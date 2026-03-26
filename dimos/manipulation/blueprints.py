@@ -90,6 +90,20 @@ def _get_piper_package_paths() -> dict[str, Path]:
     return {"piper_description": get_data("piper_description")}
 
 
+def _get_panda_urdf_path() -> Path:
+    """Get path to Panda URDF."""
+    return get_data("panda_description") / "urdf/panda.urdf"
+
+
+# Panda gripper collision exclusions (parallel jaw gripper)
+PANDA_GRIPPER_COLLISION_EXCLUSIONS: list[tuple[str, str]] = [
+    ("hand", "left_finger"),
+    ("hand", "right_finger"),
+    ("left_finger", "right_finger"),
+    ("link7", "hand"),
+]
+
+
 # Piper gripper collision exclusions (parallel jaw gripper)
 # The gripper fingers (link7, link8) can touch each other and gripper_base
 PIPER_GRIPPER_COLLISION_EXCLUSIONS: list[tuple[str, str]] = [
@@ -271,6 +285,43 @@ def _make_piper_config(
         coordinator_task_name=coordinator_task,
         home_joints=[0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     )
+
+
+def _make_panda_config(
+    name: str = "panda",
+    joint_prefix: str = "",
+    coordinator_task: str | None = None,
+) -> RobotModelConfig:
+    """Create Franka Emika Panda robot config (7 DOF).
+
+    Args:
+        name: Robot name in Drake world (must contain 'panda' for VAMP auto-detection)
+        joint_prefix: Prefix for joint name mapping (e.g., "panda_")
+        coordinator_task: Task name for coordinator RPC execution
+    """
+    joint_names = ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7"]
+    joint_mapping = {f"{joint_prefix}{j}": j for j in joint_names} if joint_prefix else {}
+
+    return RobotModelConfig(
+        name=name,
+        urdf_path=_get_panda_urdf_path(),
+        base_pose=_make_base_pose(),
+        joint_names=joint_names,
+        end_effector_link="link7",
+        base_link="link0",
+        collision_exclusion_pairs=PANDA_GRIPPER_COLLISION_EXCLUSIONS,
+        auto_convert_meshes=False,
+        max_velocity=2.0,
+        max_acceleration=4.0,
+        joint_name_mapping=joint_mapping,
+        coordinator_task_name=coordinator_task,
+        home_joints=[0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785],
+    )
+
+
+# =============================================================================
+# Blueprints
+# =============================================================================
 
 
 # Single XArm6 planner (standalone, no coordinator)
@@ -504,10 +555,50 @@ xarm_perception_agent = autoconnect(
 )
 
 
+# Panda + VAMP planner with mock coordinator (standalone, no hardware needed)
+# Usage: dimos run panda-vamp-planner
+# Plans with VAMP SIMD-accelerated planner, visualizes via meshcat.
+panda_vamp_planner = autoconnect(
+    ManipulationModule.blueprint(
+        robots=[_make_panda_config("panda", joint_prefix="arm_", coordinator_task="traj_arm")],
+        planning_timeout=10.0,
+        enable_viz=True,
+        planner_name="vamp",
+    ),
+    ControlCoordinator.blueprint(
+        tick_rate=100.0,
+        publish_joint_state=True,
+        joint_state_frame_id="coordinator",
+        hardware=[
+            HardwareComponent(
+                hardware_id="arm",
+                hardware_type=HardwareType.MANIPULATOR,
+                joints=make_joints("arm", 7),
+                adapter_type="mock",
+            ),
+        ],
+        tasks=[
+            TaskConfig(
+                name="traj_arm",
+                type="trajectory",
+                joint_names=[f"arm_joint{i + 1}" for i in range(7)],
+                priority=10,
+            ),
+        ],
+    ),
+).transports(
+    {
+        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+    }
+)
+
+
 __all__ = [
+    "PANDA_GRIPPER_COLLISION_EXCLUSIONS",
     "PIPER_GRIPPER_COLLISION_EXCLUSIONS",
     "XARM_GRIPPER_COLLISION_EXCLUSIONS",
     "dual_xarm6_planner",
+    "panda_vamp_planner",
     "xarm6_planner_only",
     "xarm7_planner_coordinator",
     "xarm7_planner_coordinator_agent",

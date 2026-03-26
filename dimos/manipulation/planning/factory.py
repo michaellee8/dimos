@@ -61,13 +61,27 @@ def create_planner(
     name: str = "rrt_connect",
     **kwargs: Any,
 ) -> PlannerSpec:
-    """Create motion planner. name='rrt_connect'."""
+    """Create motion planner.
+
+    Args:
+        name: Planner name. Options:
+            - 'rrt_connect': Bi-directional RRT-Connect (default, uses WorldSpec collision)
+            - 'vamp': VAMP SIMD-accelerated planner (uses own collision engine).
+              Requires ``pip install vamp-planner``. Supports kwargs:
+              vamp_robot_name, algorithm ('rrtc'|'prm'|'fcit'|'aorrtc'),
+              rrt_range, max_iterations, simplify, simplify_operations.
+        **kwargs: Forwarded to planner constructor.
+    """
     if name == "rrt_connect":
         from dimos.manipulation.planning.planners.rrt_planner import RRTConnectPlanner
 
         return RRTConnectPlanner(**kwargs)
+    elif name == "vamp":
+        from dimos.manipulation.planning.planners.vamp_planner import VampPlanner
+
+        return VampPlanner(**kwargs)
     else:
-        raise ValueError(f"Unknown planner: {name}. Available: ['rrt_connect']")
+        raise ValueError(f"Unknown planner: {name}. Available: ['rrt_connect', 'vamp']")
 
 
 def create_planning_stack(
