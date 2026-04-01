@@ -40,11 +40,6 @@ from dimos.control.components import (
     TaskName,
     split_joint_name,
 )
-from dimos.control.hardware_interface import (
-    ConnectedHardware,
-    ConnectedTwistBase,
-    ConnectedWholeBody,
-)
 from dimos.control.task import ControlTask
 from dimos.control.tick_loop import TickLoop
 from dimos.core.core import rpc

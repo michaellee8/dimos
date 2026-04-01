@@ -260,24 +260,11 @@ class ManipulationModule(Module):
                 coord_names = config.get_coordinator_joint_names()
                 indices = [name_to_idx.get(cn) for cn in coord_names]
                 if any(idx is None for idx in indices):
-                    missing = [
-                        cn for cn, idx in zip(coord_names, indices, strict=False) if idx is None
-                    ]
-                    logger.warning(f"Skipping '{robot_name}': missing joints {missing}")
-                    continue
+                    continue  # Not all joints present for this robot
 
                 # Build per-robot sub-message (coordinator namespace)
                 sub_positions = [msg.position[idx] for idx in indices]  # type: ignore[index]
-                sub_velocities = (
-                    [msg.velocity[idx] for idx in indices]  # type: ignore[index]
-                    if msg.velocity and len(msg.velocity) == len(msg.name)
-                    else []
-                )
-                sub_msg = JointState(
-                    name=list(coord_names),
-                    position=sub_positions,
-                    velocity=sub_velocities,
-                )
+                sub_msg = JointState(name=list(coord_names), position=sub_positions)
 
                 # Route to specific monitor
                 self._world_monitor.on_joint_state(sub_msg, robot_id=robot_id)
@@ -640,9 +627,7 @@ class ManipulationModule(Module):
             "coordinator_task_name": config.coordinator_task_name,
             "home_joints": config.home_joints,
             "pre_grasp_offset": config.pre_grasp_offset,
-            "init_joints": list(init.position)
-            if (init := self._init_joints.get(robot_name))
-            else None,
+            "init_joints": list(init.position) if (init := self._init_joints.get(robot_name)) else None,
         }
 
     @rpc
