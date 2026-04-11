@@ -40,6 +40,7 @@ from dimos.control.components import (
     TaskName,
     split_joint_name,
 )
+from dimos.control.hardware_interface import ConnectedHardware, ConnectedTwistBase, ConnectedWholeBody
 from dimos.control.task import ControlTask
 from dimos.control.tick_loop import TickLoop
 from dimos.core.core import rpc
@@ -210,7 +211,7 @@ class ControlCoordinator(Module):
 
     def _setup_hardware(self, component: HardwareComponent) -> None:
         """Connect and add a single hardware adapter."""
-        adapter: ManipulatorAdapter | TwistBaseAdapter | WholeBodyAdapter
+        adapter: ManipulatorAdapter | TwistBaseAdapter
         if component.hardware_type == HardwareType.WHOLE_BODY:
             adapter = self._create_whole_body_adapter(component)
         elif component.hardware_type == HardwareType.BASE:
@@ -275,6 +276,24 @@ class ControlCoordinator(Module):
             dof=len(component.joints),
             hardware_id=component.hardware_id,
             network_interface=addr if addr is not None else "",
+            **component.adapter_kwargs,
+        )
+
+    def _create_whole_body_adapter(self, component: HardwareComponent) -> object:
+        """Create a whole-body adapter from the whole-body registry."""
+        from dimos.hardware.whole_body.registry import whole_body_adapter_registry
+
+        addr = component.address
+        if addr is not None:
+            try:
+                addr = int(addr)
+            except ValueError:
+                pass  # keep as string (e.g. "enp60s0")
+
+        return whole_body_adapter_registry.create(
+            component.adapter_type,
+            hardware_id=component.hardware_id,
+            network_interface=addr if addr is not None else 0,
             **component.adapter_kwargs,
         )
 
@@ -364,6 +383,8 @@ class ControlCoordinator(Module):
         component: HardwareComponent,
     ) -> bool:
         """Register a hardware adapter with the coordinator."""
+        from dimos.hardware.whole_body.spec import WholeBodyAdapter
+
         is_base = component.hardware_type == HardwareType.BASE
         is_whole_body = component.hardware_type == HardwareType.WHOLE_BODY
 
@@ -373,7 +394,6 @@ class ControlCoordinator(Module):
                 f"hardware_type={component.hardware_type.value} but got "
                 f"{type(adapter).__name__}"
             )
-
         if is_whole_body and not isinstance(adapter, WholeBodyAdapter):
             raise TypeError(
                 f"Hardware type / adapter mismatch for '{component.hardware_id}': "
@@ -386,7 +406,7 @@ class ControlCoordinator(Module):
                 logger.warning(f"Hardware {component.hardware_id} already registered")
                 return False
 
-            if isinstance(adapter, WholeBodyAdapter):
+            if is_whole_body:
                 connected: ConnectedHardware = ConnectedWholeBody(
                     adapter=adapter,
                     component=component,
