@@ -61,6 +61,7 @@ class GlobalConfig(BaseSettings):
     planner_robot_speed: float | None = None
     mcp_port: int = 9990
     build_native: bool = DEFAULT_BUILD_NATIVE
+    transport: str = "lcm"
     dtop: bool = False
     obstacle_avoidance: bool = True
     detection_model: VlModelName = "moondream"
