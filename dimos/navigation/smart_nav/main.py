@@ -41,7 +41,11 @@ from dimos.navigation.smart_nav.modules.far_planner.far_planner import FarPlanne
 from dimos.navigation.smart_nav.modules.local_planner.local_planner import LocalPlanner
 from dimos.navigation.smart_nav.modules.movement_manager.movement_manager import MovementManager
 from dimos.navigation.smart_nav.modules.path_follower.path_follower import PathFollower
+from dimos.navigation.smart_nav.modules.pct_planner.pct_planner import PCTPlanner
 from dimos.navigation.smart_nav.modules.pgo.pgo import PGO
+from dimos.navigation.smart_nav.modules.preloaded_map_tracker.preloaded_map_tracker import (
+    PreloadedMapTracker,
+)
 from dimos.navigation.smart_nav.modules.simple_planner.simple_planner import SimplePlanner
 from dimos.navigation.smart_nav.modules.tare_planner.tare_planner import TarePlanner
 from dimos.navigation.smart_nav.modules.terrain_analysis.terrain_analysis import TerrainAnalysis
@@ -54,12 +58,14 @@ def smart_nav(
     use_tare: bool = False,
     use_terrain_map_ext: bool = True,
     use_simple_planner: bool = False,
+    use_pct_planner: bool = False,
     vehicle_height: float | None = None,
     terrain_analysis: dict[str, Any] | None = None,
     terrain_map_ext: dict[str, Any] | None = None,
     local_planner: dict[str, Any] | None = None,
     path_follower: dict[str, Any] | None = None,
     far_planner: dict[str, Any] | None = None,
+    pct_planner: dict[str, Any] | None = None,
     simple_planner: dict[str, Any] | None = None,
     pgo: dict[str, Any] | None = None,
     movement_manager: dict[str, Any] | None = None,
@@ -197,6 +203,13 @@ def smart_nav(
                 )
             ]
             if use_simple_planner
+            else [
+                # PCT consumes the accumulated explored_areas cloud published
+                # by PreloadedMapTracker (the ROS visualizationTools port).
+                PreloadedMapTracker.blueprint(),
+                PCTPlanner.blueprint(**(pct_planner or {})),
+            ]
+            if use_pct_planner
             else [FarPlanner.blueprint(**(far_planner or {}))]
         ),
         PGO.blueprint(**(pgo or {})),
@@ -230,11 +243,14 @@ def smart_nav(
         # loop-closure adjustments go to high-level planners; local modules
         # care only about the local environment and work in the odom frame.
         (
-            SimplePlanner if use_simple_planner else FarPlanner,
+            SimplePlanner
+            if use_simple_planner
+            else (PCTPlanner if use_pct_planner else FarPlanner),
             "odometry",
             "corrected_odometry",
         ),
         (MovementManager, "odometry", "corrected_odometry"),
+        *([(PreloadedMapTracker, "odometry", "corrected_odometry")] if use_pct_planner else []),
         (TerrainAnalysis, "odometry", "corrected_odometry"),
         # Planner owns way_point — disconnect MovementManager's click relay.
         (MovementManager, "way_point", "_mgr_way_point_unused"),
