@@ -30,7 +30,7 @@ module's config via per-module kwarg dicts (e.g.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.core.module import ModuleBase
@@ -51,6 +51,54 @@ from dimos.navigation.smart_nav.modules.tare_planner.tare_planner import TarePla
 from dimos.navigation.smart_nav.modules.terrain_analysis.terrain_analysis import TerrainAnalysis
 from dimos.navigation.smart_nav.modules.terrain_map_ext.terrain_map_ext import TerrainMapExt
 from dimos.protocol.pubsub.impl.lcmpubsub import LCM
+
+PlannerChoice = Literal["far", "simple", "pct"]
+
+
+def _global_planner_modules(
+    choice: PlannerChoice,
+    *,
+    simple_planner: dict[str, Any] | None,
+    pct_planner: dict[str, Any] | None,
+    far_planner: dict[str, Any] | None,
+    vehicle_height: float | None = None,
+) -> list[Blueprint]:
+    """Return the global-planner blueprint list for ``choice``.
+
+    PCT additionally pulls in PreloadedMapTracker, which publishes the
+    accumulated explored_areas cloud that PCT consumes.
+    """
+    if choice == "simple":
+        return [
+            SimplePlanner.blueprint(
+                **{
+                    **(
+                        {"ground_offset_below_robot": vehicle_height}
+                        if vehicle_height is not None
+                        else {}
+                    ),
+                    **(simple_planner or {}),
+                }
+            )
+        ]
+    if choice == "pct":
+        return [
+            PreloadedMapTracker.blueprint(),
+            PCTPlanner.blueprint(**(pct_planner or {})),
+        ]
+    return [
+        FarPlanner.blueprint(
+            **{"is_static_env": False, "sensor_range": 30.0, **(far_planner or {})}
+        )
+    ]
+
+
+def _global_planner_class(choice: PlannerChoice) -> type[ModuleBase]:
+    if choice == "simple":
+        return SimplePlanner
+    if choice == "pct":
+        return PCTPlanner
+    return FarPlanner
 
 
 def smart_nav(
@@ -122,6 +170,15 @@ def smart_nav(
             local_planner_threshold,
         )
 
+    if use_simple_planner and use_pct_planner:
+        raise ValueError(
+            "smart_nav(): use_simple_planner and use_pct_planner are mutually "
+            "exclusive. Pass at most one."
+        )
+    planner_choice: PlannerChoice = (
+        "simple" if use_simple_planner else "pct" if use_pct_planner else "far"
+    )
+
     modules: list[Blueprint] = [
         TerrainAnalysis.blueprint(
             **{
@@ -189,28 +246,12 @@ def smart_nav(
                 **(path_follower or {}),
             }
         ),
-        *(
-            [
-                SimplePlanner.blueprint(
-                    **{
-                        **(
-                            {"ground_offset_below_robot": vehicle_height}
-                            if vehicle_height is not None
-                            else {}
-                        ),
-                        **(simple_planner or {}),
-                    }
-                )
-            ]
-            if use_simple_planner
-            else [
-                # PCT consumes the accumulated explored_areas cloud published
-                # by PreloadedMapTracker (the ROS visualizationTools port).
-                PreloadedMapTracker.blueprint(),
-                PCTPlanner.blueprint(**(pct_planner or {})),
-            ]
-            if use_pct_planner
-            else [FarPlanner.blueprint(**(far_planner or {}))]
+        *_global_planner_modules(
+            planner_choice,
+            simple_planner=simple_planner,
+            pct_planner=pct_planner,
+            far_planner=far_planner,
+            vehicle_height=vehicle_height,
         ),
         PGO.blueprint(**(pgo or {})),
         MovementManager.blueprint(**(movement_manager or cmd_vel_mux or {})),
@@ -236,26 +277,23 @@ def smart_nav(
     if use_tare:
         modules.append(TarePlanner.blueprint(**(tare_planner or {})))
 
+    global_planner_cls = _global_planner_class(planner_choice)
+
+    # Global-scale planners use PGO-corrected odometry (per CMU ICRA 2022):
+    # loop-closure adjustments go to high-level planners; local modules
+    # care only about the local environment and work in the odom frame.
     remappings: list[tuple[type[ModuleBase], str, str | type[ModuleBase] | type[Spec]]] = [
         # PathFollower cmd_vel → MovementManager nav input (avoid collision with mux output)
         (PathFollower, "cmd_vel", "nav_cmd_vel"),
-        # Global-scale planners use PGO-corrected odometry (per CMU ICRA 2022):
-        # loop-closure adjustments go to high-level planners; local modules
-        # care only about the local environment and work in the odom frame.
-        (
-            SimplePlanner
-            if use_simple_planner
-            else (PCTPlanner if use_pct_planner else FarPlanner),
-            "odometry",
-            "corrected_odometry",
-        ),
+        (global_planner_cls, "odometry", "corrected_odometry"),
         (MovementManager, "odometry", "corrected_odometry"),
-        *([(PreloadedMapTracker, "odometry", "corrected_odometry")] if use_pct_planner else []),
         (TerrainAnalysis, "odometry", "corrected_odometry"),
         # Planner owns way_point — disconnect MovementManager's click relay.
         (MovementManager, "way_point", "_mgr_way_point_unused"),
         (PGO, "global_map", "global_map_pgo"),
     ]
+    if planner_choice == "pct":
+        remappings.append((PreloadedMapTracker, "odometry", "corrected_odometry"))
 
     return autoconnect(*modules).remappings(remappings)
 
