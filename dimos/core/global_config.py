@@ -14,6 +14,7 @@
 
 import platform
 import re
+from typing import Literal, TypeAlias
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -28,12 +29,14 @@ from dimos.visualization.rerun.constants import (
     ViewerBackend,
 )
 
+TransportBackend: TypeAlias = Literal["lcm", "zenoh"]
+
 
 def _get_all_numbers(s: str) -> list[float]:
     return [float(x) for x in re.findall(r"-?\d+\.?\d*", s)]
 
 
-def _default_transport() -> str:
+def _default_transport() -> TransportBackend:
     if platform.system() == "Darwin" and ZENOH_AVAILABLE:
         return "zenoh"
     return "lcm"
@@ -70,7 +73,7 @@ class GlobalConfig(BaseSettings):
     planner_robot_speed: float | None = None
     mcp_port: int = 9990
     build_native: bool = DEFAULT_BUILD_NATIVE
-    transport: str = Field(default_factory=_default_transport)
+    transport: TransportBackend = Field(default_factory=_default_transport)
     dtop: bool = False
     obstacle_avoidance: bool = True
     detection_model: VlModelName = "moondream"
@@ -82,6 +85,7 @@ class GlobalConfig(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        validate_assignment=True,
     )
 
     def update(self, **kwargs: object) -> None:
