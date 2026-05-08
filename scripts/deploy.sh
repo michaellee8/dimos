@@ -1,24 +1,33 @@
 #!/bin/bash
 # Deploy app code to an existing dimos-teleop EC2 instance.
 # Usage: ./scripts/deploy.sh <ip-address>
+#
+# Run from the repo root. rsyncs app/ into /opt/dimos-teleop/app/ on the
+# instance and restarts the systemd unit. Assumes user_data has already
+# bootstrapped Python/Caddy/systemd and chowned /opt/dimos-teleop to ubuntu.
 
 set -euo pipefail
 
 IP="${1:?Usage: deploy.sh <ip-address>}"
 KEY="${SSH_KEY:-daneel-local.pem}"
-SSH="ssh -i $KEY -o StrictHostKeyChecking=no ubuntu@$IP"
-SCP="scp -i $KEY -o StrictHostKeyChecking=no"
+SSH_OPTS="-i $KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
 echo "Deploying to $IP..."
 
-# Sync app code
 rsync -avz --delete \
-  -e "ssh -i $KEY -o StrictHostKeyChecking=no" \
+  --exclude __pycache__ --exclude '*.pyc' --exclude .venv --exclude '*.db' --exclude .env \
+  -e "ssh $SSH_OPTS" \
   app/ ubuntu@$IP:/opt/dimos-teleop/app/
 
-# Restart service
-$SSH "sudo systemctl restart dimos-teleop"
+# Refresh deps in case requirements.txt changed
+ssh $SSH_OPTS ubuntu@$IP \
+  '/opt/dimos-teleop/.venv/bin/pip install --quiet -r /opt/dimos-teleop/app/requirements.txt'
 
-echo "Deployed. Health check:"
+ssh $SSH_OPTS ubuntu@$IP 'sudo systemctl restart dimos-teleop'
 sleep 2
-curl -s "http://$IP:8450/health" || echo "(might need port 443 via Caddy)"
+
+echo "--- service health (from inside the box) ---"
+ssh $SSH_OPTS ubuntu@$IP '
+  sudo systemctl is-active dimos-teleop
+  curl -sf http://127.0.0.1:8450/health && echo
+'

@@ -88,11 +88,18 @@ cat > /etc/caddy/Caddyfile << 'CADDYEOF'
 }
 CADDYEOF
 
+# Make /opt/dimos-teleop writable to the ubuntu user so scripts/deploy.sh
+# can rsync app/ in without sudo. The systemd unit still runs as root, so
+# it can read everything regardless of ownership.
+chown -R ubuntu:ubuntu /opt/dimos-teleop
+
 # ─── Start services ─────────────────────────────────────────────────
 
 systemctl daemon-reload
 systemctl enable dimos-teleop
-systemctl start dimos-teleop
+# dimos-teleop will fail-and-restart until app code is rsynced in via
+# scripts/deploy.sh; that's fine — systemd's Restart=always handles it.
+systemctl start dimos-teleop || true
 systemctl restart caddy
 
 echo "dimos-teleop deployed successfully"

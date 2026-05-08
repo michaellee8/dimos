@@ -67,44 +67,28 @@ Create an A record pointing `teleop.dimensionalos.com` to the Elastic IP.
 
 ## Step 3: Deploy App Code
 
-SSH into the instance and clone the repo:
+`user_data.sh.tpl` already creates `/opt/dimos-teleop`, the venv with deps,
+the `.env` (from your CF/JWT terraform vars), the systemd unit, and Caddy.
+The only missing piece on a fresh instance is the app source — the repo is
+private, so we don't `git clone` on the box. Instead, rsync the local clone
+in via the deploy script:
 
 ```bash
-ssh -i daneel-local.pem ubuntu@<elastic_ip>
-
-# The instance bootstraps Python, Caddy, and systemd on first boot.
-# Clone the app code:
-sudo mkdir -p /opt/dimos-teleop
-sudo chown ubuntu:ubuntu /opt/dimos-teleop
-cd /opt/dimos-teleop
-git clone https://github.com/dimensionalOS/dimensional-teleop.git repo
-ln -sf repo/app app
-
-# Create .env with real credentials
-cat > app/.env << 'EOF'
-CF_TELEOP_APP_ID=<your-app-id>
-CF_TELEOP_APP_SECRET=<your-app-secret>
-JWT_SECRET=<random-string>
-DATABASE_URL=sqlite+aiosqlite:///./teleop.db
-HOST=127.0.0.1
-PORT=8450
-EOF
-chmod 600 app/.env
-
-# Install deps and start
-cd /opt/dimos-teleop
-python3.11 -m venv .venv || python3 -m venv .venv
-source .venv/bin/activate
-pip install -r app/requirements.txt
-
-# Start the service
-sudo systemctl restart dimos-teleop
+# From this repo's root, on your laptop:
+SSH_KEY=/path/to/daneel-local.pem ./scripts/deploy.sh <elastic_ip>
 ```
 
-**Or** use the deploy script from your local machine for subsequent updates:
-```bash
-./scripts/deploy.sh <elastic_ip>
-```
+`scripts/deploy.sh`:
+1. Rsyncs `app/` to `/opt/dimos-teleop/app/` (excludes `.venv`, `.env`, `*.db`).
+2. Reinstalls `requirements.txt` (cheap if nothing changed).
+3. Restarts the `dimos-teleop` systemd unit.
+4. Health-checks `http://127.0.0.1:8450/health` from inside the box.
+
+Until the first run of `scripts/deploy.sh`, the systemd unit fails-and-retries
+because `app/main.py` doesn't exist. That's expected and harmless.
+
+The same script works for subsequent code updates — just push to `main` (or your
+working branch), pull locally, and re-run.
 
 ## Step 4: Configure HTTPS (Caddy)
 
