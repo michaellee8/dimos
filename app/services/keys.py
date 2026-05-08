@@ -75,11 +75,18 @@ async def validate_api_key(db: AsyncSession, plaintext_key: str) -> APIKey | Non
     )
     key_record = result.scalar_one_or_none()
     if key_record:
-        # Throttle last_used_at writes (only if >60s stale)
+        # Throttle last_used_at writes (only if >60s stale).
+        # SQLite has no native timezone support, so the column comes back
+        # tz-naive even though we wrote tz-aware. Normalize to UTC before
+        # subtracting; otherwise this raises TypeError on every call after
+        # the first.
         now = datetime.now(timezone.utc)
+        last_used = key_record.last_used_at
+        if last_used is not None and last_used.tzinfo is None:
+            last_used = last_used.replace(tzinfo=timezone.utc)
         if (
-            key_record.last_used_at is None
-            or (now - key_record.last_used_at).total_seconds() > LAST_USED_THROTTLE_SECONDS
+            last_used is None
+            or (now - last_used).total_seconds() > LAST_USED_THROTTLE_SECONDS
         ):
             await db.execute(
                 update(APIKey)
