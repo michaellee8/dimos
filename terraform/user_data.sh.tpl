@@ -3,6 +3,21 @@ set -euo pipefail
 
 # ─── System setup ────────────────────────────────────────────────────
 
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y software-properties-common ca-certificates curl gnupg \
+  debian-keyring debian-archive-keyring apt-transport-https
+
+# Caddy is not in Ubuntu's default apt repos — add Cloudsmith's stable repo.
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+  | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+  > /etc/apt/sources.list.d/caddy-stable.list
+
+# Jammy ships python3.10 by default; only a 3.11 RC is in backports.
+# Use deadsnakes for stable python3.11.
+add-apt-repository -y ppa:deadsnakes/ppa
+
 apt-get update -y
 apt-get install -y python3.11 python3.11-venv python3-pip git caddy
 
@@ -38,6 +53,7 @@ pip install \
   pydantic-settings==2.9.1 \
   'python-jose[cryptography]==3.4.0' \
   'passlib[bcrypt]==1.7.4' \
+  'bcrypt<4.0' \
   sqlalchemy==2.0.41 \
   aiosqlite==0.21.0 \
   python-multipart==0.0.20
@@ -52,6 +68,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/opt/dimos-teleop/app
+EnvironmentFile=/opt/dimos-teleop/.env
 ExecStart=/opt/dimos-teleop/.venv/bin/uvicorn main:app --host 127.0.0.1 --port ${app_port}
 Restart=always
 RestartSec=5
