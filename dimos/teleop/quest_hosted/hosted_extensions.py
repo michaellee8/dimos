@@ -16,8 +16,12 @@
 """Hosted teleop subclasses (WebRTC-via-Cloudflare-Realtime transport).
 
 Mirrors the role of ``dimos/teleop/quest/quest_extensions.py`` but for the
-hosted module — small overrides on top of ``HostedTeleopModule`` for arm
-teleop (per-hand task names + analog trigger packing into button bits).
+hosted module — small overrides on top of ``HostedTeleopModule``:
+
+  - ``HostedArmTeleopModule``: per-hand task_name routing + analog trigger
+    packing (Quest VR mode, arm robots).
+  - ``HostedTwistTeleopModule``: scales incoming Twist by configured
+    linear/angular speeds (keyboard mode, mobile-base robots like Go2).
 """
 
 from typing import Any
@@ -25,6 +29,9 @@ from typing import Any
 from pydantic import Field
 
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.teleop.quest.quest_teleop_module import Hand
 from dimos.teleop.quest.quest_types import Buttons, QuestControllerState
 from dimos.teleop.quest_hosted.hosted_teleop_module import (
@@ -84,3 +91,35 @@ class HostedArmTeleopModule(HostedTeleopModule):
             right=right.trigger if right is not None else 0.0,
         )
         self.buttons.publish(buttons)
+
+
+class HostedTwistTeleopConfig(HostedTeleopConfig):
+    """Adds ``linear_speed`` / ``angular_speed`` for scaling incoming Twist.
+
+    The operator's keyboard sends normalized commands in [-1, 1] (with
+    Shift = 2x, Ctrl = 0.5x). The robot side multiplies by these speeds
+    to get final m/s and rad/s. Defaults are reasonable for an indoor Go2.
+    """
+
+    linear_speed: float = 0.5
+    angular_speed: float = 0.8
+
+
+class HostedTwistTeleopModule(HostedTeleopModule):
+    """Hosted teleop variant for mobile-base robots (Go2, wheeled, etc.).
+
+    Same as ``HostedTeleopModule`` but scales incoming Twist commands by
+    the configured ``linear_speed`` / ``angular_speed`` before publishing.
+    """
+
+    config: HostedTwistTeleopConfig
+
+    def _on_twist_bytes(self, data: bytes) -> None:
+        msg = TwistStamped.lcm_decode(data)
+        ls = self.config.linear_speed
+        as_ = self.config.angular_speed
+        twist = Twist(
+            linear=Vector3(msg.linear.x * ls, msg.linear.y * ls, msg.linear.z * ls),
+            angular=Vector3(msg.angular.x * as_, msg.angular.y * as_, msg.angular.z * as_),
+        )
+        self.cmd_vel.publish(twist)

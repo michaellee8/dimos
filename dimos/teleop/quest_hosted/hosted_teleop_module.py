@@ -35,6 +35,7 @@ from aiortc import (
     RTCSessionDescription,
 )
 from dimos_lcm.geometry_msgs import PoseStamped as LCMPoseStamped
+from dimos_lcm.geometry_msgs import TwistStamped as LCMTwistStamped
 from dimos_lcm.sensor_msgs import Joy as LCMJoy
 import httpx
 
@@ -42,6 +43,8 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import Out
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.sensor_msgs.Joy import Joy
 from dimos.teleop.quest.quest_types import Buttons, QuestControllerState
 from dimos.teleop.utils.teleop_transforms import webxr_to_robot
@@ -83,6 +86,7 @@ class HostedTeleopModule(Module):
     left_controller_output: Out[PoseStamped]
     right_controller_output: Out[PoseStamped]
     buttons: Out[Buttons]
+    cmd_vel: Out[Twist]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -113,6 +117,7 @@ class HostedTeleopModule(Module):
         self._decoders: dict[bytes, Any] = {
             LCMPoseStamped._get_packed_fingerprint(): self._on_pose_bytes,
             LCMJoy._get_packed_fingerprint(): self._on_joy_bytes,
+            LCMTwistStamped._get_packed_fingerprint(): self._on_twist_bytes,
         }
 
     @rpc
@@ -368,6 +373,14 @@ class HostedTeleopModule(Module):
             return
         with self._lock:
             self._controllers[hand] = controller
+
+    def _on_twist_bytes(self, data: bytes) -> None:
+        # Keyboard mode — no engagement gating. Wire format is TwistStamped
+        # (carries timestamp); strip the header and publish plain Twist on
+        # cmd_vel (matches GO2Connection.cmd_vel and most ROS-style bases).
+        msg = TwistStamped.lcm_decode(data)
+        twist = Twist(linear=msg.linear, angular=msg.angular)
+        self.cmd_vel.publish(twist)
 
     @staticmethod
     def _resolve_hand(frame_id: str) -> Hand:
