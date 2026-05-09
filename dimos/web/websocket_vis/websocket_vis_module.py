@@ -130,6 +130,9 @@ class WebsocketVisModule(Module):
     # format is identical; what matters for autoconnect is type parity.
     activate: Out[DimosBool]
     dry_run: Out[DimosBool]
+    # Respawn — dashboard "Respawn" button publishes True here, picked
+    # up by MujocoSimModule.respawn_cmd to snap the sim to keyframe 0.
+    respawn_cmd: Out[DimosBool]
 
     def __init__(self, **kwargs: Any) -> None:
         """Initialize the WebSocket visualization module.
@@ -408,6 +411,20 @@ class WebsocketVisModule(Module):
                 self.activate.publish(DimosBool(data=False))
             else:
                 logger.warning("disarm requested but activate transport is not configured")
+
+        @self.sio.event  # type: ignore[untyped-decorator]
+        async def respawn(sid: str, data: dict[str, Any] | None = None) -> None:
+            """Dashboard → reset sim to keyframe 0 (home pose).
+
+            Picked up by MujocoSimModule.respawn_cmd via /sim/respawn.
+            No-op if the respawn transport isn't configured (e.g. when
+            running against real hardware instead of MuJoCo).
+            """
+            if self.respawn_cmd and self.respawn_cmd.transport:
+                logger.info("Dashboard requested respawn")
+                self.respawn_cmd.publish(DimosBool(data=True))
+            else:
+                logger.warning("respawn requested but respawn_cmd transport is not configured")
 
         @self.sio.event  # type: ignore[untyped-decorator]
         async def set_dry_run(sid: str, data: dict[str, Any]) -> None:

@@ -443,6 +443,23 @@ class MujocoEngine(SimulationEngine):
             for i, mapping in enumerate(self._joint_mappings):
                 self._joint_position_targets[i] = self._current_position(mapping)
 
+    def reset(self) -> None:
+        """Reset the sim to keyframe 0 (the ``home`` keyframe).
+
+        Snaps qpos / qvel / actuator state back to the home pose, zeros
+        velocities, and re-arms the position-target latches so the
+        controller doesn't immediately yank the robot back where it was.
+        Held under ``self._lock`` so it's safe to call from any thread
+        while ``_sim_loop`` is stepping.
+        """
+        with self._lock:
+            mujoco.mj_resetDataKeyframe(self._model, self._data, 0)
+            mujoco.mj_forward(self._model, self._data)
+            # Re-seed position targets to the new home pose so the next
+            # tick's PD doesn't pull toward the pre-reset target.
+            for i, mapping in enumerate(self._joint_mappings):
+                self._joint_position_targets[i] = self._current_position(mapping)
+
     def get_actuator_ctrl_range(self, joint_index: int) -> tuple[float, float] | None:
         mapping = self._joint_mappings[joint_index]
         if mapping.actuator_id is None:

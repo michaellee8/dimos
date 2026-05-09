@@ -117,6 +117,10 @@ export default function App(): React.ReactElement {
     }
   }, [state.robotPose]);
 
+  const handleRespawn = React.useCallback(() => {
+    connectionRef.current?.respawn();
+  }, []);
+
   return (
     <div
       style={{
@@ -209,6 +213,9 @@ export default function App(): React.ReactElement {
           </Button>
           <Button onClick={handleStop} isActive={false}>
             Stop
+          </Button>
+          <Button onClick={handleRespawn} isActive={false}>
+            Respawn (sim)
           </Button>
         </div>
       </div>

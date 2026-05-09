@@ -37,11 +37,12 @@ import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
 from pydantic import Field
 import reactivex as rx
+from reactivex.disposable import Disposable
 from scipy.spatial.transform import Rotation as R
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.stream import Out
+from dimos.core.stream import In, Out
 from dimos.hardware.sensors.camera.spec import DepthCameraConfig, DepthCameraHardware
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -52,6 +53,7 @@ from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.std_msgs.Bool import Bool as DimosBool
 from dimos.simulation.engines.mujoco_engine import (
     CameraConfig,
     MujocoEngine,
@@ -152,6 +154,10 @@ class MujocoSimModule(
     # joint at the root.  Published every step; consumers like the viser
     # viewer use this to translate the robot in world space.
     odom: Out[PoseStamped]
+    # Respawn signal.  Any True message here resets the engine to
+    # keyframe 0 (the home pose).  Wired from the dashboard "Respawn"
+    # button via WebsocketVisModule → /sim/respawn.
+    respawn_cmd: In[DimosBool]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -380,6 +386,14 @@ class MujocoSimModule(
                 )
             )
 
+        # Respawn — dashboard publishes True on /sim/respawn to reset
+        # qpos/qvel to keyframe 0 without restarting the sim thread.
+        try:
+            unsub = self.respawn_cmd.subscribe(self._on_respawn)
+            self.register_disposable(Disposable(unsub))
+        except Exception as e:
+            logger.warning(f"MujocoSimModule: respawn_cmd subscribe failed: {e}")
+
         logger.info(
             "MujocoSimModule started",
             address=self.config.address,
@@ -472,6 +486,28 @@ class MujocoSimModule(
             if gripper_cmd is not None:
                 ctrl_value = self._gripper_joint_to_ctrl(gripper_cmd)
                 engine.set_position_target(self._gripper_idx, ctrl_value)
+
+    def _on_respawn(self, msg: DimosBool) -> None:
+        """Respawn callback — reset engine to keyframe 0 on True.
+
+        Also clears the latched PD command state so we don't immediately
+        steer back toward the pre-reset target.  Idempotent: a False
+        message is a no-op.
+        """
+        if not getattr(msg, "data", False):
+            return
+        engine = self._engine
+        if engine is None:
+            logger.warning("respawn requested but engine is not running")
+            return
+        logger.info("Respawn — resetting MuJoCo to keyframe 0")
+        engine.reset()
+        # Drop any latched PD targets from before the reset; the next
+        # adapter tick will write fresh values.
+        self._latest_pd_pos_target = None
+        self._latest_pd_kp = None
+        self._latest_pd_kd = None
+        self._latest_pd_tau = None
 
     def _publish_shm_state(self, engine: MujocoEngine) -> None:
         """Post-step hook: publish joint state + IMU to SHM."""

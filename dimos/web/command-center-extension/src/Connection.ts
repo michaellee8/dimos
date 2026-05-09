@@ -115,6 +115,10 @@ export default class Connection {
     this.socket.emit("disarm");
   }
 
+  respawn(): void {
+    this.socket.emit("respawn");
+  }
+
   setDryRun(enabled: boolean): void {
     this.socket.emit("set_dry_run", { enabled });
   }
