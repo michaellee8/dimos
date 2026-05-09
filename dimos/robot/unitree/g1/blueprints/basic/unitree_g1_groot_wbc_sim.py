@@ -57,7 +57,7 @@ logger = setup_logger()
 # DIMOS_MUJOCO_VIEW=1 subprocess can both open the file regardless of
 # the shell's CWD.  get_data also auto-extracts the LFS tarball on
 # first run.
-_MJCF_PATH = str(get_data("mujoco_sim") / "g1_gear_wbc.xml")
+_MJCF_PATH = str(get_data("mujoco_sim/g1_gear_wbc.xml"))
 
 _g1_engine = MujocoSimModule.blueprint(
     address=_MJCF_PATH,
