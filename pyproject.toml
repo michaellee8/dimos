@@ -350,7 +350,7 @@ base = [
 
 # All extras except dds and unitree-dds (which require special system setup).
 apriltag = [
-    "pupil-apriltags>=1.0.4.post11",
+    "opencv-contrib-python==4.10.0.84",
     "reportlab>=4.5.0",
 ]
 

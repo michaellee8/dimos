@@ -55,8 +55,11 @@ def parse_id_spec(spec: str) -> list[int]:
         if not part:
             continue
         if "-" in part:
-            lo, hi = part.split("-", 1)
-            out.update(range(int(lo), int(hi) + 1))
+            lo_s, hi_s = part.split("-", 1)
+            lo, hi = int(lo_s), int(hi_s)
+            if lo > hi:
+                raise ValueError(f"reversed range in id spec: {part!r}")
+            out.update(range(lo, hi + 1))
         else:
             out.add(int(part))
     return sorted(out)
@@ -81,13 +84,20 @@ def _draw_tag(
     cell = size / n
     c.setFillColorRGB(0, 0, 0)
     c.setStrokeColorRGB(0, 0, 0)
+    # Merge horizontal runs of black cells per row: one rect spans contiguous blacks,
+    # eliminating shared edges that some PDF renderers print as white hairlines.
     for r in range(n):
-        for col in range(n):
+        # cv2 row 0 is top; flip for reportlab y-up coords
+        cy = y0 + (n - 1 - r) * cell
+        col = 0
+        while col < n:
             if cells[r][col]:
-                # row 0 is the top of the tag in cv2 output; flip for reportlab y-up coords
-                cy = y0 + (n - 1 - r) * cell
-                cx = x0 + col * cell
-                c.rect(cx, cy, cell, cell, stroke=0, fill=1)
+                start = col
+                while col < n and cells[r][col]:
+                    col += 1
+                c.rect(x0 + start * cell, cy, (col - start) * cell, cell, stroke=0, fill=1)
+            else:
+                col += 1
 
 
 def _draw_ruler(c: canvas.Canvas, page_w_pt: float, y_mm: float = 18.0) -> None:
@@ -145,37 +155,35 @@ def _draw_single_page(
     _draw_ruler(c, page_w_pt)
 
 
+_PACK_MARGIN_MM = 10.0
+_PACK_LABEL_MM = 5.0
+_PACK_GAP_MIN_MM = 4.0
+_PACK_TOP_BLOCK_MM = 14.0
+_PACK_BOTTOM_BLOCK_MM = 22.0
+_PACK_CHROME_H_MM = 2 * _PACK_MARGIN_MM + _PACK_TOP_BLOCK_MM + _PACK_BOTTOM_BLOCK_MM
+
+
 def _grid_layout(
     page_w_pt: float, page_h_pt: float, size_mm: float
 ) -> tuple[int, int, float, float, float, float]:
-    """Compute (cols, rows, x_first_tag_pt, y_first_tag_top_pt, tile_w_pt, tile_h_pt).
+    """Pack as many tags as fit, then distribute leftover space evenly to center the grid."""
+    avail_w_mm = page_w_pt / mm - 2 * _PACK_MARGIN_MM
+    avail_h_mm = page_h_pt / mm - _PACK_CHROME_H_MM
 
-    Pack as many tags as fit at minimum spacing, then distribute leftover space evenly
-    so outer margins and inter-tag gaps are equal — grid sits centered in the page area.
-    """
-    margin_mm = 10.0
-    label_mm = 5.0
-    gap_min_mm = 4.0
-    top_block_mm = 14.0
-    bottom_block_mm = 22.0
+    cols = max(1, int((avail_w_mm - _PACK_GAP_MIN_MM) // (size_mm + _PACK_GAP_MIN_MM)))
+    rows = max(
+        1, int((avail_h_mm - _PACK_GAP_MIN_MM) // (size_mm + _PACK_LABEL_MM + _PACK_GAP_MIN_MM))
+    )
 
-    avail_w_mm = page_w_pt / mm - 2 * margin_mm
-    avail_h_mm = page_h_pt / mm - 2 * margin_mm - top_block_mm - bottom_block_mm
+    gap_x_mm = max(0.0, (avail_w_mm - cols * size_mm) / (cols + 1))
+    gap_y_mm = max(0.0, (avail_h_mm - rows * (size_mm + _PACK_LABEL_MM)) / (rows + 1))
 
-    # Max cols/rows with (cols+1) and (rows+1) gaps at minimum size.
-    cols = max(1, int((avail_w_mm - gap_min_mm) // (size_mm + gap_min_mm)))
-    rows = max(1, int((avail_h_mm - gap_min_mm) // (size_mm + label_mm + gap_min_mm)))
-
-    # Distribute leftover space evenly across (n+1) gaps.
-    gap_x_mm = (avail_w_mm - cols * size_mm) / (cols + 1)
-    gap_y_mm = (avail_h_mm - rows * (size_mm + label_mm)) / (rows + 1)
-
-    x0_mm = margin_mm + gap_x_mm  # left edge of first column's tag
-    y_avail_top_mm = page_h_pt / mm - margin_mm - top_block_mm
-    y_top_mm = y_avail_top_mm - gap_y_mm  # top edge of first row's tag
+    x0_mm = _PACK_MARGIN_MM + gap_x_mm
+    y_avail_top_mm = page_h_pt / mm - _PACK_MARGIN_MM - _PACK_TOP_BLOCK_MM
+    y_top_mm = y_avail_top_mm - gap_y_mm
 
     tile_w_mm = size_mm + gap_x_mm
-    tile_h_mm = size_mm + label_mm + gap_y_mm
+    tile_h_mm = size_mm + _PACK_LABEL_MM + gap_y_mm
     return cols, rows, x0_mm * mm, y_top_mm * mm, tile_w_mm * mm, tile_h_mm * mm
 
 
@@ -207,7 +215,6 @@ def _draw_packed_page(
     for idx, tag_id in enumerate(page_ids):
         r = idx // cols
         col = idx % cols
-        # Each tile holds: tag (top) + label (bottom). Compute the tag's bottom-left.
         tag_x = x0 + col * tile_w + (last_row_offset if r == last_row_idx else 0)
         tag_y = y_top - r * tile_h - size_mm * mm
         _draw_tag(c, family, tag_id, tag_x, tag_y, size_mm * mm)
@@ -232,6 +239,8 @@ def generate_pdf(
     pack=False: one large tag per page with full label block.
     pack=True:  grid as many tags as fit per page; new pages added as needed.
     """
+    family = family.lower()
+    page_size = page_size.lower()
     if family not in _FAMILIES:
         raise ValueError(f"unsupported family: {family}; choose from {sorted(_FAMILIES)}")
     if page_size not in _PAGE_SIZES:
@@ -245,12 +254,27 @@ def generate_pdf(
     page_w_pt, page_h_pt = _PAGE_SIZES[page_size]
     page_w_mm = page_w_pt / mm
     page_h_mm = page_h_pt / mm
-    if size_mm > page_w_mm - 20 or size_mm > page_h_mm - 100:
+    # Different vertical chrome for the two modes; use whichever applies.
+    needed_h_mm = _PACK_CHROME_H_MM + size_mm + _PACK_LABEL_MM if pack else size_mm + 100.0
+    needed_w_mm = size_mm + 2 * _PACK_MARGIN_MM
+    if needed_w_mm > page_w_mm or needed_h_mm > page_h_mm:
         raise ValueError(
             f"tag size {size_mm} mm too large for {page_size.upper()} "
-            f"({page_w_mm:.0f}x{page_h_mm:.0f} mm); pick a smaller size or larger page"
+            f"({page_w_mm:.0f}x{page_h_mm:.0f} mm) in "
+            f"{'pack' if pack else 'single'} mode; pick a smaller size or larger page"
         )
     c = canvas.Canvas(str(out_path), pagesize=_PAGE_SIZES[page_size])
+    ids_span = f"{ids[0]}-{ids[-1]}" if len(ids) > 1 else str(ids[0])
+    c.setTitle(f"AprilTag {family} IDs {ids_span} ({size_mm:g}mm, {page_size.upper()})")
+    c.setSubject(
+        f"{family}, size={size_mm:g}mm, ids={ids_span}, n={len(ids)}, "
+        f"page={page_size.upper()}, mode={'pack' if pack else 'single'}"
+    )
+    c.setKeywords(
+        [family, f"{size_mm:g}mm", page_size, "pack" if pack else "single", f"ids:{ids_span}"]
+    )
+    c.setCreator("dimos apriltag")
+    c.setProducer("dimos apriltag")
 
     if not pack:
         for tag_id in ids:
