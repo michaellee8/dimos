@@ -663,6 +663,25 @@ def send(
     topic_send(topic, message_expr)
 
 
+@main.command()
+def apriltag(
+    out: Path = typer.Option(Path("apriltags.pdf"), "--out", "-o", help="Output PDF path"),
+    ids: str = typer.Option("0-9", "--ids", help="ID spec, e.g. '0-49' or '0,1,5,10-20'"),
+    size_mm: float = typer.Option(
+        100.0, "--size-mm", "-s", help="Tag black-border edge size in mm (typical: 50 or 100)"
+    ),
+    family: str = typer.Option(
+        "tag36h11", "--family", help="Tag family: tag36h11, tag25h9, tag16h5"
+    ),
+) -> None:
+    """Generate a printable AprilTag PDF (one tag per A4 page, with calibration ruler)."""
+    from dimos.utils.cli.apriltag import generate_pdf, parse_id_spec
+
+    id_list = parse_id_spec(ids)
+    path = generate_pdf(id_list, out, family=family, size_mm=size_mm)
+    typer.echo(f"Wrote {len(id_list)} tag(s) to {path}")
+
+
 @main.command(name="rerun-bridge")
 def rerun_bridge_cmd(
     viewer_mode: str = typer.Option(

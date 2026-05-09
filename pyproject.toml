@@ -349,8 +349,13 @@ base = [
 ]
 
 # All extras except dds and unitree-dds (which require special system setup).
+apriltag = [
+    "pupil-apriltags>=1.0.4.post11",
+    "reportlab>=4.5.0",
+]
+
 all = [
-    "dimos[agents,base,cpu,cuda,dev,docker,drone,manipulation,misc,perception,psql,sim,unitree,visualization,web]",
+    "dimos[agents,apriltag,base,cpu,cuda,dev,docker,drone,manipulation,misc,perception,psql,sim,unitree,visualization,web]",
 ]
 
 [tool.ruff]
@@ -430,6 +435,8 @@ module = [
     "pyzed",
     "pyzed.*",
     "rclpy.*",
+    "reportlab",
+    "reportlab.*",
     "sam2.*",
     "scipy",
     "scipy.*",
