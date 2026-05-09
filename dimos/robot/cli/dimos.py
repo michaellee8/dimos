@@ -666,19 +666,27 @@ def send(
 @main.command()
 def apriltag(
     out: Path = typer.Option(Path("apriltags.pdf"), "--out", "-o", help="Output PDF path"),
-    ids: str = typer.Option("0-9", "--ids", help="ID spec, e.g. '0-49' or '0,1,5,10-20'"),
+    ids: str = typer.Option("0-11", "--ids", help="ID spec, e.g. '0-49' or '0,1,5,10-20'"),
     size_mm: float = typer.Option(
-        100.0, "--size-mm", "-s", help="Tag black-border edge size in mm (typical: 50 or 100)"
+        50.0, "--size-mm", "-s", help="Tag black-border edge size in mm (typical: 50 or 100)"
+    ),
+    page_size: str = typer.Option(
+        "a4", "--page-size", "-p", help="Page size: a0..a8 (ISO A series)"
+    ),
+    pack: bool = typer.Option(
+        True, "--pack/--no-pack", help="Pack as many tags per page as fit (vs one per page)"
     ),
     family: str = typer.Option(
         "tag36h11", "--family", help="Tag family: tag36h11, tag25h9, tag16h5"
     ),
 ) -> None:
-    """Generate a printable AprilTag PDF (one tag per A4 page, with calibration ruler)."""
+    """Generate a printable AprilTag PDF with calibration ruler."""
     from dimos.utils.cli.apriltag import generate_pdf, parse_id_spec
 
     id_list = parse_id_spec(ids)
-    path = generate_pdf(id_list, out, family=family, size_mm=size_mm)
+    path = generate_pdf(
+        id_list, out, family=family, size_mm=size_mm, page_size=page_size, pack=pack
+    )
     typer.echo(f"Wrote {len(id_list)} tag(s) to {path}")
 
 
