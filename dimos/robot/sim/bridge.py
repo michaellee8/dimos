@@ -313,6 +313,15 @@ class DimSimBridge(Module):
         super().start()
         self.register_disposable(Disposable(self.cmd_vel.subscribe(self._on_cmd_vel)))
 
+        # Touch self.tf here to force its lazy LCMTF construction on the
+        # start thread. The first access happens in _on_lcm_odom otherwise,
+        # which runs in the LCM recv thread of self._lcm — creating a second
+        # lcm.LCM instance inside another LCM's recv callback fails silently
+        # to publish, so transforms never reach other workers' TF buffers.
+        # (Worked before only because ReplanningAStarPlanner reads pose from
+        # the Odometry message and doesn't TF-lookup; nav_stack does.)
+        self.tf  # noqa: B018  -- intentional eager init
+
         # Start LCM listener for sensor data from subprocess
         lcm_url = self.config.lcm_url or os.environ.get(
             "LCM_DEFAULT_URL", "udpm://239.255.76.67:7667?ttl=0"
