@@ -18,8 +18,9 @@ Publishes ``world -> markers`` (identity) and ``markers -> marker_{id}`` so comp
 lookups match marker poses in ``world``. Requires ``CameraInfo`` (``plumb_bob`` or
 empty distortion supported best; refine intrinsics on hardware when needed).
 
-The pose chain is ``base_link -> camera_optical -> marker`` from the current
-robot TF and the detected marker pose, then ``world -> base_link`` is applied
+The pose chain is ``base_link -> <optical> -> marker`` where ``<optical>`` is
+``Image.frame_id`` when set, else ``CameraInfo.frame_id``, else ``camera_optical``.
+That matches the frame the pixels live in. Then ``world -> base_link`` is applied
 before publishing the marker namespace.
 
 OpenCV 4.7+ uses ``ArucoDetector``; pose uses ``solvePnP`` (``estimatePoseSingleMarkers``
@@ -44,6 +45,7 @@ from typing import TYPE_CHECKING, Any
 import cv2
 import numpy as np
 from pydantic import Field
+from reactivex.disposable import Disposable
 from reactivex.observable import Observable
 
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
@@ -73,6 +75,18 @@ def camera_info_to_cv_matrices(camera_info: CameraInfo) -> tuple[np.ndarray, np.
     return k, d
 
 
+def _camera_optical_frame_id(image: Image, camera_info: CameraInfo) -> str:
+    """Frame in which image pixels and intrinsics apply (optical convention in ROS).
+
+    Prefer ``Image.frame_id`` so TF lookups match the stream that produced the
+    pixels. Fall back to ``CameraInfo.frame_id``, then a conventional default.
+    """
+    for fid in (image.frame_id, camera_info.frame_id):
+        if fid and fid.strip():
+            return fid.strip()
+    return "camera_optical"
+
+
 def _aruco_marker_object_points(marker_length_m: float) -> np.ndarray:
     """Corner order matches OpenCV ArUco / solvePnP convention (planar square, Z=0)."""
     h = marker_length_m / 2.0
@@ -93,7 +107,7 @@ def estimate_marker_pose(
     camera_matrix: np.ndarray,
     dist_coeffs: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """Return ``(rvec, tvec)`` for ``camera_optical`` <- marker from undistorted solvePnP."""
+    """Return ``(rvec, tvec)`` for camera optical <- marker from undistorted solvePnP."""
     obj = _aruco_marker_object_points(marker_length_m)
     img = corners_px.reshape(4, 1, 2).astype(np.float32)
     ok, rvec, tvec = cv2.solvePnP(
@@ -212,7 +226,7 @@ class MarkerTfModule(Module):
             return
 
         cam_mtx, dist = camera_info_to_cv_matrices(info)
-        optical = info.frame_id or "camera_optical"
+        optical = _camera_optical_frame_id(image, info)
         t_world_base = self.tf.get(
             self.config.world_frame,
             self.config.base_frame,
@@ -303,7 +317,8 @@ class MarkerTfModule(Module):
         def on_camera_info(msg: CameraInfo) -> None:
             self._latest_camera_info = msg
 
-        self.register_disposable(self.camera_info.subscribe(on_camera_info))
+        unsub_info = self.camera_info.subscribe(on_camera_info)
+        self.register_disposable(Disposable(unsub_info) if callable(unsub_info) else unsub_info)
         self.register_disposable(self.sharp_image_stream().subscribe(self._process_color_image))
 
     @rpc

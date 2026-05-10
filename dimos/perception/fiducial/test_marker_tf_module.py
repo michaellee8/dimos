@@ -24,7 +24,12 @@ from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
-from dimos.perception.fiducial.marker_tf_module import MarkerTfModule, deploy, estimate_marker_pose
+from dimos.perception.fiducial.marker_tf_module import (
+    MarkerTfModule,
+    _camera_optical_frame_id,
+    deploy,
+    estimate_marker_pose,
+)
 
 
 @pytest.fixture
@@ -93,6 +98,68 @@ def test_deploy_empty_prefix_skips_auto_namespace(dimos) -> None:
         marker_length_m=0.15,
         marker_namespace_prefix=None,
     )
+
+
+def test_camera_optical_frame_id_resolution() -> None:
+    ts = 1.0
+    fx, fy, cx, cy = 600.0, 600.0, 320.0, 240.0
+    info_named = CameraInfo.from_intrinsics(fx, fy, cx, cy, 640, 480, frame_id="cam_info_optical")
+    info_named.ts = ts
+    info_empty = CameraInfo.from_intrinsics(fx, fy, cx, cy, 640, 480)
+    info_empty.ts = ts
+    img_custom = Image(
+        data=np.zeros((480, 640, 3), dtype=np.uint8),
+        format=ImageFormat.BGR,
+        ts=ts,
+        frame_id="custom_optical",
+    )
+    img_whitespace = Image(
+        data=np.zeros((480, 640, 3), dtype=np.uint8),
+        format=ImageFormat.BGR,
+        ts=ts,
+        frame_id="  custom_optical  ",
+    )
+    img_empty = Image(data=np.zeros((480, 640, 3), dtype=np.uint8), format=ImageFormat.BGR, ts=ts)
+
+    assert _camera_optical_frame_id(img_custom, info_named) == "custom_optical"
+    assert _camera_optical_frame_id(img_whitespace, info_named) == "custom_optical"
+    assert _camera_optical_frame_id(img_empty, info_named) == "cam_info_optical"
+    assert _camera_optical_frame_id(img_empty, info_empty) == "camera_optical"
+
+
+def test_marker_tf_uses_image_frame_when_camera_info_frame_empty() -> None:
+    """Regression: TF must use Image.frame_id when CameraInfo.frame_id is unset."""
+    ts = 1_000_000.0
+    fx, fy, cx, cy = 600.0, 600.0, 320.0, 240.0
+    cam_info = CameraInfo.from_intrinsics(fx, fy, cx, cy, 640, 480)
+    cam_info.ts = ts
+    bgr = _synthetic_marker_bgr(0)
+    image = Image(data=bgr, format=ImageFormat.BGR, ts=ts, frame_id="custom_optical")
+
+    mod = MarkerTfModule(marker_length_m=0.18, max_freq=30.0)
+    try:
+        mod.tf.publish(
+            Transform(
+                translation=Vector3(1.0, 0.0, 0.0),
+                rotation=Quaternion(0.0, 0.0, 0.0, 1.0),
+                frame_id="world",
+                child_frame_id="base_link",
+                ts=ts,
+            ),
+            Transform(
+                translation=Vector3(0.3, 0.0, 0.0),
+                rotation=Quaternion(0.0, 0.0, 0.0, 1.0),
+                frame_id="base_link",
+                child_frame_id="custom_optical",
+                ts=ts,
+            ),
+        )
+        mod._latest_camera_info = cam_info
+        mod._process_color_image(image)
+
+        assert mod.tf.get("world", "marker_0", ts, 1.0) is not None
+    finally:
+        mod.stop()
 
 
 def test_estimate_marker_pose_roundtrip() -> None:
