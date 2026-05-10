@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dimos_lcm.foxglove_msgs.ImageAnnotations import ImageAnnotations
 import pytest
 from reactivex.disposable import CompositeDisposable
 
@@ -48,7 +47,6 @@ def detections(detector, test_image, topic_image, get_topic_annotations):
     """Get ImageDetections2D from any detector."""
     topic_image.publish(test_image)
     detections = detector.process_image(test_image)
-    annotations = detections.to_foxglove_annotations()
     print("annotations:", annotations)
     topic_annotations = get_topic_annotations(detector.__class__.__name__)
     topic_annotations.publish(annotations)

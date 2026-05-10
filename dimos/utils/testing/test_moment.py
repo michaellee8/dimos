@@ -43,7 +43,7 @@ class Go2Moment(Moment):
             return []
 
         # we just make sure to change timestamps so that we can jump
-        # back and forth through time and foxglove doesn't get confused
+        # back and forth through time and viewer stays consistent
         odom = self.odom.value
         odom.ts = time.time()
         return connection.GO2Connection._odom_to_tf(odom)

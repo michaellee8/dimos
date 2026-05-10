@@ -377,7 +377,7 @@ Transform tree:
 ```
 
 
-You can also run `foxglove-studio-bridge` in the next terminal (binary provided by DimOS and should be in your Python env) and `foxglove-studio` to view these transforms in 3D. (TODO we need to update this for rerun)
+You can inspect these transforms using the Rerun viewer.
 
 ![transforms](assets/transforms.png)
 

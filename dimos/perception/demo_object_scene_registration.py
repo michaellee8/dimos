@@ -34,7 +34,7 @@ else:
 demo_object_scene_registration = autoconnect(
     camera_module,
     ObjectSceneRegistrationModule.blueprint(target_frame="world", prompt_mode=YoloePromptMode.LRPC),
-    vis_module("foxglove"),
+    vis_module("rerun"),
     McpServer.blueprint(),
     McpClient.blueprint(),
-).global_config(viewer="foxglove")
+)

@@ -31,7 +31,6 @@ from dimos.constants import DIMOS_PROJECT_ROOT, LOG_DIR
 
 # Suppress noisy loggers
 logging.getLogger("aiortc.codecs.h264").setLevel(logging.ERROR)
-logging.getLogger("lcm_foxglove_bridge").setLevel(logging.ERROR)
 logging.getLogger("websockets.server").setLevel(logging.ERROR)
 logging.getLogger("FoxgloveServer").setLevel(logging.ERROR)
 logging.getLogger("asyncio").setLevel(logging.ERROR)

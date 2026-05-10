@@ -44,7 +44,7 @@ demo_grasping = autoconnect(
             ("/tmp", "/tmp", "rw")
         ],  # Grasp visualization debug standalone: python -m dimos.manipulation.grasping.visualize_grasps
     ),
-    vis_module("foxglove"),
+    vis_module("rerun"),
     McpServer.blueprint(),
     McpClient.blueprint(),
-).global_config(viewer="foxglove")
+)

@@ -14,7 +14,6 @@
 
 from unittest.mock import MagicMock
 
-from dimos_lcm.foxglove_msgs.ImageAnnotations import ImageAnnotations
 import pytest
 
 from dimos.core.transport import LCMTransport
@@ -155,5 +154,4 @@ def test_query_points() -> None:
     image_topic.lcm.stop()
 
     annotations: LCMTransport[ImageAnnotations] = LCMTransport("/annotations", ImageAnnotations)
-    annotations.publish(detections.to_foxglove_annotations())
     annotations.lcm.stop()

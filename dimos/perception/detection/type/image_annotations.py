@@ -22,7 +22,6 @@ class ImageAnnotations(FoxgloveImageAnnotations):  # type: ignore[misc]
         points = self.points + other.points
         texts = self.texts + other.texts
         circles = self.circles + other.circles
-
         return ImageAnnotations(
             texts=texts,
             texts_length=len(texts),
@@ -31,8 +30,3 @@ class ImageAnnotations(FoxgloveImageAnnotations):  # type: ignore[misc]
             circles=circles,
             circles_length=len(circles),
         )
-
-    def agent_encode(self) -> str:
-        if len(self.texts) == 0:
-            return None  # type: ignore[return-value]
-        return list(map(lambda t: t.text, self.texts))  # type: ignore[return-value]

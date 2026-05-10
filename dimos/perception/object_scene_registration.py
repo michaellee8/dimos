@@ -24,7 +24,6 @@ from dimos.agents.annotation import skill
 from dimos.core.core import rpc
 from dimos.core.module import Module
 from dimos.core.stream import In, Out
-from dimos.msgs.foxglove_msgs.ImageAnnotations import ImageAnnotations
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
@@ -57,7 +56,7 @@ class ObjectSceneRegistrationModule(Module):
     detections_2d: Out[Detection2DArray]
     detections_3d: Out[Detection3DArray]
     objects: Out[list[DetObject]]
-    overlay: Out[ImageAnnotations]
+
     pointcloud: Out[PointCloud2]
 
     _detector: Yoloe2DDetector | None = None
@@ -312,8 +311,7 @@ class ObjectSceneRegistrationModule(Module):
         )
         self.detections_2d.publish(detections_2d_msg)
 
-        overlay_annotations = detections_2d.to_foxglove_annotations()
-        self.overlay.publish(overlay_annotations)
+
 
         # Process 3D detections
         self._process_3d_detections(detections_2d, color_image, depth_image)

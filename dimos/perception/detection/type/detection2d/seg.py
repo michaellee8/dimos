@@ -23,7 +23,7 @@ from dimos_lcm.foxglove_msgs.Point2 import Point2
 import numpy as np
 import torch
 
-from dimos.msgs.foxglove_msgs.Color import Color
+from dimos.perception.detection.type.annotation_color import Color
 from dimos.perception.detection.type.detection2d.bbox import Bbox, Detection2DBBox
 from dimos.types.timestamped import to_ros_stamp
 

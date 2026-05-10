@@ -196,7 +196,7 @@ xarm_perception = (
             use_aabb=True,
             max_obstacle_width=0.06,
         ),
-        vis_module("foxglove"),
+        vis_module("rerun"),
     )
     .transports(
         {

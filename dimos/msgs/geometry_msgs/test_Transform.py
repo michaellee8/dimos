@@ -334,7 +334,7 @@ def test_transform_from_pose() -> None:
 
 
 # validating results from example @
-# https://foxglove.dev/blog/understanding-ros-transforms
+# https://www.ros.org/reps/rep-0105.html
 def test_transform_from_ros() -> None:
     """Test converting PoseStamped to Transform"""
     test_time = time.time()

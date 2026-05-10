@@ -16,9 +16,6 @@ import os
 import time
 from typing import TYPE_CHECKING
 
-from dimos_lcm.foxglove_msgs.ImageAnnotations import (
-    ImageAnnotations,
-)
 import pytest
 
 from dimos.core.transport import LCMTransport
@@ -34,7 +31,7 @@ if TYPE_CHECKING:
     from dimos.models.vl.base import VlModel
 
 
-# For these tests you can run foxglove-bridge to visualize results
+# For these tests you can run lcm-spy to visualize published messages
 # You can also run lcm-spy to confirm that messages are being published
 
 
@@ -77,11 +74,6 @@ def test_vlm_bbox_detections(model_class: "type[VlModel]", model_name: str) -> N
     all_detections = ImageDetections2D(image)
     query_times = []
 
-    # Publish to LCM with model-specific channel names
-    annotations_transport: LCMTransport[ImageAnnotations] = LCMTransport(
-        "/annotations", ImageAnnotations
-    )
-
     image_transport: LCMTransport[Image] = LCMTransport("/image", Image)
 
     image_transport.publish(image)
@@ -96,7 +88,6 @@ def test_vlm_bbox_detections(model_class: "type[VlModel]", model_name: str) -> N
 
         print(f"  Found {len(detections)} detections in {query_time:.3f}s")
         all_detections.detections.extend(detections.detections)
-        annotations_transport.publish(all_detections.to_foxglove_annotations())
 
     avg_time = sum(query_times) / len(query_times) if query_times else 0
     print(f"\n{model_name} Results:")
@@ -104,9 +95,6 @@ def test_vlm_bbox_detections(model_class: "type[VlModel]", model_name: str) -> N
     print(f"  Total detections: {len(all_detections)}")
     print(all_detections)
 
-    annotations_transport.publish(all_detections.to_foxglove_annotations())
-
-    annotations_transport.lcm.stop()
     image_transport.lcm.stop()
     model.stop()
 
@@ -148,11 +136,6 @@ def test_vlm_point_detections(model_class: "type[VlModel]", model_name: str) -> 
     all_detections = ImageDetections2D(image)
     query_times = []
 
-    # Publish to LCM with model-specific channel names
-    annotations_transport: LCMTransport[ImageAnnotations] = LCMTransport(
-        "/annotations", ImageAnnotations
-    )
-
     image_transport: LCMTransport[Image] = LCMTransport("/image", Image)
 
     image_transport.publish(image)
@@ -167,7 +150,6 @@ def test_vlm_point_detections(model_class: "type[VlModel]", model_name: str) -> 
 
         print(f"  Found {len(detections)} points in {query_time:.3f}s")
         all_detections.detections.extend(detections.detections)
-        annotations_transport.publish(all_detections.to_foxglove_annotations())
 
     avg_time = sum(query_times) / len(query_times) if query_times else 0
     print(f"\n{model_name} Results:")
@@ -175,9 +157,6 @@ def test_vlm_point_detections(model_class: "type[VlModel]", model_name: str) -> 
     print(f"  Total points: {len(all_detections)}")
     print(all_detections)
 
-    annotations_transport.publish(all_detections.to_foxglove_annotations())
-
-    annotations_transport.lcm.stop()
     image_transport.lcm.stop()
     model.stop()
 
