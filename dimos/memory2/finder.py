@@ -55,6 +55,7 @@ from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.perception.detection.type.detection3d.pointcloud import Detection3DPC
+from dimos.protocol.tf.tf import LCMTF
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -73,6 +74,10 @@ class ObjectFinder3DConfig(RecorderConfig):
     min_brightness: float = 0.1
     embedding_quality_window_s: float = 0.5
     embedding_batch_size: int = 2
+    # TF buffer length — the default LCMTF buffer keeps only 10s of
+    # transforms, but we look up TFs by *recorded image* timestamps
+    # which can be minutes old. Bump to 1 hour by default.
+    tf_buffer_size_s: float = 3600.0
 
 
 class ObjectFinder3D(Recorder):
@@ -115,6 +120,19 @@ class ObjectFinder3D(Recorder):
         # records camera_info, which is harmless — we additionally
         # cache the latest in-memory below for back-projection.
         super().start()
+
+        # Activate TF reception. Splat camera publishes its
+        # world-to-optical transform under (frame_id="world",
+        # child_frame_id=image.frame_id) on every render tick — that's
+        # the correct extrinsics for Detection3DPC.from_2d, since the
+        # `pose` attached to recorded images is the pelvis (/odom),
+        # not the head-mounted camera optical frame.
+        #
+        # Override the default TF buffer (10s) before the lazy property
+        # creates the default instance — we look up TFs by *recorded*
+        # image timestamps that can be many minutes old.
+        self._tf = LCMTF(buffer_size=self.config.tf_buffer_size_s)
+        self.tf.start()
 
         # Cache camera_info for find_object_3d (stream lookup at find
         # time would also work, but in-memory cache is simpler).
@@ -185,7 +203,7 @@ class ObjectFinder3D(Recorder):
 
         n_candidate_frames = 0
         n_dets = 0
-        n_backproj_attempts = 0
+        n_tf_misses = 0
         for obs in (
             store.streams.color_image.at(
                 hotspot.pose_stamped.ts, tolerance=self.config.near_tolerance_s
@@ -205,18 +223,32 @@ class ObjectFinder3D(Recorder):
                 lidar_obs = lidar.at(obs.ts).first()
             except LookupError:
                 continue
+            # Look up the camera's world transform via TF (splat camera
+            # publishes "world" -> image.frame_id every render tick).
+            # `obs.data` here is ImageDetections2D (the .map() output);
+            # the original Image is on .image.
+            camera_frame = obs.data.image.frame_id
+            world_to_camera = self.tf.get(
+                "world", camera_frame, time_point=obs.ts, time_tolerance=2.0
+            )
+            if world_to_camera is None:
+                # TF buffer didn't reach back this far. Fall back to
+                # the pelvis pose; back-projection will likely reject
+                # all points but the chain doesn't hard-fail.
+                n_tf_misses += 1
+                world_to_camera = Transform(
+                    ts=obs.ts,
+                    translation=obs.pose_stamped.position,
+                    rotation=obs.pose_stamped.orientation,
+                )
+
             for det in obs.data.detections:
                 n_dets += 1
-                n_backproj_attempts += 1
                 det3d = Detection3DPC.from_2d(
                     det,
                     lidar_obs.data,
                     camera_info=cam_info,
-                    world_to_optical_transform=Transform(
-                        ts=obs.ts,
-                        translation=obs.pose_stamped.position,
-                        rotation=obs.pose_stamped.orientation,
-                    ).inverse(),
+                    world_to_optical_transform=world_to_camera.inverse(),
                 )
                 if det3d is None or len(det3d.pointcloud) == 0:
                     continue
@@ -233,17 +265,23 @@ class ObjectFinder3D(Recorder):
                 f"but VLM didn't detect '{label}' in {n_candidate_frames} "
                 f"best-of-window frames around it."
             )
-        # Likely: pose attached to images is the pelvis (/odom), not the
-        # camera's world transform — projected lidar points fall outside
-        # the 2D bbox so the filter rejects them all. Until the camera
-        # pose is recorded separately, fall back to the hotspot location.
+        # All detections projected through TF, but every back-projection
+        # rejected the points. Usually means the lidar pointcloud doesn't
+        # cover the 2D bbox region (target outside lidar FoV, or the
+        # bbox is on a far wall the lidar can't reach).
         h = hotspot.pose_stamped.position
+        tf_note = (
+            f" ({n_tf_misses}/{n_candidate_frames} frames missed TF — "
+            f"bump tf_buffer_size_s if your recordings are longer)"
+            if n_tf_misses
+            else ""
+        )
         return (
             f"Found '{label}' near ({h.x:.2f}, {h.y:.2f}, {h.z:.2f}) "
             f"(VLM saw {n_dets} detections in {n_candidate_frames} frames; "
-            f"3D back-projection failed on all of them — likely because "
-            f"the recorded pose is the pelvis, not the camera optical frame; "
-            f"reporting hotspot pose instead)."
+            f"3D back-projection found no lidar points in the bboxes — "
+            f"target may be outside lidar FoV; reporting hotspot pose "
+            f"instead{tf_note})."
         )
 
 
