@@ -108,7 +108,7 @@ def broadcast(  # type: ignore[no-untyped-def]
     lidar_frame: PointCloud2,
     video_frame: Image,
     odom_frame: Odometry,
-    detections,
+    detections: object,
 ) -> None:
     from dimos.core.transport import LCMTransport
     from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped

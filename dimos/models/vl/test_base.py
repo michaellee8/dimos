@@ -152,6 +152,3 @@ def test_query_points() -> None:
     image_topic: LCMTransport[Image] = LCMTransport("/image", Image)
     image_topic.publish(image)
     image_topic.lcm.stop()
-
-    annotations: LCMTransport[ImageAnnotations] = LCMTransport("/annotations", ImageAnnotations)
-    annotations.lcm.stop()

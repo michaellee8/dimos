@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import pytest
-from reactivex.disposable import CompositeDisposable
 
 from dimos.core.transport import LCMTransport
 from dimos.msgs.sensor_msgs.Image import Image
@@ -28,28 +27,10 @@ def detector(request):
 
 
 @pytest.fixture(scope="session")
-def get_topic_annotations():
-    disposables = CompositeDisposable()
-
-    def topic_annotations(suffix: str = "unnamed"):
-        annotations: LCMTransport[ImageAnnotations] = LCMTransport(
-            f"/annotations_{suffix}", ImageAnnotations
-        )
-        disposables.add(annotations)
-        return annotations
-
-    yield topic_annotations
-    disposables.dispose()
-
-
-@pytest.fixture(scope="session")
-def detections(detector, test_image, topic_image, get_topic_annotations):
+def detections(detector, test_image, topic_image):
     """Get ImageDetections2D from any detector."""
     topic_image.publish(test_image)
     detections = detector.process_image(test_image)
-    print("annotations:", annotations)
-    topic_annotations = get_topic_annotations(detector.__class__.__name__)
-    topic_annotations.publish(annotations)
     return detections
 
 

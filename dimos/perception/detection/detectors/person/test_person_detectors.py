@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dimos_lcm.foxglove_msgs.ImageAnnotations import PointsAnnotation
 import pytest
 
 from dimos.perception.detection.type.detection2d.imageDetections2D import ImageDetections2D
