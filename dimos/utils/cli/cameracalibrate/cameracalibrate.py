@@ -20,9 +20,13 @@ later T3 subtasks.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import yaml
+
+_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg"})
 
 
 def write_camera_info_yaml(
@@ -76,6 +80,30 @@ def write_camera_info_yaml(
 
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(payload, f, default_flow_style=False, sort_keys=False)
+
+
+def load_frames_from_folder(path: str) -> list[np.ndarray]:
+    """Load ``*.png``, ``*.jpg``, and ``*.jpeg`` images from a directory.
+
+    Files are ordered by filename (lexicographic sort of basenames). Raises if the path
+    is not a directory or if any matching file fails to decode with ``cv2.imread``.
+    """
+    root = Path(path)
+    if not root.is_dir():
+        raise ValueError(f"Not a directory: {path}")
+
+    paths = sorted(
+        p
+        for p in root.iterdir()
+        if p.is_file() and p.suffix.lower() in _IMAGE_EXTS
+    )
+    out: list[np.ndarray] = []
+    for p in paths:
+        img = cv2.imread(str(p))
+        if img is None:
+            raise ValueError(f"Could not read image: {p}")
+        out.append(img)
+    return out
 
 
 def find_chessboard_corners(gray: np.ndarray, cols: int, rows: int) -> np.ndarray | None:

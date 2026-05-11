@@ -22,6 +22,7 @@ from dimos.perception.common.utils import load_camera_info, load_camera_info_ope
 from dimos.utils.cli.cameracalibrate.cameracalibrate import (
     calibrate_from_frames,
     find_chessboard_corners,
+    load_frames_from_folder,
     main,
     write_camera_info_yaml,
 )
@@ -57,6 +58,24 @@ def _synthetic_chessboard_gray(
 
 def test_main_stub_runs() -> None:
     main()
+
+
+def test_load_frames_from_folder_count_order_and_pixels(tmp_path) -> None:
+    """T3.7: sorted ``*.png`` / ``*.jpg`` / ``*.jpeg``; correct count and load order."""
+    h, w = 24, 32
+    # Write out of lexicographic order; expect sorted basenames: 01, 02, 03.
+    cv2.imwrite(str(tmp_path / "02.png"), np.full((h, w, 3), (10, 20, 30), dtype=np.uint8))
+    cv2.imwrite(str(tmp_path / "01.jpg"), np.full((h, w, 3), (40, 50, 60), dtype=np.uint8))
+    cv2.imwrite(str(tmp_path / "03.jpeg"), np.full((h, w, 3), (70, 80, 90), dtype=np.uint8))
+    # Noise file must be ignored.
+    (tmp_path / "notes.txt").write_text("ignore", encoding="utf-8")
+
+    frames = load_frames_from_folder(str(tmp_path))
+    assert len(frames) == 3
+    assert frames[0].shape == (h, w, 3)
+    assert np.array_equal(frames[0], np.full((h, w, 3), (40, 50, 60), dtype=np.uint8))
+    assert np.array_equal(frames[1], np.full((h, w, 3), (10, 20, 30), dtype=np.uint8))
+    assert np.array_equal(frames[2], np.full((h, w, 3), (70, 80, 90), dtype=np.uint8))
 
 
 def test_find_chessboard_corners_synthetic_board_returns_expected_count() -> None:
