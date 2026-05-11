@@ -18,6 +18,8 @@ import cv2
 import numpy as np
 import pytest
 
+pytest.importorskip("cv2.aruco")
+
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
