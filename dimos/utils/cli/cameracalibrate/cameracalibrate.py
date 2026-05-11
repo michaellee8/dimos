@@ -20,6 +20,7 @@ later T3 subtasks.
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 import yaml
 
@@ -75,6 +76,27 @@ def write_camera_info_yaml(
 
     with open(path, "w", encoding="utf-8") as f:
         yaml.safe_dump(payload, f, default_flow_style=False, sort_keys=False)
+
+
+def find_chessboard_corners(gray: np.ndarray, cols: int, rows: int) -> np.ndarray | None:
+    """Detect inner chessboard corners and refine them with sub-pixel accuracy.
+
+    ``cols`` and ``rows`` are the counts of **inner** corners along each axis, matching
+    ``cv2.findChessboardCorners(..., patternSize=(cols, rows))``.
+
+    Returns:
+        Float array of shape ``(cols * rows, 1, 2)`` on success, else ``None``.
+    """
+    g = np.asarray(gray)
+    pattern_size = (cols, rows)
+    flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+    ok, corners = cv2.findChessboardCorners(g, pattern_size, flags)
+    if not ok or corners is None:
+        return None
+
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+    refined = cv2.cornerSubPix(g, corners, (11, 11), (-1, -1), criteria)
+    return refined
 
 
 def main() -> None:

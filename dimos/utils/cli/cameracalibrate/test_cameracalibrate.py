@@ -15,14 +15,55 @@
 import os
 import tempfile
 
+import cv2
 import numpy as np
 
 from dimos.perception.common.utils import load_camera_info, load_camera_info_opencv
-from dimos.utils.cli.cameracalibrate.cameracalibrate import main, write_camera_info_yaml
+from dimos.utils.cli.cameracalibrate.cameracalibrate import (
+    find_chessboard_corners,
+    main,
+    write_camera_info_yaml,
+)
+
+
+def _synthetic_chessboard_gray(
+    width: int,
+    height: int,
+    cols: int,
+    rows: int,
+    square_px: int,
+) -> np.ndarray:
+    """Build a binary chessboard; ``cols`` x ``rows`` inner corners need ``cols+1`` x ``rows+1`` squares."""
+    img = np.full((height, width), 255, dtype=np.uint8)
+    board_w = (cols + 1) * square_px
+    board_h = (rows + 1) * square_px
+    ox = (width - board_w) // 2
+    oy = (height - board_h) // 2
+    for yi in range(rows + 1):
+        for xi in range(cols + 1):
+            color = 0 if (xi + yi) % 2 == 0 else 255
+            x0 = ox + xi * square_px
+            y0 = oy + yi * square_px
+            cv2.rectangle(
+                img,
+                (x0, y0),
+                (x0 + square_px - 1, y0 + square_px - 1),
+                int(color),
+                thickness=-1,
+            )
+    return img
 
 
 def test_main_stub_runs() -> None:
     main()
+
+
+def test_find_chessboard_corners_synthetic_board_returns_expected_count() -> None:
+    cols, rows = 9, 6
+    gray = _synthetic_chessboard_gray(640, 480, cols, rows, square_px=40)
+    corners = find_chessboard_corners(gray, cols, rows)
+    assert corners is not None
+    assert corners.shape == (cols * rows, 1, 2)
 
 
 def test_write_camera_info_yaml_round_trip_matches_k_d_size_and_model() -> None:
