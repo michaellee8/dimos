@@ -707,6 +707,7 @@ def cameracalibrate(
 
     typer.echo(f"RMS: {float(result['rms']):.6f} px ({int(result['n_used'])} frame(s) used)")
     typer.echo(f"Wrote camera info YAML to {out}")
+    typer.echo(f"Wrote preview overlay PNG to {result['preview_path']}")
 
 
 @main.command()

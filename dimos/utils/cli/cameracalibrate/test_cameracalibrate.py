@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from hashlib import sha256
 import os
+from pathlib import Path
 import tempfile
 from unittest.mock import MagicMock
 
@@ -22,7 +24,6 @@ import pytest
 from typer.testing import CliRunner
 
 from dimos.perception.common.utils import load_camera_info, load_camera_info_opencv
-from dimos.utils.cli.cameracalibrate import cameracalibrate as cc
 from dimos.utils.cli.cameracalibrate.cameracalibrate import (
     app,
     calibrate_from_frames,
@@ -31,6 +32,19 @@ from dimos.utils.cli.cameracalibrate.cameracalibrate import (
     load_frames_from_folder,
     write_camera_info_yaml,
 )
+
+_OPENCV_FIXTURE_DIR = Path(__file__).with_name("assets")
+_OPENCV_FIXTURE_SHA256 = {
+    "left01.jpg": "9621899098adffa1440c8264606bb7be535ccfd9ad126ae8e0bd9b0c5a5b8676",
+    "left02.jpg": "052e700bbcc865c112958ec2ea105cb1bce4deca50ac8d6efae13adca9df7a2c",
+    "left03.jpg": "c85b9426c3d8fcf161e1e727356105091009c3fd0b1b1a65bc2da91fea2724d2",
+    "left04.jpg": "b490599dccfbfe5eb56d33363415b02227a9548ab8c9b8e7b05d3580e97266d9",
+    "left05.jpg": "40bab8934fa76f82ec614a7fd0e6ebb4d9f74391d5e8b0c6f2f0ed6080c6c4de",
+    "left06.jpg": "1cb164db61b3bd52f58a7e9340bb27c5e0278895bc80b6f292fba5cf9bccc4a1",
+    "left07.jpg": "d2211fe9f971646b6ff88ed93a4f0d3f443741eb2894095cba15caade7c8c6e4",
+    "left08.jpg": "f7a0737894812a28243af5b409c5689f4fadfe7610958b8ca5fc79aec2f2cd1b",
+    "left09.jpg": "753939bc62d093c001d9118e989bef2b887f1b2f9ac03603df915a8b85aa81d3",
+}
 
 
 def _synthetic_chessboard_gray(
@@ -61,6 +75,125 @@ def _synthetic_chessboard_gray(
     return img
 
 
+def _synthetic_calibration_frames(
+    *,
+    cols: int = 9,
+    rows: int = 6,
+    width: int = 640,
+    height: int = 480,
+    square_size_m: float = 0.025,
+    count: int = 12,
+) -> tuple[list[np.ndarray], np.ndarray]:
+    square_px = 40
+    K_true = np.array(
+        [[512.0, 0.0, 318.5], [0.0, 508.0, 242.3], [0.0, 0.0, 1.0]],
+        dtype=np.float64,
+    )
+    D_zero = np.zeros(5, dtype=np.float64)
+
+    gray_flat = _synthetic_chessboard_gray(width, height, cols, rows, square_px=square_px)
+    corners_flat = find_chessboard_corners(gray_flat, cols, rows)
+    assert corners_flat is not None
+    src = corners_flat.reshape(-1, 2).astype(np.float32)
+
+    objp = np.zeros((rows * cols, 3), dtype=np.float32)
+    objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2).astype(np.float32)
+    objp *= float(square_size_m)
+
+    rng = np.random.default_rng(42)
+    frames: list[np.ndarray] = []
+    for _ in range(400):
+        if len(frames) >= count:
+            break
+        rvec = rng.uniform(-0.22, 0.22, size=3).astype(np.float64)
+        tvec = np.array(
+            [
+                rng.uniform(-0.04, 0.04),
+                rng.uniform(-0.04, 0.04),
+                rng.uniform(0.38, 0.52),
+            ],
+            dtype=np.float64,
+        )
+        imgpts, _ = cv2.projectPoints(objp, rvec, tvec, K_true, D_zero)
+        dst = imgpts.reshape(-1, 2).astype(np.float32)
+        H, _ = cv2.findHomography(src, dst, cv2.RANSAC, 2.0)
+        if H is None:
+            continue
+        warped = cv2.warpPerspective(gray_flat, H, (width, height))
+        corners_w = find_chessboard_corners(warped, cols, rows)
+        if corners_w is not None:
+            frames.append(warped)
+
+    assert len(frames) >= count
+    return frames[:count], K_true
+
+
+def test_opencv_fixture_assets_are_trusted_and_detectable() -> None:
+    """Validate official OpenCV chessboard sample images before using them as fixtures."""
+    assert _OPENCV_FIXTURE_DIR.is_dir()
+    for filename, expected_hash in _OPENCV_FIXTURE_SHA256.items():
+        path = _OPENCV_FIXTURE_DIR / filename
+        data = path.read_bytes()
+        assert sha256(data).hexdigest() == expected_hash
+
+        image = cv2.imread(str(path))
+        assert image is not None
+        assert image.shape == (480, 640, 3)
+
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        corners = find_chessboard_corners(gray, cols=9, rows=6)
+        assert corners is not None
+        assert corners.shape == (54, 1, 2)
+
+
+def test_cli_folder_with_real_opencv_fixture_writes_yaml_preview_and_camera_info(
+    tmp_path,
+) -> None:
+    out = tmp_path / "camera_info.yaml"
+    result = CliRunner().invoke(
+        app,
+        [
+            "--source",
+            "folder",
+            "--images",
+            str(_OPENCV_FIXTURE_DIR),
+            "--cols",
+            "9",
+            "--rows",
+            "6",
+            "--square-size-m",
+            "0.025",
+            "--out",
+            str(out),
+            "--frame-id",
+            "camera_optical",
+            "--camera-name",
+            "opencv_left",
+            "--no-display",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "RMS:" in result.output
+    assert "(9 frame(s) used)" in result.output
+    assert "Wrote preview overlay PNG" in result.output
+
+    preview = tmp_path / "camera_info.preview.png"
+    assert out.exists()
+    assert preview.exists()
+    assert preview.stat().st_size > 0
+
+    preview_image = cv2.imread(str(preview))
+    assert preview_image is not None
+    assert preview_image.shape == (480, 640, 3)
+
+    info = load_camera_info(str(out), frame_id="camera_optical")
+    assert info.width == 640
+    assert info.height == 480
+    assert info.distortion_model == "plumb_bob"
+    assert info.header.frame_id == "camera_optical"
+
+
 def test_cli_help_lists_cameracalibrate_flags() -> None:
     result = CliRunner().invoke(app, ["--help"])
     assert result.exit_code == 0
@@ -80,27 +213,13 @@ def test_cli_help_lists_cameracalibrate_flags() -> None:
         assert flag in result.output
 
 
-def test_cli_folder_writes_yaml_and_prints_rms(tmp_path, monkeypatch) -> None:
-    frames = [np.zeros((24, 32, 3), dtype=np.uint8)]
-
-    def _fake_calibrate_from_frames(
-        input_frames: list[np.ndarray],
-        cols: int,
-        rows: int,
-        square_size_m: float,
-    ) -> dict[str, object]:
-        assert input_frames == frames
-        assert (cols, rows, square_size_m) == (9, 6, 0.025)
-        return {
-            "K": np.array([[500.0, 0.0, 16.0], [0.0, 501.0, 12.0], [0.0, 0.0, 1.0]]),
-            "D": np.zeros(5),
-            "rms": 0.123456,
-            "image_size": (32, 24),
-            "n_used": 1,
-        }
-
-    monkeypatch.setattr(cc, "load_frames_from_folder", lambda _path: frames)
-    monkeypatch.setattr(cc, "calibrate_from_frames", _fake_calibrate_from_frames)
+def test_cli_folder_writes_yaml_preview_and_prints_rms(tmp_path) -> None:
+    cols, rows = 9, 6
+    frames, _K_true = _synthetic_calibration_frames(cols=cols, rows=rows)
+    images = tmp_path / "fixture"
+    images.mkdir()
+    for i, frame in enumerate(frames):
+        assert cv2.imwrite(str(images / f"{i:02d}.png"), frame)
 
     out = tmp_path / "camera_info.yaml"
     result = CliRunner().invoke(
@@ -109,7 +228,7 @@ def test_cli_folder_writes_yaml_and_prints_rms(tmp_path, monkeypatch) -> None:
             "--source",
             "folder",
             "--images",
-            str(tmp_path),
+            str(images),
             "--cols",
             "9",
             "--rows",
@@ -127,11 +246,15 @@ def test_cli_folder_writes_yaml_and_prints_rms(tmp_path, monkeypatch) -> None:
     )
 
     assert result.exit_code == 0
-    assert "RMS: 0.123456 px" in result.output
+    assert "RMS:" in result.output
+    assert "Wrote preview overlay PNG" in result.output
     assert out.exists()
+    preview = tmp_path / "camera_info.preview.png"
+    assert preview.exists()
+    assert cv2.imread(str(preview)) is not None
     info = load_camera_info(str(out), frame_id="camera_optical")
-    assert info.width == 32
-    assert info.height == 24
+    assert info.width == 640
+    assert info.height == 480
     assert info.distortion_model == "plumb_bob"
 
 
@@ -256,50 +379,14 @@ def test_calibrate_from_frames_synthetic_twelve_views_rms_and_K_near_truth() -> 
     cols, rows = 9, 6
     width, height = 640, 480
     square_size_m = 0.025
-    square_px = 40
-
-    # Zero skew; comparing skew ratio vs near-zero truth is ill-conditioned (check fx, fy, cx, cy).
-    K_true = np.array(
-        [[512.0, 0.0, 318.5], [0.0, 508.0, 242.3], [0.0, 0.0, 1.0]],
-        dtype=np.float64,
+    frames, K_true = _synthetic_calibration_frames(
+        cols=cols,
+        rows=rows,
+        width=width,
+        height=height,
+        square_size_m=square_size_m,
+        count=12,
     )
-    D_zero = np.zeros(5, dtype=np.float64)
-
-    gray_flat = _synthetic_chessboard_gray(width, height, cols, rows, square_px=square_px)
-    corners_flat = find_chessboard_corners(gray_flat, cols, rows)
-    assert corners_flat is not None
-    src = corners_flat.reshape(-1, 2).astype(np.float32)
-
-    objp = np.zeros((rows * cols, 3), dtype=np.float32)
-    objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2).astype(np.float32)
-    objp *= float(square_size_m)
-
-    rng = np.random.default_rng(42)
-    frames: list[np.ndarray] = []
-    for _ in range(400):
-        if len(frames) >= 12:
-            break
-        rvec = rng.uniform(-0.22, 0.22, size=3).astype(np.float64)
-        tvec = np.array(
-            [
-                rng.uniform(-0.04, 0.04),
-                rng.uniform(-0.04, 0.04),
-                rng.uniform(0.38, 0.52),
-            ],
-            dtype=np.float64,
-        )
-        imgpts, _ = cv2.projectPoints(objp, rvec, tvec, K_true, D_zero)
-        dst = imgpts.reshape(-1, 2).astype(np.float32)
-        H, _ = cv2.findHomography(src, dst, cv2.RANSAC, 2.0)
-        if H is None:
-            continue
-        warped = cv2.warpPerspective(gray_flat, H, (width, height))
-        corners_w = find_chessboard_corners(warped, cols, rows)
-        if corners_w is not None:
-            frames.append(warped)
-
-    assert len(frames) >= 12
-    frames = frames[:12]
 
     out = calibrate_from_frames(frames, cols, rows, square_size_m)
     assert out["n_used"] == 12

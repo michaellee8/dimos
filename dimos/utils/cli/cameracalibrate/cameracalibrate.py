@@ -278,6 +278,34 @@ def calibrate_from_frames(
     }
 
 
+def write_preview_overlay_png(
+    frames: list[np.ndarray],
+    cols: int,
+    rows: int,
+    path: Path,
+) -> Path:
+    """Write a preview PNG with detected chessboard corners drawn on one input frame."""
+    for frame in frames:
+        f = np.asarray(frame)
+        gray = cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) if f.ndim == 3 else f
+        corners = find_chessboard_corners(gray, cols, rows)
+        if corners is None:
+            continue
+
+        preview = (
+            cv2.cvtColor(f, cv2.COLOR_GRAY2BGR)
+            if f.ndim == 2
+            else np.asarray(frame).copy()
+        )
+        cv2.drawChessboardCorners(preview, (cols, rows), corners, True)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(str(path), preview):
+            raise ValueError(f"Could not write preview image: {path}")
+        return path
+
+    raise ValueError("Chessboard not found in any frame for preview overlay.")
+
+
 def run_calibration(
     *,
     source: Source | str,
@@ -326,6 +354,9 @@ def run_calibration(
         K=np.asarray(result["K"], dtype=np.float64),
         D=np.asarray(result["D"], dtype=np.float64),
     )
+    preview_path = out.with_suffix(".preview.png")
+    write_preview_overlay_png(frames, cols, rows, preview_path)
+    result["preview_path"] = preview_path
     return result
 
 
@@ -369,6 +400,7 @@ def calibrate(
 
     typer.echo(f"RMS: {float(result['rms']):.6f} px ({int(result['n_used'])} frame(s) used)")
     typer.echo(f"Wrote camera info YAML to {out}")
+    typer.echo(f"Wrote preview overlay PNG to {result['preview_path']}")
 
 
 def main(args: list[str] | None = None) -> None:
