@@ -14,13 +14,16 @@
 
 import os
 import tempfile
+from unittest.mock import MagicMock
 
 import cv2
 import numpy as np
+import pytest
 
 from dimos.perception.common.utils import load_camera_info, load_camera_info_opencv
 from dimos.utils.cli.cameracalibrate.cameracalibrate import (
     calibrate_from_frames,
+    capture_frames_from_webcam,
     find_chessboard_corners,
     load_frames_from_folder,
     main,
@@ -58,6 +61,96 @@ def _synthetic_chessboard_gray(
 
 def test_main_stub_runs() -> None:
     main()
+
+
+class _MockVideoCapture:
+    """Minimal ``cv2.VideoCapture`` stand-in for webcam capture tests."""
+
+    def __init__(self, bgr_frame: np.ndarray) -> None:
+        self._frame = np.asarray(bgr_frame)
+        self._released = False
+
+    def isOpened(self) -> bool:
+        return True
+
+    def read(self) -> tuple[bool, np.ndarray]:
+        return True, self._frame.copy()
+
+    def release(self) -> None:
+        self._released = True
+
+
+def test_capture_frames_from_webcam_mocked_space_fills_target(monkeypatch) -> None:
+    """T3.8: SPACE accepts frames with chessboard overlay path; ``no_display`` skips GUI."""
+    cols, rows = 9, 6
+    gray = _synthetic_chessboard_gray(640, 480, cols, rows, square_px=40)
+    bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    keys_iter = iter([ord(" ")] * 3)
+
+    def _fake_wait_key(_delay: int = 0) -> int:
+        try:
+            return next(keys_iter)
+        except StopIteration:
+            return 0
+
+    monkeypatch.setattr(cv2, "VideoCapture", lambda *_a, **_k: _MockVideoCapture(bgr))
+    monkeypatch.setattr(cv2, "waitKey", _fake_wait_key)
+    mock_imshow = MagicMock()
+    monkeypatch.setattr(cv2, "imshow", mock_imshow)
+
+    out = capture_frames_from_webcam(0, 3, cols, rows, no_display=True)
+    assert len(out) == 3
+    assert all(np.array_equal(f, bgr) for f in out)
+    mock_imshow.assert_not_called()
+
+
+def test_capture_frames_from_webcam_mocked_quit_raises(monkeypatch) -> None:
+    cols, rows = 9, 6
+    gray = _synthetic_chessboard_gray(640, 480, cols, rows, square_px=40)
+    bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    keys_iter = iter([ord(" "), ord("q")])
+
+    def _fake_wait_key(_delay: int = 0) -> int:
+        try:
+            return next(keys_iter)
+        except StopIteration:
+            return 0
+
+    monkeypatch.setattr(cv2, "VideoCapture", lambda *_a, **_k: _MockVideoCapture(bgr))
+    monkeypatch.setattr(cv2, "waitKey", _fake_wait_key)
+
+    with pytest.raises(RuntimeError, match="Capture ended"):
+        capture_frames_from_webcam(0, 3, cols, rows, no_display=True)
+
+
+def test_capture_frames_from_webcam_no_display_false_calls_imshow(monkeypatch) -> None:
+    cols, rows = 9, 6
+    gray = _synthetic_chessboard_gray(320, 240, cols, rows, square_px=20)
+    bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+    monkeypatch.setattr(cv2, "VideoCapture", lambda *_a, **_k: _MockVideoCapture(bgr))
+    monkeypatch.setattr(cv2, "waitKey", lambda _delay=0: ord(" "))
+    mock_imshow = MagicMock()
+    mock_destroy = MagicMock()
+    monkeypatch.setattr(cv2, "imshow", mock_imshow)
+    monkeypatch.setattr(cv2, "destroyWindow", mock_destroy)
+
+    capture_frames_from_webcam(0, 1, cols, rows, no_display=False)
+    mock_imshow.assert_called()
+    mock_destroy.assert_called_once()
+
+
+@pytest.mark.skipif(
+    bool(os.environ.get("DIMOS_TEST_NO_CAMERA")),
+    reason="DIMOS_TEST_NO_CAMERA is set (skip hardware camera smoke in CI).",
+)
+def test_opencv_video_capture_device_zero_opens_when_camera_available() -> None:
+    """T3.8: opt-in hardware check when ``DIMOS_TEST_NO_CAMERA`` is unset."""
+    cap = cv2.VideoCapture(0)
+    try:
+        assert cap.isOpened()
+    finally:
+        cap.release()
 
 
 def test_load_frames_from_folder_count_order_and_pixels(tmp_path) -> None:

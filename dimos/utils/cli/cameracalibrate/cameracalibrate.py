@@ -106,6 +106,81 @@ def load_frames_from_folder(path: str) -> list[np.ndarray]:
     return out
 
 
+_CAMERACALIBRATE_WINDOW = "dimos cameracalibrate"
+
+
+def capture_frames_from_webcam(
+    device_index: int,
+    target_count: int,
+    cols: int,
+    rows: int,
+    *,
+    no_display: bool = False,
+) -> list[np.ndarray]:
+    """Capture ``target_count`` BGR frames from a webcam when the board is visible.
+
+    Shows a live preview (unless ``no_display`` is True, for headless runs and CI).
+    When a chessboard is detected, press SPACE to accept the current frame. Press
+    ``q`` to quit early (raises if fewer than ``target_count`` frames were accepted).
+
+    ``no_display`` mirrors the CLI ``--no-display`` flag: no ``cv2.imshow`` or window
+    teardown; ``cv2.waitKey`` is still used so automated tests can inject key codes.
+    """
+    if target_count < 1:
+        raise ValueError("target_count must be >= 1")
+
+    accepted: list[np.ndarray] = []
+    cap: cv2.VideoCapture | None = None
+
+    try:
+        cap = cv2.VideoCapture(device_index)
+        if not cap.isOpened():
+            raise RuntimeError(f"Failed to open camera device_index={device_index!r}")
+
+        while len(accepted) < target_count:
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+
+            if frame.ndim == 3:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = frame
+
+            corners = find_chessboard_corners(gray, cols, rows)
+            preview = np.asarray(frame).copy()
+            if corners is not None:
+                cv2.drawChessboardCorners(preview, (cols, rows), corners, True)
+
+            if not no_display:
+                cv2.imshow(_CAMERACALIBRATE_WINDOW, preview)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord(" "):
+                if corners is not None:
+                    accepted.append(np.asarray(frame).copy())
+            elif key == ord("q"):
+                break
+
+        if len(accepted) < target_count:
+            raise RuntimeError(
+                f"Capture ended with {len(accepted)} of {target_count} frames "
+                "(quit early, missing detections on SPACE, or read failures)."
+            )
+
+        return accepted
+
+    finally:
+        if cap is not None:
+            cap.release()
+        if not no_display:
+            try:
+                cv2.destroyWindow(_CAMERACALIBRATE_WINDOW)
+            except cv2.error:
+                pass
+            cv2.waitKey(1)
+
+
 def find_chessboard_corners(gray: np.ndarray, cols: int, rows: int) -> np.ndarray | None:
     """Detect inner chessboard corners and refine them with sub-pixel accuracy.
 
