@@ -16,6 +16,7 @@ Streams written:
 from __future__ import annotations
 
 import argparse
+import select
 import subprocess
 import sys
 import threading
@@ -79,6 +80,17 @@ def start_proc(cwd: Path, args: list[str]) -> subprocess.Popen[bytes]:
                             start_new_session=True)
 
 
+def _wait_for_stdin(bus: lcmlib.LCM) -> None:
+    """Pump the LCM bus until a line shows up on stdin (so messages keep
+    flowing while we wait at a prompt)."""
+    while True:
+        ready, _, _ = select.select([sys.stdin], [], [], 0.05)
+        if ready:
+            sys.stdin.readline()
+            return
+        bus.handle_timeout(50)
+
+
 def stop_proc(proc: subprocess.Popen[bytes], timeout: float = 3.0) -> None:
     if proc.poll() is not None:
         return
@@ -94,12 +106,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", "-o", default="tests/data/fastlio2_replay.db",
                         help="memory2 SqliteStore path (default: %(default)s)")
-    parser.add_argument("--duration", "-d", type=float, default=4.0,
-                        help="recording length in seconds (default: %(default)s)")
+    parser.add_argument("--duration", "-d", type=float, default=None,
+                        help="recording length in seconds. If omitted, "
+                             "interactively prompts to start and to stop.")
     parser.add_argument("--lidar-ip", default="192.168.1.107",
                         help="Mid-360 IP (default: %(default)s)")
     parser.add_argument("--warmup", type=float, default=2.0,
-                        help="seconds to let the pipeline stabilize before recording starts")
+                        help="seconds to let the pipeline stabilize before the start prompt")
     args = parser.parse_args()
 
     output_path = Path(args.output)
@@ -142,16 +155,31 @@ def main() -> int:
     for name, topic in TOPICS.items():
         subs.append(bus.subscribe(topic, lambda c, d, n=name: recorder._on(n, d)))
 
-    print(f"[record] waiting {args.warmup}s warmup, then recording for {args.duration}s …", flush=True)
+    print(f"[record] warming up for {args.warmup}s (FastLio IMU init, no data saved yet) …",
+          flush=True)
     warmup_end = time.time() + args.warmup
     while time.time() < warmup_end:
         bus.handle_timeout(50)
 
-    recorder.counts = {name: 0 for name in TOPICS}
-    capture_end = time.time() + args.duration
-    print("[record] capture started", flush=True)
-    while time.time() < capture_end:
-        bus.handle_timeout(50)
+    if args.duration is None:
+        print("[record] READY.  Press Enter to START recording.", flush=True)
+        _wait_for_stdin(bus)
+        recorder.counts = {name: 0 for name in TOPICS}
+        capture_start = time.time()
+        print("[record] RECORDING.  Press Enter (or Ctrl+C) to STOP.", flush=True)
+        try:
+            _wait_for_stdin(bus)
+        except KeyboardInterrupt:
+            print("\n[record] caught Ctrl+C, stopping…", flush=True)
+        capture_duration = time.time() - capture_start
+    else:
+        recorder.counts = {name: 0 for name in TOPICS}
+        capture_start = time.time()
+        capture_end = capture_start + args.duration
+        print(f"[record] RECORDING for {args.duration:.1f}s …", flush=True)
+        while time.time() < capture_end:
+            bus.handle_timeout(50)
+        capture_duration = args.duration
     print("[record] capture done", flush=True)
 
     for s in subs:
@@ -160,9 +188,9 @@ def main() -> int:
     stop_proc(mid360)
     store.stop()
 
-    print("\n[record] message counts:")
+    print(f"\n[record] message counts (over {capture_duration:.2f}s):")
     for name, n in recorder.counts.items():
-        rate = n / args.duration
+        rate = n / capture_duration if capture_duration > 0 else 0.0
         print(f"  {name:14s} {n:6d}  ({rate:6.1f} Hz)")
     print(f"\n[record] fixture written to {output_path} ({output_path.stat().st_size/1e6:.1f} MB)")
 
