@@ -17,7 +17,7 @@ import tempfile
 
 import numpy as np
 
-from dimos.perception.common.utils import load_camera_info
+from dimos.perception.common.utils import load_camera_info, load_camera_info_opencv
 from dimos.utils.cli.cameracalibrate.cameracalibrate import main, write_camera_info_yaml
 
 
@@ -47,6 +47,47 @@ def test_write_camera_info_yaml_round_trip_matches_k_d_size_and_model() -> None:
         assert info.distortion_model == "plumb_bob"
         assert np.allclose(np.asarray(info.K, dtype=np.float64).reshape(3, 3), K)
         assert np.allclose(np.asarray(info.D, dtype=np.float64).ravel(), D.ravel())
+    finally:
+        os.unlink(path)
+
+
+def test_write_camera_info_yaml_round_trip_load_camera_info_and_opencv() -> None:
+    """YAML written by ``write_camera_info_yaml`` round-trips through both loaders (T3.3)."""
+    K = np.array([[600.0, 0.5, 400.0], [0.0, 605.0, 300.5], [0.0, 0.0, 1.0]], dtype=np.float64)
+    D = np.array([-0.12, 0.08, 0.002, -0.001, 0.0], dtype=np.float64)
+    R = np.array([[0.999, -0.01, 0.0], [0.01, 0.999, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+    P = np.array(
+        [[600.0, 0.0, 400.0, 0.1], [0.0, 605.0, 300.5, 0.2], [0.0, 0.0, 1.0, 0.0]],
+        dtype=np.float64,
+    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        path = f.name
+    try:
+        write_camera_info_yaml(
+            path,
+            image_width=800,
+            image_height=600,
+            camera_name="synthetic",
+            frame_id="camera_optical",
+            K=K,
+            D=D,
+            R=R,
+            P=P,
+            distortion_model="plumb_bob",
+        )
+        info = load_camera_info(path, frame_id="camera_optical")
+        K_cv, D_cv = load_camera_info_opencv(path)
+
+        assert info.width == 800
+        assert info.height == 600
+        assert info.distortion_model == "plumb_bob"
+        assert info.header.frame_id == "camera_optical"
+        assert np.allclose(np.asarray(info.K, dtype=np.float64).reshape(3, 3), K)
+        assert np.allclose(np.asarray(info.D, dtype=np.float64).ravel(), D.ravel())
+        assert np.allclose(np.asarray(info.R, dtype=np.float64).reshape(3, 3), R)
+        assert np.allclose(np.asarray(info.P, dtype=np.float64).reshape(3, 4), P)
+        assert np.allclose(K_cv, K)
+        assert np.allclose(np.asarray(D_cv, dtype=np.float64).ravel(), D.ravel())
     finally:
         os.unlink(path)
 
