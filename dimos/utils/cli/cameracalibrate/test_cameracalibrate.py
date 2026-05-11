@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 from typer.testing import CliRunner
 
+from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo as DimosCameraInfo
 from dimos.perception.common.utils import load_camera_info, load_camera_info_opencv
 from dimos.utils.cli.cameracalibrate.cameracalibrate import (
     app,
@@ -192,6 +193,16 @@ def test_cli_folder_with_real_opencv_fixture_writes_yaml_preview_and_camera_info
     assert info.height == 480
     assert info.distortion_model == "plumb_bob"
     assert info.header.frame_id == "camera_optical"
+
+    dimos_info = DimosCameraInfo.from_yaml(str(out))
+    assert dimos_info.width == 640
+    assert dimos_info.height == 480
+    assert dimos_info.distortion_model == "plumb_bob"
+    assert dimos_info.frame_id == "camera_optical"
+    assert dimos_info.get_K_matrix().shape == (3, 3)
+    assert dimos_info.get_D_coeffs().shape == (5,)
+    assert dimos_info.get_R_matrix().shape == (3, 3)
+    assert dimos_info.get_P_matrix().shape == (3, 4)
 
 
 def test_cli_help_lists_cameracalibrate_flags() -> None:
@@ -422,6 +433,13 @@ def test_write_camera_info_yaml_round_trip_matches_k_d_size_and_model() -> None:
         assert info.distortion_model == "plumb_bob"
         assert np.allclose(np.asarray(info.K, dtype=np.float64).reshape(3, 3), K)
         assert np.allclose(np.asarray(info.D, dtype=np.float64).ravel(), D.ravel())
+
+        dimos_info = DimosCameraInfo.from_yaml(path)
+        assert dimos_info.width == 640
+        assert dimos_info.height == 480
+        assert dimos_info.distortion_model == "plumb_bob"
+        assert np.allclose(dimos_info.get_K_matrix(), K)
+        assert np.allclose(dimos_info.get_D_coeffs(), D)
     finally:
         os.unlink(path)
 
@@ -463,6 +481,16 @@ def test_write_camera_info_yaml_round_trip_load_camera_info_and_opencv() -> None
         assert np.allclose(np.asarray(info.P, dtype=np.float64).reshape(3, 4), P)
         assert np.allclose(K_cv, K)
         assert np.allclose(np.asarray(D_cv, dtype=np.float64).ravel(), D.ravel())
+
+        dimos_info = DimosCameraInfo.from_yaml(path)
+        assert dimos_info.width == 800
+        assert dimos_info.height == 600
+        assert dimos_info.distortion_model == "plumb_bob"
+        assert dimos_info.frame_id == "camera_optical"
+        assert np.allclose(dimos_info.get_K_matrix(), K)
+        assert np.allclose(dimos_info.get_D_coeffs(), D)
+        assert np.allclose(dimos_info.get_R_matrix(), R)
+        assert np.allclose(dimos_info.get_P_matrix(), P)
     finally:
         os.unlink(path)
 

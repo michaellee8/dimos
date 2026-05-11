@@ -53,10 +53,12 @@ def write_camera_info_yaml(
     P: np.ndarray | None = None,
     distortion_model: str = "plumb_bob",
 ) -> None:
-    """Write ROS-style sensor_msgs/CameraInfo YAML for use with ``load_camera_info``.
+    """Write ROS-style CameraInfo YAML loadable by dimos CameraInfo helpers.
 
-    ``frame_id`` is part of the keyword API for symmetry with ``load_camera_info``; the
-    ROS YAML schema does not store it (pass ``frame_id`` when calling ``load_camera_info``).
+    The emitted schema is accepted by ``CameraInfo.from_yaml``,
+    ``load_camera_info``, and ``load_camera_info_opencv``. ``frame_id`` is part
+    of the keyword API for call-site clarity; the ROS YAML schema does not store
+    it.
     """
     k = np.asarray(K, dtype=np.float64).reshape(3, 3)
     d = np.asarray(D, dtype=np.float64).ravel()
