@@ -36,7 +36,6 @@ import time
 from typing import Any, Literal
 
 import mujoco
-import numpy as np
 from pydantic import Field
 import reactivex as rx
 from scipy.spatial.transform import Rotation as R
@@ -91,7 +90,7 @@ def _default_identity_transform() -> Transform:
 class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     """Configuration for the unified MuJoCo simulation module."""
 
-    address: str = ""
+    address: str | Path = ""
     headless: bool = False
     dof: int = 7
 
@@ -177,7 +176,7 @@ class MujocoSimModule(
         self._engine: MujocoEngine | None = None
         self._shm: ManipShmWriter | None = None
         self._sim_hooks: Any | None = None  # WholeBodySimHooks; thread mode only
-        self._engine_proc: subprocess.Popen | None = None  # subprocess mode only
+        self._engine_proc: subprocess.Popen[Any] | None = None  # subprocess mode only
         self._gripper_idx: int | None = None
         self._gripper_ctrl_range: tuple[float, float] = (0.0, 1.0)
         self._gripper_joint_range: tuple[float, float] = (0.0, 1.0)

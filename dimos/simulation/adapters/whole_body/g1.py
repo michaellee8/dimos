@@ -26,6 +26,7 @@ top of it) can't tell sim from real.
 from __future__ import annotations
 
 import math
+from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -68,7 +69,7 @@ class SimMujocoG1WholeBodyAdapter:
 
     def __init__(
         self,
-        address: str | None = None,
+        address: str | Path | None = None,
         domain_id: int = 0,
         **_: Any,
     ) -> None:
@@ -192,10 +193,7 @@ class SimMujocoG1WholeBodyAdapter:
         kp = [cmd.kp for cmd in commands]
         kd = [cmd.kd for cmd in commands]
         tau = [cmd.tau for cmd in commands]
-        self._shm.write_position_command(q)
-        self._shm.write_kp_command(kp)
-        self._shm.write_kd_command(kd)
-        self._shm.write_tau_command(tau)
+        self._shm.write_pd_tau_command(q, kp, kd, tau)
         return True
 
 

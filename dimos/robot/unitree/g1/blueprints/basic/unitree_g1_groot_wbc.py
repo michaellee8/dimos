@@ -29,9 +29,9 @@ Sim (``--simulation``):
     50 Hz tick (matches the rate the policy was trained at). No arming
     ramp, no dry-run, no servo_arms -- sim physics doesn't gravity-collapse
     the arms between trajectories. Optional passive viewer runs in the
-    engine subprocess; flip on via ``-o mujocosimmodule.headless=false``
-    (which also flips ``engine_mode`` to ``"subprocess"`` so the viewer
-    lives on a main thread).
+    engine subprocess; flip on via
+    ``-o mujocosimmodule.engine_mode=subprocess -o mujocosimmodule.headless=false``
+    so the viewer lives on that subprocess's main thread.
 
 Usage:
     dimos run unitree-g1-groot-wbc                 # real hardware
@@ -41,10 +41,12 @@ Overrides (replace the old env-var dance):
     dimos run unitree-g1-groot-wbc \\
         -o g1wholebodyconnection.network_interface=enp2s0
     dimos --simulation run unitree-g1-groot-wbc \\
-        -o mujocoviewermodule.enabled=true
+        -o mujocosimmodule.engine_mode=subprocess -o mujocosimmodule.headless=false
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 from dimos.control.components import HardwareComponent, HardwareType
 from dimos.control.coordinator import ControlCoordinator, TaskConfig
@@ -75,11 +77,12 @@ from dimos.web.websocket_vis.websocket_vis_module import WebsocketVisModule
 _GROOT_MODEL_DIR = LfsPath("groot")
 _MJCF_PATH = LfsPath("mujoco_sim/g1_gear_wbc.xml")
 
+_adapter_address: str | Path
 
 if global_config.simulation:
     # --- Sim backend: MuJoCo engine via SHM ---
     _backend = MujocoSimModule.blueprint(
-        address=str(_MJCF_PATH),
+        address=_MJCF_PATH,
         headless=True,
         dof=29,
         enable_color=False,
@@ -92,7 +95,7 @@ if global_config.simulation:
     # base pose (read_odom was dropped from the Protocol). autoconnect
     # maps ``(odom, PoseStamped)`` to ``/odom`` by default; no override.
     _adapter_type = "sim_mujoco_g1"
-    _adapter_address: str = str(_MJCF_PATH)
+    _adapter_address = _MJCF_PATH
     _tick_rate = 50.0
     _auto_arm = True
     _auto_dry_run = False
@@ -146,7 +149,7 @@ _coordinator = ControlCoordinator.blueprint(
             type="g1_groot_wbc",
             joint_names=g1_legs_waist,
             priority=50,
-            model_path=str(_GROOT_MODEL_DIR),
+            model_path=_GROOT_MODEL_DIR,
             hardware_id="g1",
             auto_start=True,
             auto_arm=_auto_arm,

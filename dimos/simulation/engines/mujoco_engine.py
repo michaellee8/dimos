@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+import signal
 import threading
 import time
 from typing import TYPE_CHECKING
@@ -29,7 +30,14 @@ import numpy as np
 from numpy.typing import NDArray
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
+from dimos.core.transport import LCMTransport
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.simulation.engines.base import SimulationEngine
+from dimos.simulation.engines.mujoco_shm import ManipShmWriter
+from dimos.simulation.engines.wholebody_sim_hooks import WholeBodySimHooks
 from dimos.simulation.utils.xml_parser import JointMapping, build_joint_mappings
 from dimos.utils.logging_config import setup_logger
 
@@ -217,12 +225,33 @@ class MujocoEngine(SimulationEngine):
             logger.error("connect() failed", cls=self.__class__.__name__, error=str(e))
             return False
 
+    def run_blocking(self, on_started: Callable[[], None] | None = None) -> None:
+        """Run the simulation loop on the current thread until stopped.
+
+        This is used by the subprocess entry point so ``mujoco.viewer`` runs
+        on that process's main thread. The normal Module path still uses
+        ``connect()``, which starts the loop on a worker thread.
+        """
+        logger.info("run_blocking()", cls=self.__class__.__name__)
+        with self._lock:
+            self._connected = True
+            self._stop_event.clear()
+        try:
+            self._sim_loop(on_started=on_started)
+        finally:
+            with self._lock:
+                self._connected = False
+
+    def request_stop(self) -> None:
+        """Ask the sim loop to stop without joining a thread."""
+        with self._lock:
+            self._connected = False
+        self._stop_event.set()
+
     def disconnect(self) -> bool:
         try:
             logger.info("disconnect()", cls=self.__class__.__name__)
-            with self._lock:
-                self._connected = False
-            self._stop_event.set()
+            self.request_stop()
             if self._sim_thread and self._sim_thread.is_alive():
                 self._sim_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
             self._sim_thread = None
@@ -282,7 +311,7 @@ class MujocoEngine(SimulationEngine):
             state.rgb_renderer.close()
             state.depth_renderer.close()
 
-    def _sim_loop(self) -> None:
+    def _sim_loop(self, on_started: Callable[[], None] | None = None) -> None:
         logger.info("sim loop started", cls=self.__class__.__name__)
         dt = 1.0 / self._control_frequency
 
@@ -314,12 +343,16 @@ class MujocoEngine(SimulationEngine):
                 time.sleep(sleep_time)
 
         if self._headless:
+            if on_started is not None:
+                on_started()
             while not self._stop_event.is_set():
                 _step_once(sync_viewer=False)
         else:
             with viewer.launch_passive(
                 self._model, self._data, show_left_ui=False, show_right_ui=False
             ) as m_viewer:
+                if on_started is not None:
+                    on_started()
                 while m_viewer.is_running() and not self._stop_event.is_set():
                     _step_once(sync_viewer=True)
 
@@ -510,16 +543,6 @@ def engine_main(
     the dimos side. The /odom + /imu LCM publishes mirror what
     ``MujocoSimModule`` does in thread mode.
     """
-    import signal as _signal
-
-    from dimos.core.transport import LCMTransport
-    from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-    from dimos.msgs.geometry_msgs.Quaternion import Quaternion
-    from dimos.msgs.geometry_msgs.Vector3 import Vector3
-    from dimos.msgs.sensor_msgs.Imu import Imu
-    from dimos.simulation.engines.mujoco_shm import ManipShmWriter
-    from dimos.simulation.engines.wholebody_sim_hooks import WholeBodySimHooks
-
     # SHM writer that mirrors the in-process module's layout — the
     # dimos-side adapter reads the same buffers either way.
     shm = ManipShmWriter(shm_key)
@@ -592,16 +615,16 @@ def engine_main(
             if has_freejoint
             else (1.0, 0.0, 0.0, 0.0)
         )
-        gyro_tup = (
-            tuple(float(v) for v in data.sensordata[imu_gyro_slice])
-            if imu_gyro_slice is not None
-            else (0.0, 0.0, 0.0)
-        )
-        accel_tup = (
-            tuple(float(v) for v in data.sensordata[imu_accel_slice])
-            if imu_accel_slice is not None
-            else (0.0, 0.0, 0.0)
-        )
+        if imu_gyro_slice is not None:
+            gyro_vals = data.sensordata[imu_gyro_slice]
+            gyro_tup = (float(gyro_vals[0]), float(gyro_vals[1]), float(gyro_vals[2]))
+        else:
+            gyro_tup = (0.0, 0.0, 0.0)
+        if imu_accel_slice is not None:
+            accel_vals = data.sensordata[imu_accel_slice]
+            accel_tup = (float(accel_vals[0]), float(accel_vals[1]), float(accel_vals[2]))
+        else:
+            accel_tup = (0.0, 0.0, 0.0)
         shm.write_imu(quaternion=quat_tup, gyroscope=gyro_tup, accelerometer=accel_tup)
         imu_tx.publish(
             Imu(
@@ -616,42 +639,30 @@ def engine_main(
     eng._on_before_step = hooks.pre_step  # type: ignore[attr-defined]
     eng._on_after_step = _on_after_step  # type: ignore[attr-defined]
 
-    # Start the sim thread inside the engine — _sim_loop runs viewer +
-    # mj_step on the main thread (we ARE the main thread here).
-    if not eng.connect():
-        logger.error("engine_main: engine.connect() failed")
-        shm.cleanup()
-        odom_tx.stop()
-        imu_tx.stop()
-        raise SystemExit(1)
-    shm.signal_ready(num_joints=eng.num_joints)
-    logger.info(
-        "engine_main: ready",
-        mjcf=mjcf_path,
-        shm_key=shm_key,
-        dof=dof,
-        headless=headless,
-    )
-
-    # Wait for SIGTERM / SIGINT — engine's sim thread keeps stepping
-    # until eng.disconnect() flips its stop event.
-    stop_flag = threading.Event()
-
-    def _handle_sig(signum: int, frame: object) -> None:  # noqa: ANN001
+    def _handle_sig(signum: int, frame: object) -> None:
         logger.info(f"engine_main: signal {signum} received, stopping")
-        stop_flag.set()
+        eng.request_stop()
 
-    _signal.signal(_signal.SIGINT, _handle_sig)
-    _signal.signal(_signal.SIGTERM, _handle_sig)
+    signal.signal(signal.SIGINT, _handle_sig)
+    signal.signal(signal.SIGTERM, _handle_sig)
+
+    def _mark_ready() -> None:
+        shm.signal_ready(num_joints=eng.num_joints)
+        logger.info(
+            "engine_main: ready",
+            mjcf=mjcf_path,
+            shm_key=shm_key,
+            dof=dof,
+            headless=headless,
+        )
 
     try:
-        while not stop_flag.is_set():
-            time.sleep(0.1)
+        eng.run_blocking(on_started=_mark_ready)
     finally:
         try:
-            eng.disconnect()
+            eng.request_stop()
         except Exception as e:
-            logger.warning(f"engine_main: disconnect raised: {e}")
+            logger.warning(f"engine_main: request_stop raised: {e}")
         try:
             shm.signal_stop()
             shm.cleanup()

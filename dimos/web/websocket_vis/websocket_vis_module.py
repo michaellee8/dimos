@@ -378,7 +378,7 @@ class WebsocketVisModule(Module):
             client.set_activated(engaged=False)
 
         @self.sio.event  # type: ignore[untyped-decorator]
-        async def set_dry_run(sid: str, data: dict[str, Any]) -> None:
+        async def set_dry_run(sid: str, data: dict[str, Any] | None = None) -> None:
             """Dashboard → toggle dry-run on the locomotion policy.
 
             Payload: ``{"enabled": bool}``.  Task still computes but
@@ -388,7 +388,7 @@ class WebsocketVisModule(Module):
             if client is None:
                 logger.warning("set_dry_run requested but ControlCoordinator RPC is unavailable")
                 return
-            enabled = bool(data.get("enabled", False))
+            enabled = bool((data or {}).get("enabled", False))
             logger.info(f"Dashboard set dry_run = {enabled}")
             client.set_dry_run(enabled=enabled)
 
