@@ -64,9 +64,8 @@ yolo11n.pt
 /.mypy_cache*
 
 *mobileclip*
-/results
-/result
-**/cpp/result
+results/
+result
 
 CLAUDE.MD
 /assets/teleop_certs/
