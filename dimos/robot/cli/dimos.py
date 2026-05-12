@@ -224,6 +224,16 @@ def run(
 
     cli_config_overrides: dict[str, Any] = ctx.obj
 
+    # Apply --simulation / --robot-ip / etc. to ``global_config`` BEFORE
+    # blueprint import. Blueprints may inspect ``global_config.simulation``
+    # at module top level to pick between real-hw and sim backends
+    # (``unitree_g1_groot_wbc.py`` does this). Without this update the
+    # import-time branch sees stale defaults and the resulting
+    # BlueprintConfig is missing the modules the user is trying to
+    # configure via ``-o module.field=value``.
+    if cli_config_overrides:
+        global_config.update(**cli_config_overrides)
+
     # Clean stale registry entries
     stale = cleanup_stale()
     if stale:
