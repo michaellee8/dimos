@@ -19,8 +19,10 @@
 #include "point_cloud_utils.hpp"
 
 #include "nav_msgs/Odometry.hpp"
+#include "nav_msgs/Path.hpp"
 #include "sensor_msgs/PointCloud2.hpp"
 #include "geometry_msgs/Pose.hpp"
+#include "geometry_msgs/PoseStamped.hpp"
 #include "geometry_msgs/Quaternion.hpp"
 #include "geometry_msgs/Point.hpp"
 
@@ -110,6 +112,92 @@ static nav_msgs::Odometry build_odometry(const M3D& r, const V3D& t, double ts,
     return odom;
 }
 
+// Build a Path-encoded GraphNodes3D message — one pose per keyframe,
+// orientation.w encoded as node_type (1 = odom/robot — green in rerun).
+static nav_msgs::Path build_graph_nodes(const std::vector<KeyPoseWithCloud>& key_poses,
+                                         double ts,
+                                         const std::string& frame_id) {
+    nav_msgs::Path msg;
+    msg.header = dimos::make_header(frame_id, ts);
+    msg.poses_length = static_cast<int32_t>(key_poses.size());
+    msg.poses.reserve(key_poses.size());
+    for (const auto& kp : key_poses) {
+        geometry_msgs::PoseStamped ps;
+        ps.header = dimos::make_header(frame_id, ts);
+        ps.pose.position.x = kp.t_global.x();
+        ps.pose.position.y = kp.t_global.y();
+        ps.pose.position.z = kp.t_global.z();
+        ps.pose.orientation.x = 0.0;
+        ps.pose.orientation.y = 0.0;
+        ps.pose.orientation.z = 0.0;
+        // node_type 1 = odom/robot (renders green in rerun)
+        ps.pose.orientation.w = 1.0;
+        msg.poses.push_back(ps);
+    }
+    return msg;
+}
+
+static void append_segment(nav_msgs::Path& msg,
+                            const std::string& frame_id,
+                            double ts,
+                            const V3D& a,
+                            const V3D& b,
+                            double traversability) {
+    geometry_msgs::PoseStamped p1;
+    p1.header = dimos::make_header(frame_id, ts);
+    p1.pose.position.x = a.x();
+    p1.pose.position.y = a.y();
+    p1.pose.position.z = a.z();
+    p1.pose.orientation.x = 0.0;
+    p1.pose.orientation.y = 0.0;
+    p1.pose.orientation.z = 0.0;
+    // traversability is encoded on the first pose of each pair
+    p1.pose.orientation.w = traversability;
+
+    geometry_msgs::PoseStamped p2;
+    p2.header = dimos::make_header(frame_id, ts);
+    p2.pose.position.x = b.x();
+    p2.pose.position.y = b.y();
+    p2.pose.position.z = b.z();
+    p2.pose.orientation.x = 0.0;
+    p2.pose.orientation.y = 0.0;
+    p2.pose.orientation.z = 0.0;
+    p2.pose.orientation.w = traversability;
+
+    msg.poses.push_back(p1);
+    msg.poses.push_back(p2);
+}
+
+// Build a Path-encoded LineSegments3D message — pose pairs form segments.
+// Odometry edges get traversability=1.0 (green); loop closures get 0.4
+// (yellow) so they stand out in the rerun rendering.
+static nav_msgs::Path build_graph_edges(const std::vector<KeyPoseWithCloud>& key_poses,
+                                         const std::vector<std::pair<size_t, size_t>>& loop_pairs,
+                                         double ts,
+                                         const std::string& frame_id) {
+    nav_msgs::Path msg;
+    msg.header = dimos::make_header(frame_id, ts);
+
+    // Odometry edges between consecutive keyframes.
+    for (size_t i = 1; i < key_poses.size(); i++) {
+        append_segment(msg, frame_id, ts,
+                       key_poses[i - 1].t_global,
+                       key_poses[i].t_global,
+                       1.0);
+    }
+    // Loop closure edges.
+    for (const auto& pair : loop_pairs) {
+        if (pair.first >= key_poses.size() || pair.second >= key_poses.size())
+            continue;
+        append_segment(msg, frame_id, ts,
+                       key_poses[pair.first].t_global,
+                       key_poses[pair.second].t_global,
+                       0.4);
+    }
+    msg.poses_length = static_cast<int32_t>(msg.poses.size());
+    return msg;
+}
+
 int main(int argc, char** argv)
 {
     signal(SIGTERM, signal_handler);
@@ -123,6 +211,8 @@ int main(int argc, char** argv)
     std::string corrected_odom_topic = mod.topic("corrected_odometry");
     std::string global_map_topic = mod.topic("global_map");
     std::string tf_topic = mod.topic("pgo_tf");
+    std::string graph_nodes_topic = mod.topic("pgo_graph_nodes");
+    std::string graph_edges_topic = mod.topic("pgo_graph_edges");
 
     // Config parameters
     Config config;
@@ -164,6 +254,8 @@ int main(int argc, char** argv)
     fprintf(stderr, "  corrected_odometry: %s\n", corrected_odom_topic.c_str());
     fprintf(stderr, "  global_map: %s\n", global_map_topic.c_str());
     fprintf(stderr, "  pgo_tf: %s\n", tf_topic.c_str());
+    fprintf(stderr, "  pgo_graph_nodes: %s\n", graph_nodes_topic.c_str());
+    fprintf(stderr, "  pgo_graph_edges: %s\n", graph_edges_topic.c_str());
 
     double last_global_map_time = 0.0;
     int timer_period_ms = 50;  // 20 Hz, matching original
@@ -248,6 +340,18 @@ int main(int argc, char** argv)
         nav_msgs::Odometry tf_msg = build_odometry(
             pgo.offsetR(), pgo.offsetT(), cur_time, world_frame, local_frame);
         lcm.publish(tf_topic, &tf_msg);
+
+        // Publish pose-graph nodes + edges (on every keyframe — iSAM2
+        // may have re-optimized prior poses on loop closure).
+        {
+            nav_msgs::Path nodes_msg = build_graph_nodes(
+                pgo.keyPoses(), cur_time, world_frame);
+            lcm.publish(graph_nodes_topic, &nodes_msg);
+
+            nav_msgs::Path edges_msg = build_graph_edges(
+                pgo.keyPoses(), pgo.historyPairs(), cur_time, world_frame);
+            lcm.publish(graph_edges_topic, &edges_msg);
+        }
 
         // Publish global map (throttled)
         double now = cur_time;
