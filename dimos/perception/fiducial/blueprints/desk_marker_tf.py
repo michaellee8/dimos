@@ -1,0 +1,74 @@
+# Copyright 2026 Dimensional Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import time
+
+from dimos.core.core import rpc
+from dimos.core.module import Module, ModuleConfig
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+
+
+class DeskStaticTfModuleConfig(ModuleConfig):
+    world_frame: str = "world"
+    base_frame: str = "base_link"
+    camera_optical_frame: str = "camera_optical"
+    camera_translation_m: tuple[float, float, float] = (
+        0.25,
+        0.0,
+        0.15,
+    )
+    camera_rotation_rpy_rad: tuple[float, float, float] = (0.0, 0.0, 0.0)
+
+
+class DeskStaticTfModule(Module):
+    """Publish the fixed desk TF chain needed by marker pose estimation."""
+
+    config: DeskStaticTfModuleConfig
+    _last_publish_ts: float | None = None
+
+    @rpc
+    def start(self) -> None:
+        super().start()
+        self.publish_static_chain()
+
+    def publish_static_chain(self) -> None:
+        ts = time.time()
+        self._last_publish_ts = ts
+        roll, pitch, yaw = self.config.camera_rotation_rpy_rad
+        x, y, z = self.config.camera_translation_m
+
+        self.tf.publish(
+            Transform(
+                translation=Vector3(0.0, 0.0, 0.0),
+                rotation=Quaternion(0.0, 0.0, 0.0, 1.0),
+                frame_id=self.config.world_frame,
+                child_frame_id=self.config.base_frame,
+                ts=ts,
+            ),
+            Transform(
+                # Default desk camera pose: about 25 cm forward and 15 cm above base_link.
+                translation=Vector3(x, y, z),
+                rotation=Quaternion.from_euler(Vector3(roll, pitch, yaw)),
+                frame_id=self.config.base_frame,
+                child_frame_id=self.config.camera_optical_frame,
+                ts=ts,
+            ),
+        )
+
+
+desk_marker_tf = DeskStaticTfModule.blueprint()
