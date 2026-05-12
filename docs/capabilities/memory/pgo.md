@@ -60,8 +60,8 @@ Space().add(global_map).to_svg("assets/pgo_baseline_map.svg")
 
 <!--Result:-->
 ```
-07:00:38.423 [inf][dimos/mapping/voxels.py       ] VoxelGrid using device: CUDA:0
-frames=4235  total=7.9s  mean=1.9ms  max=60.4ms
+12:23:38.944 [inf][dimos/mapping/voxels.py       ] VoxelGrid using device: CUDA:0
+frames=4235  total=6.9s  mean=1.6ms  max=60.9ms
 ```
 
 ![output](assets/pgo_baseline_map.svg)
@@ -95,6 +95,13 @@ jumps = [o.data for o in pose_jump_m]
 print(f"loops fired: {loop_score.count()}  "
       f"max pose_jump: {max(jumps, default=0):.3f} m")
 
+# Pickle the corrected keyframe trajectory so future relocalization
+# tests have a pose oracle. (Drifted poses are recoverable per-frame
+# from each lidar obs.pose, so we don't need to save them.)
+import pickle
+from pathlib import Path
+Path("assets/pgo_corrected_path.pkl").write_bytes(pickle.dumps(corrected_path))
+
 (
     Space()
     .add(global_map)
@@ -114,55 +121,91 @@ print(f"loops fired: {loop_score.count()}  "
 
 <!--Result:-->
 ```
-07:00:50.300 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0598 source=125 target=78
-07:00:50.507 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0229 source=134 target=96
-07:00:53.617 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0534 source=289 target=248
-07:00:53.752 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0193 source=298 target=240
-07:00:53.969 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0738 source=308 target=68
-07:00:54.189 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0352 source=317 target=60
-07:00:54.442 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0222 source=324 target=51
-07:00:54.687 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0164 source=333 target=38
-07:00:54.945 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0199 source=341 target=29
-07:00:55.331 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0421 source=353 target=19
-07:00:57.364 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0609 source=435 target=404
-07:00:57.606 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0328 source=442 target=415
-07:00:57.974 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0287 source=452 target=407
-07:01:00.039 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.165 source=539 target=498
-07:01:00.260 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0483 source=547 target=499
-07:01:00.650 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0422 source=562 target=498
-07:01:01.042 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0462 source=576 target=498
-07:01:01.376 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0301 source=588 target=490
-07:01:01.634 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0256 source=596 target=484
-07:01:01.887 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0472 source=605 target=481
-07:01:04.360 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0178 source=710 target=668
-07:01:04.668 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0456 source=719 target=668
-07:01:04.942 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.043 source=726 target=666
-07:01:06.333 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0216 source=772 target=734
-07:01:06.675 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0171 source=782 target=741
-07:01:07.184 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0175 source=798 target=741
-07:01:07.572 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0236 source=808 target=734
-07:01:07.806 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0259 source=815 target=727
-07:01:08.079 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0224 source=825 target=720
-07:01:09.640 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0677 source=896 target=10
-07:01:09.983 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0516 source=906 target=343
-07:01:10.488 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0394 source=920 target=32
-07:01:10.792 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0308 source=928 target=339
-07:01:11.096 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0217 source=939 target=38
-07:01:11.336 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0129 source=946 target=53
-07:01:11.646 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0155 source=958 target=56
-07:01:11.952 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.014 source=970 target=61
-07:01:12.257 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0113 source=980 target=74
-07:01:12.517 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0151 source=989 target=91
-07:01:12.837 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0114 source=999 target=99
-07:01:13.051 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0111 source=1006 target=105
+12:23:48.380 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0598 source=125 target=78
+12:23:48.611 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0229 source=134 target=96
+12:23:51.096 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0463 source=289 target=248
+12:23:51.219 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0193 source=298 target=240
+12:23:51.374 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0736 source=308 target=68
+12:23:51.550 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0352 source=317 target=60
+12:23:51.762 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0222 source=324 target=51
+12:23:51.986 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0165 source=333 target=38
+12:23:52.226 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0204 source=341 target=29
+12:23:52.601 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0416 source=353 target=19
+12:23:54.419 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0601 source=435 target=404
+12:23:54.678 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0324 source=442 target=415
+12:23:54.974 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0292 source=452 target=407
+12:23:56.874 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.17 source=539 target=498
+12:23:57.078 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0475 source=547 target=499
+12:23:57.483 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0445 source=562 target=498
+12:23:57.911 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0478 source=576 target=498
+12:23:58.267 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.031 source=588 target=490
+12:23:58.544 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0249 source=596 target=484
+12:23:58.812 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0475 source=605 target=481
+12:24:01.054 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0177 source=710 target=668
+12:24:01.334 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0454 source=719 target=668
+12:24:01.574 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0529 source=726 target=666
+12:24:02.583 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0231 source=772 target=734
+12:24:02.874 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0166 source=782 target=741
+12:24:03.336 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0176 source=798 target=741
+12:24:03.727 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0236 source=808 target=734
+12:24:03.964 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0251 source=815 target=727
+12:24:04.238 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0238 source=825 target=720
+12:24:05.830 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0674 source=896 target=10
+12:24:06.110 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0509 source=906 target=343
+12:24:06.499 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0397 source=920 target=32
+12:24:06.753 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0299 source=928 target=339
+12:24:07.025 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0219 source=939 target=38
+12:24:07.211 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.013 source=946 target=53
+12:24:07.520 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0152 source=958 target=56
+12:24:07.787 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0141 source=970 target=61
+12:24:08.002 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0113 source=980 target=74
+12:24:08.235 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0153 source=989 target=91
+12:24:08.499 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0115 source=999 target=99
+12:24:08.674 [inf][dimos/mapping/pgo.py          ] Loop closure detected score=0.0111 source=1006 target=105
 keyframes: 1007
-loops fired: 41  max pose_jump: 1.082 m
+loops fired: 41  max pose_jump: 1.021 m
 ```
 
 
 ![output](assets/pgo_trajectories.svg)
 
 ![output](assets/pgo_map.svg)
+
+## Two-pass voxel rebuild (PGO corrections + voxels.py)
+
+Re-stream every lidar frame through `VoxelGrid`, but transform each
+frame's world cloud by the rigid drift correction interpolated (SLERP
+for rotation, linear for translation) between the surrounding keyframe
+corrections at that frame's timestamp. Each frame is inserted exactly
+once at its converged corrected pose — walls collapse to a single
+layer, and `VoxelGrid.carve_columns` evicts stale voxels in revisited
+columns.
+
+Reuses the trajectories from the cell above (no second PGO run).
+
+```python session=pgo
+from dimos.mapping.pgo import apply_pgo_corrections
+
+import pickle
+from pathlib import Path
+
+twopass_map = apply_pgo_corrections(
+    slice_lidar,
+    drifted_path=drifted_path,
+    corrected_path=corrected_path,
+    voxel_size=0.05,
+)
+Path("assets/pgo_twopass_map.pkl").write_bytes(pickle.dumps(twopass_map))
+
+(
+    Space()
+    .add(twopass_map)
+    .add(Polyline(msg=corrected_path, color="#2ecc71", width=0.08))
+    .to_svg("assets/pgo_twopass_map.svg")
+)
+```
+
+![output](assets/pgo_twopass_map.svg)
 
 ## Per-frame voxels ingest coste
 

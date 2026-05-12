@@ -602,6 +602,96 @@ def pgo_trajectories(
     return drifted, corrected
 
 
+def apply_pgo_corrections(
+    stream: Any,
+    drifted_path: Any,
+    corrected_path: Any,
+    *,
+    voxel_size: float = 0.05,
+    block_count: int = 2_000_000,
+    device: str = "CUDA:0",
+    frame_id: str = FRAME_MAP,
+) -> PointCloud2:
+    """Pass 2 of two-pass PGO mapping, given the keyframe paths from a
+    prior :func:`pgo_trajectories` run.
+
+    Re-streams every lidar frame through :class:`VoxelGrid`, transforming
+    each frame's world cloud by the rigid drift correction interpolated
+    (SLERP for rotation, linear for translation) between the surrounding
+    keyframes' corrections (``drifted -> corrected``).
+
+    Use this when you've already called :func:`pgo_trajectories` and want
+    to avoid re-running PGO. The result is identical to what
+    :func:`pgo_then_voxels` would produce.
+    """
+    from scipy.spatial.transform import Slerp
+
+    from dimos.mapping.voxels import VoxelGrid
+
+    drifted_poses = drifted_path.poses
+    corrected_poses = corrected_path.poses
+    if len(drifted_poses) != len(corrected_poses):
+        raise ValueError("drifted_path and corrected_path must have matching pose counts")
+
+    if len(drifted_poses) < 2:
+        # No correction possible — fall back to plain voxels insertion
+        grid = VoxelGrid(voxel_size=voxel_size, block_count=block_count, device=device)
+        try:
+            for obs in stream:
+                grid.add_frame(obs.data)
+            return grid.get_global_pointcloud2()
+        finally:
+            grid.dispose()
+
+    def _quat_to_R(q: Any) -> np.ndarray:
+        return Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+
+    kf_ts = np.array([ps.ts for ps in corrected_poses])
+    # Per-keyframe rigid drift correction: T_corr = T_global @ T_local.inv()
+    R_corr_list: list[np.ndarray] = []
+    t_corr_list: list[np.ndarray] = []
+    for d, c in zip(drifted_poses, corrected_poses, strict=True):
+        r_local = _quat_to_R(d.orientation)
+        t_local = np.array([d.position.x, d.position.y, d.position.z])
+        r_global = _quat_to_R(c.orientation)
+        t_global = np.array([c.position.x, c.position.y, c.position.z])
+        R_corr = r_global @ r_local.T
+        R_corr_list.append(R_corr)
+        t_corr_list.append(t_global - R_corr @ t_local)
+    t_corrs = np.stack(t_corr_list)
+    rot_slerp = Slerp(kf_ts, Rotation.from_matrix(np.stack(R_corr_list)))
+
+    grid = VoxelGrid(
+        voxel_size=voxel_size, block_count=block_count, device=device, frame_id=frame_id
+    )
+    try:
+        n_inserted = 0
+        for obs in stream:
+            if obs.pose is None:
+                continue
+            ts = float(np.clip(obs.ts, kf_ts[0], kf_ts[-1]))
+            r_correction = rot_slerp([ts])[0].as_matrix()
+            idx = int(np.searchsorted(kf_ts, ts))
+            if idx == 0:
+                t_correction = t_corrs[0]
+            elif idx >= len(kf_ts):
+                t_correction = t_corrs[-1]
+            else:
+                t_lo, t_hi = kf_ts[idx - 1], kf_ts[idx]
+                alpha = (ts - t_lo) / (t_hi - t_lo) if t_hi > t_lo else 0.0
+                t_correction = (1 - alpha) * t_corrs[idx - 1] + alpha * t_corrs[idx]
+
+            points, _ = obs.data.as_numpy()
+            if len(points) == 0:
+                continue
+            corrected_pts = (r_correction @ points[:, :3].T).T + t_correction
+            grid.add_frame(PointCloud2.from_numpy(corrected_pts.astype(np.float32)))
+            n_inserted += 1
+        return grid.get_global_pointcloud2()
+    finally:
+        grid.dispose()
+
+
 def pgo_then_voxels(
     stream: Any,
     *,
