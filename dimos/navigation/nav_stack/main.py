@@ -210,10 +210,7 @@ def nav_stack_rerun_config(
         resolved["max_hz"] = {
             entity: hz * vis_throttle for entity, hz in resolved["max_hz"].items()
         }
-    resolved.setdefault(
-        "blueprint",
-        _agentic_debug_rerun_blueprint if agentic_debug else _default_rerun_blueprint,
-    )
+    resolved.setdefault("blueprint", _default_rerun_blueprint)
     resolved.setdefault("pubsubs", [LCM()])
     resolved.setdefault("visual_override", {})
     resolved.setdefault("static", {})
@@ -276,25 +273,6 @@ def _default_rerun_blueprint() -> Any:
 
     return rrb.Blueprint(
         rrb.Spatial3DView(origin="world", name="3D"),
-    )
-
-
-def _agentic_debug_rerun_blueprint() -> Any:
-    """Horizontal layout: 3D view + dedicated top-down view.
-
-    Both share ``origin="world"`` so they render the same data; the
-    second view is named ``top_down`` so dimos-viewer can persist its
-    camera independently. Pair with ``agentic_debug=True`` lifts so
-    nav markers + pose graph stay visible above terrain in the top-down
-    panel.
-    """
-    import rerun.blueprint as rrb
-
-    return rrb.Blueprint(
-        rrb.Horizontal(
-            rrb.Spatial3DView(origin="world", name="3D"),
-            rrb.Spatial3DView(origin="world", name="top_down"),
-        ),
     )
 
 
