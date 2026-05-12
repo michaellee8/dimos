@@ -12,9 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
+
 from dimos.core.coordination.blueprints import Blueprint
+from dimos.hardware.sensors.camera.module import CameraModule
+from dimos.hardware.sensors.camera.webcam import Webcam
 from dimos.perception.fiducial.blueprints.desk_marker_tf import (
+    DESK_CAMERA_FRAME_ID,
     DeskStaticTfModule,
+    create_desk_webcam,
     desk_marker_tf,
 )
 
@@ -22,6 +28,46 @@ from dimos.perception.fiducial.blueprints.desk_marker_tf import (
 def test_desk_marker_tf_blueprint_declares_static_tf_module() -> None:
     assert isinstance(desk_marker_tf, Blueprint)
     assert desk_marker_tf.blueprints[0].module is DeskStaticTfModule
+    assert desk_marker_tf.blueprints[1].module is CameraModule
+    assert desk_marker_tf.blueprints[1].kwargs["hardware"] is create_desk_webcam
+    assert desk_marker_tf.blueprints[1].kwargs["transform"] is None
+
+
+def test_create_desk_webcam_loads_camera_info_yaml(tmp_path: Path) -> None:
+    camera_info_yaml = tmp_path / "camera_info.yaml"
+    camera_info_yaml.write_text(
+        """
+image_width: 1920
+image_height: 1080
+camera_name: webcam
+distortion_model: plumb_bob
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [2236.0, 0.0, 990.0, 0.0, 2378.0, 568.0, 0.0, 0.0, 1.0]
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [1.7, -24.5, -0.03, -0.1, 212.1]
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [2236.0, 0.0, 990.0, 0.0, 0.0, 2378.0, 568.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+""".lstrip()
+    )
+
+    camera = create_desk_webcam(camera_info_yaml, camera_index=1, fps=7.5)
+
+    assert isinstance(camera, Webcam)
+    assert camera.config.camera_index == 1
+    assert camera.config.width == 1920
+    assert camera.config.height == 1080
+    assert camera.config.fps == 7.5
+    assert camera.config.camera_info.frame_id == DESK_CAMERA_FRAME_ID
 
 
 def test_desk_static_tf_module_publishes_world_to_camera_optical_chain() -> None:

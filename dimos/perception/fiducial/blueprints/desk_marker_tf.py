@@ -14,13 +14,38 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import time
 
+from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
+from dimos.hardware.sensors.camera.module import CameraModule
+from dimos.hardware.sensors.camera.webcam import Webcam
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
+
+
+DESK_CAMERA_FRAME_ID = "camera_optical"
+DEFAULT_DESK_CAMERA_INFO_YAML = Path(__file__).resolve().parent / "assets" / "camera_info.yaml"
+
+
+def create_desk_webcam(
+    camera_info_yaml: str | Path = DEFAULT_DESK_CAMERA_INFO_YAML,
+    camera_index: int = 0,
+    fps: float = 15.0,
+) -> Webcam:
+    camera_info = CameraInfo.from_yaml(str(camera_info_yaml))
+    camera_info.frame_id = DESK_CAMERA_FRAME_ID
+    return Webcam(
+        camera_index=camera_index,
+        width=camera_info.width,
+        height=camera_info.height,
+        fps=fps,
+        camera_info=camera_info,
+    )
 
 
 class DeskStaticTfModuleConfig(ModuleConfig):
@@ -70,5 +95,10 @@ class DeskStaticTfModule(Module):
             ),
         )
 
-
-desk_marker_tf = DeskStaticTfModule.blueprint()
+desk_marker_tf = autoconnect(
+    DeskStaticTfModule.blueprint(),
+    CameraModule.blueprint(
+        hardware=create_desk_webcam,
+        transform=None,
+    ),
+)
