@@ -1,5 +1,3 @@
-# Native Modules
-
 Prerequisite for this is to understand dimos [Modules](/docs/usage/modules.md) and [Blueprints](/docs/usage/blueprints.md).
 
 Native modules let you wrap **any executable** as a first-class DimOS module, given it speaks LCM.

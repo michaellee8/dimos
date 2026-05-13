@@ -1,5 +1,3 @@
-# Configuration
-
 Dimos provides a `Configurable` base class. See [`service/spec.py`](/dimos/protocol/service/spec.py#L22).
 
 This allows using pydantic models to specify configuration structure and default values per module.

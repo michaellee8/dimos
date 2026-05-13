@@ -1,5 +1,3 @@
-# Docker Images
-
 Dimos uses parallel Docker image hierarchies for ROS and non-ROS builds, allowing you to choose the environment that fits your use case.
 
 ## Image Hierarchy

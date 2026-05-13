@@ -1,5 +1,3 @@
-# System Dependencies Install (Ubuntu 22.04 or 24.04)
-
 ```sh skip
 sudo apt-get update
 sudo apt-get install -y curl g++ portaudio19-dev git-lfs libturbojpeg python3-dev pre-commit

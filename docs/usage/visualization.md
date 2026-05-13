@@ -1,5 +1,3 @@
-# Viewer Backends
-
 Dimos supports three visualization backends: `rerun` (default), `foxglove`, and `none`.
 
 ## Quick Start

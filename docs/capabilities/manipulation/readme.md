@@ -1,5 +1,3 @@
-# Manipulation
-
 Motion planning and teleoperation for robotic manipulators. Uses Drake for physics simulation and Meshcat for 3D visualization.
 
 ## Quick Start

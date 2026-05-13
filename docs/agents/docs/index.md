@@ -1,6 +1,4 @@
 
-# Code Blocks
-
 **All code blocks must be executable.**
 Never write illustrative/pseudo code blocks.
 If you're showing an API usage pattern, create a minimal working example that actually runs. This ensures documentation stays correct as the codebase evolves.

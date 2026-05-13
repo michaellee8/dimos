@@ -1,5 +1,3 @@
-# System Requirements
-
 ## Hardware
 
 | Component | Minimum | Recommended |

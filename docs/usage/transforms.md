@@ -1,5 +1,3 @@
-# Transforms
-
 ## The Problem: Everything Measures from Its Own Perspective
 
 Imagine your robot has an RGB-D camera—a camera that captures both color images and depth (distance to each pixel). These are common in robotics: Intel RealSense, Microsoft Kinect, and similar sensors.

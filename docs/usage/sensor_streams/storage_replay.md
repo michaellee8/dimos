@@ -1,5 +1,3 @@
-# Sensor Storage and Replay
-
 Record sensor streams to disk and replay them with original timing. Useful for testing, debugging, and creating reproducible datasets.
 
 ## Quick Start

@@ -1,5 +1,3 @@
-# Sensor Streams
-
 Dimos uses reactive streams (RxPY) to handle sensor data. This approach naturally fits robotics where multiple sensors emit data asynchronously at different rates, and downstream processors may be slower than the data sources.
 
 ## Guides

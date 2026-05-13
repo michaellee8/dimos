@@ -1,5 +1,3 @@
-# Concepts
-
 This page explains general concepts.
 
 ## Table of Contents

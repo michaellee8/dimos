@@ -1,5 +1,3 @@
-# Unitree G1
-
 ## Requirements
 
 - Unitree G1 EDU (need SDK/SSH access)

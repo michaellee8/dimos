@@ -1,5 +1,3 @@
-# Tool Streams
-
 Some tools return quickly but keep doing work in the background. For example,
 `look_out_for` starts a perception loop and waits minutes for a match;
 `follow_person` returns "started following" right away and then keeps publishing

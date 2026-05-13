@@ -1,5 +1,3 @@
-# ReactiveX (RxPY) Quick Reference
-
 RxPY provides composable asynchronous data streams. This is a practical guide focused on common patterns in this codebase.
 
 ## Quick Start: Using an Observable

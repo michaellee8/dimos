@@ -1,5 +1,3 @@
-# Transports
-
 Transports connect **module streams** across **process boundaries** and/or **networks**.
 
 * **Module**: a running component (e.g., camera, mapping, nav).

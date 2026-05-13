@@ -1,5 +1,3 @@
-# macOS Install (12.6 or newer)
-
 ```sh skip
 # install homebrew
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"

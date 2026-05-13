@@ -1,5 +1,3 @@
-# Unitree Go2 — Getting Started
-
 The Unitree Go2 is DimOS's primary reference platform. Full autonomous navigation, mapping, and agentic control — no ROS required.
 
 ## Requirements

@@ -1,5 +1,3 @@
-# Grid Testing Strategy
-
 Grid tests run the same test logic across multiple implementations or configurations using pytest's parametrize feature.
 
 ## Case Type Pattern

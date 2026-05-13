@@ -1,5 +1,3 @@
-# Nix install (required for nix managed dimos)
-
 You need to have [nix](https://nixos.org/) installed and [flakes](https://nixos.wiki/wiki/Flakes) enabled,
 
 [official install docs](https://nixos.org/download/) recommended, but here is a quickstart:

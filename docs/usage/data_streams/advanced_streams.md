@@ -1,5 +1,3 @@
-# Advanced Stream Handling
-
 > **Prerequisite:** Read [ReactiveX Fundamentals](/docs/usage/data_streams/reactivex.md) first for Observable basics.
 
 ## Backpressure and Parallel Subscribers to Hardware
