@@ -57,6 +57,7 @@ _GEOM_LINE = (
 _DEGENERATE_EPS = 1e-3
 _SHELL_VOLUME_M3 = 2.0
 _CACHE_KEY_LEN = 12
+_CACHE_SCHEMA_VERSION = "rank3-hulls-v1"
 _VHACD_MAX_HULLS = 64
 _VHACD_RESOLUTION = 200_000
 _MIN_HULL_ASPECT_RATIO = 0.05
@@ -159,6 +160,7 @@ def _cache_key(
         return f"{path}:{stat.st_size}:{stat.st_mtime_ns}"
 
     h = hashlib.sha256()
+    h.update(_CACHE_SCHEMA_VERSION.encode())
     h.update(_file_signature(scene_mesh_path).encode())
     h.update(_file_signature(robot_mjcf_path).encode())
     h.update(repr(sorted(asdict(alignment).items())).encode())
@@ -255,6 +257,9 @@ def _valid_hull(v: np.ndarray, f: np.ndarray) -> bool:
     if max_ext > 0 and (min_ext / max_ext) < _MIN_HULL_ASPECT_RATIO:
         return False
     if min_ext < _MIN_HULL_EXTENT_M:
+        return False
+    centered = v.astype(np.float64) - v.astype(np.float64).mean(axis=0)
+    if np.linalg.matrix_rank(centered, tol=_DEGENERATE_EPS) < 3:
         return False
     try:
         from scipy.spatial import ConvexHull, QhullError
