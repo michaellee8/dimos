@@ -35,6 +35,7 @@
 
 #include <rtabmap/core/LaserScan.h>
 #include <rtabmap/core/LocalGrid.h>
+#include <rtabmap/core/LocalGridMaker.h>
 #include <rtabmap/core/Memory.h>
 #include <rtabmap/core/Parameters.h>
 #include <rtabmap/core/Rtabmap.h>
@@ -218,6 +219,17 @@ int main(int argc, char** argv) {
     params["Grid/GroundIsObstacle"] = mod.arg("grid_ground_is_obstacle", "false");
     params["Grid/FlatObstacleDetected"] =
         mod.arg("grid_flat_obstacle_detected", "true");
+    // Height-based ground segmentation by default. Synthetic scans for tests
+    // rarely have normals, and rtabmap's normal-based segmentation needs a
+    // dense neighborhood; height thresholds are more robust here. Defaults
+    // can still be overridden via the wrapper's config dict.
+    params["Grid/NormalsSegmentation"] =
+        mod.arg("grid_normals_segmentation", "false");
+    params["Grid/MaxObstacleHeight"] =
+        mod.arg("grid_max_obstacle_height", "2.0");
+    params["Grid/MaxGroundHeight"] =
+        mod.arg("grid_max_ground_height", "0.05");
+    params["Grid/RangeMax"] = mod.arg("grid_range_max", "8.0");
     // Lidar-only mode.
     params["RGBD/Enabled"] = "true";
     params["Reg/Strategy"] = "1";  // ICP
@@ -226,12 +238,27 @@ int main(int argc, char** argv) {
     // FastLIO2 odom dominates.
     params["Reg/Force3DoF"] = "false";
     params["RGBD/CreateOccupancyGrid"] = "true";
+    // Be permissive about admitting frames. Defaults gate keyframes by
+    // motion/time which makes synthetic short-trajectory test scenes never
+    // produce any local grids. These can be overridden via CLI args if a
+    // caller wants tighter cadence.
+    params["Rtabmap/DetectionRate"] =
+        mod.arg("rtabmap_detection_rate", "0");  // 0 = every frame
+    params["RGBD/LinearUpdate"] =
+        mod.arg("rgbd_linear_update", "0");  // 0 = no motion threshold
+    params["RGBD/AngularUpdate"] = mod.arg("rgbd_angular_update", "0");
+    params["Mem/NotLinkedNodesKept"] = "false";
 
     rtabmap::Rtabmap rtab;
     rtab.init(params);
 
     rtabmap::LocalGridCache grid_cache;
     rtabmap::OctoMap octomap(&grid_cache, params);
+    // Drives the per-signature local occupancy grid we feed into the OctoMap.
+    // rtabmap's own pipeline only computes these grids automatically when
+    // depth+camera is present; in lidar-only mode we must populate them
+    // ourselves via LocalGridMaker::createLocalMap().
+    rtabmap::LocalGridMaker grid_maker(params);
 
     lcm::LCM lcm;
     if (!lcm.good()) {
@@ -281,11 +308,16 @@ int main(int argc, char** argv) {
             continue;
         }
 
-        // Build SensorData with the lidar scan.
+        // Build SensorData with the lidar scan. rtabmap has no scan-only
+        // ctor — the canonical lidar-only setup is an empty SensorData with
+        // setLaserScan(scan); using one of the RGB-D+scan ctors with empty
+        // rgb/depth/camera makes rtabmap treat the data as invalid and skip
+        // grid generation entirely.
         cv::Mat scan_mat = scan_to_cv_mat(*frame.cloud_body);
         rtabmap::LaserScan laser_scan =
             rtabmap::LaserScan::backwardCompatibility(scan_mat);
-        rtabmap::SensorData data(laser_scan, cv::Mat(), cv::Mat(), rtabmap::CameraModel());
+        rtabmap::SensorData data;
+        data.setLaserScan(laser_scan);
         data.setId(++frame_id);
         data.setStamp(frame.timestamp);
 
@@ -301,17 +333,20 @@ int main(int argc, char** argv) {
             ? rtab.getMemory()->getLastWorkingSignature()
             : nullptr;
         if (sig) {
-            const rtabmap::SensorData& sd = sig->sensorData();
-            if (!sd.gridObstacleCellsRaw().empty()
-                || !sd.gridGroundCellsRaw().empty()
-                || !sd.gridEmptyCellsRaw().empty()) {
+            // Compute the local occupancy grid ourselves. In lidar-only
+            // mode rtabmap doesn't populate gridGround/Obstacle/EmptyCells
+            // on the signature automatically — LocalGridMaker is the seam.
+            // The (LaserScan, pose) overload uses the scan we just sent,
+            // bypassing any signature-side scan stripping done by rtabmap's
+            // memory manager.
+            cv::Mat ground, obstacles, empty;
+            cv::Point3f view_point(0, 0, 0);
+            grid_maker.createLocalMap(
+                laser_scan, frame.odom_pose, ground, obstacles, empty, view_point);
+            if (!ground.empty() || !obstacles.empty() || !empty.empty()) {
                 grid_cache.add(
-                    sig->id(),
-                    sd.gridGroundCellsRaw(),
-                    sd.gridObstacleCellsRaw(),
-                    sd.gridEmptyCellsRaw(),
-                    sd.gridCellSize(),
-                    sd.gridViewPoint());
+                    sig->id(), ground, obstacles, empty,
+                    grid_maker.getCellSize(), view_point);
             }
         }
 
