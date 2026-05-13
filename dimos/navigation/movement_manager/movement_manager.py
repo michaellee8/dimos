@@ -38,7 +38,7 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-# without this you can (basically) click into infinity in rerun (not good for the planner)
+# Reject accidental clicks far outside the local planning area.
 MAX_CLICK_HORIZONTAL_M = 500.0
 MAX_CLICK_VERTICAL_M = 50.0
 TELEOP_EPS = 1e-6
@@ -50,7 +50,7 @@ class MovementManagerConfig(ModuleConfig):
 
 
 class MovementManager(Module):
-    """Combine tele_cmd_vel (keyboard controls) and nav_cmd_vel in a sane way, output cmd_vel"""
+    """Mux teleop and navigation velocity commands into cmd_vel."""
 
     config: MovementManagerConfig
 
@@ -100,9 +100,6 @@ class MovementManager(Module):
 
     def _cancel_goal(self) -> None:
         self.stop_movement.publish(Bool(data=True))
-        # NOTE: this NaN goal is more of a safety fallback.
-        # It can be REALLY bad if a robot is supposed to stop moving but wont
-        # we should probably think a more robust/strict requirement on planners
         cancel = PointStamped(
             ts=time.time(), frame_id="map", x=float("nan"), y=float("nan"), z=float("nan")
         )
@@ -113,7 +110,6 @@ class MovementManager(Module):
     def _on_nav(self, msg: Twist) -> None:
         with self._lock:
             if self._teleop_active:
-                # check if cooldown has expired
                 elapsed = time.monotonic() - self._last_teleop_time
                 if elapsed < self.config.tele_cooldown_sec:
                     return

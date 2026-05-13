@@ -68,6 +68,13 @@ from dimos.utils.logging_config import setup_logger
 logger = setup_logger()
 
 _RX180 = R.from_euler("x", 180, degrees=True)
+_LIDAR_GEOM_GROUPS = (0, 0, 1, 1, 0, 0)
+_CMD_VEL_STALE_SEC = 0.5
+_ENGINE_CONNECT_TIMEOUT_SEC = 30.0
+_PUBLISH_THREAD_JOIN_TIMEOUT_SEC = 2.0
+_ENGINE_CONNECT_POLL_SEC = 0.1
+_STALE_FRAME_POLL_FRACTION = 0.5
+_RGBD_POINTCLOUD_VOXEL_SIZE = 0.005
 
 
 def _default_identity_transform() -> Transform:
@@ -193,6 +200,7 @@ class MujocoSimModule(
 
     @rpc
     def start(self) -> None:
+        super().start()
         if not self.config.address:
             raise RuntimeError("MujocoSimModule: config.address (MJCF path) is required")
 
@@ -245,12 +253,8 @@ class MujocoSimModule(
             )
 
         lidar_scene_option = mujoco.MjvOption()
-        lidar_scene_option.geomgroup[0] = 0
-        lidar_scene_option.geomgroup[1] = 0
-        lidar_scene_option.geomgroup[2] = 1
-        lidar_scene_option.geomgroup[3] = 1
-        lidar_scene_option.geomgroup[4] = 0
-        lidar_scene_option.geomgroup[5] = 0
+        for group_id, enabled in enumerate(_LIDAR_GEOM_GROUPS):
+            lidar_scene_option.geomgroup[group_id] = enabled
         for lidar_name in self.config.lidar_camera_names:
             if lidar_name == self.config.camera_name and self._primary_camera_needed:
                 continue
@@ -329,7 +333,7 @@ class MujocoSimModule(
     def stop(self) -> None:
         self._stop_event.set()
         if self._publish_thread and self._publish_thread.is_alive():
-            self._publish_thread.join(timeout=2.0)
+            self._publish_thread.join(timeout=_PUBLISH_THREAD_JOIN_TIMEOUT_SEC)
         self._publish_thread = None
 
         errors: list[tuple[str, BaseException]] = []
@@ -388,7 +392,7 @@ class MujocoSimModule(
         with self._cmd_vel_lock:
             cmd = Twist(self._cmd_vel)
             age = time.monotonic() - self._last_cmd_vel_time
-        if age > 0.5:
+        if age > _CMD_VEL_STALE_SEC:
             cmd = Twist.zero()
         engine.apply_root_twist(
             cmd.linear.x,
@@ -478,12 +482,12 @@ class MujocoSimModule(
         published_count = 0
 
         # Wait for engine to actually be connected (sim thread may take a tick).
-        deadline = time.monotonic() + 30.0
+        deadline = time.monotonic() + _ENGINE_CONNECT_TIMEOUT_SEC
         while not self._stop_event.is_set() and not engine.connected:
             if time.monotonic() > deadline:
                 logger.error("MujocoSimModule: timed out waiting for engine to connect")
                 return
-            self._stop_event.wait(timeout=0.1)
+            self._stop_event.wait(timeout=_ENGINE_CONNECT_POLL_SEC)
 
         if self._stop_event.is_set():
             return
@@ -501,7 +505,7 @@ class MujocoSimModule(
                 return
 
             if frame is None or frame.timestamp <= last_timestamp:
-                self._stop_event.wait(timeout=interval * 0.5)
+                self._stop_event.wait(timeout=interval * _STALE_FRAME_POLL_FRACTION)
                 continue
             last_timestamp = frame.timestamp
             ts = time.time()
@@ -623,7 +627,7 @@ class MujocoSimModule(
                 camera_info=self._camera_info_base,
                 depth_scale=1.0,
             )
-            pcd = pcd.voxel_downsample(0.005)
+            pcd = pcd.voxel_downsample(_RGBD_POINTCLOUD_VOXEL_SIZE)
             self.pointcloud.publish(pcd)
         except Exception as exc:
             logger.error("Pointcloud generation error", error=str(exc))

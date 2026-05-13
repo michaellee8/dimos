@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Load a 3D scene mesh from disk for ray-casting + visualization.
+"""Load a 3D scene mesh from disk for ray-casting and MuJoCo collision.
 
 Supports:
   * ``.glb`` / ``.gltf`` / ``.obj`` / ``.ply`` / ``.stl``  — via Open3D's
@@ -22,8 +22,8 @@ Supports:
 Returned form is a single concatenated ``open3d.geometry.TriangleMesh``
 in world frame, with optional scale + Y-up→Z-up + translation applied.
 
-The same mesh can feed browser visualization, ray-casting, and MJCF
-collision wrapping so the visual and physical scene share one transform.
+The same mesh can feed ray-casting and MJCF collision wrapping so the
+geometric query path and physical scene share one transform.
 """
 
 from __future__ import annotations

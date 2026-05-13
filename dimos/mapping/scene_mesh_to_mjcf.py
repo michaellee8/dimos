@@ -19,12 +19,13 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
 
-from dimos.mapping.mesh_scene import SceneMeshAlignment
+from dimos.mapping.mesh_scene import SceneMeshAlignment, load_scene_prims
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -55,6 +56,11 @@ _GEOM_LINE = (
 )
 _DEGENERATE_EPS = 1e-3
 _SHELL_VOLUME_M3 = 2.0
+_CACHE_KEY_LEN = 12
+_VHACD_MAX_HULLS = 64
+_VHACD_RESOLUTION = 200_000
+_MIN_HULL_ASPECT_RATIO = 0.05
+_MIN_HULL_EXTENT_M = 5e-3
 
 
 @dataclass
@@ -116,8 +122,6 @@ def bake_scene_mjcf(
 
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    from dimos.mapping.mesh_scene import load_scene_prims
-
     logger.info(f"bake_scene_mjcf: loading + aligning {scene_mesh_path} (per-prim)")
     prims = load_scene_prims(scene_mesh_path, alignment=align)
     logger.info(f"bake_scene_mjcf: {len(prims)} prims to bake")
@@ -155,7 +159,7 @@ def _cache_key(
     h.update(robot_mjcf_path.read_bytes())
     h.update(repr(sorted(asdict(alignment).items())).encode())
     h.update(str(meshdir).encode())
-    return h.hexdigest()[:12]
+    return h.hexdigest()[:_CACHE_KEY_LEN]
 
 
 def _cache_hit(wrapper_path: Path, cache_dir: Path) -> bool:
@@ -218,7 +222,10 @@ def _collision_hulls(tm: Any, single_hull: Any, prim_name: str) -> tuple[list[An
     if float(single_hull.volume) <= _SHELL_VOLUME_M3:
         return [single_hull], False
     try:
-        parts = tm.convex_decomposition(maxConvexHulls=64, resolution=200_000)
+        parts = tm.convex_decomposition(
+            maxConvexHulls=_VHACD_MAX_HULLS,
+            resolution=_VHACD_RESOLUTION,
+        )
         hulls = parts if isinstance(parts, list) else [parts]
         logger.info(
             f"  {prim_name}: VHACD decomposed "
@@ -241,9 +248,9 @@ def _valid_hull(v: np.ndarray, f: np.ndarray) -> bool:
         return False
     min_ext = float(extent.min())
     max_ext = float(extent.max())
-    if max_ext > 0 and (min_ext / max_ext) < 0.05:
+    if max_ext > 0 and (min_ext / max_ext) < _MIN_HULL_ASPECT_RATIO:
         return False
-    if min_ext < 5e-3:
+    if min_ext < _MIN_HULL_EXTENT_M:
         return False
     try:
         from scipy.spatial import ConvexHull, QhullError
@@ -290,8 +297,6 @@ def _write_wrapper(
 
 def cli_main() -> None:
     """Bake a wrapper, verify it loads, optionally open MuJoCo's native viewer."""
-    import sys
-
     args = list(sys.argv[1:])
     view = False
     if "--view" in args:

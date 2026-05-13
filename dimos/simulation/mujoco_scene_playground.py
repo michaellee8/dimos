@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -67,7 +68,6 @@ def _command_center_blueprints() -> list[Blueprint]:
     except ModuleNotFoundError as exc:
         if exc.name not in {"socketio", "fastapi", "uvicorn", "starlette"}:
             raise
-        import logging
 
         logging.getLogger(__name__).warning(
             "Command Center unavailable; install the web extra to enable WASD controls"
@@ -131,8 +131,6 @@ if _scene_mesh_path and _scene_mesh_collision:
             )
         )
     except Exception as exc:
-        import logging
-
         logging.getLogger(__name__).warning(
             "Failed to bake scene mesh into MuJoCo; lidar will only see the base MJCF: %s",
             exc,

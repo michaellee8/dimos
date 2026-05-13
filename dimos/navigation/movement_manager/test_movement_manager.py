@@ -43,29 +43,29 @@ class Captured:
 def _attach(module):
     """Subscribe to every Out port; return (captured, unsubscribers)."""
     captured = Captured()
-    unsubs = [
+    unsubscribe_callbacks = [
         module.cmd_vel.subscribe(captured.cmd_vel.append),
         module.stop_movement.subscribe(captured.stop_movement.append),
         module.goal.subscribe(captured.goal.append),
         module.way_point.subscribe(captured.way_point.append),
     ]
-    return captured, unsubs
+    return captured, unsubscribe_callbacks
 
 
 @pytest.fixture()
 def manager_and_captured() -> Generator[tuple[MovementManager, Captured], None, None]:
     module = MovementManager(tele_cooldown_sec=0.1)
-    captured, unsubs = _attach(module)
+    captured, unsubscribe_callbacks = _attach(module)
     try:
         yield module, captured
     finally:
-        for unsub in unsubs:
-            unsub()
+        for unsubscribe in unsubscribe_callbacks:
+            unsubscribe()
         module._close_module()
 
 
-def _twist(lx=0.0):
-    return Twist(linear=Vector3(lx, 0, 0), angular=Vector3(0, 0, 0))
+def _twist(linear_x=0.0):
+    return Twist(linear=Vector3(linear_x, 0, 0), angular=Vector3(0, 0, 0))
 
 
 def _click(x=1.0, y=2.0, z=0.0):
@@ -76,17 +76,14 @@ def test_teleop_suppresses_nav_and_cancels_goal(manager_and_captured):
     """Teleop arriving should suppress nav, publish stop_movement, and cancel the goal with NaN."""
     manager, captured = manager_and_captured
     manager.config.tele_cooldown_sec = 10.0
-    manager._on_teleop(_twist(lx=0.3))
+    manager._on_teleop(_twist(linear_x=0.3))
 
     cmd_count_after_teleop = len(captured.cmd_vel)
-    manager._on_nav(_twist(lx=0.9))
-    # Nav was suppressed: no new cmd_vel
+    manager._on_nav(_twist(linear_x=0.9))
     assert len(captured.cmd_vel) == cmd_count_after_teleop
 
-    # stop_movement fired
     assert len(captured.stop_movement) == 1
 
-    # Goal cancelled with NaN
     assert len(captured.goal) == 1
     assert math.isnan(captured.goal[0].x)
 
@@ -95,11 +92,11 @@ def test_nav_resumes_after_cooldown(manager_and_captured):
     """After the cooldown expires, nav commands pass through again."""
     manager, captured = manager_and_captured
     manager.config.tele_cooldown_sec = 0.05
-    manager._on_teleop(_twist(lx=0.3))
+    manager._on_teleop(_twist(linear_x=0.3))
     time.sleep(DEFAULT_THREAD_JOIN_TIMEOUT)
     cmd_count_before = len(captured.cmd_vel)
 
-    manager._on_nav(_twist(lx=0.9))
+    manager._on_nav(_twist(linear_x=0.9))
     assert len(captured.cmd_vel) == cmd_count_before + 1
 
 
@@ -118,8 +115,8 @@ def test_continuous_teleop_cancels_once(manager_and_captured):
     """Holding WASD should not repeatedly cancel an already-cancelled goal."""
     manager, captured = manager_and_captured
 
-    manager._on_teleop(_twist(lx=0.3))
-    manager._on_teleop(_twist(lx=0.3))
+    manager._on_teleop(_twist(linear_x=0.3))
+    manager._on_teleop(_twist(linear_x=0.3))
     manager._on_teleop(_twist())
 
     assert len(captured.stop_movement) == 1

@@ -173,26 +173,26 @@ class WebsocketVisModule(Module):
                         logger.debug(f"Failed to open browser: {e}")
 
         try:
-            unsub = self.odom.subscribe(self._on_robot_pose)
-            self.register_disposable(Disposable(unsub))
+            unsubscribe = self.odom.subscribe(self._on_robot_pose)
+            self.register_disposable(Disposable(unsubscribe))
         except Exception:
             ...
 
         try:
-            unsub = self.gps_location.subscribe(self._on_gps_location)
-            self.register_disposable(Disposable(unsub))
+            unsubscribe = self.gps_location.subscribe(self._on_gps_location)
+            self.register_disposable(Disposable(unsubscribe))
         except Exception:
             ...
 
         try:
-            unsub = self.path.subscribe(self._on_path)
-            self.register_disposable(Disposable(unsub))
+            unsubscribe = self.path.subscribe(self._on_path)
+            self.register_disposable(Disposable(unsubscribe))
         except Exception:
             ...
 
         try:
-            unsub = self.global_costmap.subscribe(self._on_global_costmap)
-            self.register_disposable(Disposable(unsub))
+            unsubscribe = self.global_costmap.subscribe(self._on_global_costmap)
+            self.register_disposable(Disposable(unsubscribe))
         except Exception:
             ...
 
