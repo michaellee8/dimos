@@ -189,8 +189,8 @@ def _load_usd_mesh(path: Path) -> o3d.geometry.TriangleMesh:
     """Walk every Mesh prim in a USD stage and concatenate to one o3d mesh.
 
     Also extracts per-vertex colors from ``primvars:displayColor`` when
-    present so downstream consumers (viser) can render textured-looking
-    Sketchfab exports without having to chase materials/textures.
+    present so downstream consumers can render textured-looking Sketchfab
+    exports without having to chase materials/textures.
     """
     try:
         from pxr import Usd, UsdGeom
@@ -299,13 +299,11 @@ def load_scene_mesh(
     if suffix in {".usdz", ".usd", ".usdc", ".usda"}:
         mesh = _load_usd_mesh(path)
     elif suffix in {".glb", ".gltf"}:
-        # GEOMETRY-ONLY GLB load. Used by floor-z probing and ``MeshCameraModule``
-        # ray-casting — neither needs PBR materials. The Viser viewer takes the
-        # GLB-native path (``add_glb`` from raw bytes) so it doesn't go through
-        # here. ``trimesh.load(path, force="mesh")`` would flatten the scene by
-        # decompressing every embedded texture and sampling per-vertex colors —
-        # for a scene with hundreds of 4K PBR textures (~895 MP total in dimos's
-        # office mesh) that allocates ~10 GB transiently and OOMs 32 GB boxes.
+        # GEOMETRY-ONLY GLB load. Used by floor-z probing and ray-casting;
+        # it does not need PBR materials. ``trimesh.load(path, force="mesh")``
+        # would flatten the scene by decompressing every embedded texture and
+        # sampling per-vertex colors. For a scene with hundreds of 4K PBR
+        # textures, that allocates ~10 GB transiently and OOMs 32 GB boxes.
         # We open in Scene mode (no flattening, no texture decode), walk the
         # instance graph applying each instance's world transform, and emit a
         # single concatenated mesh — peak stays under ~1 GB.

@@ -82,10 +82,7 @@ def bake_scene_mjcf(
         robot_mjcf_path: the base robot MJCF the wrapper will
             ``<include>``.
         alignment: scale / translation / rotation / y-up swap to bake
-            into the OBJ before MuJoCo sees it.  Authoritative for all
-            three views (MuJoCo physics, viser, mesh camera); the
-            blueprint passes the same ``SceneMeshAlignment`` to each
-            so the world frames agree to the millimeter.
+            into the OBJ before MuJoCo sees it.
         meshdir: directory MuJoCo should resolve unqualified mesh
             filenames against.  ``None`` uses the robot MJCF's parent
             directory.  Blueprints for robot assets stored elsewhere

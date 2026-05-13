@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""MuJoCo scene playground with optional Viser mesh/splat visualization."""
+"""MuJoCo scene playground with optional mesh collision."""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-import tempfile
 
 from dimos_lcm.std_msgs import Bool  # type: ignore[import-untyped]
 
@@ -36,7 +35,6 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
-from dimos.visualization.viser.viser_render_module import ViserRenderModule
 
 
 def _env_float(name: str, default: float) -> float:
@@ -75,7 +73,6 @@ def _command_center_blueprints() -> list[Blueprint]:
 
 _default_mjcf = Path("data/mujoco_sim/g1_gear_wbc.xml")
 _default_scene_mesh = Path("data/dimos_office_mesh/dimos_office_mesh.glb")
-_default_splat = Path("data/dimos_office/dimos_office.ply")
 _mjcf_path = os.environ.get("DIMOS_MJCF_PATH") or str(_default_mjcf)
 _mjcf_meshdir = os.environ.get("DIMOS_MJCF_MESHDIR")
 if _mjcf_meshdir is None and Path(_mjcf_path) == _default_mjcf:
@@ -99,21 +96,6 @@ _scene_mesh_y_up = (
 _scene_mesh_rotation = _env_xyz("DIMOS_SCENE_MESH_ROTATION_ZYX_DEG", (0.0, 0.0, 0.0))
 _scene_mesh_translation = _env_xyz("DIMOS_SCENE_MESH_TRANSLATION", (0.0, 0.0, 0.0))
 _scene_mesh_collision = os.environ.get("DIMOS_SCENE_MESH_COLLISION", "1") not in {"", "0"}
-_splat_path_override = os.environ.get("DIMOS_SPLAT_PATH") or None
-_splat_path = _splat_path_override or (
-    str(_default_splat) if _scene_mesh_path_override is None and _default_splat.exists() else None
-)
-_splat_alignment_yaml = os.environ.get("DIMOS_SPLAT_ALIGNMENT")
-if _splat_alignment_yaml is None and _splat_path == str(_default_splat):
-    _office_splat_yaml = Path(tempfile.gettempdir()) / "dimos_office_to_artist_mesh.yaml"
-    _office_splat_yaml.write_text(
-        "# Maps the original Y-up dimos_office.ply into the artist mesh frame.\n"
-        f"scale: {_scene_mesh_scale}\n"
-        f"translation: [0.0, 0.0, {0.7734 * _scene_mesh_scale}]\n"
-        "rotation_zyx: [164.6633, -0.0865, -95.4786]\n"
-        "y_up: false\n"
-    )
-    _splat_alignment_yaml = str(_office_splat_yaml)
 _enable_depth_cloud = os.environ.get("DIMOS_ENABLE_DEPTH_CLOUD", "0").lower() in {
     "1",
     "true",
@@ -176,19 +158,6 @@ mujoco_scene_playground = autoconnect(
     ),
     CostMapper.blueprint(),
     ReplanningAStarPlanner.blueprint(),
-    ViserRenderModule.blueprint(
-        splat_path=_splat_path,
-        mjcf_path=_sim_mjcf_path,
-        mjcf_meshdir=_mjcf_meshdir,
-        port=int(os.environ.get("DIMOS_VISER_PORT", "8082")),
-        alignment_yaml=_splat_alignment_yaml,
-        scene_mesh_path=_scene_mesh_path,
-        scene_mesh_scale=_scene_mesh_scale,
-        scene_mesh_translation=_scene_mesh_translation,
-        scene_mesh_rotation_zyx_deg=_scene_mesh_rotation,
-        scene_mesh_y_up=_scene_mesh_y_up,
-        pointcloud_point_size=_env_float("DIMOS_POINTCLOUD_POINT_SIZE", 0.04),
-    ),
     *_command_center_blueprints(),
 ).transports(
     {
@@ -200,7 +169,6 @@ mujoco_scene_playground = autoconnect(
         ("pointcloud", PointCloud2): LCMTransport("/lidar", PointCloud2),
         ("lidar", PointCloud2): LCMTransport("/lidar", PointCloud2),
         ("global_map", PointCloud2): LCMTransport("/global_map", PointCloud2),
-        ("pointcloud_overlay", PointCloud2): LCMTransport("/global_map", PointCloud2),
         ("global_costmap", OccupancyGrid): LCMTransport("/global_costmap", OccupancyGrid),
         ("path", PathMsg): LCMTransport("/nav_path", PathMsg),
         ("clicked_point", PointStamped): LCMTransport("/clicked_point", PointStamped),

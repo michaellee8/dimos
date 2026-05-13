@@ -202,7 +202,6 @@ all_modules = {
     "unitree-g1-skill-container": "dimos.robot.unitree.g1.skill_container.UnitreeG1SkillContainer",
     "unitree-skill-container": "dimos.robot.unitree.unitree_skill_container.UnitreeSkillContainer",
     "unity-bridge-module": "dimos.simulation.unity.module.UnityBridgeModule",
-    "viser-render-module": "dimos.visualization.viser.viser_render_module.ViserRenderModule",
     "vlm-agent": "dimos.agents.vlm_agent.VLMAgent",
     "vlm-stream-tester": "dimos.agents.vlm_stream_tester.VlmStreamTester",
     "voxel-grid-mapper": "dimos.mapping.voxels.VoxelGridMapper",
