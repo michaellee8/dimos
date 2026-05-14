@@ -64,8 +64,8 @@ def _camera_info_static(config: AnafiConnectionConfig) -> CameraInfo:
     )
 
 
-class AnafiConnectionModule(Module[AnafiConnectionConfig], Camera):
-    default_config = AnafiConnectionConfig
+class AnafiConnectionModule(Module, Camera):
+    config: AnafiConnectionConfig
 
     cmd_vel: In[Twist]
     odom: Out[PoseStamped]
