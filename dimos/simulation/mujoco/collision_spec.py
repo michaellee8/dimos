@@ -119,6 +119,17 @@ class CollisionSpec:
     #: this (m³).  Smaller furniture-scale prims use one hull regardless.
     shell_volume_m3: float = 2.0
 
+    #: Preserve large non-rectangular sheet footprints with thin triangle
+    #: prisms.  This helps moderate indoor scenes with angular floors, but
+    #: is disabled by ``bake_scene_mjcf`` for very large scenes unless
+    #: explicitly overridden.
+    enable_sheet_prisms: bool = True
+
+    #: Scene-level guard used by ``bake_scene_mjcf``.  Above this many
+    #: source prims, sheet prisms can explode the geom count; use sidecar
+    #: overrides for specific floors instead.
+    sheet_prism_max_scene_prims: int = 2500
+
     #: ``USD-path-glob -> override-dict``.  See class docstring.
     prim_overrides: dict[str, dict] = field(default_factory=dict)
 
@@ -136,6 +147,8 @@ class CollisionSpec:
             "coacd_threshold",
             "coacd_max_hulls",
             "shell_volume_m3",
+            "enable_sheet_prisms",
+            "sheet_prism_max_scene_prims",
             "prim_overrides",
         }
         kwargs = {k: v for k, v in raw.items() if k in known}
@@ -280,6 +293,12 @@ def _quat_z_to(axis: np.ndarray) -> tuple[float, float, float, float]:
 #: axis at exactly 0.  Clamping to 1 mm yields a valid geom that's still
 #: physically reasonable as a thin slab.
 _MIN_SIZE_M = 1e-3
+_SHEET_PRISM_THICKNESS_M = 0.03
+_SHEET_BOX_FILL_MIN = 0.85
+_SHEET_BOX_FILL_MAX = 1.15
+_HORIZONTAL_BOX_MAX_THICKNESS_M = 0.05
+_SHEET_PRISM_MIN_FOOTPRINT_AREA_M2 = 2.0
+_SHEET_PRISM_MAX_TRIANGLES = 1024
 
 
 def _fit_aabb_box(vertices: np.ndarray) -> dict:
@@ -363,7 +382,7 @@ def _fit_capsule(vertices: np.ndarray) -> dict:
     the *cylindrical* portion only; total length = 2*(half_h + r)."""
     cyl = _fit_cylinder(vertices)
     r, h = cyl["size"]
-    new_h = max(0.0, h - r)
+    new_h = max(float(h - r), _MIN_SIZE_M)
     vol = float(np.pi * r * r * 2.0 * new_h) + float((4.0 / 3.0) * np.pi * r**3)
     return {
         "type": "capsule",
@@ -438,6 +457,120 @@ def _is_slab(extent: np.ndarray, aspect_ratio: float) -> bool:
     if sorted_ext[0] < 1e-6:
         return True
     return bool((sorted_ext[2] / sorted_ext[0]) >= aspect_ratio)
+
+
+def _sheet_footprint_stats(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    thin_axis: int,
+) -> tuple[float, float] | None:
+    """Return ``(projected_aabb_area, projected_triangle_fill)`` for a sheet."""
+    axes = [i for i in range(3) if i != thin_axis]
+    projected = vertices[:, axes]
+    span = projected.max(axis=0) - projected.min(axis=0)
+    box_area = float(span[0] * span[1])
+    if box_area < 1e-9:
+        return None
+
+    tri = projected[triangles]
+    edge_a = tri[:, 1] - tri[:, 0]
+    edge_b = tri[:, 2] - tri[:, 0]
+    area = 0.5 * np.abs(edge_a[:, 0] * edge_b[:, 1] - edge_a[:, 1] * edge_b[:, 0]).sum()
+    fill = float(area / box_area)
+    return box_area, fill
+
+
+def _is_boxlike_sheet(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    thin_axis: int,
+) -> bool:
+    """Whether a thin mesh roughly fills its projected bounding rectangle.
+
+    A single primitive box is only acceptable when the source sheet's
+    projected triangle area is close to the projected AABB area.  Low
+    ratios mean an L-shape / beam strip / holes; high ratios usually mean
+    overlapping, folded, or angled sheets inside one prim.
+    """
+    stats = _sheet_footprint_stats(vertices, triangles, thin_axis)
+    if stats is None:
+        return False
+    _, fill = stats
+    return _SHEET_BOX_FILL_MIN <= fill <= _SHEET_BOX_FILL_MAX
+
+
+def _should_emit_triangle_prisms(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    thin_axis: int,
+) -> bool:
+    """Use exact-ish triangle prisms only for large horizontal sheets.
+
+    This avoids placing huge slabs over angular floors and roof strips,
+    without exploding tiny decorative meshes into thousands of geoms.
+    """
+    if thin_axis != 2:
+        return False
+    if len(triangles) > _SHEET_PRISM_MAX_TRIANGLES:
+        return False
+    stats = _sheet_footprint_stats(vertices, triangles, thin_axis)
+    if stats is None:
+        return False
+    footprint_area, _ = stats
+    return footprint_area >= _SHEET_PRISM_MIN_FOOTPRINT_AREA_M2
+
+
+def _thin_sheet_hulls(
+    vertices: np.ndarray,
+    triangles: np.ndarray,
+    thickness: float = _SHEET_PRISM_THICKNESS_M,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Represent a thin non-rectangular sheet as convex triangle prisms."""
+    hulls: list[tuple[np.ndarray, np.ndarray]] = []
+    faces = np.asarray(
+        [
+            [0, 1, 2],
+            [5, 4, 3],
+            [0, 3, 4],
+            [0, 4, 1],
+            [1, 4, 5],
+            [1, 5, 2],
+            [2, 5, 3],
+            [2, 3, 0],
+        ],
+        dtype=np.int32,
+    )
+
+    for tri_idx in triangles:
+        tri = vertices[tri_idx].astype(np.float64)
+        if not np.isfinite(tri).all():
+            continue
+        normal = np.cross(tri[1] - tri[0], tri[2] - tri[0])
+        norm = float(np.linalg.norm(normal))
+        if norm < 1e-9:
+            continue
+        offset = normal / norm * (thickness * 0.5)
+        prism = np.vstack((tri + offset, tri - offset)).astype(np.float32)
+        hulls.append((prism, faces))
+
+    return hulls
+
+
+def _is_flat_horizontal_box(extent: np.ndarray, thin_axis: int) -> bool:
+    """Thin in world Z, broad in world X/Y, and flat enough to box safely.
+
+    PCA boxes are unstable for nearly flat floors/ceilings: any small
+    triangulation asymmetry can rotate the OBB basis and turn a walkable
+    surface into a shallow ramp.  For world-horizontal slabs, the AABB is
+    the physically safer collision approximation.
+    """
+    if thin_axis != 2:
+        return False
+    xy_min = float(min(extent[0], extent[1]))
+    z_extent = float(extent[2])
+    if xy_min < 1e-6:
+        return False
+    return z_extent <= _HORIZONTAL_BOX_MAX_THICKNESS_M
 
 
 # --------------------------------------------------------------------------- #
@@ -529,15 +662,35 @@ def decide_for_prim(
 
     # 4. From here on: kind == "auto".  Generic heuristics first.
 
-    # 4a. Aspect-ratio: slab/beam → force OBB box (fill ratio may be
+    # 4a. Aspect-ratio: slab/beam → force box (fill ratio may be
     # marginal because of moulding/profile, but a box collision is
-    # the right physical answer for walls and slabs).
+    # the right physical answer for walls and slabs).  Non-rectangular
+    # sheets are emitted as triangle prisms so we don't fill holes or
+    # angular roof/floor outlines with one huge invisible slab.
     if _is_slab(extent, spec.aspect_ratio_box):
-        fit = _fit_obb_box(vertices)
+        thin_axis = int(np.argmin(extent))
+        if (
+            spec.enable_sheet_prisms
+            and not _is_boxlike_sheet(vertices, triangles, thin_axis)
+            and _should_emit_triangle_prisms(vertices, triangles, thin_axis)
+        ):
+            hulls = _thin_sheet_hulls(vertices, triangles)
+            if hulls:
+                return PrimDecision(
+                    mode="hulls",
+                    hulls=hulls,
+                    reason=f"thin-sheet:triangle-prisms({len(hulls)})",
+                    friction=friction,
+                )
+
+        if _is_flat_horizontal_box(extent, thin_axis):
+            fit = _fit_aabb_box(vertices)
+            reason = "aspect-ratio:horizontal-slab"
+        else:
+            fit = _fit_obb_box(vertices)
+            reason = "aspect-ratio:slab"
         fit["fill_ratio"] = float("nan")
-        return PrimDecision(
-            mode="primitive", primitive=fit, reason="aspect-ratio:slab", friction=friction
-        )
+        return PrimDecision(mode="primitive", primitive=fit, reason=reason, friction=friction)
 
     # 4b. Need hull volume for the rest.
     hull_vol = _hull_volume(vertices)

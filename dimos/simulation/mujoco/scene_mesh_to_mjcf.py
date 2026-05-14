@@ -41,9 +41,11 @@ no sides) -- we route visual writes through :func:`_write_visual_obj`,
 which substitutes the prim's convex hull when it isn't watertight, so
 the viewer renders solid geometry instead of see-through slabs.
 
-Per-prim work is fanned across processes via ``ProcessPoolExecutor``
-(fork on macOS) since each prim's decision is independent and CoACD
-calls dominate wall time.
+Per-prim work is fanned across worker processes since each prim's
+decision is independent and CoACD calls dominate wall time.  Standalone
+CLI bakes use forked processes; in an already-threaded DimOS runtime we
+use ``forkserver`` so workers do not inherit the parent process's active
+threads.
 
 Output is cached at ``~/.cache/dimos/scene_meshes/<hash>/`` keyed on
 the SHA256 of (source mesh, robot MJCF, alignment, meshdir, sidecar
@@ -59,7 +61,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import hashlib
 import multiprocessing
 import os
@@ -100,6 +102,10 @@ _WRAPPER_TEMPLATE = """\
 <mujoco model="{model_name}">
   <include file="{robot_mjcf_abs}"/>
   <compiler angle="radian" meshdir="{meshdir}" texturedir="{meshdir}"/>
+  <statistic center="{statistic_center}" extent="{statistic_extent}"/>
+  <visual>
+    <map znear="0.01" zfar="{visual_zfar}"/>
+  </visual>
   <asset>
 {asset_meshes}
   </asset>
@@ -164,7 +170,9 @@ _CACHE_KEY_LEN = 12
 # Bump when the bake pipeline's output format changes so old caches
 # invalidate on the next call.  Increment for any change that could
 # affect MJCF emission (new geom kinds, rewritten visual policy, etc.).
-_CACHE_SCHEMA_VERSION = "dispatcher-v2"
+# This is only a local cache salt; it is not a persisted file format
+# contract and old cache directories can safely stay on disk.
+_CACHE_SCHEMA_VERSION = "dispatcher-v7"
 
 
 @dataclass
@@ -182,6 +190,15 @@ class _BakeArtifacts:
     decision_reasons: dict[str, int]
 
 
+def _resolve_existing_file(path: str | Path, label: str) -> Path:
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(f"{label} not found: {resolved}")
+    if not resolved.is_file():
+        raise ValueError(f"{label} must be a file, got: {resolved}")
+    return resolved
+
+
 def bake_scene_mjcf(
     scene_mesh_path: str | Path,
     robot_mjcf_path: str | Path,
@@ -190,6 +207,7 @@ def bake_scene_mjcf(
     cache_root: Path | None = None,
     collision_spec: CollisionSpec | None = None,
     include_visual_mesh: bool = False,
+    rebake: bool = False,
 ) -> Path:
     """Convert ``scene_mesh_path`` to OBJs + MJCF wrapper around the robot.
 
@@ -216,21 +234,18 @@ def bake_scene_mjcf(
             for visual debugging, but doubles disk usage.  When ``True``
             non-watertight prim meshes are substituted with their convex
             hull so they don't appear see-through.
+        rebake: ignore an existing ``wrapper.xml`` in the computed cache
+            directory and regenerate the scene collision geometry.
 
     Returns:
         Path to the wrapper MJCF.  Pass to ``MujocoSimModule`` instead of
         the raw robot MJCF, or use :func:`load_or_bake` to also get an
         ``.mjb`` cache.
     """
-    scene_mesh_path = Path(scene_mesh_path).expanduser().resolve()
-    robot_mjcf_path = Path(robot_mjcf_path).expanduser().resolve()
+    scene_mesh_path = _resolve_existing_file(scene_mesh_path, "scene mesh")
+    robot_mjcf_path = _resolve_existing_file(robot_mjcf_path, "robot MJCF")
     align = alignment or SceneMeshAlignment()
     spec = collision_spec or CollisionSpec.auto_discover(scene_mesh_path)
-
-    if not scene_mesh_path.exists():
-        raise FileNotFoundError(f"scene mesh not found: {scene_mesh_path}")
-    if not robot_mjcf_path.exists():
-        raise FileNotFoundError(f"robot MJCF not found: {robot_mjcf_path}")
 
     meshdir = Path(meshdir).expanduser().resolve() if meshdir else robot_mjcf_path.parent
 
@@ -246,7 +261,7 @@ def bake_scene_mjcf(
     cache_dir = root / cache_key
     wrapper_path = cache_dir / "wrapper.xml"
 
-    if _cache_hit(wrapper_path):
+    if not rebake and _cache_hit(wrapper_path):
         logger.info(f"bake_scene_mjcf: cache hit at {cache_dir}")
         return wrapper_path
 
@@ -255,6 +270,13 @@ def bake_scene_mjcf(
     logger.info(f"bake_scene_mjcf: loading + aligning {scene_mesh_path}")
     prims = load_scene_prims(scene_mesh_path, alignment=align)
     logger.info(f"bake_scene_mjcf: {len(prims)} prims to process")
+    if spec.enable_sheet_prisms and len(prims) > spec.sheet_prism_max_scene_prims:
+        logger.info(
+            "bake_scene_mjcf: disabling thin-sheet triangle prisms for "
+            f"{len(prims)}-prim scene; use a collision sidecar to opt in"
+        )
+        spec = replace(spec, enable_sheet_prisms=False)
+    scene_center, scene_extent = _scene_bounds(prims)
 
     artifacts = _bake_prims(
         prims,
@@ -288,6 +310,8 @@ def bake_scene_mjcf(
         robot_mjcf_path=robot_mjcf_path,
         asset_lines=artifacts.asset_lines,
         geom_lines=artifacts.geom_lines,
+        statistic_center=scene_center,
+        statistic_extent=scene_extent,
     )
     return wrapper_path
 
@@ -322,11 +346,14 @@ def load_or_bake(
     """
     import mujoco  # type: ignore[import-untyped]
 
+    scene_mesh_path = _resolve_existing_file(scene_mesh_path, "scene mesh")
+    robot_mjcf_path = _resolve_existing_file(robot_mjcf_path, "robot MJCF")
+
     if not rebake:
         # Compute the cache key without baking, so we can probe for an
         # existing .mjb / wrapper.xml without doing any work.
-        sp = Path(scene_mesh_path).expanduser().resolve()
-        rp = Path(robot_mjcf_path).expanduser().resolve()
+        sp = scene_mesh_path
+        rp = robot_mjcf_path
         al = alignment or SceneMeshAlignment()
         sd = collision_spec or CollisionSpec.auto_discover(sp)
         md = Path(meshdir).expanduser().resolve() if meshdir else rp.parent
@@ -336,7 +363,13 @@ def load_or_bake(
         mjb = cache_dir / "compiled.mjb"
         wrapper = cache_dir / "wrapper.xml"
 
-        if mjb.exists():
+        wrapper_is_current = _cache_hit(wrapper)
+
+        if (
+            mjb.exists()
+            and wrapper_is_current
+            and mjb.stat().st_mtime_ns >= wrapper.stat().st_mtime_ns
+        ):
             logger.info(f"load_or_bake: loading compiled binary {mjb}")
             t0 = time.time()
             model = mujoco.MjModel.from_binary_path(str(mjb))
@@ -346,7 +379,7 @@ def load_or_bake(
             )
             return model, wrapper
 
-        if wrapper.exists() and any(cache_dir.glob("*.obj")):
+        if wrapper_is_current and any(cache_dir.glob("*.obj")):
             logger.info(f"load_or_bake: wrapper cached, compiling XML -> .mjb at {wrapper}")
             t0 = time.time()
             model = mujoco.MjModel.from_xml_path(str(wrapper))
@@ -367,6 +400,7 @@ def load_or_bake(
         cache_root=cache_root,
         collision_spec=collision_spec,
         include_visual_mesh=include_visual_mesh,
+        rebake=rebake,
     )
     logger.info(f"load_or_bake: compiling baked wrapper {wrapper}")
     t0 = time.time()
@@ -421,7 +455,13 @@ def _cache_key(
 
 
 def _cache_hit(wrapper_path: Path) -> bool:
-    return wrapper_path.exists()
+    if not wrapper_path.exists():
+        return False
+    try:
+        text = wrapper_path.read_text()
+    except OSError:
+        return False
+    return "<statistic center=" in text and '<map znear="0.01" zfar=' in text
 
 
 # --------------------------------------------------------------------------- #
@@ -524,14 +564,11 @@ def _bake_prims(
 ) -> _BakeArtifacts:
     """Fan per-prim work across cores; aggregate the resulting MJCF lines.
 
-    Uses ``fork`` (not macOS's default ``spawn``) so worker processes
-    inherit the parent's already-imported modules -- otherwise each
-    worker re-imports the script that called ``bake_scene_mjcf`` and
-    recurses if it lacks an ``if __name__ == "__main__"`` guard.  Fork
-    is safe here because we haven't touched any thread-holding C
-    library before this point (Open3D's OBJ writer only runs inside
-    workers; ``pxr.Usd`` is single-threaded and finishes its work in
-    ``load_scene_prims`` before fork).
+    Standalone bakes use ``fork`` so workers inherit the parent's
+    already-imported modules.  Runtime bakes inside DimOS may happen
+    after other modules have started threads; in that case use
+    ``forkserver`` so workers do not inherit locks from the parent
+    process's C extension state.
     """
     asset_lines: list[str] = []
     geom_lines: list[str] = []
@@ -543,14 +580,26 @@ def _bake_prims(
     n_degenerate = 0
     reasons: dict[str, int] = {}
 
-    n_workers = max(1, (os.cpu_count() or 4) - 1)
-    logger.info(f"_bake_prims: fanning {len(prims)} prims across {n_workers} workers (fork)")
-
     work_items = [(prim, cache_dir, spec, include_visual_mesh) for prim in prims]
-    mp_ctx = multiprocessing.get_context("fork")
+    n_workers = max(1, (os.cpu_count() or 4) - 1)
+    if _native_thread_count() > 1:
+        n_workers = min(n_workers, 8)
+        start_method = (
+            "forkserver" if "forkserver" in multiprocessing.get_all_start_methods() else "spawn"
+        )
+    else:
+        start_method = "fork"
+    logger.info(
+        f"_bake_prims: fanning {len(prims)} prims across "
+        f"{n_workers} workers ({start_method})"
+    )
 
     t0 = time.time()
-    with ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx) as ex:
+    mp_ctx = multiprocessing.get_context(start_method)
+    executor = ProcessPoolExecutor(max_workers=n_workers, mp_context=mp_ctx)
+
+    progress_every = 25 if len(prims) <= 500 else 250
+    with executor as ex:
         futures = [ex.submit(_process_one_prim, item) for item in work_items]
         done = 0
         for fut in as_completed(futures):
@@ -567,7 +616,7 @@ def _bake_prims(
             n_visuals += counters["visuals"]
             n_degenerate += counters["degenerate"]
             done += 1
-            if done % 250 == 0 or done == len(prims):
+            if done % progress_every == 0 or done == len(prims):
                 elapsed = time.time() - t0
                 eta = elapsed * (len(prims) - done) / max(done, 1)
                 logger.info(
@@ -588,6 +637,13 @@ def _bake_prims(
         n_degenerate_dropped=n_degenerate,
         decision_reasons=reasons,
     )
+
+
+def _native_thread_count() -> int:
+    try:
+        return len(os.listdir("/proc/self/task"))
+    except OSError:
+        return 1
 
 
 # --------------------------------------------------------------------------- #
@@ -744,6 +800,37 @@ def _fmt_vec(values: np.ndarray) -> str:
     return " ".join(f"{float(v):.9g}" for v in values)
 
 
+def _scene_bounds(prims: list[Any]) -> tuple[np.ndarray, float]:
+    """Return a viewer-friendly center and extent for the aligned scene.
+
+    MuJoCo's viewer uses ``statistic.center`` / ``statistic.extent`` for
+    camera framing and clipping.  The included robot MJCF's defaults are
+    much too small for baked building-scale scenes, so wrappers need to
+    advertise the scene bounds explicitly.
+    """
+    mins: list[np.ndarray] = []
+    maxs: list[np.ndarray] = []
+    for prim in prims:
+        vertices = np.asarray(prim.vertices, dtype=np.float64)
+        if vertices.ndim != 2 or vertices.shape[1] != 3 or len(vertices) == 0:
+            continue
+        finite = vertices[np.isfinite(vertices).all(axis=1)]
+        if len(finite) == 0:
+            continue
+        mins.append(finite.min(axis=0))
+        maxs.append(finite.max(axis=0))
+
+    if not mins:
+        return np.zeros(3, dtype=np.float64), 1.0
+
+    scene_min = np.min(np.vstack(mins), axis=0)
+    scene_max = np.max(np.vstack(maxs), axis=0)
+    center = (scene_min + scene_max) * 0.5
+    diagonal = scene_max - scene_min
+    extent = max(float(np.linalg.norm(diagonal) * 0.5 * 1.1), 1.0)
+    return center, extent
+
+
 # --------------------------------------------------------------------------- #
 # OBJ I/O                                                                     #
 # --------------------------------------------------------------------------- #
@@ -816,11 +903,17 @@ def _write_wrapper(
     robot_mjcf_path: Path,
     asset_lines: list[str],
     geom_lines: list[str],
+    statistic_center: np.ndarray,
+    statistic_extent: float,
 ) -> None:
+    visual_zfar = max(float(statistic_extent) * 20.0, 10000.0)
     wrapper_xml = _WRAPPER_TEMPLATE.format(
         model_name=f"robot_with_scene_{cache_key}",
         meshdir=str(meshdir),
         robot_mjcf_abs=str(robot_mjcf_path),
+        statistic_center=_fmt_vec(statistic_center),
+        statistic_extent=f"{float(statistic_extent):.9g}",
+        visual_zfar=f"{visual_zfar:.9g}",
         asset_meshes="\n".join(asset_lines),
         scene_geoms="\n".join(geom_lines),
     )
@@ -884,16 +977,22 @@ def cli_main() -> None:
     )
     args = p.parse_args()
 
+    try:
+        scene_path = _resolve_existing_file(args.scene, "scene mesh")
+        robot_path = _resolve_existing_file(args.robot, "robot MJCF")
+    except (FileNotFoundError, ValueError) as exc:
+        p.error(str(exc))
+
     align = SceneMeshAlignment(scale=args.scale, y_up=not args.no_y_up)
     spec = (
         CollisionSpec.from_json(args.collision_spec)
         if args.collision_spec is not None
-        else CollisionSpec.auto_discover(args.scene)
+        else CollisionSpec.auto_discover(scene_path)
     )
 
     model, wrapper = load_or_bake(
-        scene_mesh_path=args.scene,
-        robot_mjcf_path=args.robot,
+        scene_mesh_path=scene_path,
+        robot_mjcf_path=robot_path,
         alignment=align,
         meshdir=args.meshdir,
         collision_spec=spec,

@@ -77,12 +77,13 @@ def _command_center_blueprints() -> list[Blueprint]:
     ]
 
 
-_default_mjcf = Path("data/mujoco_sim/g1_gear_wbc.xml")
-_default_scene_mesh = Path("data/dimos_office_mesh/dimos_office_mesh.glb")
+_repo_root = Path(__file__).resolve().parents[6]
+_default_mjcf = _repo_root / "data/mujoco_sim/g1_gear_wbc.xml"
+_default_scene_mesh = _repo_root / "data/dimos_office_mesh/dimos_office_mesh.glb"
 _mjcf_path = os.environ.get("DIMOS_MJCF_PATH") or str(_default_mjcf)
 _mjcf_meshdir = os.environ.get("DIMOS_MJCF_MESHDIR")
-if _mjcf_meshdir is None and Path(_mjcf_path) == _default_mjcf:
-    _mjcf_meshdir = "data/g1_urdf/meshes"
+if _mjcf_meshdir is None and Path(_mjcf_path).expanduser().resolve() == _default_mjcf:
+    _mjcf_meshdir = str(_repo_root / "data/g1_urdf/meshes")
 _dof = int(os.environ.get("DIMOS_MUJOCO_DOF", "29"))
 _scene_mesh_path_override = os.environ.get("DIMOS_SCENE_MESH_PATH") or None
 _scene_mesh_path = _scene_mesh_path_override or (
@@ -97,6 +98,7 @@ _scene_mesh_rotation = _env_xyz("DIMOS_SCENE_MESH_ROTATION_ZYX_DEG", (0.0, 0.0, 
 _scene_mesh_translation = _env_xyz("DIMOS_SCENE_MESH_TRANSLATION", (0.0, 0.0, 0.0))
 _scene_mesh_collision = _env_bool("DIMOS_SCENE_MESH_COLLISION", True)
 _scene_mesh_visual = _env_bool("DIMOS_SCENE_MESH_VISUAL", False)
+_scene_mesh_bake = _env_bool("DIMOS_SCENE_MESH_BAKE", False)
 _enable_depth_cloud = _env_bool("DIMOS_ENABLE_DEPTH_CLOUD", False)
 _disable_lidar = _env_bool("DIMOS_DISABLE_LIDAR", False)
 
@@ -104,22 +106,23 @@ _sim_mjcf_path = _mjcf_path
 if _scene_mesh_path and _scene_mesh_collision:
     try:
         from dimos.simulation.mujoco.mesh_scene import SceneMeshAlignment
-        from dimos.simulation.mujoco.scene_mesh_to_mjcf import bake_scene_mjcf
+        from dimos.simulation.mujoco.scene_mesh_to_mjcf import load_or_bake
 
-        _sim_mjcf_path = str(
-            bake_scene_mjcf(
-                scene_mesh_path=_scene_mesh_path,
-                robot_mjcf_path=_mjcf_path,
-                alignment=SceneMeshAlignment(
-                    scale=_scene_mesh_scale,
-                    rotation_zyx_deg=_scene_mesh_rotation,
-                    translation=_scene_mesh_translation,
-                    y_up=_scene_mesh_y_up,
-                ),
-                meshdir=_mjcf_meshdir,
-                include_visual_mesh=_scene_mesh_visual,
-            )
+        _, _scene_wrapper = load_or_bake(
+            scene_mesh_path=_scene_mesh_path,
+            robot_mjcf_path=_mjcf_path,
+            alignment=SceneMeshAlignment(
+                scale=_scene_mesh_scale,
+                rotation_zyx_deg=_scene_mesh_rotation,
+                translation=_scene_mesh_translation,
+                y_up=_scene_mesh_y_up,
+            ),
+            meshdir=_mjcf_meshdir,
+            include_visual_mesh=_scene_mesh_visual,
+            rebake=_scene_mesh_bake,
         )
+        _scene_mjb_path = _scene_wrapper.with_name("compiled.mjb")
+        _sim_mjcf_path = str(_scene_mjb_path if _scene_mjb_path.exists() else _scene_wrapper)
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "Failed to bake scene mesh into MuJoCo; lidar will only see the base MJCF: %s",

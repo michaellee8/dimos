@@ -107,6 +107,8 @@ class MujocoEngine(SimulationEngine):
         self._control_frequency = 1.0 / timestep if timestep > 0.0 else 100.0
         self._root_free_qpos_adr: int | None = None
         self._root_free_qvel_adr: int | None = None
+        self._root_kinematic_pose: tuple[float, float, float] | None = None
+        self._scene_body_ids = self._collect_body_ids("dimos_scene")
         free_joint = int(mujoco.mjtJoint.mjJNT_FREE)  # type: ignore[attr-defined]
         for joint_id in range(self._model.njnt):
             if self._model.jnt_type[joint_id] == free_joint:
@@ -143,10 +145,13 @@ class MujocoEngine(SimulationEngine):
         resolved = config_path.expanduser()
         xml_path = resolved / "scene.xml" if resolved.is_dir() else resolved
         if not xml_path.exists():
-            raise FileNotFoundError(f"MuJoCo XML not found: {xml_path}")
+            raise FileNotFoundError(f"MuJoCo model not found: {xml_path}")
         return xml_path
 
     def _load_model(self, xml_path: Path, *, meshdir: str | Path | None) -> mujoco.MjModel:
+        if xml_path.suffix.lower() == ".mjb":
+            return mujoco.MjModel.from_binary_path(str(xml_path))
+
         if meshdir is None:
             return mujoco.MjModel.from_xml_path(str(xml_path))
 
@@ -173,6 +178,46 @@ class MujocoEngine(SimulationEngine):
         if mapping.actuator_id is not None:
             return float(self._data.actuator_length[mapping.actuator_id])
         return 0.0
+
+    def _collect_body_ids(self, root_name: str) -> set[int]:
+        root_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, root_name)
+        if root_id < 0:
+            return set()
+        body_ids = {root_id}
+        changed = True
+        while changed:
+            changed = False
+            for body_id in range(self._model.nbody):
+                parent_id = int(self._model.body_parentid[body_id])
+                if parent_id in body_ids and body_id not in body_ids:
+                    body_ids.add(body_id)
+                    changed = True
+        return body_ids
+
+    def _is_scene_geom(self, geom_id: int) -> bool:
+        if geom_id < 0 or not self._scene_body_ids:
+            return False
+        return int(self._model.geom_bodyid[geom_id]) in self._scene_body_ids
+
+    def _has_blocking_scene_contact(self) -> bool:
+        """Return true for non-floor contacts between robot and baked scene."""
+        if not self._scene_body_ids:
+            return False
+        for contact_idx in range(self._data.ncon):
+            contact = self._data.contact[contact_idx]
+            geom1 = int(contact.geom1)
+            geom2 = int(contact.geom2)
+            geom1_is_scene = self._is_scene_geom(geom1)
+            geom2_is_scene = self._is_scene_geom(geom2)
+            if geom1_is_scene == geom2_is_scene:
+                continue
+            if float(contact.dist) > 1e-4:
+                continue
+            normal = contact.frame[:3]
+            if abs(float(normal[2])) > 0.75:
+                continue
+            return True
+        return False
 
     def _apply_control(self) -> None:
         with self._lock:
@@ -489,7 +534,13 @@ class MujocoEngine(SimulationEngine):
         *,
         fixed_z: float | None = None,
     ) -> bool:
-        """Integrate planar velocity onto the first freejoint root."""
+        """Integrate planar velocity onto the first freejoint root.
+
+        The root is treated as kinematic once this method is used: we
+        maintain an internal desired x/y/yaw and write it back every tick.
+        That prevents contact impulses or gravity settling from slowly
+        walking the floating base when the commanded twist is zero.
+        """
         qpos_adr = self._root_free_qpos_adr
         if qpos_adr is None:
             return False
@@ -497,24 +548,48 @@ class MujocoEngine(SimulationEngine):
         dt = 1.0 / self._control_frequency
         with self._lock:
             qpos = self._data.qpos
-            qw, qx, qy, qz = qpos[qpos_adr + 3 : qpos_adr + 7]
-            yaw = math.atan2(
-                2.0 * (qw * qz + qx * qy),
-                1.0 - 2.0 * (qy * qy + qz * qz),
-            )
+            if self._root_kinematic_pose is None:
+                qw, qx, qy, qz = qpos[qpos_adr + 3 : qpos_adr + 7]
+                yaw = math.atan2(
+                    2.0 * (qw * qz + qx * qy),
+                    1.0 - 2.0 * (qy * qy + qz * qz),
+                )
+                self._root_kinematic_pose = (
+                    float(qpos[qpos_adr]),
+                    float(qpos[qpos_adr + 1]),
+                    yaw,
+                )
 
-            qpos[qpos_adr] += (math.cos(yaw) * linear_x - math.sin(yaw) * linear_y) * dt
-            qpos[qpos_adr + 1] += (math.sin(yaw) * linear_x + math.cos(yaw) * linear_y) * dt
+            old_x, old_y, old_yaw = self._root_kinematic_pose
+            new_x = old_x + (math.cos(old_yaw) * linear_x - math.sin(old_yaw) * linear_y) * dt
+            new_y = old_y + (math.sin(old_yaw) * linear_x + math.cos(old_yaw) * linear_y) * dt
+            new_yaw = old_yaw + angular_z * dt
+
+            qpos[qpos_adr] = new_x
+            qpos[qpos_adr + 1] = new_y
             if fixed_z is not None:
                 qpos[qpos_adr + 2] = fixed_z
 
-            yaw += angular_z * dt
             qpos[qpos_adr + 3 : qpos_adr + 7] = [
-                math.cos(yaw * 0.5),
+                math.cos(new_yaw * 0.5),
                 0.0,
                 0.0,
-                math.sin(yaw * 0.5),
+                math.sin(new_yaw * 0.5),
             ]
+            mujoco.mj_forward(self._model, self._data)
+
+            if self._has_blocking_scene_contact():
+                qpos[qpos_adr] = old_x
+                qpos[qpos_adr + 1] = old_y
+                qpos[qpos_adr + 3 : qpos_adr + 7] = [
+                    math.cos(old_yaw * 0.5),
+                    0.0,
+                    0.0,
+                    math.sin(old_yaw * 0.5),
+                ]
+                mujoco.mj_forward(self._model, self._data)
+            else:
+                self._root_kinematic_pose = (new_x, new_y, new_yaw)
 
             qvel_adr = self._root_free_qvel_adr
             if qvel_adr is not None:
