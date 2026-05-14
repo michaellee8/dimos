@@ -211,6 +211,47 @@ def create_nav_stack(
     return autoconnect(*modules).remappings(remappings)
 
 
+_RTAB_FOCUS_HIDE: tuple[str, ...] = (
+    "world/sensor_scan",
+    "world/terrain_map",
+    "world/terrain_map_ext",
+    "world/global_map",  # raw terrain/global_map from terrain analysis
+    "world/global_map_fastlio",
+    "world/registered_scan",
+    "world/explored_areas",
+    "world/preloaded_map",
+    "world/way_point",
+    "world/goal",
+    "world/goal_path",
+    "world/nav_boundary",
+    "world/contour_polygons",
+    "world/graph_nodes",
+    "world/graph_edges",
+    "world/obstacle_cloud",
+    "world/costmap_cloud",
+    "world/free_paths",
+    "world/path",
+)
+
+
+def _apply_rtab_focus(visual_override: dict[str, Any]) -> None:
+    """Hide nav-stack visual layers except RtabMap's own outputs + trajectory.
+
+    Pattern for any future focus mode: a `_<NAME>_HIDE` tuple of entities
+    to suppress, plus explicit `setdefault` calls for the entities to
+    keep. setdefault means the caller can still override an entry by
+    passing it in the incoming ``user_config["visual_override"]``.
+    """
+    for hidden in _RTAB_FOCUS_HIDE:
+        visual_override.setdefault(hidden, _hide)
+    # RtabMap's `global_map` Out gets remapped to topic `global_map_slam`
+    # by create_nav_stack — that's the dense rtab cloud we want to see.
+    visual_override.setdefault("world/global_map_slam", _global_map_colors)
+    visual_override.setdefault("world/octomap", _global_map_colors)
+    visual_override.setdefault("world/projected_2d_grid", _global_map_colors)
+    visual_override.setdefault("world/trajectory", _trajectory_colors)
+
+
 def nav_stack_rerun_config(
     user_config: dict[str, Any] | None = None,
     *,
@@ -226,10 +267,12 @@ def nav_stack_rerun_config(
 
     Use ``vis_throttle`` (make smaller) if there is crashing related to Rerun/Dimos-Viewer.
 
-    ``rtab_focus`` is a temporary debugging flag: hide everything except
-    the RTAB OctoMap output, the 2D projection, the robot base box, and
-    the trajectory. Useful for visually validating that the RtabMap
-    native module is actually populating its outputs end-to-end.
+    ``rtab_focus`` is a debug visualization mode: hide every nav-stack
+    layer except RtabMap's own outputs (``global_map_slam``, ``octomap``,
+    ``projected_2d_grid``) plus the trajectory + the robot. Useful for
+    visually validating that the RtabMap native module is actually
+    populating its outputs end-to-end. See :func:`_apply_rtab_focus` for
+    the pattern; add more focus modes the same way.
     """
     resolved = dict(user_config or {})
     if vis_throttle != 1.0 and "max_hz" in resolved:
@@ -242,42 +285,7 @@ def nav_stack_rerun_config(
     resolved.setdefault("static", {})
     visual_override = dict(resolved["visual_override"])
     if rtab_focus:
-        # Hide every nav-stack visual layer except RTAB-Map's own outputs
-        # and the trajectory/robot, so we can eyeball whether the OctoMap
-        # is actually being built. The robot's base box is configured at
-        # the blueprint level (not here), so it stays visible naturally.
-        for hidden in (
-            "world/sensor_scan",
-            "world/terrain_map",
-            "world/terrain_map_ext",
-            "world/global_map",  # raw terrain/global_map from terrain analysis
-            # NOTE: world/global_map_slam is the RtabMap remapped global_map
-            # output — leave it visible.
-            "world/global_map_fastlio",
-            "world/registered_scan",
-            "world/explored_areas",
-            "world/preloaded_map",
-            "world/way_point",
-            "world/goal",
-            "world/goal_path",
-            "world/nav_boundary",
-            "world/contour_polygons",
-            "world/graph_nodes",
-            "world/graph_edges",
-            "world/obstacle_cloud",
-            "world/costmap_cloud",
-            "world/free_paths",
-            "world/path",
-        ):
-            visual_override.setdefault(hidden, _hide)
-        # Keep these on (the actual RTAB outputs + robot trajectory).
-        # RtabMap's `global_map` Out gets remapped to topic `global_map_slam`
-        # by create_nav_stack (the topic name is shared with PGO so the rest
-        # of the stack doesn't have to know who the SLAM provider is).
-        visual_override.setdefault("world/global_map_slam", _global_map_colors)
-        visual_override.setdefault("world/octomap", _global_map_colors)
-        visual_override.setdefault("world/projected_2d_grid", _global_map_colors)
-        visual_override.setdefault("world/trajectory", _trajectory_colors)
+        _apply_rtab_focus(visual_override)
     else:
         visual_override.setdefault("world/sensor_scan", _sensor_scan_colors)
         visual_override.setdefault("world/terrain_map", _terrain_map_colors)
