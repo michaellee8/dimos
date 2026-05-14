@@ -256,6 +256,7 @@ sim = [
     "pygame>=2.6.1",
     "trimesh",
     "usd-core>=24.0",
+    "vhacdx",
 ]
 
 navigation = [
