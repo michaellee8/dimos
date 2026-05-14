@@ -170,8 +170,8 @@ class MujocoEngine(SimulationEngine):
     @staticmethod
     def _load_binary_model(model_path: Path) -> mujoco.MjModel:
         load_binary_model = cast(
-            Callable[[str], mujoco.MjModel],
-            getattr(mujoco.MjModel, "from_binary_path"),
+            "Callable[[str], mujoco.MjModel]",
+            mujoco.MjModel.from_binary_path,
         )
         return load_binary_model(str(model_path))
 

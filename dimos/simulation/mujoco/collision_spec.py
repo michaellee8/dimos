@@ -41,12 +41,11 @@ include for the prim.
 
 from __future__ import annotations
 
-from typing import Any, Literal
-
 from dataclasses import dataclass, field
 import fnmatch
 import json
 from pathlib import Path
+from typing import Any, Literal
 
 import numpy as np
 from scipy.spatial import ConvexHull, QhullError  # type: ignore[import-untyped]

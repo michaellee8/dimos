@@ -354,12 +354,12 @@ def load_or_bake(
     scene_mesh_path = _resolve_existing_file(scene_mesh_path, "scene mesh")
     robot_mjcf_path = _resolve_existing_file(robot_mjcf_path, "robot MJCF")
     load_binary_model = cast(
-        Callable[[str], Any],
-        getattr(mujoco.MjModel, "from_binary_path"),
+        "Callable[[str], Any]",
+        mujoco.MjModel.from_binary_path,
     )
     save_model = cast(
-        Callable[[Any, str], None],
-        getattr(mujoco, "mj_saveModel"),
+        "Callable[[Any, str], None]",
+        mujoco.mj_saveModel,
     )
 
     if not rebake:
