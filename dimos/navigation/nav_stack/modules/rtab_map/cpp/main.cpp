@@ -179,6 +179,56 @@ private:
     double latest_odom_ts_ = 0.0;
 };
 
+struct CachedWorldCloud {
+    rtabmap::Transform pose;
+    CloudType::Ptr cloud;
+};
+
+// Drop entries whose ids are no longer in the optimized pose set, and add /
+// refresh entries whose pose has changed (loop closures shift poses) or that
+// haven't been transformed yet. Each scan is transformed at most once per
+// pose update — replaces the prior O(total_scans * points_per_scan) rebuild.
+void update_world_cloud_cache(
+    const rtabmap::Memory& memory,
+    const std::map<int, rtabmap::Transform>& opt_poses,
+    std::map<int, CachedWorldCloud>& cache) {
+    for (auto it = cache.begin(); it != cache.end();) {
+        if (opt_poses.find(it->first) == opt_poses.end()) {
+            it = cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (const auto& kv : opt_poses) {
+        auto it = cache.find(kv.first);
+        const bool needs_update = it == cache.end() || !(it->second.pose == kv.second);
+        if (!needs_update) continue;
+
+        const rtabmap::Signature* s = memory.getSignature(kv.first);
+        if (!s) continue;
+        const rtabmap::LaserScan& ls = s->sensorData().laserScanRaw();
+        if (ls.empty()) continue;
+
+        const cv::Mat& m = ls.data();
+        const int channels = m.channels();
+        CloudType::Ptr body(new CloudType);
+        body->resize(m.cols);
+        for (int i = 0; i < m.cols; ++i) {
+            const float* p = m.ptr<float>(0) + i * channels;
+            (*body)[i].x = p[0];
+            (*body)[i].y = p[1];
+            (*body)[i].z = p[2];
+            (*body)[i].intensity = channels >= 4 ? p[3] : 0.0f;
+        }
+
+        CloudType::Ptr world(new CloudType);
+        Eigen::Affine3f t(kv.second.toEigen4f());
+        pcl::transformPointCloud(*body, *world, t);
+
+        cache[kv.first] = CachedWorldCloud{kv.second, world};
+    }
+}
+
 cv::Mat scan_to_cv_mat(const CloudType& cloud) {
     cv::Mat m(1, static_cast<int>(cloud.size()), CV_32FC4);
     for (size_t i = 0; i < cloud.size(); ++i) {
@@ -302,6 +352,7 @@ int main(int argc, char** argv) {
     double last_global_map_publish = 0.0;
     int frame_id = 0;
     const int timer_period_ms = 30;
+    std::map<int, CachedWorldCloud> world_cloud_cache;
 
     while (g_running.load()) {
         // Block waiting for at least one LCM event (or shutdown). When a scan
@@ -418,47 +469,27 @@ int main(int argc, char** argv) {
                 lcm, proj2d_topic, proj_points, world_frame, frame.timestamp);
         }
 
-        // Publish accumulated global cloud (throttled). Built from optimized
-        // signatures' body-frame clouds transformed into the map frame.
+        // Publish accumulated global cloud (throttled).
+        //
+        // Built from per-signature world-frame caches: each signature's body
+        // scan gets transformed once when its pose first appears (and again
+        // only when a loop closure shifts that pose). The previous version
+        // re-transformed every scan on every publish, which was O(N*S) per
+        // tick and tanked perf on long runs.
         if (frame.timestamp - last_global_map_publish >= global_map_publish_period) {
             last_global_map_publish = frame.timestamp;
 
-            CloudType::Ptr global_cloud(new CloudType);
             if (rtab.getMemory()) {
-                for (const auto& kv : opt_poses) {
-                    const rtabmap::Signature* s =
-                        rtab.getMemory()->getSignature(kv.first);
-                    if (!s) continue;
-                    const rtabmap::LaserScan& ls = s->sensorData().laserScanRaw();
-                    if (ls.empty()) continue;
-
-                    Eigen::Affine3f t;
-                    t.translation() << kv.second.x(), kv.second.y(), kv.second.z();
-                    Eigen::Matrix3f r;
-                    r << kv.second.r11(), kv.second.r12(), kv.second.r13(),
-                         kv.second.r21(), kv.second.r22(), kv.second.r23(),
-                         kv.second.r31(), kv.second.r32(), kv.second.r33();
-                    t.linear() = r;
-
-                    // Pull XYZ out of the scan cv::Mat and transform.
-                    const cv::Mat& m = ls.data();
-                    int channels = m.channels();
-                    CloudType::Ptr body(new CloudType);
-                    body->resize(m.cols);
-                    for (int i = 0; i < m.cols; ++i) {
-                        const float* p = m.ptr<float>(0) + i * channels;
-                        (*body)[i].x = p[0];
-                        (*body)[i].y = p[1];
-                        (*body)[i].z = p[2];
-                        (*body)[i].intensity = channels >= 4 ? p[3] : 0.0f;
-                    }
-                    CloudType::Ptr world(new CloudType);
-                    pcl::transformPointCloud(*body, *world, t);
-                    *global_cloud += *world;
-                }
+                update_world_cloud_cache(*rtab.getMemory(), opt_poses, world_cloud_cache);
             }
 
-            // Voxel downsample for size sanity.
+            CloudType::Ptr global_cloud(new CloudType);
+            for (const auto& kv : opt_poses) {
+                auto it = world_cloud_cache.find(kv.first);
+                if (it == world_cloud_cache.end()) continue;
+                *global_cloud += *(it->second.cloud);
+            }
+
             float voxel = static_cast<float>(std::stod(mod.arg("global_map_voxel_size", "0.15")));
             if (!global_cloud->empty() && voxel > 0) {
                 CloudType::Ptr filtered(new CloudType);
