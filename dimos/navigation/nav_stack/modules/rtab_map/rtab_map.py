@@ -137,8 +137,15 @@ class RtabMapConfig(NativeModuleConfig):
     # scans contributing — they persist. Cells whose only supporting
     # scans rolled off the window get evicted regardless of whether a
     # clearing ray ever passed through them.
-    octomap_max_age_seconds: float = 30.0
-    octomap_rebuild_period: float = 5.0
+    #
+    # Worst-case ghost-clear latency = max_age + rebuild_period. With
+    # the defaults below that's ~6 s. The Mid360 has 360° horizontal
+    # FoV so walls in any direction get hit every scan and stay solidly
+    # in the window even at 5 s. Caller can crank max_age up for
+    # stable long-term mapping, or down (e.g. 2 s) for near-instant
+    # decay of anything not currently in view.
+    octomap_max_age_seconds: float = 5.0
+    octomap_rebuild_period: float = 1.0
 
     # Input handling.
     # Input scans arrive in the world (map) frame; the binary undoes the

@@ -411,9 +411,9 @@ int main(int argc, char** argv) {
     const double octomap_publish_period = std::stod(mod.arg("octomap_publish_period", "0.3"));
     const double global_map_publish_period = std::stod(mod.arg("global_map_publish_period", "0.5"));
     const double octomap_max_age_seconds =
-        std::stod(mod.arg("octomap_max_age_seconds", "30.0"));
+        std::stod(mod.arg("octomap_max_age_seconds", "5.0"));
     const double octomap_rebuild_period =
-        std::stod(mod.arg("octomap_rebuild_period", "5.0"));
+        std::stod(mod.arg("octomap_rebuild_period", "1.0"));
 
     double last_octomap_publish = 0.0;
     double last_global_map_publish = 0.0;
