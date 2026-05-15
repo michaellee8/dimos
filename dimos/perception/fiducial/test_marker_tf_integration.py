@@ -20,25 +20,18 @@ imported from ``marker_tf_module`` except ``deploy`` (the package entrypoint
 under test). A flat synthetic marker image keeps detection reliable; depth is
 whatever ``solvePnP`` recovers for that view, and we assert the running module
 matches that same OpenCV reference on the same pixels.
-
-Marked ``slow``. Run with::
-
-    uv run pytest dimos/perception/fiducial/test_marker_tf_integration.py -m slow -v --import-mode=prepend
 """
 
 from __future__ import annotations
 
 import time
+from typing import cast
 
 import cv2
 import numpy as np
-import pytest
 from scipy.spatial.transform import Rotation as SciRotation
 
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
-from dimos.core.core import rpc
-from dimos.core.module import Module
-from dimos.core.stream import Out
 from dimos.core.transport import LCMTransport
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
@@ -46,7 +39,9 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.perception.fiducial.marker_tf_module import deploy
+from dimos.perception.fiducial.testing.manual_frame_camera import ManualFrameCameraModule
 from dimos.protocol.tf.tf import LCMTF
+from dimos.spec.perception import Camera
 
 
 def _marker_square_object_points_m(marker_length_m: float) -> np.ndarray:
@@ -112,27 +107,6 @@ def _synthetic_flat_marker_bgr(marker_id: int = 0) -> np.ndarray:
     return cv2.cvtColor(canvas, cv2.COLOR_GRAY2BGR)
 
 
-class ArucoTestCameraModule(Module):
-    """Minimal camera source for integration tests (picklable top-level class)."""
-
-    color_image: Out[Image]
-    camera_info: Out[CameraInfo]
-
-    @rpc
-    def start(self) -> None:
-        super().start()
-
-    @rpc
-    def stop(self) -> None:
-        super().stop()
-
-    @rpc
-    def publish_frame(self, image: Image, info: CameraInfo) -> None:
-        self.camera_info.publish(info)
-        self.color_image.publish(image)
-
-
-@pytest.mark.slow
 def test_marker_tf_deploy_lcm_tf_integration() -> None:
     """Exercise deployed ``MarkerTfModule``; oracle = OpenCV solvePnP + NumPy SE3."""
     height, width = 480, 640
@@ -196,7 +170,7 @@ def test_marker_tf_deploy_lcm_tf_integration() -> None:
     coord.start()
     host_tf = LCMTF()
     try:
-        cam = coord.deploy(ArucoTestCameraModule)
+        cam = coord.deploy(ManualFrameCameraModule)
         cam.color_image.transport = LCMTransport(
             "/integration_marker_tf/color_image",
             Image,
@@ -208,7 +182,7 @@ def test_marker_tf_deploy_lcm_tf_integration() -> None:
 
         deploy(
             coord,
-            cam,
+            cast(Camera, cam),  # noqa: TC006
             prefix="/marker_tf",
             marker_length_m=marker_length_m,
             max_freq=60.0,
