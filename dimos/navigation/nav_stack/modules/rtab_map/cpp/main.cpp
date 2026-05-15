@@ -16,16 +16,11 @@
 // Grid/MaxGroundAngle=45, Grid/CellSize=0.1, Grid/GroundIsObstacle=false.
 
 #include <atomic>
-#include <chrono>
 #include <cstdio>
-#include <cstring>
-#include <deque>
-#include <memory>
 #include <mutex>
 #include <queue>
 #include <signal.h>
 #include <string>
-#include <thread>
 
 #include <Eigen/Geometry>
 #include <lcm/lcm-cpp.hpp>
@@ -33,16 +28,13 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/common/transforms.h>
-#include <pcl/filters/voxel_grid.h>
 
 #include <rtabmap/core/LaserScan.h>
 #include <rtabmap/core/LocalGrid.h>
 #include <rtabmap/core/LocalGridMaker.h>
-#include <rtabmap/core/Memory.h>
 #include <rtabmap/core/Parameters.h>
 #include <rtabmap/core/Rtabmap.h>
 #include <rtabmap/core/SensorData.h>
-#include <rtabmap/core/Signature.h>
 #include <rtabmap/core/Transform.h>
 #include <rtabmap/core/global_map/OctoMap.h>
 
@@ -225,56 +217,6 @@ private:
     int scan_drops_ = 0;
 };
 
-struct CachedWorldCloud {
-    rtabmap::Transform pose;
-    CloudType::Ptr cloud;
-};
-
-// Drop entries whose ids are no longer in the optimized pose set, and add /
-// refresh entries whose pose has changed (loop closures shift poses) or that
-// haven't been transformed yet. Each scan is transformed at most once per
-// pose update — replaces the prior O(total_scans * points_per_scan) rebuild.
-void update_world_cloud_cache(
-    const rtabmap::Memory& memory,
-    const std::map<int, rtabmap::Transform>& opt_poses,
-    std::map<int, CachedWorldCloud>& cache) {
-    for (auto it = cache.begin(); it != cache.end();) {
-        if (opt_poses.find(it->first) == opt_poses.end()) {
-            it = cache.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    for (const auto& kv : opt_poses) {
-        auto it = cache.find(kv.first);
-        const bool needs_update = it == cache.end() || !(it->second.pose == kv.second);
-        if (!needs_update) continue;
-
-        const rtabmap::Signature* s = memory.getSignature(kv.first);
-        if (!s) continue;
-        const rtabmap::LaserScan& ls = s->sensorData().laserScanRaw();
-        if (ls.empty()) continue;
-
-        const cv::Mat& m = ls.data();
-        const int channels = m.channels();
-        CloudType::Ptr body(new CloudType);
-        body->resize(m.cols);
-        for (int i = 0; i < m.cols; ++i) {
-            const float* p = m.ptr<float>(0) + i * channels;
-            (*body)[i].x = p[0];
-            (*body)[i].y = p[1];
-            (*body)[i].z = p[2];
-            (*body)[i].intensity = channels >= 4 ? p[3] : 0.0f;
-        }
-
-        CloudType::Ptr world(new CloudType);
-        Eigen::Affine3f t(kv.second.toEigen4f());
-        pcl::transformPointCloud(*body, *world, t);
-
-        cache[kv.first] = CachedWorldCloud{kv.second, world};
-    }
-}
-
 cv::Mat scan_to_cv_mat(const CloudType& cloud) {
     cv::Mat m(1, static_cast<int>(cloud.size()), CV_32FC4);
     for (size_t i = 0; i < cloud.size(); ++i) {
@@ -378,18 +320,24 @@ int main(int argc, char** argv) {
     rtabmap::Rtabmap rtab;
     rtab.init(params);
 
-    // Two separate caches + OctoMap:
-    // - `keyframe_grid_cache` accumulates every keyframe's local grid; the
-    //   global_map cloud built from `world_cloud_cache` references the
-    //   same keyframe scans and benefits from loop-closure-corrected poses.
-    // - `transient_grid_cache` is rebuilt every frame from a rolling
-    //   window of the last N scans (any scans, keyframe or not). The
-    //   OctoMap derived from it represents "the world the robot is
-    //   seeing right now, fading out over ~window seconds" — a person
-    //   walking past appears in front of the robot and the rays from
-    //   the next scan clear out the trail behind them.
-    rtabmap::LocalGridCache keyframe_grid_cache;
-    rtabmap::LocalGridCache transient_grid_cache;
+    // Single persistent global OctoMap. Every scan's local grid is added
+    // with a monotonically increasing id, so OctoMap's internal log-odds
+    // accumulator handles both occupancy AND clearing:
+    //   - Cells hit repeatedly accumulate +log-odds (saturated occupied).
+    //   - When something moves out of view (chair rolls away), the empty
+    //     cells produced by LocalGridMaker for subsequent scans pass
+    //     through that location → -log-odds → eventually flips to free.
+    //
+    // We snapshot `mapCorrection * odom_pose` once per scan at capture
+    // time. That pose never updates afterward, so OctoMap's
+    // fullUpdateNeeded never fires and we don't pay full rebuild cost on
+    // every loop closure. Trade-off: octomap drifts slightly relative to
+    // current rtabmap state, but on minute-scale operation drift is well
+    // within the cell size.
+    rtabmap::LocalGridCache global_grid_cache;
+    rtabmap::OctoMap global_octomap(&global_grid_cache, params);
+    std::map<int, rtabmap::Transform> octomap_poses;
+    int octomap_next_id = 1;
     rtabmap::LocalGridMaker grid_maker(params);
 
     lcm::LCM lcm;
@@ -426,29 +374,6 @@ int main(int argc, char** argv) {
     double last_global_map_publish = 0.0;
     int frame_id = 0;
     const int timer_period_ms = 30;
-    std::map<int, CachedWorldCloud> world_cloud_cache;
-
-    // Rolling window for the dynamic OctoMap. Each frame appends one
-    // entry; older entries fall off the front. The OctoMap is rebuilt
-    // from this window every frame so anything that drops out actually
-    // disappears from the published map — no permanent trails behind
-    // moving objects.
-    struct RollingScan {
-        int id;
-        rtabmap::Transform pose;
-        cv::Mat ground;
-        cv::Mat obstacles;
-        cv::Mat empty;
-        cv::Point3f view_point;
-        float cell_size;
-    };
-    std::deque<RollingScan> rolling_window;
-    // rtabmap's OctoMap assemble path indexes by id internally and some
-    // checks bail on non-positive ids. Use a high base (1e9) for these
-    // transient/non-keyframe ids so they don't collide with rtabmap's
-    // own signature ids (which start at 1).
-    int rolling_id = 1'000'000'000;
-    const int rolling_window_size = mod.arg_int("rolling_window_size", 10);
 
     while (g_running.load()) {
         // Block waiting for at least one LCM event (or shutdown). When a scan
@@ -496,60 +421,22 @@ int main(int argc, char** argv) {
             laser_scan, frame.odom_pose, ground, obstacles, empty, view_point);
         const float cell_size = grid_maker.getCellSize();
 
-        // Keyframe scans: archive into the keyframe cache too, so the
-        // accumulated `global_map` cloud benefits from loop-closure
-        // pose corrections.
-        if (processed && rtab.getMemory()
-            && rtab.getMemory()->getLastWorkingSignature()
-            && (!ground.empty() || !obstacles.empty() || !empty.empty())) {
-            int kf_id = rtab.getMemory()->getLastWorkingSignature()->id();
-            keyframe_grid_cache.add(
-                kf_id, ground, obstacles, empty, cell_size, view_point);
-        }
-
-        // Push the latest scan onto the rolling window used to drive the
-        // dynamic OctoMap. Pop the oldest if we've exceeded the window
-        // size. Pose is corrected (mapCorrection * raw_odom) so the
-        // window stays consistent with whatever loop-closure shifts have
-        // accumulated.
+        // Add the scan's local grid to the global cache with a fresh
+        // monotonically-increasing id. Pose is `mapCorrection *
+        // odom_pose` at capture time and frozen — we deliberately do not
+        // re-stamp old scans with updated corrections, which would force
+        // OctoMap's fullUpdateNeeded → clear-and-rebuild path on every
+        // loop closure.
         if (!ground.empty() || !obstacles.empty() || !empty.empty()) {
-            rolling_window.push_back(RollingScan{
-                ++rolling_id,
-                rtab.getMapCorrection() * frame.odom_pose,
-                ground, obstacles, empty, view_point, cell_size,
-            });
-            while (static_cast<int>(rolling_window.size()) > rolling_window_size) {
-                rolling_window.pop_front();
-            }
+            int id = octomap_next_id++;
+            global_grid_cache.add(id, ground, obstacles, empty, cell_size, view_point);
+            octomap_poses[id] = rtab.getMapCorrection() * frame.odom_pose;
         }
         if (debug) {
             fprintf(stderr,
-                    "[rtab DEBUG]   localmap kf=%d g=%d o=%d e=%d cellSize=%.3f kf_cache=%zu window=%zu\n",
+                    "[rtab DEBUG]   localmap kf=%d g=%d o=%d e=%d cellSize=%.3f cache=%zu\n",
                     processed ? 1 : 0, ground.cols, obstacles.cols, empty.cols,
-                    cell_size, keyframe_grid_cache.size(), rolling_window.size());
-        }
-
-        // Rebuild the dynamic OctoMap from the current rolling window
-        // every frame. Anything that's fallen off the front of the window
-        // disappears from the published map this frame — that's what
-        // gives us "person walks past, no permanent trail."
-        //
-        // We rebuild a fresh OctoMap object rather than calling clear()
-        // on a persistent one: rtabmap's OctoMap.clear() resets the
-        // assembled-node tracker but the underlying octree's log-odds
-        // state isn't always wiped. A fresh instance is a no-cache,
-        // no-residual-state guarantee.
-        std::unique_ptr<rtabmap::OctoMap> octomap;
-        if (!rolling_window.empty()) {
-            transient_grid_cache.clear();
-            std::map<int, rtabmap::Transform> rolling_poses;
-            for (const auto& s : rolling_window) {
-                transient_grid_cache.add(
-                    s.id, s.ground, s.obstacles, s.empty, s.cell_size, s.view_point);
-                rolling_poses[s.id] = s.pose;
-            }
-            octomap = std::make_unique<rtabmap::OctoMap>(&transient_grid_cache, params);
-            octomap->update(rolling_poses);
+                    cell_size, global_grid_cache.size());
         }
 
         // Publish corrected odometry and map->odom correction every frame.
@@ -564,13 +451,27 @@ int main(int argc, char** argv) {
             correction, frame.timestamp, world_frame, local_frame);
         lcm.publish(tf_topic, &tf_msg);
 
+        // Periodically integrate pending scans into the global OctoMap.
+        // OctoMap::update only processes ids it hasn't seen, so calling
+        // this with the accumulated poses map cheaply picks up everything
+        // added since last call. We gate on the octomap publish period so
+        // we batch multiple scans per update instead of paying the
+        // per-cell octree-write cost on every frame.
+        bool octomap_due =
+            frame.timestamp - last_octomap_publish >= octomap_publish_period;
+        bool global_map_due =
+            frame.timestamp - last_global_map_publish >= global_map_publish_period;
+        if ((octomap_due || global_map_due) && !octomap_poses.empty()) {
+            global_octomap.update(octomap_poses);
+        }
+
         // Publish OctoMap-derived outputs (throttled).
-        if (octomap && frame.timestamp - last_octomap_publish >= octomap_publish_period) {
+        if (octomap_due && !octomap_poses.empty()) {
             last_octomap_publish = frame.timestamp;
 
             // Occupied voxels.
             std::vector<int> obstacleIndices;
-            auto cloud = octomap->createCloud(
+            auto cloud = global_octomap.createCloud(
                 /*treeDepth=*/0, &obstacleIndices, nullptr, nullptr);
             std::vector<smartnav::PointXYZI> octo_points;
             if (cloud) {
@@ -588,7 +489,7 @@ int main(int argc, char** argv) {
             // cells to a point cloud at z=0 so downstream consumers can plot
             // it cheaply.
             float xMin = 0, yMin = 0, cellSize = 0;
-            cv::Mat proj = octomap->createProjectionMap(xMin, yMin, cellSize);
+            cv::Mat proj = global_octomap.createProjectionMap(xMin, yMin, cellSize);
             std::vector<smartnav::PointXYZI> proj_points;
             if (!proj.empty() && cellSize > 0) {
                 proj_points.reserve(proj.rows * proj.cols / 8);
@@ -606,52 +507,44 @@ int main(int argc, char** argv) {
                 lcm, proj2d_topic, proj_points, world_frame, frame.timestamp);
             if (debug) {
                 fprintf(stderr,
-                        "[rtab DEBUG] published octomap — voxels=%zu proj2d=%zu\n",
-                        octo_points.size(), proj_points.size());
+                        "[rtab DEBUG] published octomap — voxels=%zu proj2d=%zu poses=%zu\n",
+                        octo_points.size(), proj_points.size(), octomap_poses.size());
             }
         }
 
         // Publish accumulated global cloud (throttled).
         //
-        // Built from per-signature world-frame caches: each signature's body
-        // scan gets transformed once when its pose first appears (and again
-        // only when a loop closure shifts that pose). The previous version
-        // re-transformed every scan on every publish, which was O(N*S) per
-        // tick and tanked perf on long runs.
-        if (frame.timestamp - last_global_map_publish >= global_map_publish_period) {
+        // Same OctoMap as the obstacle topic, but with ground cells
+        // included for a dense visualization. Sharing the OctoMap means
+        // the ray-traced clearing applies to the global map too — when
+        // a chair rolls away, its old hits get probabilistically cleared
+        // by subsequent scans' rays, so no permanent ghost points.
+        if (global_map_due && !octomap_poses.empty()) {
             last_global_map_publish = frame.timestamp;
 
-            const std::map<int, rtabmap::Transform>& opt_poses =
-                rtab.getLocalOptimizedPoses();
-            if (rtab.getMemory()) {
-                update_world_cloud_cache(*rtab.getMemory(), opt_poses, world_cloud_cache);
+            std::vector<int> obstacleIndices;
+            std::vector<int> groundIndices;
+            auto cloud = global_octomap.createCloud(
+                /*treeDepth=*/0, &obstacleIndices, nullptr, &groundIndices);
+            std::vector<smartnav::PointXYZI> gpoints;
+            if (cloud) {
+                gpoints.reserve(obstacleIndices.size() + groundIndices.size());
+                for (int idx : obstacleIndices) {
+                    const auto& pt = cloud->points[idx];
+                    gpoints.push_back({pt.x, pt.y, pt.z, 1.0f});
+                }
+                for (int idx : groundIndices) {
+                    const auto& pt = cloud->points[idx];
+                    gpoints.push_back({pt.x, pt.y, pt.z, 0.0f});
+                }
             }
-
-            CloudType::Ptr global_cloud(new CloudType);
-            for (const auto& kv : opt_poses) {
-                auto it = world_cloud_cache.find(kv.first);
-                if (it == world_cloud_cache.end()) continue;
-                *global_cloud += *(it->second.cloud);
-            }
-
-            float voxel = static_cast<float>(std::stod(mod.arg("global_map_voxel_size", "0.15")));
-            if (!global_cloud->empty() && voxel > 0) {
-                CloudType::Ptr filtered(new CloudType);
-                pcl::VoxelGrid<PointType> vg;
-                vg.setInputCloud(global_cloud);
-                vg.setLeafSize(voxel, voxel, voxel);
-                vg.filter(*filtered);
-                global_cloud = filtered;
-            }
-
-            sensor_msgs::PointCloud2 gmsg =
-                smartnav::from_pcl(*global_cloud, world_frame, frame.timestamp);
-            lcm.publish(global_map_topic, &gmsg);
+            publish_pointcloud(
+                lcm, global_map_topic, gpoints, world_frame, frame.timestamp);
             if (debug) {
                 fprintf(stderr,
-                        "[rtab DEBUG] published global_map — pts=%zu poses=%zu cache=%zu topic=%s\n",
-                        global_cloud->size(), opt_poses.size(), world_cloud_cache.size(),
-                        global_map_topic.c_str());
+                        "[rtab DEBUG] published global_map — obstacles=%zu ground=%zu poses=%zu topic=%s\n",
+                        obstacleIndices.size(), groundIndices.size(),
+                        octomap_poses.size(), global_map_topic.c_str());
             }
         }
     }

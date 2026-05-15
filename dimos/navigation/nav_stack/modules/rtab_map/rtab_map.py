@@ -97,17 +97,14 @@ class RtabMapConfig(NativeModuleConfig):
     # publish events fire and to which topics.
     debug: bool = False
 
-    # Publishing cadence.
+    # Publishing cadence. Each publish triggers
+    # ``OctoMap::update(octomap_poses)`` first, which integrates every
+    # scan accumulated since the last update — so this also controls how
+    # often new scans get baked into the global map. Faster updates =
+    # snappier dynamic-obstacle clearing but more octree write cost.
     octomap_publish_period: float = 0.5
     global_map_publish_period: float = 1.0
     global_map_voxel_size: float = 0.15
-
-    # Size of the rolling scan window used to rebuild the published
-    # OctoMap each frame. Larger = denser dynamic-obstacle map but
-    # heavier per-frame rebuild; smaller = lighter rebuild but more
-    # gaps when the sensor doesn't see the same region twice within
-    # the window. 10 scans ≈ 1 s at 10 Hz scan rate.
-    rolling_window_size: int = 10
 
     # Input handling.
     # Input scans arrive in the world (map) frame; the binary undoes the
