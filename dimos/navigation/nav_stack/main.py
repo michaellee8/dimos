@@ -343,19 +343,8 @@ _AGENTIC_DEBUG_BOUNDARY_LIFT = _AGENTIC_DEBUG_LIFT - 1.0  # boundary below marke
 def _default_rerun_blueprint() -> Any:
     import rerun.blueprint as rrb
 
-    # Top-down camera locked over the world origin. Useful for eyeballing
-    # the OctoMap / global map / trajectory while a SLAM module is running
-    # in sim. Users can still orbit the view manually in the Rerun GUI.
     return rrb.Blueprint(
-        rrb.Spatial3DView(
-            origin="world",
-            name="Top-down",
-            eye_controls=rrb.archetypes.EyeControls3D(
-                position=[0.0, 0.0, 25.0],
-                look_target=[0.0, 0.0, 0.0],
-                eye_up=[0.0, 1.0, 0.0],
-            ),
-        ),
+        rrb.Spatial3DView(origin="world", name="3D"),
     )
 
 
