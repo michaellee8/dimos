@@ -205,6 +205,11 @@ unitree-dds = [
     "cyclonedds>=0.10.5",
 ]
 
+booster = [
+    "dimos[base]",
+    "booster-rpc>=0.0.6",
+]
+
 manipulation = [
     # Planning (Drake)
     "drake==1.45.0; sys_platform == 'darwin' and platform_machine != 'aarch64'",
