@@ -123,6 +123,23 @@ class RtabMapConfig(NativeModuleConfig):
     global_map_publish_period: float = 1.0
     global_map_voxel_size: float = 0.15
 
+    # Time-based eviction window. The persistent OctoMap accumulates
+    # every scan's local grid, so a cell hit even once stays occupied
+    # until a clearing ray happens to pass through it. In practice the
+    # combination of FastLIO2 z-drift (~3 cm over a few minutes) and
+    # the Mid360's non-uniform angular density means some cells never
+    # get a clearing ray and persist as "ghost" obstacles forever
+    # (chair sat there 30 s ago, person walked past 1 min ago, etc.).
+    #
+    # Fix: drop scans older than ``octomap_max_age_seconds`` and rebuild
+    # the OctoMap from the surviving window every ``octomap_rebuild_period``
+    # seconds. Walls that are constantly re-observed always have fresh
+    # scans contributing — they persist. Cells whose only supporting
+    # scans rolled off the window get evicted regardless of whether a
+    # clearing ray ever passed through them.
+    octomap_max_age_seconds: float = 30.0
+    octomap_rebuild_period: float = 5.0
+
     # Input handling.
     # Input scans arrive in the world (map) frame; the binary undoes the
     # current odom transform so rtabmap sees body-frame scans.

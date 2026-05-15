@@ -349,6 +349,19 @@ int main(int argc, char** argv) {
     rtabmap::LocalGridCache global_grid_cache;
     rtabmap::OctoMap global_octomap(&global_grid_cache, params);
     std::map<int, rtabmap::Transform> octomap_poses;
+    // Per-scan captured grid kept in a private copy so we can rebuild
+    // the LocalGridCache after eviction (rtabmap's cache has no
+    // per-id remove). Stores everything OctoMap needs to re-assemble
+    // the scan, plus the capture timestamp used by the eviction window.
+    struct ScanEntry {
+        cv::Mat ground;
+        cv::Mat obstacles;
+        cv::Mat empty;
+        cv::Point3f view_point;
+        float cell_size;
+        double timestamp;
+    };
+    std::map<int, ScanEntry> scan_history;
     int octomap_next_id = 1;
     rtabmap::LocalGridMaker grid_maker(params);
 
@@ -397,9 +410,14 @@ int main(int argc, char** argv) {
     // with hundreds of poses.
     const double octomap_publish_period = std::stod(mod.arg("octomap_publish_period", "0.3"));
     const double global_map_publish_period = std::stod(mod.arg("global_map_publish_period", "0.5"));
+    const double octomap_max_age_seconds =
+        std::stod(mod.arg("octomap_max_age_seconds", "30.0"));
+    const double octomap_rebuild_period =
+        std::stod(mod.arg("octomap_rebuild_period", "5.0"));
 
     double last_octomap_publish = 0.0;
     double last_global_map_publish = 0.0;
+    double last_octomap_rebuild = 0.0;
     int frame_id = 0;
     const int timer_period_ms = 30;
 
@@ -449,22 +467,66 @@ int main(int argc, char** argv) {
             laser_scan, frame.odom_pose, ground, obstacles, empty, view_point);
         const float cell_size = grid_maker.getCellSize();
 
-        // Add the scan's local grid to the global cache with a fresh
-        // monotonically-increasing id. Pose is `mapCorrection *
-        // odom_pose` at capture time and frozen — we deliberately do not
-        // re-stamp old scans with updated corrections, which would force
-        // OctoMap's fullUpdateNeeded → clear-and-rebuild path on every
-        // loop closure.
+        // Add the scan's local grid to the rtabmap cache + our private
+        // history with a fresh monotonically-increasing id. Pose is
+        // `mapCorrection * odom_pose` at capture time and frozen — we
+        // deliberately do not re-stamp old scans with updated corrections,
+        // which would force OctoMap's fullUpdateNeeded → clear-and-rebuild
+        // path on every loop closure.
         if (!ground.empty() || !obstacles.empty() || !empty.empty()) {
             int id = octomap_next_id++;
             global_grid_cache.add(id, ground, obstacles, empty, cell_size, view_point);
             octomap_poses[id] = rtab.getMapCorrection() * frame.odom_pose;
+            scan_history[id] = ScanEntry{
+                ground, obstacles, empty, view_point, cell_size, frame.timestamp,
+            };
         }
         if (debug) {
             fprintf(stderr,
                     "[rtab DEBUG]   localmap kf=%d g=%d o=%d e=%d cellSize=%.3f cache=%zu\n",
                     processed ? 1 : 0, ground.cols, obstacles.cols, empty.cols,
                     cell_size, global_grid_cache.size());
+        }
+
+        // Time-based eviction. Drop scans older than `max_age` and rebuild
+        // the OctoMap from the surviving window. Without this, a cell hit
+        // once stays occupied forever (drift + LiDAR angular gaps mean
+        // many cells never get a clearing ray in subsequent scans). With
+        // this, walls re-observed every scan stay in the map; trails
+        // observed only during a brief walk-past fall out of the window
+        // and disappear after ~max_age seconds.
+        if (frame.timestamp - last_octomap_rebuild >= octomap_rebuild_period
+            && !scan_history.empty()) {
+            last_octomap_rebuild = frame.timestamp;
+            const double cutoff = frame.timestamp - octomap_max_age_seconds;
+            size_t evicted = 0;
+            for (auto it = scan_history.begin(); it != scan_history.end();) {
+                if (it->second.timestamp < cutoff) {
+                    octomap_poses.erase(it->first);
+                    it = scan_history.erase(it);
+                    ++evicted;
+                } else {
+                    ++it;
+                }
+            }
+            if (evicted > 0) {
+                // Wipe both rtabmap's grid cache and the OctoMap's octree
+                // state, then re-add the surviving scans. `update()`
+                // below will re-assemble them.
+                global_grid_cache.clear();
+                global_octomap.clear();
+                for (const auto& kv : scan_history) {
+                    const ScanEntry& e = kv.second;
+                    global_grid_cache.add(
+                        kv.first, e.ground, e.obstacles, e.empty,
+                        e.cell_size, e.view_point);
+                }
+                if (debug) {
+                    fprintf(stderr,
+                            "[rtab DEBUG] evicted %zu scans older than %.1fs; window now %zu scans\n",
+                            evicted, octomap_max_age_seconds, scan_history.size());
+                }
+            }
         }
 
         // Publish corrected odometry and map->odom correction every frame.
