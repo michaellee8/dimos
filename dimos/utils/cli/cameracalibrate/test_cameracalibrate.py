@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import os
-from pathlib import Path
 import re
 import tempfile
 from unittest.mock import MagicMock
