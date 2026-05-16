@@ -63,11 +63,6 @@ QUATERNION_UNIT_TOL = 0.05
 TRANSLATION_MAX_M = 100.0
 
 
-# ---------------------------------------------------------------------------
-# Modules
-# ---------------------------------------------------------------------------
-
-
 class RosbagScanOdomPlaybackConfig(ModuleConfig):
     rosbag_path: str | None = None
     odom_subsample: int = 4
@@ -171,11 +166,6 @@ class LoopClosureRecorderModule(Module):
         return list(self._events)
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-
 def _message_to_dict(message: NavPath) -> dict[str, Any]:
     """JSON-friendly snapshot of a NavPath — Pydantic-friendly RPC return."""
     return {
@@ -253,11 +243,6 @@ def _validate_loop_closure_event(event: dict[str, Any], event_index: int) -> tup
         max_quaternion_drift = max(max_quaternion_drift, quaternion_drift)
 
     return max_translation_norm, max_quaternion_drift
-
-
-# ---------------------------------------------------------------------------
-# Test
-# ---------------------------------------------------------------------------
 
 
 class TestPGOLoopClosure:
