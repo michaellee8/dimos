@@ -68,6 +68,19 @@ class MujocoRespawnSpec(Spec, Protocol):
     def respawn(self) -> bool: ...
 
 
+class HumanoidControlSpec(Spec, Protocol):
+    """Optional spec implemented by humanoid robot adapters.
+
+    Any module with these three methods is auto-wired into the viewer so the
+    HUD's Mode / Arm-preset controls work. Stays robot-agnostic — both X2 and
+    G1 (or anything else) can implement it.
+    """
+
+    def set_motion_mode(self, mode: str) -> bool: ...
+    def home_arms(self) -> bool: ...
+    def tuck_arms(self) -> bool: ...
+
+
 def _compose_scene_mesh_wxyz(
     *, y_up: bool, rotation_zyx_deg: tuple[float, float, float]
 ) -> tuple[float, float, float, float]:
@@ -117,6 +130,7 @@ class BabylonSceneViewerModule(Module):
     point_goal: Out[PointStamped]
     cmd_vel: Out[Twist]
     _mujoco_sim: MujocoRespawnSpec | None = None
+    _robot_ctrl: HumanoidControlSpec | None = None
 
     def __init__(
         self,
@@ -325,6 +339,26 @@ class BabylonSceneViewerModule(Module):
             twist = self._parse_twist(message)
             if twist is not None:
                 self.cmd_vel.publish(twist)
+            return
+        if message_type == "motion_mode":
+            mode = message.get("mode")
+            if self._robot_ctrl is None:
+                logger.warning("BabylonViewer: motion_mode requested but no robot adapter is wired")
+                return
+            if not isinstance(mode, str):
+                return
+            logger.info("BabylonViewer: requesting motion_mode=%s", mode)
+            self._robot_ctrl.set_motion_mode(mode)
+            return
+        if message_type == "arm_preset":
+            preset = message.get("preset")
+            if self._robot_ctrl is None:
+                logger.warning("BabylonViewer: arm_preset requested but no robot adapter is wired")
+                return
+            if preset == "home":
+                self._robot_ctrl.home_arms()
+            elif preset == "tuck":
+                self._robot_ctrl.tuck_arms()
             return
         if message_type not in {"clicked_point", "point_goal"}:
             return
@@ -587,41 +621,124 @@ _HTML = r"""<!doctype html>
         left: 16px;
         top: 16px;
         display: flex;
-        gap: 8px;
-        align-items: center;
+        align-items: stretch;
+        flex-wrap: wrap;
+        gap: 10px;
         max-width: calc(100vw - 32px);
-        padding: 8px;
-        border: 1px solid rgb(255 255 255 / 12%);
-        border-radius: 8px;
-        background: rgb(17 20 26 / 82%);
-        backdrop-filter: blur(10px);
+        padding: 8px 10px;
+        border: 1px solid rgb(255 255 255 / 10%);
+        border-radius: 10px;
+        background: rgb(17 20 26 / 86%);
+        backdrop-filter: blur(14px);
+        box-shadow: 0 6px 24px rgb(0 0 0 / 32%);
+      }
+
+      .hud-group {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding-right: 12px;
+        border-right: 1px solid rgb(255 255 255 / 8%);
+      }
+
+      .hud-group:has(+ #status),
+      .hud-group:last-of-type {
+        border-right: none;
+        padding-right: 0;
+      }
+
+      .hud-label {
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: rgb(255 255 255 / 38%);
+        margin-right: 2px;
+        font-weight: 600;
       }
 
       button,
       #status {
-        height: 32px;
-        border: 1px solid rgb(255 255 255 / 16%);
+        height: 28px;
+        border: 1px solid rgb(255 255 255 / 14%);
         border-radius: 6px;
-        background: rgb(255 255 255 / 7%);
+        background: rgb(255 255 255 / 6%);
         color: inherit;
         font: inherit;
-        font-size: 13px;
+        font-size: 12px;
+        white-space: nowrap;
       }
 
       button {
         padding: 0 10px;
         cursor: pointer;
+        transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+      }
+
+      button:hover {
+        background: rgb(255 255 255 / 12%);
+        border-color: rgb(255 255 255 / 22%);
+      }
+
+      button:active {
+        transform: translateY(1px);
+      }
+
+      button[data-active="true"] {
+        background: rgb(96 165 250 / 18%);
+        border-color: rgb(96 165 250 / 42%);
+        color: rgb(180 210 255);
       }
 
       button[data-active="false"] {
-        opacity: 0.52;
+        opacity: 0.6;
+      }
+
+      .hud-segmented {
+        display: flex;
+        border: 1px solid rgb(255 255 255 / 14%);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+
+      .hud-segmented button {
+        height: 28px;
+        border: none;
+        border-radius: 0;
+        border-right: 1px solid rgb(255 255 255 / 8%);
+        background: transparent;
+      }
+
+      .hud-segmented button:last-child {
+        border-right: none;
+      }
+
+      .hud-segmented button:hover {
+        background: rgb(255 255 255 / 8%);
+      }
+
+      .hud-segmented button[data-active="true"] {
+        background: rgb(96 165 250 / 22%);
+        color: rgb(200 220 255);
+      }
+
+      .hud-segmented button[data-active="false"] {
+        opacity: 1;       /* segmented controls show all 3, just highlight active */
+        color: rgb(255 255 255 / 72%);
+      }
+
+      .hud-hidden-by-default {
+        display: none;
       }
 
       #status {
         display: flex;
         align-items: center;
-        min-width: 160px;
-        padding: 0 10px;
+        min-width: 140px;
+        padding: 0 12px;
+        margin-left: 4px;
+        color: rgb(255 255 255 / 75%);
+        background: rgb(255 255 255 / 3%);
+        border-color: rgb(255 255 255 / 8%);
       }
 
       #cameraPanel {
@@ -688,19 +805,38 @@ _HTML = r"""<!doctype html>
       <div id="cameraEmpty">waiting for frames…</div>
     </div>
     <div id="hud">
-      <button id="toggleScene" data-active="true">Scene</button>
-      <button id="loadScene">Load</button>
-      <button id="toggleRobot" data-active="true">Robot</button>
-      <button id="toggleDrive" data-active="false">Drive</button>
-      <button id="respawnRobot">Respawn</button>
-      <button id="toggleLidar" data-active="true">Lidar</button>
-      <button id="toggleCamera" data-active="true">Camera</button>
-      <button id="navClick" data-active="false">Nav</button>
-      <button id="pointClick" data-active="false">Point</button>
-      <button id="toggleDepth" data-active="true">Depth</button>
-      <button id="toggleWire" data-active="false">Wire</button>
-      <button id="forceVisible" data-active="false">Visible</button>
-      <button id="focusRobot">Focus</button>
+      <div class="hud-group">
+        <span class="hud-label">View</span>
+        <button id="toggleScene" data-active="true">Scene</button>
+        <button id="toggleRobot" data-active="true">Robot</button>
+        <button id="toggleCamera" data-active="true">Camera</button>
+        <button id="toggleLidar" data-active="true">Lidar</button>
+        <button id="toggleDepth" data-active="true">Depth</button>
+        <button id="toggleWire" data-active="false">Wire</button>
+        <button id="forceVisible" data-active="false">Force</button>
+      </div>
+      <div class="hud-group">
+        <span class="hud-label">Mode</span>
+        <div class="hud-segmented" role="radiogroup">
+          <button class="mode-btn" data-mode="STAND_DEFAULT" data-active="false">Stand</button>
+          <button class="mode-btn" data-mode="LOCOMOTION_DEFAULT" data-active="false">Walk</button>
+          <button class="mode-btn" data-mode="JOINT_DEFAULT" data-active="false">Joint</button>
+        </div>
+      </div>
+      <div class="hud-group">
+        <span class="hud-label">Arms</span>
+        <button id="armsHome">Home</button>
+        <button id="armsTuck">Tuck</button>
+      </div>
+      <div class="hud-group">
+        <span class="hud-label">Interact</span>
+        <button id="toggleDrive" data-active="false">Drive</button>
+        <button id="navClick" data-active="false">Nav</button>
+        <button id="pointClick" data-active="false">Point</button>
+        <button id="focusRobot">Focus</button>
+        <button id="loadScene">Load Scene</button>
+        <button id="respawnRobot" class="hud-hidden-by-default">Respawn</button>
+      </div>
       <span id="status">starting</span>
     </div>
     <script>
@@ -1343,6 +1479,33 @@ _HTML = r"""<!doctype html>
           console.error(error);
           setStatus("scene load failed");
         });
+      };
+
+      // --- Motion mode segmented control ---
+      const modeButtons = Array.from(document.querySelectorAll(".mode-btn"));
+      modeButtons.forEach((btn) => {
+        btn.onclick = () => {
+          const mode = btn.dataset.mode;
+          // Optimistic toggle: mark this one active, others inactive
+          modeButtons.forEach((b) => {
+            b.dataset.active = b === btn ? "true" : "false";
+          });
+          if (sendSocketPayload({ type: "motion_mode", mode })) {
+            setStatus(`mode → ${btn.textContent.toLowerCase()}`);
+          }
+        };
+      });
+
+      // --- Arm presets ---
+      document.getElementById("armsHome").onclick = () => {
+        if (sendSocketPayload({ type: "arm_preset", preset: "home" })) {
+          setStatus("arms → home");
+        }
+      };
+      document.getElementById("armsTuck").onclick = () => {
+        if (sendSocketPayload({ type: "arm_preset", preset: "tuck" })) {
+          setStatus("arms → tuck");
+        }
       };
 
       const socketRef = { current: null };
