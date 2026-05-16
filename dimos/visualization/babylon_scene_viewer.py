@@ -71,12 +71,10 @@ class MujocoRespawnSpec(Spec, Protocol):
 class HumanoidControlSpec(Spec, Protocol):
     """Optional spec implemented by humanoid robot adapters.
 
-    Any module with these three methods is auto-wired into the viewer so the
-    HUD's Mode / Arm-preset controls work. Stays robot-agnostic — both X2 and
-    G1 (or anything else) can implement it.
+    Auto-wired into the viewer so the HUD's Arms preset buttons work.
+    Stays robot-agnostic — any humanoid implementing these two methods slots in.
     """
 
-    def set_motion_mode(self, mode: str) -> bool: ...
     def home_arms(self) -> bool: ...
     def tuck_arms(self) -> bool: ...
 
@@ -339,16 +337,6 @@ class BabylonSceneViewerModule(Module):
             twist = self._parse_twist(message)
             if twist is not None:
                 self.cmd_vel.publish(twist)
-            return
-        if message_type == "motion_mode":
-            mode = message.get("mode")
-            if self._robot_ctrl is None:
-                logger.warning("BabylonViewer: motion_mode requested but no robot adapter is wired")
-                return
-            if not isinstance(mode, str):
-                return
-            logger.info("BabylonViewer: requesting motion_mode=%s", mode)
-            self._robot_ctrl.set_motion_mode(mode)
             return
         if message_type == "arm_preset":
             preset = message.get("preset")
@@ -814,14 +802,6 @@ _HTML = r"""<!doctype html>
         <button id="toggleDepth" data-active="true">Depth</button>
         <button id="toggleWire" data-active="false">Wire</button>
         <button id="forceVisible" data-active="false">Force</button>
-      </div>
-      <div class="hud-group">
-        <span class="hud-label">Mode</span>
-        <div class="hud-segmented" role="radiogroup">
-          <button class="mode-btn" data-mode="STAND_DEFAULT" data-active="false">Stand</button>
-          <button class="mode-btn" data-mode="LOCOMOTION_DEFAULT" data-active="false">Walk</button>
-          <button class="mode-btn" data-mode="JOINT_DEFAULT" data-active="false">Joint</button>
-        </div>
       </div>
       <div class="hud-group">
         <span class="hud-label">Arms</span>
@@ -1480,21 +1460,6 @@ _HTML = r"""<!doctype html>
           setStatus("scene load failed");
         });
       };
-
-      // --- Motion mode segmented control ---
-      const modeButtons = Array.from(document.querySelectorAll(".mode-btn"));
-      modeButtons.forEach((btn) => {
-        btn.onclick = () => {
-          const mode = btn.dataset.mode;
-          // Optimistic toggle: mark this one active, others inactive
-          modeButtons.forEach((b) => {
-            b.dataset.active = b === btn ? "true" : "false";
-          });
-          if (sendSocketPayload({ type: "motion_mode", mode })) {
-            setStatus(`mode → ${btn.textContent.toLowerCase()}`);
-          }
-        };
-      });
 
       // --- Arm presets ---
       document.getElementById("armsHome").onclick = () => {

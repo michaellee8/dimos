@@ -63,20 +63,9 @@ _TOPIC_JOINT_WAIST = "/aima/hal/joint/waist/state"
 _TOPIC_JOINT_HEAD = "/aima/hal/joint/head/state"
 _TOPIC_ARM_COMMAND = "/aima/hal/joint/arm/command"
 _SVC_INPUT_SOURCE = "/aimdk_5Fmsgs/srv/SetMcInputSource"
-_SVC_SET_MC_ACTION = "/aimdk_5Fmsgs/srv/SetMcAction"
 
 # Path to the URDF bundled in this package — used for IK.
 _X2_URDF_PATH = Path(__file__).resolve().parent / "x2_ultra.urdf"
-
-# MC action modes the user is likely to want from a skill.  Strings match the
-# `action_desc` field of McActionCommand (the SDK examples use the string form).
-_VALID_MC_MODES = (
-    "PASSIVE_DEFAULT",     # zero torque
-    "DAMPING_DEFAULT",     # damped joints
-    "JOINT_DEFAULT",       # position-controlled stand (arm teleop mode)
-    "STAND_DEFAULT",       # active balance, ready for locomotion
-    "LOCOMOTION_DEFAULT",  # walk/run
-)
 
 # Joint name ordering per the AgiBot X2 SDK docs (Interface > Control > Joint Control).
 # Names match the X2 URDF/MJCF (sans the "_joint" suffix, which the viewer adds).
@@ -95,6 +84,35 @@ _LEG_JOINT_NAMES: tuple[str, ...] = (
 )
 _WAIST_JOINT_NAMES: tuple[str, ...] = ("waist_yaw", "waist_pitch", "waist_roll")
 _HEAD_JOINT_NAMES: tuple[str, ...] = ("head_yaw", "head_pitch")
+
+# Per-joint position-control gains for the arm, matching the SDK's
+# motocontrol.py example. Index aligned with _ARM_JOINT_NAMES.
+# (kp, kd, lower_limit_rad, upper_limit_rad)
+_ARM_JOINT_GAINS: tuple[tuple[float, float, float, float], ...] = (
+    # left_shoulder_pitch, _roll, _yaw, elbow, wrist_yaw, _pitch, _roll
+    (20.0, 2.0, -3.08, 2.04),
+    (20.0, 2.0, -0.061, 2.993),
+    (20.0, 2.0, -2.556, 2.556),
+    (20.0, 2.0, -2.3556, 0.0),
+    (20.0, 2.0, -2.556, 2.556),
+    (20.0, 2.0, -0.558, 0.558),
+    (20.0, 2.0, -1.571, 0.724),
+    # right_shoulder_pitch, _roll, _yaw, elbow, wrist_yaw, _pitch, _roll
+    (20.0, 2.0, -3.08, 2.04),
+    (20.0, 2.0, -2.993, 0.061),
+    (20.0, 2.0, -2.556, 2.556),
+    (20.0, 2.0, -2.3556, 0.0),
+    (20.0, 2.0, -2.556, 2.556),
+    (20.0, 2.0, -0.558, 0.558),
+    (20.0, 2.0, -0.724, 1.571),
+)
+
+# Ruckig trajectory limits per arm joint (per the SDK example: max v=1.0 rad/s,
+# max a=1.0 rad/s², max j=25.0 rad/s³). 2 ms control period = 500 Hz.
+_ARM_CONTROL_PERIOD_S = 0.002
+_ARM_MAX_VEL = 1.0
+_ARM_MAX_ACC = 1.0
+_ARM_MAX_JERK = 25.0
 
 # Velocity limits from the SDK
 _MAX_FORWARD = 1.0
@@ -320,6 +338,7 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
     _cam_proc: subprocess.Popen | None = None  # type: ignore[type-arg]
     _cam_thread: Thread | None = None
     _arm_ik: X2ArmIK | None = None
+    _arm_ctrl_thread: Thread | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -332,10 +351,14 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
         self._cam_proc = None
         self._cam_thread = None
         self._cam_stop = False
-        # Arm-control state. The IK model is lazy-loaded on first arm use to
-        # keep module import cheap.
+        # Arm controller (built once we have the first joint_state snapshot so
+        # we can seed Ruckig with the real current pose, not zeros).
         self._arm_ik = None
         self._arm_lock = Lock()
+        self._arm_target: list[float] | None = None  # 14-vector target, ARM_JOINT_NAMES order
+        self._arm_ctrl_thread = None
+        self._arm_ctrl_stop = False
+        self._arm_state_seen = False  # set once joint_state slice arrives
 
     @rpc
     def start(self) -> None:
@@ -477,6 +500,12 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
         self._ros_thread = Thread(target=self._ros_spin, daemon=True)
         self._ros_thread.start()
 
+        # Arm trajectory controller: 500 Hz Ruckig planner that always
+        # publishes all 14 arm joints. Starts paused until a target is set.
+        self._arm_ctrl_stop = False
+        self._arm_ctrl_thread = Thread(target=self._arm_controller_loop, daemon=True)
+        self._arm_ctrl_thread.start()
+
         # Register input source in a background thread so start() returns quickly
         Thread(target=self._register_input_source, daemon=True).start()
 
@@ -498,6 +527,12 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
         # Tear down the camera bridge first so its rclpy shutdown isn't racing
         # ours.
         self._stop_camera_bridge()
+
+        # Stop the arm controller loop before rclpy shuts down.
+        self._arm_ctrl_stop = True
+        if self._arm_ctrl_thread and self._arm_ctrl_thread.is_alive():
+            self._arm_ctrl_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
+        self._arm_ctrl_thread = None
 
         if self._ros_node is not None:
             try:
@@ -569,7 +604,15 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
         else:
             logger.error("X2Connection: input source registration timed out")
 
-    # --- Arm control ---
+    # --- Arm control (matches SDK example motocontrol.py) ---
+    #
+    # Architecture:
+    #   * One Ruckig planner sized to all 14 arm joints, period 2 ms (500 Hz).
+    #   * Targets are set by skills; the controller thread always runs and
+    #     publishes every cycle whether moving or holding pose.
+    #   * Per-joint kp/kd from _ARM_JOINT_GAINS (the SDK's calibrated table).
+    #   * Robot does NOT need to be in JOINT_DEFAULT — works in STAND_DEFAULT
+    #     while MC handles balance. The SDK example does exactly this.
 
     def _ensure_arm_ik(self) -> X2ArmIK:
         if self._arm_ik is None:
@@ -577,66 +620,116 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
             logger.info("X2Connection: arm IK loaded from %s", _X2_URDF_PATH)
         return self._arm_ik
 
-    def _current_q(self) -> Any:
-        """Build a pinocchio q vector from the most recent joint_state map.
-
-        Missing joints default to 0 — fine for IK seeding since arm IK only
-        modifies the arm-joint slots and other slots are irrelevant.
-        """
-        import numpy as np
-
-        ik = self._ensure_arm_ik()
-        q = ik.home_q()
+    def _arm_state_vector(self) -> list[float]:
+        """Return the current 14-DoF arm state from joint_state in the SDK's
+        canonical order. Missing slots default to 0 — only used until the
+        first joint_state arrives."""
         with self._joint_lock:
-            snapshot = dict(self._joint_positions)
-        for jname, pos in snapshot.items():
-            full = jname + "_joint"
-            if ik.model.existJointName(full):
-                jid = ik.model.getJointId(full)
-                q[ik.model.joints[jid].idx_q] = float(pos)
-        return q
+            return [float(self._joint_positions.get(n, 0.0)) for n in _ARM_JOINT_NAMES]
 
-    def _build_arm_command_msg(self, positions_by_short_name: dict[str, float]) -> Any:
-        """Pack a 14-joint aimdk_msgs/JointCommandArray in SDK-required order."""
-        from aimdk_msgs.msg import JointCommand, JointCommandArray, MessageHeader
-
-        out = JointCommandArray()
-        out.header = MessageHeader()
-        out.header.stamp = self._ros_node.get_clock().now().to_msg()
-        for short_name in _ARM_JOINT_NAMES:
-            jc = JointCommand()
-            jc.name = short_name + "_joint"
-            jc.position = float(positions_by_short_name.get(short_name, 0.0))
-            jc.velocity = 0.0
-            jc.effort = 0.0
-            # Conservative gains. Tune per-deployment if motion is too soft/stiff.
-            jc.stiffness = 50.0
-            jc.damping = 1.0
-            out.joints.append(jc)
+    def _clamp_arm(self, vec: list[float]) -> list[float]:
+        out = []
+        for v, (_, _, lo, hi) in zip(vec, _ARM_JOINT_GAINS, strict=True):
+            out.append(float(min(max(v, lo), hi)))
         return out
 
-    def _publish_arm_positions(self, positions_by_short_name: dict[str, float]) -> bool:
-        if self._arm_publisher is None:
-            logger.warning("X2Connection: arm publisher not ready")
-            return False
-        try:
-            self._arm_publisher.publish(self._build_arm_command_msg(positions_by_short_name))
-            return True
-        except Exception as exc:
-            logger.exception("X2Connection: arm publish failed: %s", exc)
-            return False
+    def _set_arm_target(self, target: list[float]) -> None:
+        if len(target) != 14:
+            raise ValueError(f"arm target must be 14 floats, got {len(target)}")
+        clamped = self._clamp_arm(target)
+        with self._arm_lock:
+            self._arm_target = clamped
+        logger.info("X2Connection: arm target set")
+
+    def _arm_controller_loop(self) -> None:
+        """500 Hz Ruckig position controller. Publishes all 14 arm joints
+        every cycle. No-op until the first joint_state arrives AND a target
+        has been set at least once."""
+        import ruckig
+
+        rk = ruckig.Ruckig(14, _ARM_CONTROL_PERIOD_S)
+        in_ = ruckig.InputParameter(14)
+        out_ = ruckig.OutputParameter(14)
+        in_.max_velocity = [_ARM_MAX_VEL] * 14
+        in_.max_acceleration = [_ARM_MAX_ACC] * 14
+        in_.max_jerk = [_ARM_MAX_JERK] * 14
+        in_.target_velocity = [0.0] * 14
+        in_.target_acceleration = [0.0] * 14
+        initialised = False
+
+        while not self._arm_ctrl_stop:
+            # Wait until we have a real joint_state snapshot AND a target.
+            if not self._arm_state_seen:
+                time.sleep(0.02)
+                continue
+            with self._arm_lock:
+                target = list(self._arm_target) if self._arm_target is not None else None
+            if target is None:
+                time.sleep(0.02)
+                continue
+
+            if not initialised:
+                # Seed Ruckig from the real current arm pose.
+                state = self._arm_state_vector()
+                in_.current_position = state
+                in_.current_velocity = [0.0] * 14
+                in_.current_acceleration = [0.0] * 14
+                initialised = True
+
+            in_.target_position = target
+            result = rk.update(in_, out_)
+
+            # Build + publish JointCommandArray (all 14 joints every cycle).
+            try:
+                from aimdk_msgs.msg import (
+                    JointCommand,
+                    JointCommandArray,
+                    MessageHeader,
+                )
+
+                cmd = JointCommandArray()
+                cmd.header = MessageHeader()
+                cmd.header.stamp = self._ros_node.get_clock().now().to_msg()
+                for i, short_name in enumerate(_ARM_JOINT_NAMES):
+                    kp, kd, _, _ = _ARM_JOINT_GAINS[i]
+                    jc = JointCommand()
+                    jc.name = short_name + "_joint"
+                    jc.position = float(out_.new_position[i])
+                    jc.velocity = float(out_.new_velocity[i])
+                    jc.effort = 0.0
+                    jc.stiffness = kp
+                    jc.damping = kd
+                    cmd.joints.append(jc)
+                self._arm_publisher.publish(cmd)
+            except Exception as exc:
+                logger.exception("X2Connection: arm cmd publish failed: %s", exc)
+                time.sleep(0.1)
+                continue
+
+            # Roll forward
+            in_.current_position = out_.new_position
+            in_.current_velocity = out_.new_velocity
+            in_.current_acceleration = out_.new_acceleration
+
+            time.sleep(_ARM_CONTROL_PERIOD_S)
+
+            # If we reached target with zero velocity, stay here but keep
+            # republishing (the SDK example does the same; holds pose).
+            if result == ruckig.Result.Finished:
+                pass
 
     def _on_arm_joint_command(self, msg: JointState) -> None:
-        """Direct (non-IK) arm joint command. Names use the short form, e.g.
-        'left_shoulder_pitch'. Anything not in _ARM_JOINT_NAMES is ignored.
+        """Set a 14-joint position target directly. Names use the short form,
+        e.g. 'left_shoulder_pitch'. Missing entries default to current state.
         """
         positions = dict(zip(msg.name, msg.position, strict=False))
-        self._publish_arm_positions(positions)
+        target = [
+            float(positions.get(n, self._joint_positions.get(n, 0.0)))
+            for n in _ARM_JOINT_NAMES
+        ]
+        self._set_arm_target(target)
 
-    def _solve_and_publish_cartesian(
-        self, target_pose: PoseStamped, side: str
-    ) -> bool:
-        """Solve IK for the named side and publish the resulting arm joints."""
+    def _solve_and_target_cartesian(self, target_pose: PoseStamped, side: str) -> bool:
         import numpy as np
         import pinocchio as pin
 
@@ -653,126 +746,78 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
             np.array([target_pose.x, target_pose.y, target_pose.z], dtype=np.float64),
         )
 
-        with self._arm_lock:
-            q_seed = self._current_q()
-            q_sol, ok, err = ik.solve(target_se3, q_seed, chain)
-
-        if not ok:
-            logger.warning("X2Connection: %s arm IK did not converge (err=%.4f)", side, err)
-            # Still publish best-effort — partial motion is usually fine.
-
-        # Build the full 14-joint map from the IK result (filling the other arm
-        # from current state so we don't reset it).
-        positions: dict[str, float] = {}
+        # Seed IK from the current robot state via pinocchio q.
+        ik_q = ik.home_q()
         with self._joint_lock:
-            for name, pos in self._joint_positions.items():
-                if name in _ARM_JOINT_NAMES:
-                    positions[name] = pos
+            snap = dict(self._joint_positions)
+        for jname, pos in snap.items():
+            full = jname + "_joint"
+            if ik.model.existJointName(full):
+                jid = ik.model.getJointId(full)
+                ik_q[ik.model.joints[jid].idx_q] = float(pos)
+
+        q_sol, ok, err = ik.solve(target_se3, ik_q, chain)
+        if not ok:
+            logger.warning("X2Connection: %s IK no-converge (err=%.4f), using best effort",
+                           side, err)
+
+        # Start from current arm target (preserve unaffected joints if a
+        # previous target was set; else start from current state).
+        with self._arm_lock:
+            base = list(self._arm_target) if self._arm_target is not None else self._arm_state_vector()
         for short_name, slot in zip(chain.joint_names, chain.qpos_indices, strict=True):
-            # short_name here ends in "_joint" — strip it for the map key.
             key = short_name[:-len("_joint")] if short_name.endswith("_joint") else short_name
-            positions[key] = float(q_sol[slot])
-        return self._publish_arm_positions(positions)
+            idx = _ARM_JOINT_NAMES.index(key)
+            base[idx] = float(q_sol[slot])
+
+        self._set_arm_target(base)
+        return True
 
     def _on_cartesian_left(self, msg: PoseStamped) -> None:
-        self._solve_and_publish_cartesian(msg, "left")
+        self._solve_and_target_cartesian(msg, "left")
 
     def _on_cartesian_right(self, msg: PoseStamped) -> None:
-        self._solve_and_publish_cartesian(msg, "right")
-
-    @skill
-    def set_motion_mode(self, mode: str) -> bool:
-        """Switch the robot's motion-control mode.
-
-        Valid values: ``STAND_DEFAULT`` (active-balance stand, locomotion-ready),
-        ``LOCOMOTION_DEFAULT`` (walking), ``JOINT_DEFAULT`` (position-controlled
-        stand — required before sending arm joint commands),
-        ``DAMPING_DEFAULT``, ``PASSIVE_DEFAULT``.
-        """
-        if mode not in _VALID_MC_MODES:
-            logger.error(
-                "X2Connection: unknown motion mode %r (valid: %s)", mode, _VALID_MC_MODES
-            )
-            return False
-        if self._ros_node is None:
-            logger.error("X2Connection: ROS not started")
-            return False
-
-        from aimdk_msgs.msg import McActionCommand, RequestHeader
-        from aimdk_msgs.srv import SetMcAction
-
-        client = self._ros_node.create_client(SetMcAction, _SVC_SET_MC_ACTION)
-        if not client.wait_for_service(timeout_sec=5.0):
-            logger.error("X2Connection: SetMcAction service unavailable")
-            return False
-
-        req = SetMcAction.Request()
-        req.header = RequestHeader()
-        cmd = McActionCommand()
-        cmd.action_desc = mode
-        req.command = cmd
-
-        future = None
-        for attempt in range(8):
-            req.header.stamp = self._ros_node.get_clock().now().to_msg()
-            req.source = _INPUT_SOURCE_NAME
-            future = client.call_async(req)
-            deadline = time.time() + 2.0
-            while not future.done() and time.time() < deadline:
-                time.sleep(0.05)
-            if future.done():
-                break
-            logger.info("X2Connection: SetMcAction retry [%d]", attempt)
-
-        if future is None or not future.done():
-            logger.error("X2Connection: SetMcAction timed out")
-            return False
-        try:
-            resp = future.result()
-            ok = int(resp.response.status.value) == 1
-            logger.info(
-                "X2Connection: set_motion_mode(%s) -> status=%s",
-                mode, resp.response.status.value,
-            )
-            return ok
-        except Exception as exc:
-            logger.error("X2Connection: SetMcAction failed: %s", exc)
-            return False
+        self._solve_and_target_cartesian(msg, "right")
 
     @skill
     def home_arms(self) -> bool:
-        """Drive both arms to the all-zeros (hanging) pose.
+        """Drive both arms to the all-zeros (hanging) pose, smoothly.
 
-        Requires the robot to be in ``JOINT_DEFAULT`` mode (call
-        ``set_motion_mode('JOINT_DEFAULT')`` first).
+        Works in ``STAND_DEFAULT`` while the robot is balanced — the trajectory
+        controller publishes at 500 Hz with the SDK's per-joint gains. No mode
+        switch needed.
         """
-        positions = {name: 0.0 for name in _ARM_JOINT_NAMES}
-        return self._publish_arm_positions(positions)
+        self._set_arm_target([0.0] * 14)
+        return True
 
     @skill
     def tuck_arms(self) -> bool:
-        """Move both arms to a tucked pose (elbows bent ~90°, arms close to body).
-
-        Requires ``JOINT_DEFAULT`` mode. Conservative pose meant as a safe
-        starting position before cartesian teleop.
-        """
-        # Symmetric: shoulder neutral, elbow bent.
-        positions = {name: 0.0 for name in _ARM_JOINT_NAMES}
-        positions["left_elbow"] = 1.5
-        positions["right_elbow"] = 1.5
-        return self._publish_arm_positions(positions)
+        """Move both arms to a tucked pose (elbows bent ~90°, arms close to body)."""
+        target = [0.0] * 14
+        # elbow indices in _ARM_JOINT_NAMES: 3 (left), 10 (right)
+        target[3] = -1.2   # left elbow (limits: -2.3556..0.0)
+        target[10] = -1.2  # right elbow
+        self._set_arm_target(target)
+        return True
 
     @skill
     def move_left_hand_to(self, x: float, y: float, z: float) -> bool:
         """Move the left wrist to (x, y, z) metres in the pelvis frame.
 
-        Orientation is kept at its current value. Requires ``JOINT_DEFAULT``
-        mode and the joint_state stream to be active (used as the IK seed).
+        Orientation kept at its current value.
         """
         import pinocchio as pin
 
         ik = self._ensure_arm_ik()
-        current = ik.fk_pose(self._current_q(), ik.left)
+        ik_q = ik.home_q()
+        with self._joint_lock:
+            snap = dict(self._joint_positions)
+        for jname, pos in snap.items():
+            full = jname + "_joint"
+            if ik.model.existJointName(full):
+                jid = ik.model.getJointId(full)
+                ik_q[ik.model.joints[jid].idx_q] = float(pos)
+        current = ik.fk_pose(ik_q, ik.left)
         q_wxyz = pin.Quaternion(current.rotation)
         target = PoseStamped(
             x=float(x), y=float(y), z=float(z),
@@ -780,19 +825,26 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
                 float(q_wxyz.x), float(q_wxyz.y), float(q_wxyz.z), float(q_wxyz.w)
             ),
         )
-        return self._solve_and_publish_cartesian(target, "left")
+        return self._solve_and_target_cartesian(target, "left")
 
     @skill
     def move_right_hand_to(self, x: float, y: float, z: float) -> bool:
         """Move the right wrist to (x, y, z) metres in the pelvis frame.
 
-        Orientation is kept at its current value. Requires ``JOINT_DEFAULT``
-        mode.
+        Orientation kept at its current value.
         """
         import pinocchio as pin
 
         ik = self._ensure_arm_ik()
-        current = ik.fk_pose(self._current_q(), ik.right)
+        ik_q = ik.home_q()
+        with self._joint_lock:
+            snap = dict(self._joint_positions)
+        for jname, pos in snap.items():
+            full = jname + "_joint"
+            if ik.model.existJointName(full):
+                jid = ik.model.getJointId(full)
+                ik_q[ik.model.joints[jid].idx_q] = float(pos)
+        current = ik.fk_pose(ik_q, ik.right)
         q_wxyz = pin.Quaternion(current.rotation)
         target = PoseStamped(
             x=float(x), y=float(y), z=float(z),
@@ -800,7 +852,7 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
                 float(q_wxyz.x), float(q_wxyz.y), float(q_wxyz.z), float(q_wxyz.w)
             ),
         )
-        return self._solve_and_publish_cartesian(target, "right")
+        return self._solve_and_target_cartesian(target, "right")
 
     # --- ROS2 sensor callbacks ---
 
@@ -975,6 +1027,9 @@ class X2Connection(X2ConnectionBase, Camera, Pointcloud, IMU, Lidar):
         with self._joint_lock:
             for name, joint in zip(joint_names, joints, strict=True):
                 self._joint_positions[name] = float(joint.position)
+            # Once we've seen at least one arm sample, the controller can seed.
+            if joint_names is _ARM_JOINT_NAMES:
+                self._arm_state_seen = True
             # Rate-limit dimos publishes: cheap dict updates always happen,
             # only emit a merged snapshot when the throttle interval is up.
             now = time.monotonic()
