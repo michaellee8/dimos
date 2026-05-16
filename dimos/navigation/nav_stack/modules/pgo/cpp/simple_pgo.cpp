@@ -141,7 +141,7 @@ int SimplePGO::searchByPosition() const
     for (size_t i = 0; i < ids.size(); i++)
     {
         int idx = ids[i];
-        if (std::abs(last_item.time - m_key_poses[idx].time) > m_config.loop_time_tresh)
+        if (std::abs(last_item.time - m_key_poses[idx].time) > m_config.loop_time_thresh)
         {
             return idx;
         }
@@ -167,7 +167,7 @@ int SimplePGO::searchByScanContext(int& out_sector_shift) const
     const size_t cur_idx = m_key_poses.size() - 1;
     for (size_t i = 0; i < cur_idx; i++) {
         if (m_sc_descriptors[i].size() == 0) continue;
-        if (std::abs(current_time - m_key_poses[i].time) <= m_config.loop_time_tresh) {
+        if (std::abs(current_time - m_key_poses[i].time) <= m_config.loop_time_thresh) {
             continue;  // too recent — not a true loop candidate
         }
         const float key_dist = (m_sc_ring_keys[i] - query_key).norm();

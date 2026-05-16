@@ -79,18 +79,18 @@ public:
             return;
         g_last_message_time = ts;
 
-        CloudWithPose cp;
-        cp.pose.r = g_latest_r;
-        cp.pose.t = g_latest_t;
-        cp.pose.setTime(static_cast<int32_t>(ts),
+        CloudWithPose cloud_with_pose;
+        cloud_with_pose.pose.r = g_latest_r;
+        cloud_with_pose.pose.t = g_latest_t;
+        cloud_with_pose.pose.setTime(static_cast<int32_t>(ts),
                         static_cast<uint32_t>((ts - static_cast<int32_t>(ts)) * 1e9));
 
         // Parse PointCloud2 to PCL
-        cp.cloud = CloudType::Ptr(new CloudType);
-        smartnav::to_pcl(*msg, *cp.cloud);
+        cloud_with_pose.cloud = CloudType::Ptr(new CloudType);
+        smartnav::to_pcl(*msg, *cloud_with_pose.cloud);
 
         std::lock_guard<std::mutex> buf_lock(g_buffer_mutex);
-        g_cloud_buffer.push(cp);
+        g_cloud_buffer.push(cloud_with_pose);
     }
 };
 
@@ -248,48 +248,48 @@ int main(int argc, char** argv)
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
 
-    dimos::NativeModule mod(argc, argv);
+    dimos::NativeModule native_module(argc, argv);
 
     // Port topics
-    std::string scan_topic = mod.topic("registered_scan");
-    std::string odom_topic = mod.topic("odometry");
-    std::string corrected_odom_topic = mod.topic("corrected_odometry");
-    std::string global_map_topic = mod.topic("global_map");
-    std::string tf_topic = mod.topic("pgo_tf");
-    std::string graph_nodes_topic = mod.topic("pgo_graph_nodes");
-    std::string graph_edges_topic = mod.topic("pgo_graph_edges");
-    std::string loop_closure_topic = mod.topic("pgo_loop_closure");
+    std::string scan_topic = native_module.topic("registered_scan");
+    std::string odom_topic = native_module.topic("odometry");
+    std::string corrected_odom_topic = native_module.topic("corrected_odometry");
+    std::string global_map_topic = native_module.topic("global_map");
+    std::string tf_topic = native_module.topic("pgo_tf");
+    std::string graph_nodes_topic = native_module.topic("pgo_graph_nodes");
+    std::string graph_edges_topic = native_module.topic("pgo_graph_edges");
+    std::string loop_closure_topic = native_module.topic("pgo_loop_closure");
 
     // Config parameters
     Config config;
-    config.key_pose_delta_deg = mod.arg_float("key_pose_delta_deg", 10.0f);
-    config.key_pose_delta_trans = mod.arg_float("key_pose_delta_trans", 0.5f);
-    config.loop_search_radius = mod.arg_float("loop_search_radius", 1.0f);
-    config.loop_time_tresh = mod.arg_float("loop_time_thresh", 60.0f);
-    config.loop_score_thresh = mod.arg_float("loop_score_thresh", 0.15f);
-    config.loop_submap_half_range = mod.arg_int("loop_submap_half_range", 5);
-    config.submap_resolution = mod.arg_float("submap_resolution", 0.1f);
-    config.min_loop_detect_duration = mod.arg_float("min_loop_detect_duration", 5.0f);
-    config.use_scan_context = mod.arg_bool("use_scan_context", true);
-    config.sc_n_rings = mod.arg_int("sc_n_rings", 20);
-    config.sc_n_sectors = mod.arg_int("sc_n_sectors", 60);
-    config.sc_max_range_m = mod.arg_float("sc_max_range_m", 80.0f);
-    config.sc_top_k = mod.arg_int("sc_top_k", 10);
-    config.sc_match_threshold = mod.arg_float("sc_match_threshold", 0.4f);
-    config.sc_lidar_height_m = mod.arg_float("sc_lidar_height_m", 2.0f);
+    config.key_pose_delta_deg = native_module.arg_float("key_pose_delta_deg", 10.0f);
+    config.key_pose_delta_trans = native_module.arg_float("key_pose_delta_trans", 0.5f);
+    config.loop_search_radius = native_module.arg_float("loop_search_radius", 1.0f);
+    config.loop_time_thresh = native_module.arg_float("loop_time_thresh", 60.0f);
+    config.loop_score_thresh = native_module.arg_float("loop_score_thresh", 0.15f);
+    config.loop_submap_half_range = native_module.arg_int("loop_submap_half_range", 5);
+    config.submap_resolution = native_module.arg_float("submap_resolution", 0.1f);
+    config.min_loop_detect_duration = native_module.arg_float("min_loop_detect_duration", 5.0f);
+    config.use_scan_context = native_module.arg_bool("use_scan_context", true);
+    config.sc_n_rings = native_module.arg_int("sc_n_rings", 20);
+    config.sc_n_sectors = native_module.arg_int("sc_n_sectors", 60);
+    config.sc_max_range_m = native_module.arg_float("sc_max_range_m", 80.0f);
+    config.sc_top_k = native_module.arg_int("sc_top_k", 10);
+    config.sc_match_threshold = native_module.arg_float("sc_match_threshold", 0.4f);
+    config.sc_lidar_height_m = native_module.arg_float("sc_lidar_height_m", 2.0f);
 
     // Node-level config
-    std::string world_frame = mod.arg("world_frame", "map");
-    std::string local_frame = mod.arg("local_frame", "odom");
-    float global_map_voxel_size = mod.arg_float("global_map_voxel_size", 0.1f);
-    float global_map_publish_rate = mod.arg_float("global_map_publish_rate", 1.0f);
+    std::string world_frame = native_module.arg("world_frame", "map");
+    std::string local_frame = native_module.arg("local_frame", "odom");
+    float global_map_voxel_size = native_module.arg_float("global_map_voxel_size", 0.1f);
+    float global_map_publish_rate = native_module.arg_float("global_map_publish_rate", 1.0f);
     double global_map_interval = global_map_publish_rate > 0
         ? 1.0 / global_map_publish_rate : 2.0;
 
     // Unregister mode: transform world-frame scans to body-frame
-    bool unregister_input = mod.arg_bool("unregister_input", true);
+    bool unregister_input = native_module.arg_bool("unregister_input", true);
 
-    bool debug = mod.arg_bool("debug", false);
+    bool debug = native_module.arg_bool("debug", false);
 
     pcl::console::setVerbosityLevel(
         debug ? pcl::console::L_INFO : pcl::console::L_ERROR);
@@ -326,12 +326,12 @@ int main(int argc, char** argv)
         while (lcm.handleTimeout(0) > 0) {}
 
         // Check buffer
-        CloudWithPose cp;
+        CloudWithPose cloud_with_pose;
         bool has_data = false;
         {
             std::lock_guard<std::mutex> lock(g_buffer_mutex);
             if (!g_cloud_buffer.empty()) {
-                cp = g_cloud_buffer.front();
+                cloud_with_pose = g_cloud_buffer.front();
                 // Drain entire queue (matching original: process oldest, discard rest)
                 while (!g_cloud_buffer.empty()) {
                     g_cloud_buffer.pop();
@@ -346,13 +346,13 @@ int main(int argc, char** argv)
         }
 
         // Optionally transform world-frame scan to body-frame
-        if (unregister_input && cp.cloud && cp.cloud->size() > 0) {
+        if (unregister_input && cloud_with_pose.cloud && cloud_with_pose.cloud->size() > 0) {
             CloudType::Ptr body_cloud(new CloudType);
             // body = R_odom^T * (world_pts - t_odom)
-            M3D r_inv = cp.pose.r.transpose();
-            for (const auto& pt : *cp.cloud) {
+            M3D r_inv = cloud_with_pose.pose.r.transpose();
+            for (const auto& pt : *cloud_with_pose.cloud) {
                 V3D world_pt(pt.x, pt.y, pt.z);
-                V3D body_pt = r_inv * (world_pt - cp.pose.t);
+                V3D body_pt = r_inv * (world_pt - cloud_with_pose.pose.t);
                 PointType bp;
                 bp.x = static_cast<float>(body_pt.x());
                 bp.y = static_cast<float>(body_pt.y());
@@ -360,15 +360,15 @@ int main(int argc, char** argv)
                 bp.intensity = pt.intensity;
                 body_cloud->push_back(bp);
             }
-            cp.cloud = body_cloud;
+            cloud_with_pose.cloud = body_cloud;
         }
 
-        double cur_time = cp.pose.second;
+        double cur_time = cloud_with_pose.pose.second;
 
-        if (!pgo.addKeyPose(cp)) {
+        if (!pgo.addKeyPose(cloud_with_pose)) {
             // Not a keyframe — still broadcast TF and corrected odom
-            M3D corr_r = pgo.offsetR() * cp.pose.r;
-            V3D corr_t = pgo.offsetR() * cp.pose.t + pgo.offsetT();
+            M3D corr_r = pgo.offsetR() * cloud_with_pose.pose.r;
+            V3D corr_t = pgo.offsetR() * cloud_with_pose.pose.t + pgo.offsetT();
 
             nav_msgs::Odometry corrected = build_odometry(
                 corr_r, corr_t, cur_time, world_frame, "base_link");
@@ -412,12 +412,12 @@ int main(int argc, char** argv)
         if (debug) {
             fprintf(stderr, "PGO: keyframe %zu at (%.1f, %.1f, %.1f)\n",
                     pgo.keyPoses().size(),
-                    cp.pose.t.x(), cp.pose.t.y(), cp.pose.t.z());
+                    cloud_with_pose.pose.t.x(), cloud_with_pose.pose.t.y(), cloud_with_pose.pose.t.z());
         }
 
         // Publish corrected odometry
-        M3D corr_r = pgo.offsetR() * cp.pose.r;
-        V3D corr_t = pgo.offsetR() * cp.pose.t + pgo.offsetT();
+        M3D corr_r = pgo.offsetR() * cloud_with_pose.pose.r;
+        V3D corr_t = pgo.offsetR() * cloud_with_pose.pose.t + pgo.offsetT();
         nav_msgs::Odometry corrected = build_odometry(
             corr_r, corr_t, cur_time, world_frame, "base_link");
         lcm.publish(corrected_odom_topic, &corrected);
