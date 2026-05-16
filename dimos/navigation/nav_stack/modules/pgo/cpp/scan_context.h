@@ -28,6 +28,11 @@ struct Config {
     double max_range_m = 80.0;    // ignore points beyond this
     int candidate_top_k = 10;     // kd-tree neighbours to score
     double match_threshold = 0.4; // accepted cosine distance (0..2)
+    // Shifts body-frame z so all cells are positive before cosine distance,
+    // matching irapkaist/scancontext's LIDAR_HEIGHT convention. Ground points
+    // sit near -lidar_height_m in the body frame; without this shift, negative
+    // cells make cosine similarity meaningless for revisits.
+    double lidar_height_m = 2.0;
 };
 
 using Descriptor = Eigen::MatrixXf;   // (n_rings × n_sectors)
