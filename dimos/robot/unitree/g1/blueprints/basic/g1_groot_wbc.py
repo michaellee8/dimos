@@ -461,6 +461,9 @@ def _arm_teleop_blueprint() -> Blueprint | None:
 
     return G1ArmTeleop.blueprint().transports(
         {
+            ("joint_state", JointState): LCMTransport(
+                "/coordinator/joint_state", JointState
+            ),
             ("joint_command", JointState): LCMTransport("/g1/joint_command", JointState),
         }
     )

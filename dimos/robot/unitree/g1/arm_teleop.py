@@ -16,30 +16,33 @@
 
 Bridges the babylon viewer's ``HumanoidControlSpec`` to the
 ``ControlCoordinator``'s ``servo_arms`` task. The viewer's per-joint slider
-HUD calls ``set_arm_joint(name, position)`` via RPC; this module publishes a
-matching ``JointState`` on the ``joint_command`` stream (transport-mapped to
-``/g1/joint_command``). The coordinator routes it to the priority-10
-``servo_arms`` task that owns the 14 arm joints, while the priority-50
-``groot_wbc`` task continues to own legs + waist for balance.
+HUD calls ``set_arm_joint(name, position)`` via RPC; this module owns the
+14-joint arm target vector and publishes the full vector on the
+``joint_command`` stream (transport-mapped to ``/g1/joint_command``) every
+time. The ``servo_arms`` task expects a complete 14-vector target — its
+contract is "give me a target, I'll hold it" — so the adapter is the place
+that knows how to assemble that target from per-joint slider events.
+
+The current target is seeded from the latest joint_state when the first
+``set_arm_joint`` arrives (so we don't snap the other 13 joints away from
+where they actually are). Subsequent calls mutate one slot and republish.
 
 Joint names exposed to the viewer are the short form ("left_shoulder_pitch"),
-matching the convention the babylon slider HUD assumes. We add the ``g1/``
-hardware-id prefix internally when publishing.
-
-Limits come straight from the G1 URDF, parsed once at module construction so
-this module owns the source of truth (mismatched gains in older configs
-have caused us trouble before).
+matching the convention the babylon slider HUD uses. The ``g1/`` hardware-id
+prefix is added internally when publishing, and stripped from incoming
+joint_state names.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from typing import Any
 import xml.etree.ElementTree as ET
 
 from dimos.core.core import rpc
 from dimos.core.module import Module
-from dimos.core.stream import Out
+from dimos.core.stream import In, Out
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.utils.logging_config import setup_logger
 
@@ -56,6 +59,7 @@ _ARM_JOINT_NAMES: tuple[str, ...] = (
     "right_shoulder_pitch", "right_shoulder_roll", "right_shoulder_yaw",
     "right_elbow", "right_wrist_roll", "right_wrist_pitch", "right_wrist_yaw",
 )
+_FULL_JOINT_NAMES: tuple[str, ...] = tuple(f"{_HW_ID}/{n}" for n in _ARM_JOINT_NAMES)
 
 
 def _load_arm_limits() -> dict[str, tuple[float, float]]:
@@ -81,22 +85,35 @@ def _load_arm_limits() -> dict[str, tuple[float, float]]:
 
 
 class G1ArmTeleop(Module):
-    """Publishes arm joint targets to the coordinator on behalf of the viewer.
+    """Owns the 14-joint arm target vector and publishes it on demand.
 
     Ports:
-        joint_command (Out[JointState]): target positions routed by the
-            coordinator to the ``servo_arms`` task.
+        joint_state (In[JointState]): coordinator-published full-body state,
+            used to seed the target from the real arm pose on first interaction.
+        joint_command (Out[JointState]): full 14-joint arm target, routed by
+            the coordinator to the ``servo_arms`` task.
     """
 
+    joint_state: In[JointState]
     joint_command: Out[JointState]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self._limits = _load_arm_limits()
+        # Latest observed arm pose, keyed by short name. Updated from
+        # joint_state callbacks.
+        self._state_lock = threading.Lock()
+        self._latest_pose: dict[str, float] | None = None
+        # The current 14-joint target we'll publish. None until first
+        # ``set_arm_joint`` (or ``release_arms``) — we don't want to publish
+        # a target before the user asks for one, otherwise we'd race the
+        # servo_arms task's default_positions on startup.
+        self._target: list[float] | None = None
 
     @rpc
     def start(self) -> None:
         super().start()
+        self.joint_state.subscribe(self._on_joint_state)
         logger.info(
             "G1ArmTeleop ready (%d arm joints, limits from URDF)", len(self._limits)
         )
@@ -104,6 +121,37 @@ class G1ArmTeleop(Module):
     @rpc
     def stop(self) -> None:
         super().stop()
+
+    def _on_joint_state(self, msg: JointState) -> None:
+        """Cache the latest arm pose so we can seed our target from reality."""
+        if not msg.name or not msg.position:
+            return
+        pose: dict[str, float] = {}
+        for name, pos in zip(msg.name, msg.position, strict=False):
+            # Coordinator names are "g1/<short>"; tolerate plain "<short>" too.
+            short = name.split("/", 1)[1] if "/" in name else name
+            if short in self._limits:
+                pose[short] = float(pos)
+        if not pose:
+            return
+        with self._state_lock:
+            self._latest_pose = pose
+
+    def _seed_target(self) -> list[float]:
+        """Build a 14-vector target from the latest observed arm pose.
+
+        Falls back to zeros (the servo task's default_positions) if no
+        joint_state has been observed yet — the user clicking a slider
+        before state arrives is unlikely but cheap to handle.
+        """
+        with self._state_lock:
+            pose = dict(self._latest_pose) if self._latest_pose is not None else {}
+        return [pose.get(name, 0.0) for name in _ARM_JOINT_NAMES]
+
+    def _publish_target(self) -> None:
+        assert self._target is not None
+        msg = JointState(name=list(_FULL_JOINT_NAMES), position=list(self._target))
+        self.joint_command.publish(msg)
 
     @rpc
     def arm_joint_limits(self) -> list[tuple[str, float, float]]:
@@ -114,25 +162,27 @@ class G1ArmTeleop(Module):
     @rpc
     def set_arm_joint(self, name: str, position: float) -> bool:
         """Drive one arm joint. ``name`` is the short form (e.g.,
-        ``left_shoulder_pitch``); we add the ``g1/`` prefix the coordinator
-        expects. Position is clamped to URDF limits."""
+        ``left_shoulder_pitch``). Position is clamped to URDF limits. The
+        other 13 joints stay at their last commanded value (or the current
+        real pose on the first call), so we publish a complete 14-vector
+        target every time — what the servo_arms task expects."""
         limit = self._limits.get(name)
         if limit is None:
             logger.warning("G1ArmTeleop: unknown arm joint %r", name)
             return False
+        if self._target is None:
+            self._target = self._seed_target()
         lo, hi = limit
-        clamped = max(lo, min(hi, float(position)))
-        msg = JointState(name=[f"{_HW_ID}/{name}"], position=[clamped])
-        self.joint_command.publish(msg)
+        idx = _ARM_JOINT_NAMES.index(name)
+        self._target[idx] = max(lo, min(hi, float(position)))
+        self._publish_target()
         return True
 
     @rpc
     def release_arms(self) -> bool:
-        """Send all 14 arm joints back to neutral (zero pose). The servo task
-        will hold them there until the next ``set_arm_joint`` overrides."""
-        names = [f"{_HW_ID}/{n}" for n in _ARM_JOINT_NAMES]
-        positions = [0.0] * len(_ARM_JOINT_NAMES)
-        self.joint_command.publish(JointState(name=names, position=positions))
+        """Send all 14 arm joints back to neutral (zero pose)."""
+        self._target = [0.0] * len(_ARM_JOINT_NAMES)
+        self._publish_target()
         return True
 
 
