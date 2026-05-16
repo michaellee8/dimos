@@ -64,7 +64,7 @@ alfred_nav = (
         vis_module(
             global_config.viewer,
             rerun_config={
-                **nav_stack_rerun_config({"memory_limit": "1GB"}, vis_throttle=0.5),
+                **nav_stack_rerun_config({"memory_limit": "1GB"}, vis_throttle=1.0),
                 "rerun_open": "native",
             },
         ),
