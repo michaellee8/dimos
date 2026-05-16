@@ -610,7 +610,7 @@ int main(int argc, char** argv) {
     // the precision/recall sweet spot for KITTI-360 seq 2 (smaller
     // values admit FPs without recovering TPs).
     params["Icp/CorrespondenceRatio"] =
-        mod.arg("icp_correspondence_ratio", "0.01");
+        mod.arg("icp_correspondence_ratio", "0.02");
     // Voxel-downsample the laser scan in Memory before ICP runs. Default
     // 0 (no downsampling) makes ICP eat the full 80k-point KITTI scan
     // each iteration. 0.2m voxel gets the scan to ~5-10k points with
