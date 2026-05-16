@@ -36,7 +36,7 @@ from reactivex.disposable import Disposable
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.core import rpc
-from dimos.core.module import Module, ModuleConfig
+from dimos.core.module import Module
 from dimos.core.stream import In
 from dimos.msgs.nav_msgs.Path import Path as NavPath
 from dimos.navigation.nav_stack.modules.pgo.pgo import PGO
@@ -56,14 +56,9 @@ QUATERNION_UNIT_TOL = 0.05
 TRANSLATION_MAX_M = 100.0
 
 
-class LoopClosureRecorderConfig(ModuleConfig):
-    pass
-
-
 class LoopClosureRecorderModule(Module):
     """Accumulates every loop_closure event so the test can validate the shape."""
 
-    config: LoopClosureRecorderConfig
     loop_closure: In[NavPath]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -76,7 +71,25 @@ class LoopClosureRecorderModule(Module):
         self.register_disposable(Disposable(self.loop_closure.subscribe(self._on_loop_closure)))
 
     def _on_loop_closure(self, message: NavPath) -> None:
-        self._events.append(_message_to_dict(message))
+        # JSON-friendly snapshot — Pydantic-friendly RPC return.
+        self._events.append(
+            {
+                "frame_id": message.frame_id,
+                "ts": message.ts,
+                "poses": [
+                    {
+                        "position": (pose.position.x, pose.position.y, pose.position.z),
+                        "orientation": (
+                            pose.orientation.x,
+                            pose.orientation.y,
+                            pose.orientation.z,
+                            pose.orientation.w,
+                        ),
+                    }
+                    for pose in message.poses
+                ],
+            }
+        )
         first_pose = message.poses[0] if message.poses else None
         first_pose_summary = (
             f"first=t=({first_pose.position.x:.3f},{first_pose.position.y:.3f},"
@@ -95,30 +108,6 @@ class LoopClosureRecorderModule(Module):
     @rpc
     def events(self) -> list[dict[str, Any]]:
         return list(self._events)
-
-
-def _message_to_dict(message: NavPath) -> dict[str, Any]:
-    """JSON-friendly snapshot of a NavPath — Pydantic-friendly RPC return."""
-    return {
-        "frame_id": message.frame_id,
-        "ts": message.ts,
-        "poses": [
-            {
-                "position": (
-                    pose.position.x,
-                    pose.position.y,
-                    pose.position.z,
-                ),
-                "orientation": (
-                    pose.orientation.x,
-                    pose.orientation.y,
-                    pose.orientation.z,
-                    pose.orientation.w,
-                ),
-            }
-            for pose in message.poses
-        ],
-    }
 
 
 def _validate_loop_closure_event(event: dict[str, Any], event_index: int) -> tuple[float, float]:

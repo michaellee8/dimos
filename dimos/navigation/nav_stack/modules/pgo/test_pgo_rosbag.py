@@ -26,7 +26,7 @@ from reactivex.disposable import Disposable
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.core import rpc
-from dimos.core.module import Module, ModuleConfig
+from dimos.core.module import Module
 from dimos.core.stream import In
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
@@ -45,14 +45,8 @@ POST_FEED_DRAIN_SEC = 3.0
 POLL_INTERVAL_SEC = 0.25
 
 
-class PgoOutputCollectorConfig(ModuleConfig):
-    pass
-
-
 class PgoOutputCollectorModule(Module):
     """Captures PGO's corrected_odometry, global_map, and corrected_tf streams."""
-
-    config: PgoOutputCollectorConfig
 
     corrected_odometry: In[Odometry]
     global_map: In[PointCloud2]

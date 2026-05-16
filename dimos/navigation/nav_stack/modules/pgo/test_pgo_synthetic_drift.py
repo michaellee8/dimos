@@ -298,14 +298,9 @@ class SyntheticDriftPlaybackModule(Module):
         return self._frames_published
 
 
-class LoopClosureCounterConfig(ModuleConfig):
-    pass
-
-
 class LoopClosureCounterModule(Module):
     """Counts loop_closure events from any pose-graph SLAM module."""
 
-    config: LoopClosureCounterConfig
     loop_closure: In[NavPath]
 
     def __init__(self, **kwargs: Any) -> None:
