@@ -113,13 +113,19 @@ class NativeModuleConfig(ModuleConfig):
 
         A subclass that redeclares an inherited field (e.g. ``frame_id``) is
         signalling it wants that field exposed — usually as a CLI arg or
-        stdin config entry — so we don't filter it out.
+        stdin config entry — so we don't filter it out. Fields declared
+        directly on NativeModuleConfig (``executable``, ``cwd``, ...) configure
+        the wrapper itself and stay ignored even when redeclared to override
+        defaults.
         """
         ignore = set(NativeModuleConfig.model_fields)
+        wrapper_only = set(NativeModuleConfig.__annotations__)
         for klass in self.__class__.__mro__:
             if klass is NativeModuleConfig:
                 break
-            ignore -= set(getattr(klass, "__annotations__", {}))
+            for field in getattr(klass, "__annotations__", {}):
+                if field not in wrapper_only:
+                    ignore.discard(field)
         return ignore
 
     def to_config_dict(self) -> dict[str, Any]:
