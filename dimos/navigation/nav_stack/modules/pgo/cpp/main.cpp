@@ -12,6 +12,7 @@
 
 #include <lcm/lcm-cpp.hpp>
 #include <Eigen/Geometry>
+#include <pcl/console/print.h>
 
 #include "commons.h"
 #include "simple_pgo.h"
@@ -19,8 +20,10 @@
 #include "point_cloud_utils.hpp"
 
 #include "nav_msgs/Odometry.hpp"
+#include "nav_msgs/Path.hpp"
 #include "sensor_msgs/PointCloud2.hpp"
 #include "geometry_msgs/Pose.hpp"
+#include "geometry_msgs/PoseStamped.hpp"
 #include "geometry_msgs/Quaternion.hpp"
 #include "geometry_msgs/Point.hpp"
 
@@ -76,18 +79,18 @@ public:
             return;
         g_last_message_time = ts;
 
-        CloudWithPose cp;
-        cp.pose.r = g_latest_r;
-        cp.pose.t = g_latest_t;
-        cp.pose.setTime(static_cast<int32_t>(ts),
+        CloudWithPose cloud_with_pose;
+        cloud_with_pose.pose.r = g_latest_r;
+        cloud_with_pose.pose.t = g_latest_t;
+        cloud_with_pose.pose.setTime(static_cast<int32_t>(ts),
                         static_cast<uint32_t>((ts - static_cast<int32_t>(ts)) * 1e9));
 
         // Parse PointCloud2 to PCL
-        cp.cloud = CloudType::Ptr(new CloudType);
-        smartnav::to_pcl(*msg, *cp.cloud);
+        cloud_with_pose.cloud = CloudType::Ptr(new CloudType);
+        smartnav::to_pcl(*msg, *cloud_with_pose.cloud);
 
         std::lock_guard<std::mutex> buf_lock(g_buffer_mutex);
-        g_cloud_buffer.push(cp);
+        g_cloud_buffer.push(cloud_with_pose);
     }
 };
 
@@ -110,41 +113,186 @@ static nav_msgs::Odometry build_odometry(const M3D& r, const V3D& t, double ts,
     return odom;
 }
 
+// Build a Path-encoded GraphNodes3D message — one pose per keyframe,
+// orientation.w encoded as node_type (1 = odom/robot — green in rerun).
+static nav_msgs::Path build_graph_nodes(const std::vector<KeyPoseWithCloud>& key_poses,
+                                         double ts,
+                                         const std::string& frame_id) {
+    nav_msgs::Path msg;
+    msg.header = dimos::make_header(frame_id, ts);
+    msg.poses_length = static_cast<int32_t>(key_poses.size());
+    msg.poses.reserve(key_poses.size());
+    for (const auto& keyframe : key_poses) {
+        geometry_msgs::PoseStamped pose_stamped;
+        pose_stamped.header = dimos::make_header(frame_id, ts);
+        pose_stamped.pose.position.x = keyframe.t_global.x();
+        pose_stamped.pose.position.y = keyframe.t_global.y();
+        pose_stamped.pose.position.z = keyframe.t_global.z();
+        pose_stamped.pose.orientation.x = 0.0;
+        pose_stamped.pose.orientation.y = 0.0;
+        pose_stamped.pose.orientation.z = 0.0;
+        pose_stamped.pose.orientation.w = 1.0;
+        msg.poses.push_back(pose_stamped);
+    }
+    return msg;
+}
+
+static void append_segment(nav_msgs::Path& msg,
+                            const std::string& frame_id,
+                            double start_ts,
+                            const V3D& start,
+                            const V3D& end,
+                            double traversability,
+                            double end_ts) {
+    geometry_msgs::PoseStamped start_pose;
+    start_pose.header = dimos::make_header(frame_id, start_ts);
+    start_pose.pose.position.x = start.x();
+    start_pose.pose.position.y = start.y();
+    start_pose.pose.position.z = start.z();
+    start_pose.pose.orientation.x = 0.0;
+    start_pose.pose.orientation.y = 0.0;
+    start_pose.pose.orientation.z = 0.0;
+    // traversability is encoded on the first pose of each pair
+    start_pose.pose.orientation.w = traversability;
+
+    geometry_msgs::PoseStamped end_pose;
+    end_pose.header = dimos::make_header(frame_id, end_ts);
+    end_pose.pose.position.x = end.x();
+    end_pose.pose.position.y = end.y();
+    end_pose.pose.position.z = end.z();
+    end_pose.pose.orientation.x = 0.0;
+    end_pose.pose.orientation.y = 0.0;
+    end_pose.pose.orientation.z = 0.0;
+    end_pose.pose.orientation.w = traversability;
+
+    msg.poses.push_back(start_pose);
+    msg.poses.push_back(end_pose);
+}
+
+// Build a Path-encoded loop-closure-deltas message — one PoseStamped per
+// keyframe, where position = (post - delta @ pre) translation delta and
+// orientation = delta rotation quaternion. The Nth pose corresponds to
+// the Nth keyframe (m_key_poses[N]).
+static nav_msgs::Path build_loop_closure_deltas(
+    const std::vector<std::pair<M3D, V3D>>& pre_poses,
+    const std::vector<KeyPoseWithCloud>& post_poses,
+    double ts,
+    const std::string& frame_id) {
+    nav_msgs::Path msg;
+    msg.header = dimos::make_header(frame_id, ts);
+    size_t count = std::min(pre_poses.size(), post_poses.size());
+    msg.poses.reserve(count);
+    for (size_t i = 0; i < count; i++) {
+        const M3D& pre_r = pre_poses[i].first;
+        const V3D& pre_t = pre_poses[i].second;
+        const M3D& post_r = post_poses[i].r_global;
+        const V3D& post_t = post_poses[i].t_global;
+
+        // SE(3) delta such that post = delta * pre.
+        M3D r_delta = post_r * pre_r.transpose();
+        V3D t_delta = post_t - r_delta * pre_t;
+
+        geometry_msgs::PoseStamped pose_stamped;
+        pose_stamped.header = dimos::make_header(frame_id, ts);
+        pose_stamped.pose.position.x = t_delta.x();
+        pose_stamped.pose.position.y = t_delta.y();
+        pose_stamped.pose.position.z = t_delta.z();
+        Eigen::Quaterniond q(r_delta);
+        pose_stamped.pose.orientation.x = q.x();
+        pose_stamped.pose.orientation.y = q.y();
+        pose_stamped.pose.orientation.z = q.z();
+        pose_stamped.pose.orientation.w = q.w();
+        msg.poses.push_back(pose_stamped);
+    }
+    msg.poses_length = static_cast<int32_t>(msg.poses.size());
+    return msg;
+}
+
+// Build a Path-encoded LineSegments3D message — pose pairs form segments.
+// Odometry edges get traversability=1.0 (green); loop closures get 0.4
+// (yellow) so they stand out in the rerun rendering. The header stamp
+// on each endpoint is the *creation* time of that keyframe (not the
+// message publish time), so downstream consumers can correlate edge
+// endpoints back to the input scan that produced each keyframe.
+static nav_msgs::Path build_graph_edges(const std::vector<KeyPoseWithCloud>& key_poses,
+                                         const std::vector<std::pair<size_t, size_t>>& loop_pairs,
+                                         double ts,
+                                         const std::string& frame_id) {
+    nav_msgs::Path msg;
+    msg.header = dimos::make_header(frame_id, ts);
+
+    // Odometry edges between consecutive keyframes.
+    for (size_t i = 1; i < key_poses.size(); i++) {
+        append_segment(msg, frame_id, key_poses[i - 1].time,
+                       key_poses[i - 1].t_global,
+                       key_poses[i].t_global,
+                       1.0,
+                       key_poses[i].time);
+    }
+    // Loop closure edges.
+    for (const auto& pair : loop_pairs) {
+        if (pair.first >= key_poses.size() || pair.second >= key_poses.size())
+            continue;
+        append_segment(msg, frame_id, key_poses[pair.first].time,
+                       key_poses[pair.first].t_global,
+                       key_poses[pair.second].t_global,
+                       0.4,
+                       key_poses[pair.second].time);
+    }
+    msg.poses_length = static_cast<int32_t>(msg.poses.size());
+    return msg;
+}
+
 int main(int argc, char** argv)
 {
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
 
-    dimos::NativeModule mod(argc, argv);
+    dimos::NativeModule native_module(argc, argv);
 
     // Port topics
-    std::string scan_topic = mod.topic("registered_scan");
-    std::string odom_topic = mod.topic("odometry");
-    std::string corrected_odom_topic = mod.topic("corrected_odometry");
-    std::string global_map_topic = mod.topic("global_map");
-    std::string tf_topic = mod.topic("pgo_tf");
+    std::string scan_topic = native_module.topic("registered_scan");
+    std::string odom_topic = native_module.topic("odometry");
+    std::string corrected_odom_topic = native_module.topic("corrected_odometry");
+    std::string global_map_topic = native_module.topic("global_map");
+    std::string tf_topic = native_module.topic("corrected_tf");
+    std::string graph_nodes_topic = native_module.topic("pose_graph_nodes");
+    std::string graph_edges_topic = native_module.topic("pose_graph_edges");
+    std::string loop_closure_topic = native_module.topic("loop_closure");
 
     // Config parameters
     Config config;
-    config.key_pose_delta_deg = mod.arg_float("key_pose_delta_deg", 10.0f);
-    config.key_pose_delta_trans = mod.arg_float("key_pose_delta_trans", 0.5f);
-    config.loop_search_radius = mod.arg_float("loop_search_radius", 1.0f);
-    config.loop_time_tresh = mod.arg_float("loop_time_thresh", 60.0f);
-    config.loop_score_tresh = mod.arg_float("loop_score_thresh", 0.15f);
-    config.loop_submap_half_range = mod.arg_int("loop_submap_half_range", 5);
-    config.submap_resolution = mod.arg_float("submap_resolution", 0.1f);
-    config.min_loop_detect_duration = mod.arg_float("min_loop_detect_duration", 5.0f);
+    config.key_pose_delta_deg = native_module.arg_float("key_pose_delta_deg", 10.0f);
+    config.key_pose_delta_trans = native_module.arg_float("key_pose_delta_trans", 0.5f);
+    config.loop_search_radius = native_module.arg_float("loop_search_radius", 1.0f);
+    config.loop_time_thresh = native_module.arg_float("loop_time_thresh", 60.0f);
+    config.loop_score_thresh = native_module.arg_float("loop_score_thresh", 0.15f);
+    config.loop_submap_half_range = native_module.arg_int("loop_submap_half_range", 5);
+    config.submap_resolution = native_module.arg_float("submap_resolution", 0.1f);
+    config.min_loop_detect_duration = native_module.arg_float("min_loop_detect_duration", 5.0f);
+    config.use_scan_context = native_module.arg_bool("use_scan_context", true);
+    config.scan_context_num_rings = native_module.arg_int("scan_context_num_rings", 20);
+    config.scan_context_num_sectors = native_module.arg_int("scan_context_num_sectors", 60);
+    config.scan_context_max_range_m = native_module.arg_float("scan_context_max_range_m", 80.0f);
+    config.scan_context_top_k = native_module.arg_int("scan_context_top_k", 10);
+    config.scan_context_match_threshold = native_module.arg_float("scan_context_match_threshold", 0.4f);
+    config.scan_context_lidar_height_m = native_module.arg_float("scan_context_lidar_height_m", 2.0f);
 
     // Node-level config
-    std::string world_frame = mod.arg("world_frame", "map");
-    std::string local_frame = mod.arg("local_frame", "odom");
-    float global_map_voxel_size = mod.arg_float("global_map_voxel_size", 0.1f);
-    float global_map_publish_rate = mod.arg_float("global_map_publish_rate", 1.0f);
+    std::string world_frame = native_module.arg("world_frame", "map");
+    std::string local_frame = native_module.arg("local_frame", "odom");
+    float global_map_voxel_size = native_module.arg_float("global_map_voxel_size", 0.1f);
+    float global_map_publish_rate = native_module.arg_float("global_map_publish_rate", 1.0f);
     double global_map_interval = global_map_publish_rate > 0
         ? 1.0 / global_map_publish_rate : 2.0;
 
     // Unregister mode: transform world-frame scans to body-frame
-    bool unregister_input = mod.arg_bool("unregister_input", true);
+    bool unregister_input = native_module.arg_bool("unregister_input", true);
+
+    bool debug = native_module.arg_bool("debug", false);
+
+    pcl::console::setVerbosityLevel(
+        debug ? pcl::console::L_INFO : pcl::console::L_ERROR);
 
     SimplePGO pgo(config);
 
@@ -158,12 +306,17 @@ int main(int argc, char** argv)
     lcm.subscribe(odom_topic, &Handlers::on_odometry, &handlers);
     lcm.subscribe(scan_topic, &Handlers::on_registered_scan, &handlers);
 
-    fprintf(stderr, "PGO native module started\n");
-    fprintf(stderr, "  registered_scan: %s\n", scan_topic.c_str());
-    fprintf(stderr, "  odometry: %s\n", odom_topic.c_str());
-    fprintf(stderr, "  corrected_odometry: %s\n", corrected_odom_topic.c_str());
-    fprintf(stderr, "  global_map: %s\n", global_map_topic.c_str());
-    fprintf(stderr, "  pgo_tf: %s\n", tf_topic.c_str());
+    if (debug) {
+        fprintf(stderr, "PGO native module started\n");
+        fprintf(stderr, "  registered_scan: %s\n", scan_topic.c_str());
+        fprintf(stderr, "  odometry: %s\n", odom_topic.c_str());
+        fprintf(stderr, "  corrected_odometry: %s\n", corrected_odom_topic.c_str());
+        fprintf(stderr, "  global_map: %s\n", global_map_topic.c_str());
+        fprintf(stderr, "  corrected_tf: %s\n", tf_topic.c_str());
+        fprintf(stderr, "  pose_graph_nodes: %s\n", graph_nodes_topic.c_str());
+        fprintf(stderr, "  pose_graph_edges: %s\n", graph_edges_topic.c_str());
+        fprintf(stderr, "  loop_closure: %s\n", loop_closure_topic.c_str());
+    }
 
     double last_global_map_time = 0.0;
     int timer_period_ms = 50;  // 20 Hz, matching original
@@ -173,12 +326,12 @@ int main(int argc, char** argv)
         while (lcm.handleTimeout(0) > 0) {}
 
         // Check buffer
-        CloudWithPose cp;
+        CloudWithPose cloud_with_pose;
         bool has_data = false;
         {
             std::lock_guard<std::mutex> lock(g_buffer_mutex);
             if (!g_cloud_buffer.empty()) {
-                cp = g_cloud_buffer.front();
+                cloud_with_pose = g_cloud_buffer.front();
                 // Drain entire queue (matching original: process oldest, discard rest)
                 while (!g_cloud_buffer.empty()) {
                     g_cloud_buffer.pop();
@@ -193,13 +346,13 @@ int main(int argc, char** argv)
         }
 
         // Optionally transform world-frame scan to body-frame
-        if (unregister_input && cp.cloud && cp.cloud->size() > 0) {
+        if (unregister_input && cloud_with_pose.cloud && cloud_with_pose.cloud->size() > 0) {
             CloudType::Ptr body_cloud(new CloudType);
             // body = R_odom^T * (world_pts - t_odom)
-            M3D r_inv = cp.pose.r.transpose();
-            for (const auto& pt : *cp.cloud) {
+            M3D r_inv = cloud_with_pose.pose.r.transpose();
+            for (const auto& pt : *cloud_with_pose.cloud) {
                 V3D world_pt(pt.x, pt.y, pt.z);
-                V3D body_pt = r_inv * (world_pt - cp.pose.t);
+                V3D body_pt = r_inv * (world_pt - cloud_with_pose.pose.t);
                 PointType bp;
                 bp.x = static_cast<float>(body_pt.x());
                 bp.y = static_cast<float>(body_pt.y());
@@ -207,15 +360,15 @@ int main(int argc, char** argv)
                 bp.intensity = pt.intensity;
                 body_cloud->push_back(bp);
             }
-            cp.cloud = body_cloud;
+            cloud_with_pose.cloud = body_cloud;
         }
 
-        double cur_time = cp.pose.second;
+        double cur_time = cloud_with_pose.pose.second;
 
-        if (!pgo.addKeyPose(cp)) {
+        if (!pgo.addKeyPose(cloud_with_pose)) {
             // Not a keyframe — still broadcast TF and corrected odom
-            M3D corr_r = pgo.offsetR() * cp.pose.r;
-            V3D corr_t = pgo.offsetR() * cp.pose.t + pgo.offsetT();
+            M3D corr_r = pgo.offsetR() * cloud_with_pose.pose.r;
+            V3D corr_t = pgo.offsetR() * cloud_with_pose.pose.t + pgo.offsetT();
 
             nav_msgs::Odometry corrected = build_odometry(
                 corr_r, corr_t, cur_time, world_frame, "base_link");
@@ -229,17 +382,42 @@ int main(int argc, char** argv)
             continue;
         }
 
-        // Keyframe added
+        // Keyframe added. Snapshot keyframe global poses BEFORE search +
+        // smooth so we can publish the delta applied by iSAM2 if a loop
+        // closure actually fires.
         pgo.searchForLoopPairs();
+        bool had_loop = pgo.hasLoop();
+
+        std::vector<std::pair<M3D, V3D>> pre_poses;
+        if (had_loop) {
+            pre_poses.reserve(pgo.keyPoses().size());
+            for (const auto& kp : pgo.keyPoses()) {
+                pre_poses.emplace_back(kp.r_global, kp.t_global);
+            }
+        }
+
         pgo.smoothAndUpdate();
 
-        fprintf(stderr, "PGO: keyframe %zu at (%.1f, %.1f, %.1f)\n",
-                pgo.keyPoses().size(),
-                cp.pose.t.x(), cp.pose.t.y(), cp.pose.t.z());
+        if (had_loop) {
+            nav_msgs::Path loop_closure_msg = build_loop_closure_deltas(
+                pre_poses, pgo.keyPoses(), cur_time, world_frame);
+            lcm.publish(loop_closure_topic, &loop_closure_msg);
+            if (debug) {
+                fprintf(stderr,
+                        "PGO: loop closure event published — %zu keyframe deltas\n",
+                        pre_poses.size());
+            }
+        }
+
+        if (debug) {
+            fprintf(stderr, "PGO: keyframe %zu at (%.1f, %.1f, %.1f)\n",
+                    pgo.keyPoses().size(),
+                    cloud_with_pose.pose.t.x(), cloud_with_pose.pose.t.y(), cloud_with_pose.pose.t.z());
+        }
 
         // Publish corrected odometry
-        M3D corr_r = pgo.offsetR() * cp.pose.r;
-        V3D corr_t = pgo.offsetR() * cp.pose.t + pgo.offsetT();
+        M3D corr_r = pgo.offsetR() * cloud_with_pose.pose.r;
+        V3D corr_t = pgo.offsetR() * cloud_with_pose.pose.t + pgo.offsetT();
         nav_msgs::Odometry corrected = build_odometry(
             corr_r, corr_t, cur_time, world_frame, "base_link");
         lcm.publish(corrected_odom_topic, &corrected);
@@ -248,6 +426,18 @@ int main(int argc, char** argv)
         nav_msgs::Odometry tf_msg = build_odometry(
             pgo.offsetR(), pgo.offsetT(), cur_time, world_frame, local_frame);
         lcm.publish(tf_topic, &tf_msg);
+
+        // Publish pose-graph nodes + edges (on every keyframe — iSAM2
+        // may have re-optimized prior poses on loop closure).
+        {
+            nav_msgs::Path nodes_msg = build_graph_nodes(
+                pgo.keyPoses(), cur_time, world_frame);
+            lcm.publish(graph_nodes_topic, &nodes_msg);
+
+            nav_msgs::Path edges_msg = build_graph_edges(
+                pgo.keyPoses(), pgo.historyPairs(), cur_time, world_frame);
+            lcm.publish(graph_edges_topic, &edges_msg);
+        }
 
         // Publish global map (throttled)
         double now = cur_time;
@@ -281,6 +471,6 @@ int main(int argc, char** argv)
         std::this_thread::sleep_for(std::chrono::milliseconds(timer_period_ms));
     }
 
-    fprintf(stderr, "PGO native module shutting down\n");
+    if (debug) fprintf(stderr, "PGO native module shutting down\n");
     return 0;
 }
