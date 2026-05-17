@@ -251,10 +251,9 @@ class ModuleBase(Configurable, CompositeResource):
 
     @property
     def tf(self):  # type: ignore[no-untyped-def]
-        if self._tf is None:
-            with self._tf_lock:
-                if self._tf is None:
-                    self._tf = LCMTF()
+        with self._tf_lock:
+            if self._tf is None:
+                self._tf = LCMTF()
         return self._tf
 
     @tf.setter
