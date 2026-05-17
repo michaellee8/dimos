@@ -19,8 +19,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+import os
 from pathlib import Path
 from typing import Any, TypedDict, cast
+
+# Default OpenCL off: on Apple Silicon, CPU chessboard detection is often faster and more stable here.
+# Use setdefault so an explicit OPENCV_OPENCL_RUNTIME from the environment still wins.
+os.environ.setdefault("OPENCV_OPENCL_RUNTIME", "disabled")
 
 import cv2
 import numpy as np
@@ -136,6 +141,7 @@ def load_frames_from_folder(path: str) -> list[np.ndarray]:
 
 _CAMERACALIBRATE_WINDOW = "dimos cameracalibrate"
 _MAX_CONSECUTIVE_WEBCAM_READ_FAILURES = 30
+_OPENCV_CALIBRATION_RUNTIME_CONFIGURED = False
 
 
 @dataclass(frozen=True)
@@ -155,6 +161,7 @@ class _WebcamCapture:
 
 def _pattern_candidates(cols: int, rows: int) -> list[tuple[int, int, str]]:
     """Return plausible inner-corner pattern sizes, exact request first."""
+    # Board size may be given as inner corners or as square counts; also try swapped axes (portrait).
     candidates = [
         (cols, rows, "requested inner corners"),
         (rows, cols, "requested inner corners, rotated"),
@@ -185,9 +192,71 @@ def _as_grayscale_uint8(gray: np.ndarray) -> np.ndarray:
     if g.ndim == 3:
         g = cv2.cvtColor(g, cv2.COLOR_BGR2GRAY)
     if g.dtype != np.uint8:
+        # Corner finders expect uint8 range; normalize wider dtypes before detection.
         out_norm = np.empty(g.shape, dtype=np.uint8)
         g = cv2.normalize(g, out_norm, 0, 255, cv2.NORM_MINMAX)
     return np.ascontiguousarray(g)
+
+
+def _configure_opencv_calibration_runtime() -> None:
+    global _OPENCV_CALIBRATION_RUNTIME_CONFIGURED
+    if _OPENCV_CALIBRATION_RUNTIME_CONFIGURED:
+        return
+
+    # Process-global OpenCV settings; run once before any chessboard detection in this module.
+    cv2.setUseOptimized(True)
+    if hasattr(cv2, "ocl"):
+        try:
+            cv2.ocl.setUseOpenCL(False)
+        except cv2.error:
+            pass
+
+    _OPENCV_CALIBRATION_RUNTIME_CONFIGURED = True
+
+
+def _find_chessboard_corners_sb(
+    gray: np.ndarray,
+    cols: int,
+    rows: int,
+    *,
+    exhaustive: bool,
+) -> np.ndarray | None:
+    _configure_opencv_calibration_runtime()
+    find_sb = getattr(cv2, "findChessboardCornersSB", None)
+    if find_sb is None:
+        return None
+
+    g = _as_grayscale_uint8(gray)
+    pattern_size = (cols, rows)
+    sb_flags = cv2.CALIB_CB_NORMALIZE_IMAGE
+    if exhaustive:
+        # CALIB_CB_EXHAUSTIVE and CALIB_CB_ACCURACY: higher CPU, better recall on difficult frames.
+        # Live preview passes exhaustive=False; exhaustive=True is reserved for the offline fallback path.
+        if hasattr(cv2, "CALIB_CB_EXHAUSTIVE"):
+            sb_flags |= cv2.CALIB_CB_EXHAUSTIVE
+        if hasattr(cv2, "CALIB_CB_ACCURACY"):
+            sb_flags |= cv2.CALIB_CB_ACCURACY
+
+    ok, corners = cast("Callable[..., tuple[bool, Any]]", find_sb)(g, pattern_size, sb_flags)
+    if not ok or corners is None:
+        return None
+    return np.asarray(corners, dtype=np.float32).reshape(cols * rows, 1, 2)
+
+
+def _find_chessboard_corners_realtime(
+    gray: np.ndarray,
+    cols: int,
+    rows: int,
+) -> np.ndarray | None:
+    # Preview path: SB without exhaustive flags so most misses stay cheap (latency budget).
+    corners = _find_chessboard_corners_sb(gray, cols, rows, exhaustive=False)
+    if corners is not None:
+        return corners
+
+    if getattr(cv2, "findChessboardCornersSB", None) is not None:
+        return None
+
+    return _find_chessboard_corners_exact(gray, cols, rows)
 
 
 def _find_chessboard_corners_exact(gray: np.ndarray, cols: int, rows: int) -> np.ndarray | None:
@@ -198,30 +267,26 @@ def _find_chessboard_corners_exact(gray: np.ndarray, cols: int, rows: int) -> np
     _find_corners = cast("Callable[..., tuple[bool, Any]]", cv2.findChessboardCorners)
     ok, corners = _find_corners(g_cv, pattern_size, flags)
     if ok and corners is not None:
+        # Classic detector already gave pixel locations; refine to sub-pixel accuracy.
         criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
         refined = cv2.cornerSubPix(g_cv, corners, (11, 11), (-1, -1), criteria)
         return cast("np.ndarray", refined)
 
-    find_sb = getattr(cv2, "findChessboardCornersSB", None)
-    if find_sb is None:
-        return None
-
-    sb_flags = cv2.CALIB_CB_NORMALIZE_IMAGE
-    if hasattr(cv2, "CALIB_CB_EXHAUSTIVE"):
-        sb_flags |= cv2.CALIB_CB_EXHAUSTIVE
-    if hasattr(cv2, "CALIB_CB_ACCURACY"):
-        sb_flags |= cv2.CALIB_CB_ACCURACY
-    ok, corners = cast("Callable[..., tuple[bool, Any]]", find_sb)(g_cv, pattern_size, sb_flags)
-    if not ok or corners is None:
-        return None
-    return np.asarray(corners, dtype=np.float32).reshape(cols * rows, 1, 2)
+    # Classic detector missed: try SB again with exhaustive flags (slower, higher recall).
+    return _find_chessboard_corners_sb(g_cv, cols, rows, exhaustive=True)
 
 
 def _find_chessboard_detection(
-    gray: np.ndarray, cols: int, rows: int
+    gray: np.ndarray,
+    cols: int,
+    rows: int,
+    *,
+    realtime: bool = False,
+    candidates: list[tuple[int, int, str]] | None = None,
 ) -> _ChessboardDetection | None:
-    for cand_cols, cand_rows, label in _pattern_candidates(cols, rows):
-        corners = _find_chessboard_corners_exact(gray, cand_cols, cand_rows)
+    detector = _find_chessboard_corners_realtime if realtime else _find_chessboard_corners_exact
+    for cand_cols, cand_rows, label in candidates or _pattern_candidates(cols, rows):
+        corners = detector(gray, cand_cols, cand_rows)
         if corners is not None:
             return _ChessboardDetection(corners, cand_cols, cand_rows, label)
     return None
@@ -272,6 +337,9 @@ def _capture_frames_from_webcam(
     cap: cv2.VideoCapture | None = None
     last_detected: tuple[int, int, str] | None = None
     locked_pattern: tuple[int, int, str] | None = None
+    locked_exact_probe = False
+    pattern_candidates = _pattern_candidates(cols, rows)
+    pattern_candidate_index = 0
     consecutive_read_failures = 0
 
     try:
@@ -298,12 +366,30 @@ def _capture_frames_from_webcam(
                 gray = frame
 
             if locked_pattern is None:
-                detection = _find_chessboard_detection(gray, cols, rows)
+                candidate = pattern_candidates[pattern_candidate_index]
+                pattern_candidate_index = (pattern_candidate_index + 1) % len(pattern_candidates)
+                # Until pattern lock: one candidate per frame so we do not evaluate every pattern every frame.
+                detection = _find_chessboard_detection(
+                    gray,
+                    cols,
+                    rows,
+                    realtime=True,
+                    candidates=[candidate],
+                )
                 if detection is not None:
                     locked_pattern = (detection.cols, detection.rows, detection.label)
+                    locked_exact_probe = True
             else:
                 locked_cols, locked_rows, locked_label = locked_pattern
-                corners = find_chessboard_corners(gray, locked_cols, locked_rows)
+                if locked_exact_probe:
+                    # Locked board: prefer full detector; on miss, drop to realtime until corners reappear.
+                    corners = find_chessboard_corners(gray, locked_cols, locked_rows)
+                    if corners is None:
+                        locked_exact_probe = False
+                else:
+                    corners = _find_chessboard_corners_realtime(gray, locked_cols, locked_rows)
+                    if corners is not None:
+                        locked_exact_probe = True
                 detection = (
                     _ChessboardDetection(corners, locked_cols, locked_rows, locked_label)
                     if corners is not None
@@ -391,12 +477,14 @@ def _select_calibration_pattern(
     cols: int,
     rows: int,
 ) -> tuple[int, int, str]:
+    candidates = _pattern_candidates(cols, rows)
     best_cols, best_rows, best_label = cols, rows, "requested inner corners"
     best_count = -1
-    for cand_cols, cand_rows, label in _pattern_candidates(cols, rows):
+    for cand_cols, cand_rows, label in candidates:
         count = 0
         for frame in frames:
-            corners = find_chessboard_corners(frame, cand_cols, cand_rows)
+            # Many frames: score each candidate with the lightweight detector first (same idea as preview).
+            corners = _find_chessboard_corners_realtime(frame, cand_cols, cand_rows)
             if corners is not None:
                 count += 1
         if count > best_count:
@@ -404,7 +492,18 @@ def _select_calibration_pattern(
             best_count = count
 
     if best_count <= 0:
-        raise ValueError("Chessboard not found in any frame.")
+        for cand_cols, cand_rows, label in candidates:
+            count = 0
+            for frame in frames:
+                corners = find_chessboard_corners(frame, cand_cols, cand_rows)
+                if corners is not None:
+                    count += 1
+            if count > best_count:
+                best_cols, best_rows, best_label = cand_cols, cand_rows, label
+                best_count = count
+
+        if best_count <= 0:
+            raise ValueError("Chessboard not found in any frame.")
     return best_cols, best_rows, best_label
 
 
@@ -435,6 +534,7 @@ def calibrate_from_frames(
     else:
         actual_cols, actual_rows, pattern_label = pattern_hint
 
+    # Object points on Z=0 with XY spacing square_size_m; pairs with image_points from the detector.
     objp = np.zeros((actual_rows * actual_cols, 3), dtype=np.float32)
     objp[:, :2] = np.mgrid[0:actual_cols, 0:actual_rows].T.reshape(-1, 2).astype(np.float32)
     objp *= float(square_size_m)
@@ -455,6 +555,7 @@ def calibrate_from_frames(
 
         corners_found: np.ndarray
         if image_points_hint is not None:
+            # Corners from the frame at SPACE accept time; avoids re-detecting a different instant.
             corners_found = np.asarray(image_points_hint[i], dtype=np.float32).reshape(
                 actual_rows * actual_cols,
                 1,
@@ -641,7 +742,7 @@ def calibrate(
             target_count=target_count,
             no_display=no_display,
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
     typer.echo(f"RMS: {float(result['rms']):.6f} px ({int(result['n_used'])} frame(s) used)")
