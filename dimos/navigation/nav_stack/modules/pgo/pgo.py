@@ -93,7 +93,7 @@ class PGO(NativeModule, LoopClosure):
     corrected_tf: Out[Odometry]
     pose_graph_nodes: Out[NavPath]
     pose_graph_edges: Out[NavPath]
-    loop_closure: Out[NavPath]
+    loop_correction_delta: Out[NavPath]
 
     @rpc
     def start(self) -> None:

@@ -11,7 +11,7 @@ runner provides two helper modules:
 | Module                       | Role                                                      |
 |------------------------------|-----------------------------------------------------------|
 | `Kitti360PlaybackModule`     | Publishes `registered_scan` + `odometry` from disk        |
-| Your pose-graph SLAM module  | Consumes those, publishes `pose_graph_edges` + `loop_closure` |
+| Your pose-graph SLAM module  | Consumes those, publishes `pose_graph_edges` + `loop_correction_delta` |
 | `PoseGraphScoringModule`     | Subscribes to the outputs, accumulates metrics            |
 
 `autoconnect` wires the three together by stream name.
@@ -24,7 +24,7 @@ class YourPoseGraphModule(Module):
     odometry: In[Odometry]
 
     pose_graph_edges: Out[NavPath]   # loop edges tagged orientation.w == 0.4
-    loop_closure: Out[NavPath]       # one message per loop-closure update
+    loop_correction_delta: Out[NavPath]  # one message per loop-closure update
 ```
 
 Edge convention on `pose_graph_edges`: poses are paired
@@ -72,7 +72,7 @@ print(results)
 # {
 #   "true_positive": ..., "false_positive": ..., "false_negative": ...,
 #   "precision": ..., "recall": ..., "f1": ...,
-#   "detected_loop_edges": ..., "loop_closure_events": ...,
+#   "detected_loop_edges": ..., "loop_correction_delta_events": ...,
 #   "wallclock_seconds": ..., "sequence_id": 2,
 # }
 ```

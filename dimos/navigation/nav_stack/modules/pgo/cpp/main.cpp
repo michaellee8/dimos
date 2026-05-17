@@ -169,11 +169,11 @@ static void append_segment(nav_msgs::Path& msg,
     msg.poses.push_back(end_pose);
 }
 
-// Build a Path-encoded loop-closure-deltas message — one PoseStamped per
+// Build a Path-encoded loop-correction-delta message — one PoseStamped per
 // keyframe, where position = (post - delta @ pre) translation delta and
 // orientation = delta rotation quaternion. The Nth pose corresponds to
 // the Nth keyframe (m_key_poses[N]).
-static nav_msgs::Path build_loop_closure_deltas(
+static nav_msgs::Path build_loop_correction_delta(
     const std::vector<std::pair<M3D, V3D>>& pre_poses,
     const std::vector<KeyPoseWithCloud>& post_poses,
     double ts,
@@ -258,7 +258,7 @@ int main(int argc, char** argv)
     std::string tf_topic = native_module.topic("corrected_tf");
     std::string graph_nodes_topic = native_module.topic("pose_graph_nodes");
     std::string graph_edges_topic = native_module.topic("pose_graph_edges");
-    std::string loop_closure_topic = native_module.topic("loop_closure");
+    std::string loop_correction_delta_topic = native_module.topic("loop_correction_delta");
 
     // Config parameters
     Config config;
@@ -315,7 +315,7 @@ int main(int argc, char** argv)
         fprintf(stderr, "  corrected_tf: %s\n", tf_topic.c_str());
         fprintf(stderr, "  pose_graph_nodes: %s\n", graph_nodes_topic.c_str());
         fprintf(stderr, "  pose_graph_edges: %s\n", graph_edges_topic.c_str());
-        fprintf(stderr, "  loop_closure: %s\n", loop_closure_topic.c_str());
+        fprintf(stderr, "  loop_correction_delta: %s\n", loop_correction_delta_topic.c_str());
     }
 
     double last_global_map_time = 0.0;
@@ -399,12 +399,12 @@ int main(int argc, char** argv)
         pgo.smoothAndUpdate();
 
         if (had_loop) {
-            nav_msgs::Path loop_closure_msg = build_loop_closure_deltas(
+            nav_msgs::Path loop_correction_delta_msg = build_loop_correction_delta(
                 pre_poses, pgo.keyPoses(), cur_time, world_frame);
-            lcm.publish(loop_closure_topic, &loop_closure_msg);
+            lcm.publish(loop_correction_delta_topic, &loop_correction_delta_msg);
             if (debug) {
                 fprintf(stderr,
-                        "PGO: loop closure event published — %zu keyframe deltas\n",
+                        "PGO: loop_correction_delta published — %zu keyframe deltas\n",
                         pre_poses.size());
             }
         }

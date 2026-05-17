@@ -18,7 +18,7 @@ Subscribes to two outputs that any pose-graph SLAM module exposes:
 
 * ``pose_graph_edges: In[NavPath]`` — pose-graph edges where loop closures
   are tagged with ``orientation.w == 0.4`` (odometry edges use ``1.0``).
-* ``loop_closure: In[NavPath]`` — one event per loop-closure update with
+* ``loop_correction_delta: In[NavPath]`` — one event per loop-closure update with
   per-keyframe deltas.
 
 The scoring module needs to know, for each edge endpoint, which input scan
@@ -92,12 +92,12 @@ class PoseGraphScoringModule(Module):
     config: PoseGraphScoringConfig
 
     pose_graph_edges: In[NavPath]
-    loop_closure: In[NavPath]
+    loop_correction_delta: In[NavPath]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._detected_pairs: list[tuple[int, int]] = []
-        self._loop_closure_events: int = 0
+        self._loop_correction_delta_events: int = 0
         self._timestamp_ms_to_frame_id: dict[int, int] = {
             round(send_timestamp * 1e3): frame_id
             for frame_id, send_timestamp in zip(
@@ -108,14 +108,16 @@ class PoseGraphScoringModule(Module):
     @rpc
     def start(self) -> None:
         super().start()
-        self.register_disposable(Disposable(self.loop_closure.subscribe(self._on_loop_closure)))
+        self.register_disposable(
+            Disposable(self.loop_correction_delta.subscribe(self._on_loop_correction_delta))
+        )
         self.register_disposable(
             Disposable(self.pose_graph_edges.subscribe(self._on_pose_graph_edges))
         )
 
-    def _on_loop_closure(self, message: NavPath) -> None:
+    def _on_loop_correction_delta(self, message: NavPath) -> None:
         del message
-        self._loop_closure_events += 1
+        self._loop_correction_delta_events += 1
 
     def _on_pose_graph_edges(self, message: NavPath) -> None:
         pose_index = 0
@@ -157,7 +159,7 @@ class PoseGraphScoringModule(Module):
             "groundtruth_queries_with_loop": queries_with_loop,
             "groundtruth_total_loop_pairs": total_pairs,
             "detected_loop_edges": len(self._detected_pairs),
-            "loop_closure_events": self._loop_closure_events,
+            "loop_correction_delta_events": self._loop_correction_delta_events,
             "true_positive": metrics.true_positive,
             "false_positive": metrics.false_positive,
             "false_negative": metrics.false_negative,

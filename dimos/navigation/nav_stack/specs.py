@@ -28,7 +28,12 @@ if TYPE_CHECKING:
 class LoopClosure(Protocol):
     registered_scan: In[PointCloud2]
     odometry: In[Odometry]
-    loop_closure: Out[NavPath]
+    # Per-keyframe SE(3) correction applied by the optimizer when a loop
+    # closure fires. Encoded as a NavPath where position = translation delta
+    # and orientation = rotation delta quaternion. The Nth pose corresponds
+    # to the Nth keyframe — same length and same keyframe-index order as
+    # `pose_graph_nodes` published in the same cycle.
+    loop_correction_delta: Out[NavPath]
     pose_graph_edges: Out[NavPath]
 
     @classmethod

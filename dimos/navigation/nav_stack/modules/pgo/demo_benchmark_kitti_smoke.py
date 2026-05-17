@@ -52,7 +52,7 @@ class TopicCounterModule(Module):
     corrected_tf: In[Odometry]
     pose_graph_nodes: In[NavPath]
     pose_graph_edges: In[NavPath]
-    loop_closure: In[NavPath]
+    loop_correction_delta: In[NavPath]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -62,7 +62,7 @@ class TopicCounterModule(Module):
             "corrected_tf": 0,
             "pose_graph_nodes": 0,
             "pose_graph_edges": 0,
-            "loop_closure": 0,
+            "loop_correction_delta": 0,
         }
 
     @rpc
@@ -132,7 +132,7 @@ def main() -> None:
         "corrected_tf",
         "pose_graph_nodes",
         "pose_graph_edges",
-        "loop_closure",
+        "loop_correction_delta",
     ):
         print(f"  {name:<24} {counts.get(name, 0):>6}")
 
@@ -141,7 +141,7 @@ def main() -> None:
         print("  ⚠ no graph nodes — PGO never promoted a keyframe. Check --key_pose_delta_*.")
     elif counts.get("pose_graph_edges", 0) == 0:
         print("  ⚠ nodes but no edges — graph isn't being assembled.")
-    elif counts.get("loop_closure", 0) == 0:
+    elif counts.get("loop_correction_delta", 0) == 0:
         print(
             "  ⚠ graph builds, no loop closure events — try wider --loop-search-radius "
             "or lower --scan-context-match-threshold."
