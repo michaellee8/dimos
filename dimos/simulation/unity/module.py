@@ -237,7 +237,7 @@ class UnityBridgeModule(Module):
         cmd_vel (In[Twist]): Velocity commands.
         terrain_map (In[PointCloud2]): Terrain for Z adjustment.
         odometry (Out[Odometry]): Vehicle state at sim_rate.
-        registered_scan (Out[PointCloud2]): Lidar from Unity.
+        lidar (Out[PointCloud2]): Lidar from Unity.
         color_image (Out[Image]): RGB camera from Unity (1920x640 panoramic).
         semantic_image (Out[Image]): Semantic segmentation from Unity.
         camera_info (Out[CameraInfo]): Camera intrinsics.
@@ -248,7 +248,7 @@ class UnityBridgeModule(Module):
     cmd_vel: In[Twist]
     terrain_map: In[PointCloud2]
     odometry: Out[Odometry]
-    registered_scan: Out[PointCloud2]
+    lidar: Out[PointCloud2]
     color_image: Out[Image]
     semantic_image: Out[Image]
     camera_info: Out[CameraInfo]
@@ -667,12 +667,12 @@ class UnityBridgeModule(Module):
             self._send_queue.put(("__raw__", frame))
 
     def _handle_unity_message(self, topic: str, data: bytes) -> None:
-        if topic == "/registered_scan":
+        if topic == "/lidar":
             pc_result = deserialize_pointcloud2(data)
             if pc_result is not None:
                 points, frame_id, ts = pc_result
                 if len(points) > 0:
-                    self.registered_scan.publish(
+                    self.lidar.publish(
                         PointCloud2.from_numpy(points, frame_id=frame_id, timestamp=ts)
                     )
 

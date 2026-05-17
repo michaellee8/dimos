@@ -19,7 +19,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from dimos_lcm.geometry_msgs import PolygonStamped
-from dimos_lcm.std_msgs import Float32
+from dimos_lcm.std_msgs import (
+    Bool,  # type: ignore[import-untyped]
+    Float32,
+)
 
 from dimos.core.core import rpc
 from dimos.core.native_module import NativeModule, NativeModuleConfig
@@ -30,7 +33,6 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path as NavPath
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.msgs.std_msgs.Bool import Bool
 from dimos.msgs.std_msgs.Int8 import Int8
 
 

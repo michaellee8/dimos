@@ -22,6 +22,7 @@ import numpy as np
 
 from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
+from dimos.navigation.nav_stack.modules.apply_closure.apply_closure import ApplyClosure
 from dimos.navigation.nav_stack.modules.far_planner.far_planner import FarPlanner
 from dimos.navigation.nav_stack.modules.local_planner.local_planner import LocalPlanner
 from dimos.navigation.nav_stack.modules.path_follower.path_follower import PathFollower
@@ -122,6 +123,8 @@ def create_nav_stack(
             }
         ).remappings(
             [
+                # Inputs
+                (TerrainAnalysis, "registered_scan", "lidar"),
                 (TerrainAnalysis, "odometry", "corrected_odometry"),
             ]
         ),
@@ -138,6 +141,11 @@ def create_nav_stack(
                 "publish_free_paths": False,
                 **local_planner_config,
             }
+        ).remappings(
+            [
+                (LocalPlanner, "registered_scan", "lidar"),
+                (LocalPlanner, "cancel_goal", "stop_movement"),
+            ]
         ),
         PathFollower.blueprint(
             **{
@@ -164,7 +172,7 @@ def create_nav_stack(
                 "body_frame": current_point_frame,
                 **(pgo or {}),
             }
-        ).remappings([(PGO, "global_map", "_pgo_global_map")]),
+        ).remappings([(PGO, "registered_scan", "lidar"), (PGO, "global_map", "_pgo_global_map")]),
     ]
     if planner == "simple":
         merged_simple_planner_config: dict[str, Any] = {
@@ -202,6 +210,7 @@ def create_nav_stack(
                 }
             ).remappings(
                 [
+                    (TerrainMapExt, "registered_scan", "lidar"),
                     (TerrainMapExt, "odometry", "corrected_odometry"),
                 ]
             )
@@ -212,25 +221,11 @@ def create_nav_stack(
         modules.append(
             RayTracingVoxelMap.blueprint(**(ray_tracing or {})).remappings(
                 [
-                    # Use the deskewed, world-frame scan that PGO/FastLio publishes
-                    # rather than the raw sensor frames.
-                    (RayTracingVoxelMap, "lidar", "registered_scan"),
-                    # ApplyClosure publishes the warped map on ``corrected_global_map``;
-                    # feeding it into ``map_override`` snaps the ray-tracer's internal
-                    # voxel state to the post-closure map so future scans accumulate
-                    # on top of the corrected world.
-                    (RayTracingVoxelMap, "map_override", "corrected_global_map"),
+                    (RayTracingVoxelMap, "odometry", "corrected_odometry"),
                 ]
             )
         )
     if use_apply_closure:
-        # ApplyClosure transitively imports GraphDelta3D → Graph3D. Defer the
-        # import so callers that explicitly disable apply_closure don't hit
-        # the dependency on environments where Graph3D isn't installed.
-        from dimos.navigation.nav_stack.modules.apply_closure.apply_closure import (
-            ApplyClosure,
-        )
-
         modules.append(ApplyClosure.blueprint(**(apply_closure or {})))
     if record:
         # Lazy: breaks on G1 onboard (linux-aarch64 TLS allocation failure)

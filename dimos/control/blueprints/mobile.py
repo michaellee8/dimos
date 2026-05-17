@@ -198,7 +198,6 @@ coordinator_flowbase_nav = (
     )
     .remappings(
         [
-            (FastLio2, "lidar", "registered_scan"),
             (FastLio2, "global_map", "_global_map_fastlio"),
             # SimplePlanner / FarPlanner owns way_point — disconnect MovementManager's
             # redundant pass-through copy (matches unitree-g1-nav-onboard).

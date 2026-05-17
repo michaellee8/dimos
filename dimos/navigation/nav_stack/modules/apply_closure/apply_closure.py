@@ -241,7 +241,7 @@ class ApplyClosure(Module):
 
     global_map: In[DynamicCloud]
     loop_closure_event: In[GraphDelta3D]
-    corrected_global_map: Out[DynamicCloud]
+    map_override: Out[DynamicCloud]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
