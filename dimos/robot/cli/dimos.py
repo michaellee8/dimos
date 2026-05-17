@@ -705,7 +705,7 @@ def cameracalibrate(
             target_count=target_count,
             no_display=no_display,
         )
-    except ValueError as exc:
+    except (ValueError, RuntimeError) as exc:
         raise typer.BadParameter(str(exc)) from exc
 
     typer.echo(f"RMS: {float(result['rms']):.6f} px ({int(result['n_used'])} frame(s) used)")
