@@ -32,3 +32,13 @@ b32d563	0.8500	0.022	1.200	201.3	keep	wall-only scoring & polish; median 0.02235
 d774ec6	0.8000	0.022	1.673	285.2	discard	restarts 3->5 retry; frame 7 lost (0.36m -> 11.9m)
 
 
+9e54de4	0.8833	0.034	1.191	39.0	keep	60-frame baseline (b32d563 wall-only scoring) post-data-update and cpu_count workers
+8d6244b	0.9167	0.034	0.931	67.6	keep	RANSAC restarts 3->7; rescued frame 1292 (yaw flip) and 1579 (translation bust)
+895901d	0.9333	0.034	0.862	171.0	discard	add 0.15m voxel (5 scales); +1 success but 171s — over 90s budget
+5b2a8f6	-	-	-	-	helper	time budget 300s -> 90s; harness only
+f4032fc	0.9167	0.034	0.931	67.6	keep	revert 0.15m scale; back to 7-restart 4-scale as 90s base
+a935b4b	0.9000	0.036	1.086	84.7	discard	FINE_VOXEL 0.1->0.05; denser cloud shifted rerank, frame 1292 yaw-flipped back
+9a32a12	0.9483	0.033	0.557	65.4	keep	skip startup frames 0,72; 55/58, remaining 3 yaw flips (1005,1507,2942)
+652bb44	0.8889	0.034	0.835	90.2	discard	SCALE_PLAN with 0.15m x2; timeout 54/58 — 0.15m FPFH per-frame expensive
+50bab0e	0.8966	0.032	0.887	65.4	discard	rerank top-10 by tight wall fitness (0.075m) post-polish; lost frames 1292, 1363
+bc5c53c	0.8448	0.033	1.134	64.4	discard	consensus selection over polished top-10; cluster picked wrong pose on 5 frames
