@@ -51,8 +51,9 @@ logger = setup_logger()
 
 
 def run_benchmark(
-    module_under_test: LoopClosure,
+    module_under_test: type[LoopClosure],
     kitti360_root: Path,
+    module_kwargs: dict[str, Any] | None = None,
     sequence_id: int = 2,
     max_scans: int | None = None,
     publish_interval_sec: float = 0.02,
@@ -106,7 +107,8 @@ def run_benchmark(
         },
     )
 
-    blueprint = autoconnect(playback_blueprint, scoring_blueprint, module_under_test)
+    sut_blueprint = module_under_test.blueprint(**(module_kwargs or {}))
+    blueprint = autoconnect(playback_blueprint, scoring_blueprint, sut_blueprint)
 
     wallclock_start = time.monotonic()
     coordinator = ModuleCoordinator.build(blueprint)

@@ -34,6 +34,7 @@ from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path as NavPath
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.nav_stack.frames import FRAME_MAP, FRAME_ODOM
+from dimos.navigation.nav_stack.specs import LoopClosure
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -79,7 +80,7 @@ class PGOConfig(NativeModuleConfig):
     debug: bool = False
 
 
-class PGO(NativeModule):
+class PGO(NativeModule, LoopClosure):
     """Pose graph optimization with loop closure using GTSAM iSAM2 + PCL ICP."""
 
     config: PGOConfig

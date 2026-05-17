@@ -14,12 +14,15 @@
 
 """Spec protocols for nav-stack producer/consumer pairs."""
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from dimos.core.stream import In, Out
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path as NavPath
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+
+if TYPE_CHECKING:
+    from dimos.core.coordination.blueprints import Blueprint
 
 
 class LoopClosure(Protocol):
@@ -27,3 +30,6 @@ class LoopClosure(Protocol):
     odometry: In[Odometry]
     loop_closure: Out[NavPath]
     pose_graph_edges: Out[NavPath]
+
+    @classmethod
+    def blueprint(cls, **kwargs: Any) -> "Blueprint": ...
