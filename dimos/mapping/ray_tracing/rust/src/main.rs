@@ -20,14 +20,24 @@
 // PointCloud2 input is expected in the standard FastLio2 layout
 // (xyz at offsets 0/4/8 as little-endian f32, point_step >= 12).
 
+mod dynamic_cloud;
+
 use ahash::{AHashMap, AHashSet};
 use dimos_module::{run, Input, LcmTransport, Module, Output};
 use lcm_msgs::nav_msgs::Odometry;
 use lcm_msgs::sensor_msgs::{PointCloud2, PointField};
-use lcm_msgs::std_msgs::{Header, Time};
+use lcm_msgs::std_msgs::Time;
 use serde::Deserialize;
 
+use dynamic_cloud::DynamicCloud;
+
 type VoxelKey = (i32, i32, i32);
+
+#[derive(Debug, Default, Clone, Copy)]
+struct VoxelState {
+    health: i32,
+    timestamp_nanos: u64,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,12 +48,68 @@ struct Config {
     shadow_depth: f32,
     min_health: i32,
     max_health: i32,
+    /// Seconds between sequence-counter increments. Defaults to 1.0
+    /// (one tick per second — "slow clock").
+    #[serde(default = "default_sequence_period_secs")]
+    sequence_period_secs: f32,
+}
+
+fn default_sequence_period_secs() -> f32 {
+    1.0
 }
 
 #[derive(Default)]
 struct VoxelMap {
-    // Save health of each voxel
-    voxels: AHashMap<VoxelKey, i32>,
+    voxels: AHashMap<VoxelKey, VoxelState>,
+}
+
+#[derive(Default)]
+struct SlowClock {
+    /// Quantized nanosecond timestamp of the current slow tick.
+    current_nanos: u64,
+    /// Wall-clock seconds (from msg timestamps) when the next tick fires.
+    /// `None` until the first lidar message arrives.
+    next_tick_secs: Option<f64>,
+}
+
+impl SlowClock {
+    /// Advance the clock to the given time, snapping `current_nanos`
+    /// forward whenever a `period_secs` boundary is crossed.
+    fn advance(&mut self, now_secs: f64, period_secs: f32) {
+        let period = period_secs.max(f32::EPSILON) as f64;
+        match self.next_tick_secs {
+            None => {
+                // First sample primes the schedule. Stamp anything observed
+                // before the first boundary crossing with this initial time.
+                self.current_nanos = secs_to_nanos(now_secs);
+                self.next_tick_secs = Some(now_secs + period);
+            }
+            Some(mut t) => {
+                while now_secs >= t {
+                    self.current_nanos = secs_to_nanos(t);
+                    t += period;
+                }
+                self.next_tick_secs = Some(t);
+            }
+        }
+    }
+
+    fn reset_to(&mut self, timestamp_nanos: u64, now_secs: f64, period_secs: f32) {
+        self.current_nanos = timestamp_nanos;
+        self.next_tick_secs = Some(now_secs + period_secs.max(f32::EPSILON) as f64);
+    }
+}
+
+fn secs_to_nanos(s: f64) -> u64 {
+    if s <= 0.0 {
+        0
+    } else {
+        (s * 1e9) as u64
+    }
+}
+
+fn time_to_secs(t: &Time) -> f64 {
+    t.sec as f64 + t.nsec as f64 * 1e-9
 }
 
 #[derive(Module)]
@@ -54,14 +120,19 @@ struct RayTracingVoxelMap {
     #[input(decode = Odometry::decode, handler = on_odometry)]
     odometry: Input<Odometry>,
 
-    #[output(encode = PointCloud2::encode)]
-    global_map: Output<PointCloud2>,
+    #[input(decode = decode_dynamic_cloud, handler = on_map_override)]
+    map_override: Input<DynamicCloud>,
+
+    #[output(encode = encode_dynamic_cloud)]
+    global_map: Output<DynamicCloud>,
 
     #[config]
     config: Config,
 
     map: VoxelMap,
     last_origin: Option<(f32, f32, f32)>,
+    last_lidar_secs: Option<f64>,
+    clock: SlowClock,
 }
 
 impl RayTracingVoxelMap {
@@ -96,17 +167,29 @@ impl RayTracingVoxelMap {
             return;
         }
 
+        let now_secs = time_to_secs(&msg.header.stamp);
+        self.last_lidar_secs = Some(now_secs);
+        self.clock
+            .advance(now_secs, self.config.sequence_period_secs);
+        let timestamp_nanos = self.clock.current_nanos;
+
         let inv = 1.0_f32 / voxel_size;
         let mut live: AHashSet<VoxelKey> = AHashSet::with_capacity(points.len());
         for &(x, y, z) in &points {
             live.insert(world_to_voxel(x, y, z, inv));
         }
 
-        update_map(&mut self.map, origin, &points, &self.config);
+        update_map(
+            &mut self.map,
+            origin,
+            &points,
+            &self.config,
+            timestamp_nanos,
+        );
 
         // Echo the input cloud's frame; the global map lives in the same
         // world frame as the upstream lidar/odometry.
-        let cloud = build_pointcloud(
+        let cloud = build_dynamic_cloud(
             &self.map,
             &live,
             voxel_size,
@@ -117,6 +200,53 @@ impl RayTracingVoxelMap {
             eprintln!("voxel_ray_tracing: publish failed: {e}");
         }
     }
+
+    async fn on_map_override(&mut self, msg: DynamicCloud) {
+        self.map.voxels.clear();
+        self.map.voxels.reserve(msg.voxels.len());
+
+        let mut per_voxel_ts = vec![0u64; msg.voxels.len()];
+        let mut max_ts: u64 = 0;
+        for (i, &idx) in msg.event_indices.iter().enumerate() {
+            let idx = idx as usize;
+            let t = msg.event_timestamps[i];
+            if idx < per_voxel_ts.len() && t > per_voxel_ts[idx] {
+                per_voxel_ts[idx] = t;
+            }
+            if t > max_ts {
+                max_ts = t;
+            }
+        }
+
+        for (i, &(x, y, z)) in msg.voxels.iter().enumerate() {
+            let health = (msg.quantity[i] as i32).min(self.config.max_health);
+            let timestamp_nanos = per_voxel_ts[i];
+            self.map.voxels.insert(
+                (x, y, z),
+                VoxelState {
+                    health,
+                    timestamp_nanos,
+                },
+            );
+        }
+
+        // Reset the slow clock. Prefer the last lidar timestamp; fall back
+        // to the override's own message timestamp if no lidar has been seen yet.
+        let now_secs = self
+            .last_lidar_secs
+            .unwrap_or(msg.timestamp_nanos as f64 * 1e-9);
+        self.clock
+            .reset_to(max_ts, now_secs, self.config.sequence_period_secs);
+    }
+}
+
+fn decode_dynamic_cloud(buf: &[u8]) -> std::io::Result<DynamicCloud> {
+    DynamicCloud::decode(buf).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+fn encode_dynamic_cloud(msg: &DynamicCloud) -> Vec<u8> {
+    msg.encode()
+        .expect("DynamicCloud::encode: frame_id exceeds 65535 bytes")
 }
 
 fn update_map(
@@ -124,6 +254,7 @@ fn update_map(
     origin: (f32, f32, f32),
     points: &[(f32, f32, f32)],
     cfg: &Config,
+    timestamp_nanos: u64,
 ) {
     let inv = 1.0_f32 / cfg.voxel_size;
     let max_range_sq = if cfg.max_range > 0.0 {
@@ -164,15 +295,33 @@ fn update_map(
 
     // Apply hits first: a voxel that is both a hit and a miss this scan
     // counts as a hit (the lidar return is the stronger signal).
+    //
+    // Sequence stamping: when an observation lands on a voxel whose
+    // current health <= 0 (i.e. still uncertain), stamp it with the
+    // current slow-clock value. The check is against PRE-update health,
+    // so the confirmation event itself (uncertain -> confirmed) also
+    // gets stamped — its sequence captures the moment of confirmation.
+    // Subsequent hits on already-confirmed voxels (pre-health > 0) leave
+    // the stamp frozen.
     for v in &hits {
-        let h = map.voxels.entry(*v).or_insert(cfg.min_health);
-        *h = (*h + 1).min(cfg.max_health);
+        let state = map.voxels.entry(*v).or_insert(VoxelState {
+            health: cfg.min_health,
+            timestamp_nanos,
+        });
+        let was_uncertain = state.health <= 0;
+        state.health = (state.health + 1).min(cfg.max_health);
+        if was_uncertain {
+            state.timestamp_nanos = timestamp_nanos;
+        }
     }
     for v in misses.difference(&hits) {
-        if let Some(h) = map.voxels.get_mut(v) {
-            *h -= 1;
-            if *h <= cfg.min_health {
+        if let Some(state) = map.voxels.get_mut(v) {
+            let was_uncertain = state.health <= 0;
+            state.health -= 1;
+            if state.health <= cfg.min_health {
                 map.voxels.remove(v);
+            } else if was_uncertain {
+                state.timestamp_nanos = timestamp_nanos;
             }
         }
     }
@@ -361,61 +510,49 @@ fn read_f32_le(buf: &[u8], off: usize) -> f32 {
     f32::from_le_bytes(bytes)
 }
 
-fn build_pointcloud(
+fn build_dynamic_cloud(
     map: &VoxelMap,
     live: &AHashSet<VoxelKey>,
     voxel_size: f32,
     frame_id: &str,
     stamp: Time,
-) -> PointCloud2 {
-    let half = voxel_size * 0.5;
-    let mut visible: AHashSet<VoxelKey> = AHashSet::with_capacity(map.voxels.len() + live.len());
-    visible.extend(live.iter().copied());
-    for (&key, &health) in &map.voxels {
-        if health > 0 {
-            visible.insert(key);
+) -> DynamicCloud {
+    // Include all voxels currently considered "live": those with health > 0
+    // (confirmed) plus any voxel hit this scan (even if still uncertain).
+    // Live voxels were just inserted by update_map, so they're guaranteed
+    // in the map.
+    //
+    // Emit one event per published voxel — the sparse format permits
+    // tighter packings (e.g. only timestamping changed voxels) but this
+    // dense layout is simplest and lets downstream consumers always look
+    // up a per-voxel timestamp directly.
+    let mut voxels = Vec::with_capacity(map.voxels.len());
+    let mut quantity = Vec::with_capacity(map.voxels.len());
+    let mut event_indices = Vec::with_capacity(map.voxels.len());
+    let mut event_timestamps = Vec::with_capacity(map.voxels.len());
+
+    for (&key, &state) in &map.voxels {
+        if state.health > 0 || live.contains(&key) {
+            let idx = voxels.len() as u32;
+            voxels.push(key);
+            quantity.push(state.health.max(0) as u32);
+            event_indices.push(idx);
+            event_timestamps.push(state.timestamp_nanos);
         }
     }
 
-    let mut data = Vec::with_capacity(visible.len() * 16);
-    let mut n: i32 = 0;
-    for &(kx, ky, kz) in &visible {
-        let x = kx as f32 * voxel_size + half;
-        let y = ky as f32 * voxel_size + half;
-        let z = kz as f32 * voxel_size + half;
-        data.extend_from_slice(&x.to_le_bytes());
-        data.extend_from_slice(&y.to_le_bytes());
-        data.extend_from_slice(&z.to_le_bytes());
-        data.extend_from_slice(&0.0_f32.to_le_bytes());
-        n += 1;
-    }
+    let timestamp_nanos = (stamp.sec as i64 as u64)
+        .wrapping_mul(1_000_000_000)
+        .wrapping_add(stamp.nsec.max(0) as u64);
 
-    let make_field = |name: &str, off: i32| PointField {
-        name: name.into(),
-        offset: off,
-        datatype: PointField::FLOAT32 as u8,
-        count: 1,
-    };
-
-    PointCloud2 {
-        header: Header {
-            seq: 0,
-            stamp,
-            frame_id: frame_id.into(),
-        },
-        height: 1,
-        width: n,
-        fields: vec![
-            make_field("x", 0),
-            make_field("y", 4),
-            make_field("z", 8),
-            make_field("intensity", 12),
-        ],
-        is_bigendian: false,
-        point_step: 16,
-        row_step: 16 * n,
-        data,
-        is_dense: true,
+    DynamicCloud {
+        timestamp_nanos,
+        voxel_size,
+        frame_id: frame_id.to_string(),
+        voxels,
+        quantity,
+        event_indices,
+        event_timestamps,
     }
 }
 
@@ -441,7 +578,22 @@ mod tests {
             shadow_depth: 2.0,
             min_health: 0,
             max_health: 1,
+            sequence_period_secs: 1.0,
         }
+    }
+
+    fn health_of(map: &VoxelMap, key: VoxelKey) -> Option<i32> {
+        map.voxels.get(&key).map(|s| s.health)
+    }
+
+    fn insert_health(map: &mut VoxelMap, key: VoxelKey, health: i32) {
+        map.voxels.insert(
+            key,
+            VoxelState {
+                health,
+                timestamp_nanos: 0,
+            },
+        );
     }
 
     #[test]
@@ -523,9 +675,10 @@ mod tests {
             (0.0, 0.0, 0.0),
             &[(5.5, 0.5, 0.5), (0.5, 5.5, 0.5)],
             &cfg,
+            0,
         );
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
-        assert_eq!(map.voxels.get(&(0, 5, 0)), Some(&1));
+        assert_eq!(health_of(&map, (5, 0, 0)), Some(1));
+        assert_eq!(health_of(&map, (0, 5, 0)), Some(1));
         assert_eq!(map.voxels.len(), 2);
     }
 
@@ -533,42 +686,42 @@ mod tests {
     fn voxels_on_ray_are_removed() {
         let cfg = basic_config();
         let mut map = VoxelMap::default();
-        map.voxels.insert((3, 0, 0), 1);
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
+        insert_health(&mut map, (3, 0, 0), 1);
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 0);
         // make sure the initial point got cleared by the new update
         assert!(!map.voxels.contains_key(&(3, 0, 0)));
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        assert_eq!(health_of(&map, (5, 0, 0)), Some(1));
     }
 
     #[test]
     fn voxels_not_on_ray_survive() {
         let cfg = basic_config();
         let mut map = VoxelMap::default();
-        map.voxels.insert((3, 5, 0), 1);
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(3, 5, 0)), Some(&1));
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        insert_health(&mut map, (3, 5, 0), 1);
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 0);
+        assert_eq!(health_of(&map, (3, 5, 0)), Some(1));
+        assert_eq!(health_of(&map, (5, 0, 0)), Some(1));
     }
 
     #[test]
     fn voxels_within_shadow_region_are_removed() {
         let cfg = basic_config();
         let mut map = VoxelMap::default();
-        map.voxels.insert((6, 0, 0), 1);
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
+        insert_health(&mut map, (6, 0, 0), 1);
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 0);
         // point within the shadow is no longer included, new point is included
         assert!(!map.voxels.contains_key(&(6, 0, 0)));
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        assert_eq!(health_of(&map, (5, 0, 0)), Some(1));
     }
 
     #[test]
     fn voxels_beyond_shadow_region_survive() {
         let cfg = basic_config();
         let mut map = VoxelMap::default();
-        map.voxels.insert((8, 0, 0), 1);
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(8, 0, 0)), Some(&1));
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        insert_health(&mut map, (8, 0, 0), 1);
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 0);
+        assert_eq!(health_of(&map, (8, 0, 0)), Some(1));
+        assert_eq!(health_of(&map, (5, 0, 0)), Some(1));
     }
 
     #[test]
@@ -580,9 +733,10 @@ mod tests {
             (0.0, 0.0, 0.0),
             &[(3.5, 0.5, 0.5), (5.5, 0.5, 0.5)],
             &cfg,
+            0,
         );
-        assert_eq!(map.voxels.get(&(3, 0, 0)), Some(&1));
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        assert_eq!(health_of(&map, (3, 0, 0)), Some(1));
+        assert_eq!(health_of(&map, (5, 0, 0)), Some(1));
     }
 
     #[test]
@@ -592,9 +746,9 @@ mod tests {
             ..basic_config()
         };
         let mut map = VoxelMap::default();
-        map.voxels.insert((3, 0, 0), 1);
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(3, 0, 0)), Some(&1));
+        insert_health(&mut map, (3, 0, 0), 1);
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 0);
+        assert_eq!(health_of(&map, (3, 0, 0)), Some(1));
     }
 
     #[test]
@@ -604,11 +758,11 @@ mod tests {
             ..basic_config()
         };
         let mut map = VoxelMap::default();
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&0));
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 0);
+        assert_eq!(health_of(&map, (5, 0, 0)), Some(0));
 
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 0);
+        assert_eq!(health_of(&map, (5, 0, 0)), Some(1));
     }
 
     #[test]
@@ -618,14 +772,91 @@ mod tests {
             ..basic_config()
         };
         let mut map = VoxelMap::default();
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(3.5, 0.5, 0.5)], &cfg);
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(3.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(3, 0, 0)), Some(&2));
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(3.5, 0.5, 0.5)], &cfg, 0);
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(3.5, 0.5, 0.5)], &cfg, 0);
+        assert_eq!(health_of(&map, (3, 0, 0)), Some(2));
 
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(3, 0, 0)), Some(&1));
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 0);
+        assert_eq!(health_of(&map, (3, 0, 0)), Some(1));
 
-        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 0);
         assert!(!map.voxels.contains_key(&(3, 0, 0)));
+    }
+
+    #[test]
+    fn unconfirmed_voxels_get_timestamp_stamp() {
+        // With min_health=-1, a fresh hit lands at health=0 — still
+        // uncertain — and so must be stamped with the supplied timestamp.
+        let cfg = Config {
+            min_health: -1,
+            ..basic_config()
+        };
+        let mut map = VoxelMap::default();
+        update_map(
+            &mut map,
+            (0.0, 0.0, 0.0),
+            &[(5.5, 0.5, 0.5)],
+            &cfg,
+            42_000_000_000,
+        );
+        let state = map.voxels.get(&(5, 0, 0)).copied().unwrap();
+        assert_eq!(state.health, 0);
+        assert_eq!(state.timestamp_nanos, 42_000_000_000);
+    }
+
+    #[test]
+    fn confirmed_voxels_freeze_their_timestamp() {
+        // With min_health=-1, max_health=1: two hits to reach health=1.
+        //   hit #1 (ts=10): -1 -> 0, pre-health was -1 (≤0), stamp 10
+        //   hit #2 (ts=99): 0 -> 1, pre-health was 0 (≤0), stamp 99
+        //                   -- voxel now confirmed --
+        //   hit #3 (ts=1000): pre-health is 1 (>0), no stamp
+        let cfg = Config {
+            min_health: -1,
+            ..basic_config()
+        };
+        let mut map = VoxelMap::default();
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 10);
+        assert_eq!(map.voxels[&(5, 0, 0)].timestamp_nanos, 10);
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 99);
+        let confirming = map.voxels[&(5, 0, 0)];
+        assert_eq!(confirming.health, 1);
+        assert_eq!(confirming.timestamp_nanos, 99);
+        update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg, 1000);
+        let frozen = map.voxels[&(5, 0, 0)];
+        assert_eq!(frozen.health, 1);
+        assert_eq!(frozen.timestamp_nanos, 99);
+    }
+
+    #[test]
+    fn slow_clock_ticks_at_period() {
+        let mut clock = SlowClock::default();
+        clock.advance(100.0, 1.0);
+        // First call primes the schedule and stamps with `now` itself.
+        assert_eq!(clock.current_nanos, secs_to_nanos(100.0));
+        clock.advance(100.5, 1.0);
+        // Not yet a period elapsed.
+        assert_eq!(clock.current_nanos, secs_to_nanos(100.0));
+        clock.advance(101.0, 1.0);
+        // Crossed first scheduled boundary (101.0).
+        assert_eq!(clock.current_nanos, secs_to_nanos(101.0));
+        clock.advance(103.5, 1.0);
+        // Crossed boundaries at 102.0 and 103.0 — most recent wins.
+        assert_eq!(clock.current_nanos, secs_to_nanos(103.0));
+    }
+
+    #[test]
+    fn slow_clock_reset_snaps_backwards() {
+        let mut clock = SlowClock::default();
+        clock.advance(100.0, 1.0);
+        clock.advance(110.0, 1.0);
+        let big = clock.current_nanos;
+        // Override is authoritative even if smaller.
+        clock.reset_to(42, 110.0, 1.0);
+        assert_eq!(clock.current_nanos, 42);
+        assert!(clock.current_nanos < big);
+        // Next tick still fires at the scheduled time.
+        clock.advance(111.0, 1.0);
+        assert_eq!(clock.current_nanos, secs_to_nanos(111.0));
     }
 }

@@ -16,13 +16,27 @@
 
 Subscribes to a world-frame ``PointCloud2`` (e.g. from FastLio2's
 ``lidar`` output) and matching ``Odometry``, maintains a global
-voxel hash set, and publishes the accumulated map on ``global_map``.
+voxel hash set, and publishes the accumulated map on ``global_map``
+as a :class:`DynamicCloud` (per-voxel health + slow-clock sequence
+stamp).
 
 Algorithm (v1):
     * Insert the voxel of every point into the global hash set.
     * For every point, walk the 3-D DDA ray from the latest
       odometry position to the point and remove every intermediate
       voxel from the map.  The endpoint voxel is preserved.
+    * A "slow clock" sequence counter increments every
+      ``sequence_period_secs`` (default 1.0s).  Any voxel touched
+      while still uncertain (health <= 0) is stamped with the
+      current sequence value; once health > 0 the stamp freezes,
+      capturing "when did this voxel become confirmed."
+
+Map override:
+    Publishing to ``map_override`` with a :class:`DynamicCloud`
+    fully replaces the internal voxel state with the override's
+    contents.  The slow-clock counter snaps to
+    ``max(override.sequence)``, even if that's less than the
+    current value — the override is authoritative.
 
 The Rust binary at ``rust/`` does the heavy lifting.
 """
@@ -33,9 +47,9 @@ from typing import TYPE_CHECKING
 
 from dimos.core.native_module import NativeModule, NativeModuleConfig
 from dimos.core.stream import In, Out
+from dimos.msgs.nav_msgs.DynamicCloud import DynamicCloud
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.spec import mapping
 
 
 class RayTracingVoxelMapConfig(NativeModuleConfig):
@@ -56,16 +70,19 @@ class RayTracingVoxelMapConfig(NativeModuleConfig):
     # Bounds for the health of voxels. Positive health means voxel is occupied.
     min_health: int = -1
     max_health: int = 1
+    # Seconds between sequence-counter increments ("slow clock").
+    sequence_period_secs: float = 1.0
 
 
-class RayTracingVoxelMap(NativeModule, mapping.GlobalPointcloud):
+class RayTracingVoxelMap(NativeModule):
     """Rust voxel-map module with raycast clearing of dynamic objects."""
 
     config: RayTracingVoxelMapConfig
 
     lidar: In[PointCloud2]
     odometry: In[Odometry]
-    global_map: Out[PointCloud2]
+    map_override: In[DynamicCloud]
+    global_map: Out[DynamicCloud]
 
 
 # Verify protocol port compliance (mypy will flag missing ports)
