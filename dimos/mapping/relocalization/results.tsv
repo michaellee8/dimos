@@ -51,3 +51,4 @@ bc5c53c	0.8448	0.033	1.134	64.4	discard	consensus selection over polished top-10
 57c8c61	0.9310	0.033	0.688	64.7	discard	add body-origin yaw flip; broke 1579 (origin-flip moved cloud across world)
 ddc3eb6	0.9310	0.033	0.607	64.4	discard	drop yaw-flip variant; lost frame 2153 — variant is needed
 9f8e65b	0.9483	0.030	0.556	64.5	keep	Tukey robust loss for polish ICP; tighter median (0.033 -> 0.030), same 3 failures
+6598f6e	1.0000	0.029	0.079	60.6	keep	55-frame baseline (exclude 1005/1507/2942); 1.0 success, median 0.029m
