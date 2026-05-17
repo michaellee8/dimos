@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import threading
 import time
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from dimos.control.components import (
     TWIST_SUFFIX_MAP,
@@ -169,6 +169,13 @@ class ControlCoordinator(Module):
     """
 
     config: ControlCoordinatorConfig
+
+    # Hard-realtime: the 500 Hz tick loop drives motor commands. A co-tenant
+    # in the same Python process (e.g. a viewer's asyncio loop or a slow
+    # subscriber) can hold the GIL long enough that the tick loop misses
+    # frames and the robot's onboard watchdog goes to damping. Force this
+    # module onto its own worker process.
+    solo_worker: ClassVar[bool] = True
 
     # Output: Aggregated joint state for external consumers
     joint_state: Out[JointState]

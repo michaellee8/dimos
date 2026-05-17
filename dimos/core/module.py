@@ -112,6 +112,13 @@ class ModuleBase(Configurable, CompositeResource):
     # handle; the coordinator routes modules accordingly.
     deployment: ClassVar[Deployment] = "python"
 
+    # When True, this module is guaranteed its own Python worker process —
+    # no other module shares the GIL with it. Use for hard-realtime loops
+    # (e.g. ControlCoordinator's 500 Hz tick) where a slow co-tenant in the
+    # same process can stall motor commands and trigger the robot's onboard
+    # watchdog into a fault / damping state.
+    solo_worker: ClassVar[bool] = False
+
     _rpc: RPCSpec | None = None
     _tf: TFSpec | None = None
     _loop: asyncio.AbstractEventLoop | None = None

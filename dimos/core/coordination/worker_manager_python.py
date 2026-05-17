@@ -151,9 +151,22 @@ class WorkerManagerPython:
         # Pre-assign workers sequentially (so least-loaded accounting is
         # correct), then deploy concurrently via threads. The per-worker lock
         # serializes deploys that land on the same worker process.
+        # Modules marked ``solo_worker=True`` get a fresh process to
+        # themselves — used for hard-realtime modules (ControlCoordinator)
+        # that can't share a GIL with anyone slow.
         assignments: list[tuple[PythonWorker, type[ModuleBase], GlobalConfig, dict[str, Any]]] = []
         for module_class, global_config, kwargs in specs:
-            worker = self._select_worker()
+            if getattr(module_class, "solo_worker", False):
+                worker = PythonWorker()
+                worker.start_process()
+                self._workers.append(worker)
+                self._n_workers += 1
+                logger.info(
+                    "Spawned dedicated worker for solo module.",
+                    module=module_class.__name__,
+                )
+            else:
+                worker = self._select_worker()
             worker.reserve_slot()
             kwargs.update(blueprint_args.get(module_class.name, {}))
             assignments.append((worker, module_class, global_config, kwargs))
