@@ -61,6 +61,37 @@ def _preprocess(pcd: o3d.geometry.PointCloud, voxel_size: float):
     return down, fpfh
 
 
+# Per-process cache of the global map's downsampled cloud + FPFH features and
+# the fine-voxel cloud used for ICP. The evaluator forks workers and reuses
+# the same global map across all 20 frames per worker, so the first call in
+# each worker pays the cost; the remaining 4-5 frames it handles get it free.
+# Allowed per program.md: "caching the global map's FPFH features across calls
+# is fine *within one run*; the evaluator instantiates fresh state per process."
+_GLOBAL_CACHE: dict = {}
+
+
+def _global_preprocess(global_map: o3d.geometry.PointCloud, voxel_size: float):
+    key = ("ransac", voxel_size, len(global_map.points))
+    cached = _GLOBAL_CACHE.get(key)
+    if cached is None:
+        cached = _preprocess(global_map, voxel_size)
+        _GLOBAL_CACHE[key] = cached
+    return cached
+
+
+def _global_fine(global_map: o3d.geometry.PointCloud, voxel_size: float):
+    key = ("fine", voxel_size, len(global_map.points))
+    cached = _GLOBAL_CACHE.get(key)
+    if cached is None:
+        down = global_map.voxel_down_sample(voxel_size)
+        down.estimate_normals(
+            o3d.geometry.KDTreeSearchParamHybrid(radius=voxel_size * 2, max_nn=30)
+        )
+        cached = down
+        _GLOBAL_CACHE[key] = cached
+    return cached
+
+
 def _ransac(src_down, tgt_down, src_fpfh, tgt_fpfh, voxel_size: float):
     """Open3D feature-matching RANSAC. Returns a RegistrationResult.
 
@@ -104,18 +135,15 @@ def relocalize(
     """
     # Fine downsample once — used for both candidate scoring and the final ICP.
     src_fine = local_map.voxel_down_sample(FINE_VOXEL)
-    tgt_fine = global_map.voxel_down_sample(FINE_VOXEL)
     src_fine.estimate_normals(
         o3d.geometry.KDTreeSearchParamHybrid(radius=FINE_VOXEL * 2, max_nn=30)
     )
-    tgt_fine.estimate_normals(
-        o3d.geometry.KDTreeSearchParamHybrid(radius=FINE_VOXEL * 2, max_nn=30)
-    )
+    tgt_fine = _global_fine(global_map, FINE_VOXEL)
 
     candidates: list[np.ndarray] = []  # 4x4 transforms
     for vs in VOXEL_SIZES:
         src_down, src_fpfh = _preprocess(local_map, vs)
-        tgt_down, tgt_fpfh = _preprocess(global_map, vs)
+        tgt_down, tgt_fpfh = _global_preprocess(global_map, vs)
         for _ in range(1 + RANSAC_RESTARTS):
             # Successive calls advance Open3D's RNG state (seeded per-frame in
             # run.py), so each restart explores a different sample sequence.
