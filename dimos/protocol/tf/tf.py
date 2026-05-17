@@ -27,6 +27,10 @@ from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.protocol.pubsub.impl.lcmpubsub import LCM, Topic
 from dimos.protocol.pubsub.spec import PubSub
 from dimos.protocol.service.spec import BaseConfig, Service
+from dimos.types.timestamped import to_human_readable
+from dimos.utils.logging_config import setup_logger
+
+logger = setup_logger()
 
 
 # generic configuration for transform service
@@ -86,8 +90,6 @@ class TBuffer(InMemoryStore[Transform]):
         first_item = self.first()
         time_range = self.time_range()
         if time_range and first_item:
-            from dimos.types.timestamped import to_human_readable
-
             start_time = to_human_readable(time_range[0])
             end_time = to_human_readable(time_range[1])
             duration = time_range[1] - time_range[0]
@@ -164,12 +166,22 @@ class MultiTBuffer:
 
     def get(self, *args, **kwargs) -> Transform | None:  # type: ignore[no-untyped-def]
         simple = self.get_transform(*args, **kwargs)
+
         if simple is not None:
             return simple
 
         complex = self.get_transform_search(*args, **kwargs)
 
         if complex is None:
+            parent_frame, child_frame = (
+                args[0],
+                args[1],
+            )
+            time_point = args[2] if len(args) > 2 else time.time()
+
+            logger.warn(
+                f"No direct transform found between '{parent_frame}' and '{child_frame}' at '{to_human_readable(time_point)}', {self}"
+            )
             return None
 
         return reduce(lambda t1, t2: t1 + t2, complex)
@@ -339,4 +351,8 @@ class LCMTF(PubSubTF):
     config: LCMPubsubConfig
 
 
+TF = LCMTF
+TF = LCMTF
+TF = LCMTF
+TF = LCMTF
 TF = LCMTF
