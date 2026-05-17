@@ -21,6 +21,8 @@ from dataclasses import dataclass
 from enum import Enum
 import os
 from pathlib import Path
+import threading
+import time
 from typing import Any, TypedDict, cast
 
 # Default OpenCL off: on Apple Silicon, CPU chessboard detection is often faster and more stable here.
@@ -59,6 +61,7 @@ class Source(str, Enum):
 
     webcam = "webcam"
     folder = "folder"
+    topic = "topic"
 
 
 app = typer.Typer(
@@ -312,53 +315,37 @@ def _draw_capture_status(
     cv2.putText(preview, detail, (12, 48), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
 
-def _capture_frames_from_webcam(
-    device_index: int,
+def _interactive_capture(
+    next_frame: Callable[[], np.ndarray | None],
     target_count: int,
     cols: int,
     rows: int,
     *,
-    no_display: bool = False,
+    no_display: bool,
 ) -> _WebcamCapture:
-    """Capture ``target_count`` BGR frames from a webcam when the board is visible.
+    """Interactive chessboard preview + SPACE-accept / q-quit loop.
 
-    Shows a live preview (unless ``no_display`` is True, for headless runs and CI).
-    When a chessboard is detected, press SPACE to accept the current frame. Press
-    ``q`` to quit early (raises if fewer than ``target_count`` frames were accepted).
-
-    ``no_display`` mirrors the CLI ``--no-display`` flag: no ``cv2.imshow`` or window
-    teardown; ``cv2.waitKey`` is still used so automated tests can inject key codes.
+    ``next_frame()`` returns the latest BGR (or grayscale) frame, or ``None`` to
+    skip the iteration without calling ``imshow``/``waitKey``. The caller owns
+    any wait-on-no-frame or fail-fast policy. ``no_display`` skips ``imshow``
+    and window teardown; ``cv2.waitKey`` is still called so tests can inject keys.
     """
     if target_count < 1:
         raise ValueError("target_count must be >= 1")
 
     accepted: list[np.ndarray] = []
     accepted_corners: list[np.ndarray] = []
-    cap: cv2.VideoCapture | None = None
     last_detected: tuple[int, int, str] | None = None
     locked_pattern: tuple[int, int, str] | None = None
     locked_exact_probe = False
     pattern_candidates = _pattern_candidates(cols, rows)
     pattern_candidate_index = 0
-    consecutive_read_failures = 0
 
     try:
-        cap = cv2.VideoCapture(device_index)
-        if not cap.isOpened():
-            raise RuntimeError(f"Failed to open camera device_index={device_index!r}")
-
         while len(accepted) < target_count:
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                consecutive_read_failures += 1
-                if consecutive_read_failures >= _MAX_CONSECUTIVE_WEBCAM_READ_FAILURES:
-                    raise RuntimeError(
-                        "Failed to read from camera "
-                        f"device_index={device_index!r} for "
-                        f"{_MAX_CONSECUTIVE_WEBCAM_READ_FAILURES} consecutive attempts."
-                    )
+            frame = next_frame()
+            if frame is None:
                 continue
-            consecutive_read_failures = 0
 
             if frame.ndim == 3:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -432,14 +419,63 @@ def _capture_frames_from_webcam(
         return _WebcamCapture(accepted, accepted_corners, locked_pattern)
 
     finally:
-        if cap is not None:
-            cap.release()
         if not no_display:
             try:
                 cv2.destroyWindow(_CAMERACALIBRATE_WINDOW)
             except cv2.error:
                 pass
             cv2.waitKey(1)
+
+
+def _capture_frames_from_webcam(
+    device_index: int,
+    target_count: int,
+    cols: int,
+    rows: int,
+    *,
+    no_display: bool = False,
+) -> _WebcamCapture:
+    """Capture ``target_count`` BGR frames from a webcam when the board is visible.
+
+    Shows a live preview (unless ``no_display`` is True, for headless runs and CI).
+    When a chessboard is detected, press SPACE to accept the current frame. Press
+    ``q`` to quit early (raises if fewer than ``target_count`` frames were accepted).
+
+    ``no_display`` mirrors the CLI ``--no-display`` flag: no ``cv2.imshow`` or window
+    teardown; ``cv2.waitKey`` is still used so automated tests can inject key codes.
+    """
+    if target_count < 1:
+        raise ValueError("target_count must be >= 1")
+
+    cap: cv2.VideoCapture | None = None
+    consecutive_read_failures = 0
+
+    try:
+        cap = cv2.VideoCapture(device_index)
+        if not cap.isOpened():
+            raise RuntimeError(f"Failed to open camera device_index={device_index!r}")
+
+        def _next() -> np.ndarray | None:
+            nonlocal consecutive_read_failures
+            assert cap is not None  # narrow for type-checker
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                consecutive_read_failures += 1
+                if consecutive_read_failures >= _MAX_CONSECUTIVE_WEBCAM_READ_FAILURES:
+                    raise RuntimeError(
+                        "Failed to read from camera "
+                        f"device_index={device_index!r} for "
+                        f"{_MAX_CONSECUTIVE_WEBCAM_READ_FAILURES} consecutive attempts."
+                    )
+                return None
+            consecutive_read_failures = 0
+            return frame  # type: ignore[no-any-return]
+
+        return _interactive_capture(_next, target_count, cols, rows, no_display=no_display)
+
+    finally:
+        if cap is not None:
+            cap.release()
 
 
 def capture_frames_from_webcam(
@@ -457,6 +493,93 @@ def capture_frames_from_webcam(
         cols,
         rows,
         no_display=no_display,
+    ).frames
+
+
+def _capture_frames_from_topic(
+    topic_uri: str,
+    target_count: int,
+    cols: int,
+    rows: int,
+    *,
+    no_display: bool = False,
+    timeout_sec: float = 60.0,
+) -> _WebcamCapture:
+    """Capture frames from an LCM/SHM image topic with the same interactive UX.
+
+    ``topic_uri`` follows the pubsub registry format ``"<proto>:<topic>"``, e.g.
+    ``"jpeg_lcm:/color_image"`` or ``"pshm:color_image"``. The publisher must
+    emit ``sensor_msgs.Image`` messages; ``Image.to_opencv()`` normalizes the
+    payload to BGR before detection. Raises ``RuntimeError`` if no frames arrive
+    within ``timeout_sec``.
+    """
+    from dimos.msgs.sensor_msgs.Image import Image
+    from dimos.protocol.pubsub.registry import subscribe_pubsub_uri
+
+    if target_count < 1:
+        raise ValueError("target_count must be >= 1")
+
+    latest_frame: list[np.ndarray | None] = [None]
+    last_received_ts: list[float] = [time.time()]
+    lock = threading.Lock()
+
+    def _on_image(msg: Any) -> None:
+        try:
+            arr = msg.to_opencv()
+        except (AttributeError, ValueError):
+            return
+        with lock:
+            latest_frame[0] = np.asarray(arr)
+            last_received_ts[0] = time.time()
+
+    transport, unsub = subscribe_pubsub_uri(topic_uri, _on_image, msg_type=Image)
+
+    def _next() -> np.ndarray | None:
+        with lock:
+            frame = latest_frame[0]
+            ts = last_received_ts[0]
+        if frame is None:
+            if time.time() - ts > timeout_sec:
+                raise RuntimeError(
+                    f"No frames received on topic {topic_uri!r} within {timeout_sec:.1f}s."
+                )
+            # Yield so the LCM/SHM callback thread can run; avoid busy spin.
+            time.sleep(0.01)
+            return None
+        return frame
+
+    try:
+        return _interactive_capture(_next, target_count, cols, rows, no_display=no_display)
+    finally:
+        # Best-effort teardown: swallow per-transport quirks so cleanup
+        # never masks the original error from _interactive_capture.
+        try:
+            unsub()
+        except Exception:
+            pass
+        try:
+            transport.stop()
+        except Exception:
+            pass
+
+
+def capture_frames_from_topic(
+    topic_uri: str,
+    target_count: int,
+    cols: int,
+    rows: int,
+    *,
+    no_display: bool = False,
+    timeout_sec: float = 60.0,
+) -> list[np.ndarray]:
+    """Capture ``target_count`` frames from an LCM/SHM image topic."""
+    return _capture_frames_from_topic(
+        topic_uri,
+        target_count,
+        cols,
+        rows,
+        no_display=no_display,
+        timeout_sec=timeout_sec,
     ).frames
 
 
@@ -628,6 +751,8 @@ def run_calibration(
     source: Source | str,
     device_index: int,
     images: Path | None,
+    topic: str | None,
+    topic_timeout_sec: float,
     cols: int,
     rows: int,
     square_size_m: float,
@@ -652,6 +777,22 @@ def run_calibration(
         frames = load_frames_from_folder(str(images))
         pattern_hint = None
         image_points_hint = None
+    elif source_value is Source.topic:
+        if topic is None:
+            raise ValueError(
+                "--topic is required when --source topic (e.g. --topic jpeg_lcm:/color_image)"
+            )
+        capture = _capture_frames_from_topic(
+            topic,
+            target_count,
+            cols,
+            rows,
+            no_display=no_display,
+            timeout_sec=topic_timeout_sec,
+        )
+        frames = capture.frames
+        pattern_hint = capture.pattern
+        image_points_hint = capture.image_points
     else:
         capture = _capture_frames_from_webcam(
             device_index,
@@ -706,10 +847,23 @@ def run_calibration(
 
 @app.command()
 def calibrate(
-    source: Source = typer.Option(..., "--source", help="Frame source: webcam or folder"),
+    source: Source = typer.Option(..., "--source", help="Frame source: webcam, folder, or topic"),
     device_index: int = typer.Option(0, "--device-index", help="Webcam device index"),
     images: Path | None = typer.Option(
         None, "--images", help="Directory of calibration images for --source folder"
+    ),
+    topic: str | None = typer.Option(
+        None,
+        "--topic",
+        help=(
+            "Pubsub URI for --source topic (proto:channel), "
+            "e.g. 'jpeg_lcm:/color_image' or 'pshm:color_image'."
+        ),
+    ),
+    topic_timeout_sec: float = typer.Option(
+        60.0,
+        "--topic-timeout-sec",
+        help="Abort --source topic if no frames arrive within this many seconds.",
     ),
     cols: int = typer.Option(..., "--cols", help="Inner chessboard corner columns"),
     rows: int = typer.Option(..., "--rows", help="Inner chessboard corner rows"),
@@ -733,6 +887,8 @@ def calibrate(
             source=source,
             device_index=device_index,
             images=images,
+            topic=topic,
+            topic_timeout_sec=topic_timeout_sec,
             cols=cols,
             rows=rows,
             square_size_m=square_size_m,

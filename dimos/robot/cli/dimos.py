@@ -687,10 +687,23 @@ def send(
 
 @main.command()
 def cameracalibrate(
-    source: str = typer.Option(..., "--source", help="Frame source: webcam or folder"),
+    source: str = typer.Option(..., "--source", help="Frame source: webcam, folder, or topic"),
     device_index: int = typer.Option(0, "--device-index", help="Webcam device index"),
     images: Path | None = typer.Option(
         None, "--images", help="Directory of calibration images for --source folder"
+    ),
+    topic: str | None = typer.Option(
+        None,
+        "--topic",
+        help=(
+            "Pubsub URI for --source topic (proto:channel), "
+            "e.g. 'jpeg_lcm:/color_image' or 'pshm:color_image'."
+        ),
+    ),
+    topic_timeout_sec: float = typer.Option(
+        60.0,
+        "--topic-timeout-sec",
+        help="Abort --source topic if no frames arrive within this many seconds.",
     ),
     cols: int = typer.Option(..., "--cols", help="Inner chessboard corner columns"),
     rows: int = typer.Option(..., "--rows", help="Inner chessboard corner rows"),
@@ -716,6 +729,8 @@ def cameracalibrate(
             source=source,
             device_index=device_index,
             images=images,
+            topic=topic,
+            topic_timeout_sec=topic_timeout_sec,
             cols=cols,
             rows=rows,
             square_size_m=square_size_m,

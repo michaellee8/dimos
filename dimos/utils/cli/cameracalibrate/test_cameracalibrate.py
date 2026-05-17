@@ -27,6 +27,7 @@ from dimos.perception.common.utils import load_camera_info, load_camera_info_ope
 from dimos.utils.cli.cameracalibrate.cameracalibrate import (
     app,
     calibrate_from_frames,
+    capture_frames_from_topic,
     capture_frames_from_webcam,
     find_chessboard_corners,
     load_frames_from_folder,
@@ -182,6 +183,8 @@ def test_cli_help_lists_cameracalibrate_flags() -> None:
         "--source",
         "--device-index",
         "--images",
+        "--topic",
+        "--topic-timeout-sec",
         "--cols",
         "--rows",
         "--square-size-m",
@@ -432,6 +435,170 @@ def test_opencv_video_capture_device_zero_opens_when_camera_available() -> None:
         assert cap.isOpened()
     finally:
         cap.release()
+
+
+class _FakeTopicTransport:
+    """Stand-in for a started ``PubSubTransport`` used by topic-source tests."""
+
+    def __init__(self) -> None:
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
+def _make_subscribe_pubsub_uri_stub(
+    fire_with: object | None,
+    *,
+    record: dict[str, object] | None = None,
+):
+    """Return a fake ``subscribe_pubsub_uri`` that optionally fires the cb once."""
+
+    def _stub(uri, callback, *, msg_type=None):  # type: ignore[no-untyped-def]
+        if record is not None:
+            record["uri"] = uri
+            record["msg_type"] = msg_type
+        transport = _FakeTopicTransport()
+        if fire_with is not None:
+            callback(fire_with)
+        unsubscribed: dict[str, bool] = {"called": False}
+
+        def _unsub() -> None:
+            unsubscribed["called"] = True
+
+        if record is not None:
+            record["unsub_state"] = unsubscribed
+        return transport, _unsub
+
+    return _stub
+
+
+def test_capture_frames_from_topic_mocked_space_fills_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SPACE accepts frames delivered over a fake pubsub subscription."""
+    from dimos.msgs.sensor_msgs.Image import Image
+
+    cols, rows = 9, 6
+    gray = _synthetic_chessboard_gray(640, 480, cols, rows, square_px=40)
+    bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    image_msg = Image.from_opencv(bgr)
+
+    record: dict[str, object] = {}
+    monkeypatch.setattr(
+        "dimos.protocol.pubsub.registry.subscribe_pubsub_uri",
+        _make_subscribe_pubsub_uri_stub(fire_with=image_msg, record=record),
+    )
+
+    keys_iter = iter([ord(" ")] * 3)
+
+    def _fake_wait_key(_delay: int = 0) -> int:
+        try:
+            return next(keys_iter)
+        except StopIteration:
+            return 0
+
+    monkeypatch.setattr(cv2, "waitKey", _fake_wait_key)
+
+    out = capture_frames_from_topic(
+        "jpeg_lcm:/color_image",
+        3,
+        cols,
+        rows,
+        no_display=True,
+    )
+    assert len(out) == 3
+    assert all(np.array_equal(f, bgr) for f in out)
+    assert record["uri"] == "jpeg_lcm:/color_image"
+    assert record["msg_type"] is Image
+    assert record["unsub_state"]["called"] is True  # type: ignore[index]
+
+
+def test_capture_frames_from_topic_no_frames_within_timeout_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Timeout fires if the subscription never delivers a frame."""
+    monkeypatch.setattr(
+        "dimos.protocol.pubsub.registry.subscribe_pubsub_uri",
+        _make_subscribe_pubsub_uri_stub(fire_with=None),
+    )
+    monkeypatch.setattr(cv2, "waitKey", lambda _delay=0: 0)
+
+    with pytest.raises(RuntimeError, match="No frames received"):
+        capture_frames_from_topic(
+            "lcm:/never_published",
+            1,
+            9,
+            6,
+            no_display=True,
+            timeout_sec=0.05,
+        )
+
+
+def test_cli_topic_source_uri_passes_through(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """``--source topic --topic <uri>`` forwards the URI verbatim to the registry."""
+    from dimos.msgs.sensor_msgs.Image import Image
+
+    cols, rows = 9, 6
+    gray = _synthetic_chessboard_gray(640, 480, cols, rows, square_px=40)
+    bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    image_msg = Image.from_opencv(bgr)
+
+    record: dict[str, object] = {}
+    monkeypatch.setattr(
+        "dimos.protocol.pubsub.registry.subscribe_pubsub_uri",
+        _make_subscribe_pubsub_uri_stub(fire_with=image_msg, record=record),
+    )
+    monkeypatch.setattr(cv2, "waitKey", lambda _delay=0: ord(" "))
+
+    out = tmp_path / "camera_info.yaml"
+    result = CliRunner().invoke(
+        app,
+        [
+            "--source",
+            "topic",
+            "--topic",
+            "jpeg_lcm:/color_image",
+            "--cols",
+            "9",
+            "--rows",
+            "6",
+            "--square-size-m",
+            "0.025",
+            "--target-count",
+            "1",
+            "--out",
+            str(out),
+            "--no-display",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert record["uri"] == "jpeg_lcm:/color_image"
+    assert out.exists()
+
+
+def test_cli_topic_source_without_topic_flag_is_rejected() -> None:
+    """``--source topic`` without ``--topic`` should fail with a helpful message."""
+    result = CliRunner().invoke(
+        app,
+        [
+            "--source",
+            "topic",
+            "--cols",
+            "9",
+            "--rows",
+            "6",
+            "--square-size-m",
+            "0.025",
+            "--no-display",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "--topic is required" in result.output
 
 
 def test_load_frames_from_folder_count_order_and_pixels(tmp_path: Path) -> None:

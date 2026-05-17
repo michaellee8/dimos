@@ -52,9 +52,26 @@ uv run dimos cameracalibrate --source webcam --device-index 0 --cols 8 --rows 6 
 uv run dimos cameracalibrate --source folder --images ./capture/ --cols 8 --rows 6 --square-size-m 0.02485 --out ./camera_info.yaml ./camera_info.preview.png
 ```
 
+**Topic (live pubsub stream).** Subscribe to a camera that is already publishing over the dimos pubsub bus — for example a robot blueprint that's currently running — instead of opening a local webcam device. The same interactive UX applies: press **Space** to accept a frame, **q** to quit early, stop after `--target-count` (default 20). The publisher must emit `sensor_msgs.Image`; the calibration script normalizes to BGR via `Image.to_opencv()`.
+
+```bash
+uv run dimos cameracalibrate --source topic --topic "jpeg_lcm:/color_image" --cols 8 --rows 6 --square-size-m 0.02485 --out ./camera_info.yaml ./camera_info.preview.png
+```
+
+`--topic` is a single URI `<proto>:<channel>` from the pubsub registry (`dimos.protocol.pubsub.registry`). Pick the proto that matches how the publisher transports the image:
+
+- `lcm:/color_image` — standard typed LCM stream.
+- `jpeg_lcm:/color_image` — Go2 `smart` blueprint and other JPEG-LCM publishers.
+- `pshm:color_image` — Go2 `basic` blueprint (pickled shared memory).
+- `shm` / `jpeg_shm` / `plcm` are also accepted for niche cases.
+
+The optional `#<msg_type>` URI suffix forwards a fully-qualified message name to the registry (e.g. `lcm:/color_image#sensor_msgs.Image`); when omitted, the calibration CLI passes `sensor_msgs.Image` for typed protos. Pickled / self-describing protos (`plcm`, `pshm`, ...) ignore the type.
+
+If the topic stays silent, `--topic-timeout-sec` (default 60) aborts the run instead of hanging the terminal. Increase it if your publisher is slow to start.
+
 Output files are explicit. Pass `--out ./camera_info.yaml` to write the ROS CameraInfo YAML. Pass a preview PNG path immediately after it to write a corner-overlay preview, for example `--out ./camera_info.yaml ./camera_info.preview.png`. If you omit both output paths, the command still runs calibration and prints RMS, but does not write YAML or PNG files. A preview PNG path without `--out` is rejected.
 
-Optional flags (same for both sources): `--target-count` (webcam only; default 20), `--camera-name` (default `webcam`), `--no-display` (no OpenCV window; for headless or automation), `--debug` (write detailed capture logs to the system temp directory).
+Optional flags (shared across sources): `--target-count` (webcam/topic; default 20), `--camera-name` (default `webcam`), `--no-display` (no OpenCV window; for headless or automation), `--debug` (write detailed capture logs to the system temp directory).
 
 On success the process prints the calibration RMS, the detected pattern, and any output paths you requested. Example:
 
