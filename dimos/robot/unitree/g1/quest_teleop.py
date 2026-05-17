@@ -265,6 +265,10 @@ class G1QuestTeleopModule(QuestTeleopModule):
         # Track engage transitions so we log the state change exactly once and
         # the operator can confirm the X+A handshake worked.
         self._arms_engaged_state = False
+        # Same idea for cmd_vel: log when the joystick starts/stops producing
+        # a non-zero Twist so the operator can confirm the joy path is alive
+        # without sifting through 50 Hz noise.
+        self._cmd_vel_moving = False
 
         self._state_lock = threading.Lock()
         self._latest_arm_q: np.ndarray | None = None
@@ -280,6 +284,27 @@ class G1QuestTeleopModule(QuestTeleopModule):
     @rpc
     def stop(self) -> None:
         super().stop()
+
+    def _on_joy_bytes(self, data: bytes) -> None:
+        """Dump raw axes the moment a Joy frame arrives, before any downstream
+        logic. Lets us see exactly what the Quest browser is sending —
+        whether the thumbstick is at zero, missing, or scaled wrong."""
+        from dimos.msgs.sensor_msgs.Joy import Joy as _Joy
+
+        try:
+            msg = _Joy.lcm_decode(data)
+        except Exception as exc:
+            logger.warning("G1 Quest: failed to decode Joy: %s", exc)
+            return super()._on_joy_bytes(data)
+        axes = list(msg.axes or [])
+        # Throttle: only log when values change by more than 0.01 from the
+        # last logged frame, so a still controller doesn't spam.
+        prev_key = f"_last_joy_axes_{msg.frame_id}"
+        prev = getattr(self, prev_key, None)
+        if prev is None or any(abs(axes[i] - prev[i]) > 0.01 for i in range(min(len(axes), len(prev)))):
+            logger.info("G1 Quest joy[%s]: axes=%s", msg.frame_id, [round(a, 3) for a in axes])
+            setattr(self, prev_key, list(axes))
+        super()._on_joy_bytes(data)
 
     def _on_pose_bytes(self, data: bytes) -> None:
         msg = PoseStamped.lcm_decode(data)
@@ -356,6 +381,15 @@ class G1QuestTeleopModule(QuestTeleopModule):
                 angular=Vector3(0.0, 0.0, yaw_rate),
             )
         )
+        moving = abs(vx) > 0.0 or abs(vy) > 0.0 or abs(yaw_rate) > 0.0
+        if moving != self._cmd_vel_moving:
+            self._cmd_vel_moving = moving
+            if moving:
+                logger.info(
+                    "G1 Quest cmd_vel active: vx=%.2f vy=%.2f wz=%.2f", vx, vy, yaw_rate
+                )
+            else:
+                logger.info("G1 Quest cmd_vel zeroed")
 
     def _arms_engaged(
         self,
