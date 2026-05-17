@@ -173,6 +173,24 @@
             gl.clearColor(0, 0, 0, 0); // Transparent background for passthrough
         }
 
+        function sendPoseStamped(frameId, transform, nowMs) {
+            const pos = transform.position;
+            const rot = transform.orientation;
+            const poseStamped = new geometry_msgs.PoseStamped({
+                header: new std_msgs.Header({
+                    stamp: new std_msgs.Time({ sec: Math.floor(nowMs / 1000), nsec: (nowMs % 1000) * 1_000_000 }),
+                    frame_id: frameId
+                }),
+                pose: new geometry_msgs.Pose({
+                    position: new geometry_msgs.Point({ x: pos.x, y: pos.y, z: pos.z }),
+                    orientation: new geometry_msgs.Quaternion({ x: rot.x, y: rot.y, z: rot.z, w: rot.w })
+                })
+            });
+
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(poseStamped.encode());
+            }
+        }
 
         // Send raw controller tracking data (no processing - done in Python)
         function processTracking(frame) {
@@ -182,6 +200,12 @@
                 return;
             }
             lastSendTime = now;
+            const nowMs = Date.now();
+
+            const viewerPose = frame.getViewerPose(xrRefSpace);
+            if (viewerPose) {
+                sendPoseStamped('head', viewerPose.transform, nowMs);
+            }
 
             // Process input sources (controllers)
             for (const inputSource of frame.session.inputSources) {
@@ -194,25 +218,7 @@
                 const pose = frame.getPose(trackingSpace, xrRefSpace);
                 if (!pose) continue;
 
-                // Send raw pose directly from WebXR - no processing
-                const pos = pose.transform.position;
-                const rot = pose.transform.orientation;
-
-                const nowMs = Date.now();
-                const poseStamped = new geometry_msgs.PoseStamped({
-                    header: new std_msgs.Header({
-                        stamp: new std_msgs.Time({ sec: Math.floor(nowMs / 1000), nsec: (nowMs % 1000) * 1_000_000 }),
-                        frame_id: handedness
-                    }),
-                    pose: new geometry_msgs.Pose({
-                        position: new geometry_msgs.Point({ x: pos.x, y: pos.y, z: pos.z }),
-                        orientation: new geometry_msgs.Quaternion({ x: rot.x, y: rot.y, z: rot.z, w: rot.w })
-                    })
-                });
-
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(poseStamped.encode());
-                }
+                sendPoseStamped(handedness, pose.transform, nowMs);
 
                 // Send Joy message with all buttons and axes
                 const gamepad = inputSource.gamepad;

@@ -55,6 +55,7 @@ from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.MotorCommandArray import MotorCommandArray
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.robot.unitree.g1.wholebody_connection import G1WholeBodyConnection
+from dimos.teleop.quest.quest_types import Buttons
 from dimos.utils.data import LfsPath
 from dimos.web.websocket_vis.websocket_vis_module import WebsocketVisModule
 
@@ -95,6 +96,17 @@ class _BackendSelection:
     default_ramp_seconds: float
     decimation: int | None
     arm_holder: TaskConfig | None
+
+
+def _arm_holder_config() -> TaskConfig:
+    return TaskConfig(
+        name="servo_arms",
+        type="servo",
+        joint_names=g1_arms,
+        priority=10,
+        default_positions=ARM_DEFAULT_POSE,
+        auto_start=True,
+    )
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -181,14 +193,6 @@ def _scene_backed_mjcf(
 
 def _select_backend() -> _BackendSelection:
     if not global_config.simulation:
-        arm_holder = TaskConfig(
-            name="servo_arms",
-            type="servo",
-            joint_names=g1_arms,
-            priority=10,
-            default_positions=ARM_DEFAULT_POSE,
-            auto_start=True,
-        )
         return _BackendSelection(
             blueprint=G1WholeBodyConnection.blueprint(release_sport_mode=True),
             adapter_type="transport_lcm",
@@ -199,7 +203,7 @@ def _select_backend() -> _BackendSelection:
             auto_dry_run=True,
             default_ramp_seconds=_REAL_ARM_RAMP_SECONDS,
             decimation=None,
-            arm_holder=arm_holder,
+            arm_holder=_arm_holder_config(),
         )
 
     (
@@ -255,7 +259,7 @@ def _select_backend() -> _BackendSelection:
         auto_dry_run=False,
         default_ramp_seconds=0.0,
         decimation=_SIM_POLICY_DECIMATION,
-        arm_holder=None,
+        arm_holder=_arm_holder_config(),
     )
 
 
@@ -423,9 +427,7 @@ def _babylon_blueprint(viewer_mjcf_path: str | Path, cmd_vel_topic: str) -> Blue
         kwargs.update(
             scene_path=scene_visual_path,
             scene_scale=_env_float("DIMOS_SCENE_VISUAL_SCALE", scene_mesh_scale),
-            scene_translation=_env_xyz(
-                "DIMOS_SCENE_VISUAL_TRANSLATION", scene_mesh_translation
-            ),
+            scene_translation=_env_xyz("DIMOS_SCENE_VISUAL_TRANSLATION", scene_mesh_translation),
             scene_rotation_zyx_deg=_env_xyz(
                 "DIMOS_SCENE_VISUAL_ROTATION_ZYX_DEG", scene_mesh_rotation
             ),
@@ -436,9 +438,7 @@ def _babylon_blueprint(viewer_mjcf_path: str | Path, cmd_vel_topic: str) -> Blue
 
     return BabylonSceneViewerModule.blueprint(**kwargs).transports(
         {
-            ("joint_state", JointState): LCMTransport(
-                "/coordinator/joint_state", JointState
-            ),
+            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
             ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
             ("path", PathMsg): LCMTransport("/nav_path", PathMsg),
             ("pointcloud_overlay", PointCloud2): LCMTransport("/global_map", PointCloud2),
@@ -461,10 +461,27 @@ def _arm_teleop_blueprint() -> Blueprint | None:
 
     return G1ArmTeleop.blueprint().transports(
         {
-            ("joint_state", JointState): LCMTransport(
-                "/coordinator/joint_state", JointState
-            ),
+            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
             ("joint_command", JointState): LCMTransport("/g1/joint_command", JointState),
+        }
+    )
+
+
+def _quest_teleop_blueprint(cmd_vel_topic: str) -> Blueprint | None:
+    if not _env_bool("DIMOS_ENABLE_QUEST_TELEOP", False):
+        return None
+    from dimos.robot.unitree.g1.quest_teleop import G1QuestTeleopModule
+
+    return G1QuestTeleopModule.blueprint(
+        server_port=_env_int("DIMOS_QUEST_TELEOP_PORT", 8443),
+        right_stick_mode=os.environ.get("DIMOS_QUEST_RIGHT_STICK_MODE", "yaw").strip().lower()
+        or "yaw",
+    ).transports(
+        {
+            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+            ("joint_command", JointState): LCMTransport("/g1/joint_command", JointState),
+            ("cmd_vel", Twist): LCMTransport(cmd_vel_topic, Twist),
+            ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
         }
     )
 
@@ -473,7 +490,8 @@ _backend_selection = _select_backend()
 _coordinator, _cmd_vel_topic = _coordinator_blueprint(_backend_selection)
 _babylon = _babylon_blueprint(_backend_selection.viewer_mjcf_path, _cmd_vel_topic)
 _teleop = _arm_teleop_blueprint()
-_optional = tuple(bp for bp in (_babylon, _teleop) if bp is not None)
+_quest = _quest_teleop_blueprint(_cmd_vel_topic)
+_optional = tuple(bp for bp in (_babylon, _teleop, _quest) if bp is not None)
 
 g1_groot_wbc = autoconnect(
     _backend_selection.blueprint,

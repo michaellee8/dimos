@@ -214,6 +214,8 @@ class QuestTeleopModule(Module):
     def _on_pose_bytes(self, data: bytes) -> None:
         """Decode LCM bytes into PoseStamped, transform to robot frame."""
         msg = PoseStamped.lcm_decode(data)
+        if msg.frame_id not in {"left", "right"}:
+            return
         hand = self._resolve_hand(msg.frame_id)
         robot_pose = webxr_to_robot(msg, is_left_controller=(hand == Hand.LEFT))
         with self._lock:
