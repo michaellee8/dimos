@@ -35,6 +35,8 @@ from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.core import rpc
 from dimos.core.module import Module
 from dimos.core.stream import In
+from dimos.msgs.nav_msgs.GraphNodes3D import GraphNodes3D
+from dimos.msgs.nav_msgs.LineSegments3D import LineSegments3D
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path as NavPath
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
@@ -49,9 +51,8 @@ class TopicCounterModule(Module):
 
     corrected_odometry: In[Odometry]
     global_map: In[PointCloud2]
-    corrected_tf: In[Odometry]
-    pose_graph_nodes: In[NavPath]
-    pose_graph_edges: In[NavPath]
+    pose_graph_nodes: In[GraphNodes3D]
+    pose_graph_edges: In[LineSegments3D]
     loop_closure: In[NavPath]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -59,7 +60,6 @@ class TopicCounterModule(Module):
         self._counts: dict[str, int] = {
             "corrected_odometry": 0,
             "global_map": 0,
-            "corrected_tf": 0,
             "pose_graph_nodes": 0,
             "pose_graph_edges": 0,
             "loop_closure": 0,
@@ -117,6 +117,9 @@ def main() -> None:
         counter = coordinator.get_instance(TopicCounterModule)
         while not playback.is_finished():
             time.sleep(args.poll_interval_sec)
+        playback_error = playback.playback_error()
+        if playback_error is not None:
+            raise RuntimeError(f"Kitti360 playback aborted: {playback_error}")
         time.sleep(args.drain_sec)
         counts = counter.counts()
     finally:
@@ -126,7 +129,6 @@ def main() -> None:
     for name in (
         "corrected_odometry",
         "global_map",
-        "corrected_tf",
         "pose_graph_nodes",
         "pose_graph_edges",
         "loop_closure",

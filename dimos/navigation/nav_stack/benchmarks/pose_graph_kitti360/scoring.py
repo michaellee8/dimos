@@ -16,8 +16,8 @@
 
 Subscribes to two outputs that any pose-graph SLAM module exposes:
 
-* ``pose_graph_edges: In[NavPath]`` — pose-graph edges where loop closures
-  are tagged with ``orientation.w == 0.4`` (odometry edges use ``1.0``).
+* ``pose_graph_edges: In[LineSegments3D]`` — pose-graph edges where loop
+  closures are tagged with traversability ``0.4`` (odometry edges use ``1.0``).
 * ``loop_closure: In[NavPath]`` — one event per loop-closure update with
   per-keyframe deltas.
 
@@ -30,21 +30,21 @@ after iSAM2 has shifted the optimized keyframe positions.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import math
 from typing import Any
 
+from pydantic import Field
 from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In
+from dimos.msgs.nav_msgs.LineSegments3D import LineSegments3D
 from dimos.msgs.nav_msgs.Path import Path as NavPath
 
-# Default tag value used by the PGO publisher to mark loop-closure edges in
-# the orientation.w field of pose_graph_edges PoseStamped pairs (odometry
-# edges use 1.0). Both knobs are exposed on PoseGraphScoringConfig so any
-# other pose-graph producer can dial in its own marker.
+# Producer convention used by PGO and the default for any other
+# LoopClosure implementer that doesn't override it.
 DEFAULT_LOOP_CLOSURE_TRAVERSABILITY = 0.4
 DEFAULT_TRAVERSABILITY_TOLERANCE = 0.05
 
@@ -74,15 +74,15 @@ class LoopMetrics:
 
 
 class PoseGraphScoringConfig(ModuleConfig):
-    frame_ids: list[int] = field(default_factory=list)
-    send_timestamps: list[float] = field(default_factory=list)
+    # ``ModuleConfig`` inherits from ``pydantic.BaseModel``, so default
+    # factories must come from ``pydantic.Field`` — ``dataclasses.field``
+    # would be stored as the literal default value and break validation
+    # (greptile c5 on PR #2099).
+    frame_ids: list[int] = Field(default_factory=list)
+    send_timestamps: list[float] = Field(default_factory=list)
     # JSON-friendly form of LoopGroundtruth.valid_loops_per_query:
     # frame_id → list of frame_ids that form valid loop pairs.
-    valid_loops_per_query: dict[int, list[int]] = field(default_factory=dict)
-    # Tag value the publisher writes into orientation.w to mark a
-    # pose_graph_edges PoseStamped pair as a loop closure (vs the
-    # odometry-edge default of 1.0). Both fields are config-driven so
-    # different pose-graph SLAM producers can plug in their own marker.
+    valid_loops_per_query: dict[int, list[int]] = Field(default_factory=dict)
     loop_closure_traversability: float = DEFAULT_LOOP_CLOSURE_TRAVERSABILITY
     traversability_tolerance: float = DEFAULT_TRAVERSABILITY_TOLERANCE
 
@@ -92,7 +92,7 @@ class PoseGraphScoringModule(Module):
 
     config: PoseGraphScoringConfig
 
-    pose_graph_edges: In[NavPath]
+    pose_graph_edges: In[LineSegments3D]
     loop_closure: In[NavPath]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -118,23 +118,25 @@ class PoseGraphScoringModule(Module):
         del message
         self._loop_closure_events += 1
 
-    def _on_pose_graph_edges(self, message: NavPath) -> None:
-        pose_index = 0
-        while pose_index + 1 < len(message.poses):
-            start_pose = message.poses[pose_index]
-            end_pose = message.poses[pose_index + 1]
-            traversability = float(start_pose.orientation.w)
+    def _on_pose_graph_edges(self, message: LineSegments3D) -> None:
+        # LineSegments3D decodes nav_msgs/Path as paired endpoints + a
+        # per-segment traversability + per-endpoint timestamps. We use
+        # the endpoint timestamps to map each endpoint back to the
+        # input frame_id that produced that keyframe.
+        traversabilities = message._traversability
+        endpoint_ts = message._endpoint_ts
+        for segment_index, traversability in enumerate(traversabilities):
             if (
                 abs(traversability - self.config.loop_closure_traversability)
-                < self.config.traversability_tolerance
+                >= self.config.traversability_tolerance
             ):
-                start_frame_id = self._timestamp_to_frame(start_pose.ts)
-                end_frame_id = self._timestamp_to_frame(end_pose.ts)
-                if start_frame_id is not None and end_frame_id is not None:
-                    pair = (start_frame_id, end_frame_id)
-                    if pair not in self._detected_pairs:
-                        self._detected_pairs.append(pair)
-            pose_index += 2
+                continue
+            start_frame_id = self._timestamp_to_frame(endpoint_ts[2 * segment_index])
+            end_frame_id = self._timestamp_to_frame(endpoint_ts[2 * segment_index + 1])
+            if start_frame_id is not None and end_frame_id is not None:
+                pair = (start_frame_id, end_frame_id)
+                if pair not in self._detected_pairs:
+                    self._detected_pairs.append(pair)
 
     def _timestamp_to_frame(self, timestamp_sec: float) -> int | None:
         timestamp_ms = round(timestamp_sec * 1e3)
@@ -172,23 +174,29 @@ def _score_pairs(
     detected_pairs: list[tuple[int, int]],
     valid_loops_per_query: dict[int, set[int]],
 ) -> LoopMetrics:
-    true_positives = 0
-    false_positives = 0
+    # All three counts are query-level so precision/recall stay
+    # dimensionally consistent. The "query" of a detection pair is the
+    # later frame_id (matches the LCDNet convention). A query
+    # contributes 1 TP if any of its edges matched groundtruth,
+    # otherwise 1 FP. Duplicate detections for the same query collapse.
     seen_queries_with_hit: set[int] = set()
+    seen_queries_without_hit: set[int] = set()
     queries_with_any_groundtruth = {
         frame_id for frame_id, valid in valid_loops_per_query.items() if valid
     }
     for source_frame_id, target_frame_id in detected_pairs:
         source_valid = valid_loops_per_query.get(source_frame_id, set())
         target_valid = valid_loops_per_query.get(target_frame_id, set())
+        query_frame_id = max(source_frame_id, target_frame_id)
         if target_frame_id in source_valid or source_frame_id in target_valid:
-            true_positives += 1
-            seen_queries_with_hit.add(max(source_frame_id, target_frame_id))
+            seen_queries_with_hit.add(query_frame_id)
         else:
-            false_positives += 1
-    false_negatives = len(queries_with_any_groundtruth - seen_queries_with_hit)
+            seen_queries_without_hit.add(query_frame_id)
+    # A query that fires both a TP and a FP edge is counted as TP only
+    # (one good detection is enough to say PGO recognised the place).
+    seen_queries_without_hit -= seen_queries_with_hit
     return LoopMetrics(
-        true_positive=true_positives,
-        false_positive=false_positives,
-        false_negative=false_negatives,
+        true_positive=len(seen_queries_with_hit),
+        false_positive=len(seen_queries_without_hit),
+        false_negative=len(queries_with_any_groundtruth - seen_queries_with_hit),
     )

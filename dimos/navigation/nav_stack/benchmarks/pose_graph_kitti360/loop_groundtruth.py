@@ -113,16 +113,15 @@ def score_detected_loops(
 ) -> LoopMetrics:
     """Score detected (query_id, candidate_id) pairs against groundtruth.
 
-    A detection is a true positive iff its candidate is in the
-    groundtruth set for that query (or vice-versa — order-agnostic).
-
-    Recall denominator = number of queries that have at least one
-    valid loop. (We don't count "valid pairs missed" because a single
-    correct detection per query is enough to count.)
+    All three counts are query-level so precision/recall stay
+    dimensionally consistent. The "query" of a detected pair is the
+    later frame_id. A query contributes 1 TP if any of its detected
+    edges matched groundtruth, otherwise 1 FP. Duplicate detections
+    for the same query collapse. Match is order-agnostic — PGO may
+    report (target, source) or (source, target).
     """
-    true_positives = 0
-    false_positives = 0
     seen_queries_with_hit: set[int] = set()
+    seen_queries_without_hit: set[int] = set()
     queries_with_any_groundtruth = {
         query_frame_id
         for query_frame_id, valid in groundtruth.valid_loops_per_query.items()
@@ -130,19 +129,17 @@ def score_detected_loops(
     }
 
     for source_frame_id, target_frame_id in detected_pairs:
-        # Order-agnostic: PGO may report (target, source) or (source, target).
         source_valid = groundtruth.valid_loops_per_query.get(source_frame_id, set())
         target_valid = groundtruth.valid_loops_per_query.get(target_frame_id, set())
+        query_frame_id = max(source_frame_id, target_frame_id)
         if target_frame_id in source_valid or source_frame_id in target_valid:
-            true_positives += 1
-            # For per-query recall, mark whichever side was the "later" query.
-            seen_queries_with_hit.add(max(source_frame_id, target_frame_id))
+            seen_queries_with_hit.add(query_frame_id)
         else:
-            false_positives += 1
+            seen_queries_without_hit.add(query_frame_id)
+    seen_queries_without_hit -= seen_queries_with_hit
 
-    false_negatives = len(queries_with_any_groundtruth - seen_queries_with_hit)
     return LoopMetrics(
-        true_positive=true_positives,
-        false_positive=false_positives,
-        false_negative=false_negatives,
+        true_positive=len(seen_queries_with_hit),
+        false_positive=len(seen_queries_without_hit),
+        false_negative=len(queries_with_any_groundtruth - seen_queries_with_hit),
     )

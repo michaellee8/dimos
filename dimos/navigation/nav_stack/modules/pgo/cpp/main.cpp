@@ -362,7 +362,6 @@ int main(int argc, char** argv)
         fprintf(stderr, "  pose_graph_edges: %s\n", graph_edges_topic.c_str());
         fprintf(stderr, "  loop_closure: %s\n", loop_closure_topic.c_str());
     }
-
     // Seed identity TF so consumers can query the chain before the first
     // odom message arrives.
     {

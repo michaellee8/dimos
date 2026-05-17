@@ -56,6 +56,10 @@ class LineSegments3D(Timestamped):
     frame_id: str
     _segments: list[tuple[tuple[float, float, float], tuple[float, float, float]]]
     _traversability: list[float]
+    # Per-endpoint timestamps (2 entries per segment, in segment order).
+    # Producers that don't carry per-endpoint timing can omit this; the
+    # default is the message-level ts for every endpoint.
+    _endpoint_ts: list[float]
 
     def __init__(
         self,
@@ -63,11 +67,15 @@ class LineSegments3D(Timestamped):
         frame_id: str = "map",
         segments: list[tuple[tuple[float, float, float], tuple[float, float, float]]] | None = None,
         traversability: list[float] | None = None,
+        endpoint_ts: list[float] | None = None,
     ) -> None:
         self.frame_id = frame_id
         self.ts = ts if ts != 0 else time.time()
         self._segments = segments or []
         self._traversability = traversability or [1.0] * len(self._segments)
+        self._endpoint_ts = (
+            endpoint_ts if endpoint_ts is not None else [self.ts] * (2 * len(self._segments))
+        )
 
     def lcm_encode(self) -> bytes:
         lcm_msg = LCMPath()
@@ -76,11 +84,15 @@ class LineSegments3D(Timestamped):
         header_sec_nsec = _sec_nsec(self.ts)
         for idx, (p1, p2) in enumerate(self._segments):
             trav = self._traversability[idx] if idx < len(self._traversability) else 1.0
-            for endpoint, w_field in ((p1, trav), (p2, 0.0)):
+            endpoint_pairs = (
+                (p1, trav, self._endpoint_ts_for(2 * idx)),
+                (p2, 0.0, self._endpoint_ts_for(2 * idx + 1)),
+            )
+            for endpoint, w_field, endpoint_ts in endpoint_pairs:
                 pose = LCMPoseStamped()
                 pose.header = LCMHeader()
                 pose.header.stamp = LCMTime()
-                [pose.header.stamp.sec, pose.header.stamp.nsec] = header_sec_nsec
+                [pose.header.stamp.sec, pose.header.stamp.nsec] = _sec_nsec(endpoint_ts)
                 pose.header.frame_id = self.frame_id
                 pose.pose = LCMPose()
                 pose.pose.position = LCMPoint()
@@ -98,6 +110,11 @@ class LineSegments3D(Timestamped):
         lcm_msg.header.frame_id = self.frame_id
         return lcm_msg.lcm_encode()  # type: ignore[no-any-return]
 
+    def _endpoint_ts_for(self, index: int) -> float:
+        if index < len(self._endpoint_ts):
+            return self._endpoint_ts[index]
+        return self.ts
+
     @classmethod
     def lcm_decode(cls, data: bytes | BinaryIO) -> LineSegments3D:
         lcm_msg = LCMPath.lcm_decode(data)
@@ -106,6 +123,7 @@ class LineSegments3D(Timestamped):
 
         segments = []
         traversability = []
+        endpoint_ts = []
         poses = lcm_msg.poses
         for i in range(0, len(poses) - 1, 2):
             p1, p2 = poses[i], poses[i + 1]
@@ -116,8 +134,14 @@ class LineSegments3D(Timestamped):
                 )
             )
             traversability.append(p1.pose.orientation.w)
+            endpoint_ts.append(p1.header.stamp.sec + p1.header.stamp.nsec / 1e9)
+            endpoint_ts.append(p2.header.stamp.sec + p2.header.stamp.nsec / 1e9)
         return cls(
-            ts=header_ts, frame_id=frame_id, segments=segments, traversability=traversability
+            ts=header_ts,
+            frame_id=frame_id,
+            segments=segments,
+            traversability=traversability,
+            endpoint_ts=endpoint_ts,
         )
 
     def to_rerun(

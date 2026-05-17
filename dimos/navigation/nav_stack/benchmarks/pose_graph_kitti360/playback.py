@@ -14,9 +14,7 @@
 
 """Module that streams a KITTI-360 sequence as scan + odometry messages.
 
-Drop this into any blueprint that expects ``registered_scan: In[PointCloud2]``
-and ``odometry: In[Odometry]`` (e.g. a pose-graph SLAM module). The blueprint
-auto-connects the streams by name.
+Pairs with any module satisfying ``LoopClosure``
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ from scipy.spatial.transform import Rotation
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.stream import Out
+from dimos.core.stream import In, Out
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.nav_stack.benchmarks.pose_graph_kitti360.kitti360_loader import (
@@ -41,12 +39,15 @@ from dimos.navigation.nav_stack.tests.rosbag_fixtures import (
     make_pointcloud_msg,
 )
 
+FIRST_RESPONSE_TIMEOUT_SEC = 120.0
+
 
 class Kitti360PlaybackConfig(ModuleConfig):
     kitti360_root: str
     sequence_id: int = 2
     max_scans: int | None = None
     publish_interval_sec: float = 0.02
+    first_response_timeout_sec: float = FIRST_RESPONSE_TIMEOUT_SEC
 
 
 class Kitti360PlaybackModule(Module):
@@ -56,6 +57,7 @@ class Kitti360PlaybackModule(Module):
 
     registered_scan: Out[PointCloud2]
     odometry: Out[Odometry]
+    corrected_odometry: In[Odometry]
 
     def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)
@@ -63,12 +65,14 @@ class Kitti360PlaybackModule(Module):
         self._send_timestamps: list[float] = []
         self._frames_published: int = 0
         self._playback_finished: bool = False
+        self._playback_error: str | None = None
+        self._first_response_event: asyncio.Event | None = None
+
+    async def handle_corrected_odometry(self, value: Odometry) -> None:
+        if self._first_response_event is not None:
+            self._first_response_event.set()
 
     async def main(self) -> AsyncIterator[None]:
-        # Index-only loader work — no per-scan file IO yet. The scans get
-        # streamed off disk inside ``_run_playback`` so we don't stall
-        # ``self._loop`` (and the module's RPC dispatcher) for tens of
-        # seconds while we preload 100s of MB of point clouds.
         self._sequence = load_kitti360_sequence(
             Path(self.config.kitti360_root), self.config.sequence_id
         )
@@ -77,37 +81,55 @@ class Kitti360PlaybackModule(Module):
             frame_ids = frame_ids[: self.config.max_scans]
         self._frame_ids = frame_ids
         self._send_timestamps = compute_send_timestamps(self._sequence.timestamps, frame_ids)
+        # Event lives on self._loop, the same loop _run_playback and
+        # handle_corrected_odometry run on.
+        self._first_response_event = asyncio.Event()
         self._playback_task = asyncio.create_task(self._run_playback())
         yield
         self._playback_task.cancel()
 
     async def _run_playback(self) -> None:
-        # Wait for the system-ready barrier so PGO has subscribed before
-        # we start streaming scans.
-        await self.wait_for_system_ready()
-        for index, frame_id in enumerate(self._frame_ids):
-            # ``scan_xyz`` is a blocking np.fromfile — push it to a thread so
-            # the event loop (and any concurrent RPC) keeps spinning.
-            scan_xyz = await asyncio.to_thread(self._sequence.scan_xyz, frame_id)
-            pose = self._sequence.lidar_pose(frame_id)
-            position = pose[:3, 3]
-            quaternion = Rotation.from_matrix(pose[:3, :3]).as_quat()
-            timestamp = self._send_timestamps[index]
+        try:
+            assert self._first_response_event is not None
+            for index, frame_id in enumerate(self._frame_ids):
+                # scan_xyz is a blocking np.fromfile — push it to a thread so
+                # the event loop (and any concurrent RPC) keeps spinning.
+                scan_xyz = await asyncio.to_thread(self._sequence.scan_xyz, frame_id)
+                pose = self._sequence.lidar_pose(frame_id)
+                position = pose[:3, 3]
+                quaternion = Rotation.from_matrix(pose[:3, :3]).as_quat()
+                timestamp = self._send_timestamps[index]
 
-            odometry_message = make_odometry_msg(position, quaternion, ts=timestamp)
-            world_xyz = (pose[:3, :3] @ scan_xyz[:, :3].T).T + position
-            cloud_array = np.column_stack([world_xyz, scan_xyz[:, 3:4]]).astype(np.float32)
-            cloud_message = make_pointcloud_msg(cloud_array, ts=timestamp)
+                odometry_message = make_odometry_msg(position, quaternion, ts=timestamp)
+                world_xyz = (pose[:3, :3] @ scan_xyz[:, :3].T).T + position
+                cloud_array = np.column_stack([world_xyz, scan_xyz[:, 3:4]]).astype(np.float32)
+                cloud_message = make_pointcloud_msg(cloud_array, ts=timestamp)
 
-            # Odometry first so the receiver can stash the latest pose before
-            # the matching scan arrives.
-            self.odometry.publish(odometry_message)
-            self.registered_scan.publish(cloud_message)
+                # Odometry first so the receiver can stash the latest pose
+                # before the matching scan arrives.
+                self.odometry.publish(odometry_message)
+                self.registered_scan.publish(cloud_message)
 
-            self._frames_published = index + 1
-            if self.config.publish_interval_sec > 0:
-                await asyncio.sleep(self.config.publish_interval_sec)
-        self._playback_finished = True
+                self._frames_published = index + 1
+                if index == 0:
+                    try:
+                        await asyncio.wait_for(
+                            self._first_response_event.wait(),
+                            timeout=self.config.first_response_timeout_sec,
+                        )
+                    except asyncio.TimeoutError:
+                        raise RuntimeError(
+                            "No corrected_odometry within "
+                            f"{self.config.first_response_timeout_sec:.1f}s of "
+                            "the first scan — playback aborted"
+                        ) from None
+                if self.config.publish_interval_sec > 0:
+                    await asyncio.sleep(self.config.publish_interval_sec)
+        except Exception as exc:
+            self._playback_error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            self._playback_finished = True
 
     @rpc
     def frames_published(self) -> int:
@@ -116,6 +138,10 @@ class Kitti360PlaybackModule(Module):
     @rpc
     def is_finished(self) -> bool:
         return self._playback_finished
+
+    @rpc
+    def playback_error(self) -> str | None:
+        return self._playback_error
 
     @rpc
     def send_timestamps(self) -> list[float]:

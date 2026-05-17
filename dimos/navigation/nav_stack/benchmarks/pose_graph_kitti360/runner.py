@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generic KITTI-360 loop-closure benchmark for any pose-graph SLAM module.
+"""Generic KITTI-360 loop-closure benchmark for any module satisfying
+``LoopClosure`` (see ``dimos/navigation/nav_stack/specs.py``).
 
-Drop in any module that publishes ``pose_graph_edges: Out[NavPath]`` and
-``loop_closure: Out[NavPath]`` and consumes ``registered_scan: In[PointCloud2]``
-+ ``odometry: In[Odometry]`` — the playback + scoring modules wire into it via
-``autoconnect`` and the runner doesn't care which implementation it is.
+The playback + scoring modules wire into the producer via ``autoconnect``;
+the runner doesn't care which implementation it is.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from typing import Any
 
 import numpy as np
 
-from dimos.core.coordination.blueprints import Blueprint, autoconnect
+from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.navigation.nav_stack.benchmarks.pose_graph_kitti360.kitti360_loader import (
     load_kitti360_sequence,
@@ -45,14 +44,16 @@ from dimos.navigation.nav_stack.benchmarks.pose_graph_kitti360.playback import (
 from dimos.navigation.nav_stack.benchmarks.pose_graph_kitti360.scoring import (
     PoseGraphScoringModule,
 )
+from dimos.navigation.nav_stack.specs import LoopClosure
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
 
 def run_benchmark(
-    module_under_test: Blueprint,
+    module_under_test: type[LoopClosure],
     kitti360_root: Path,
+    module_kwargs: dict[str, Any] | None = None,
     sequence_id: int = 2,
     max_scans: int | None = None,
     publish_interval_sec: float = 0.02,
@@ -106,7 +107,8 @@ def run_benchmark(
         },
     )
 
-    blueprint = autoconnect(playback_blueprint, scoring_blueprint, module_under_test)
+    sut_blueprint = module_under_test.blueprint(**(module_kwargs or {}))
+    blueprint = autoconnect(playback_blueprint, scoring_blueprint, sut_blueprint)
 
     wallclock_start = time.monotonic()
     coordinator = ModuleCoordinator.build(blueprint)
@@ -122,6 +124,13 @@ def run_benchmark(
                 f"({published / max(len(frame_ids), 1) * 100:.0f}%)"
             )
             time.sleep(poll_interval_sec)
+
+        playback_error = playback.playback_error()
+        if playback_error is not None:
+            raise RuntimeError(
+                f"Kitti360PlaybackModule aborted at frame "
+                f"{playback.frames_published()}/{len(frame_ids)}: {playback_error}"
+            )
 
         # Drain remaining loop-closure / edge messages from PGO's backlog.
         logger.info(f"playback done, draining for {drain_sec:.1f}s")

@@ -46,15 +46,14 @@ def main() -> None:
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
-    pgo_blueprint = PGO.blueprint(
-        scan_context_match_threshold=args.scan_context_match_threshold,
-        loop_score_thresh=args.loop_score_thresh,
-        loop_search_radius=args.loop_search_radius_m,
-        key_pose_delta_trans=args.key_pose_delta_trans,
-    )
-
     results = run_benchmark(
-        module_under_test=pgo_blueprint,
+        module_under_test=PGO,
+        module_kwargs={
+            "scan_context_match_threshold": args.scan_context_match_threshold,
+            "loop_score_thresh": args.loop_score_thresh,
+            "loop_search_radius": args.loop_search_radius_m,
+            "key_pose_delta_trans": args.key_pose_delta_trans,
+        },
         kitti360_root=args.kitti360_root,
         sequence_id=args.sequence,
         max_scans=args.max_scans,

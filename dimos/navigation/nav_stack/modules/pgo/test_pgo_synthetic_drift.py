@@ -59,7 +59,7 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-pytestmark = [pytest.mark.slow]
+pytestmark = [pytest.mark.self_hosted, pytest.mark.skipif_no_nix, pytest.mark.skipif_macos_bug]
 
 # Cross-trajectory drift injected at the revisit. Must be >> loop_search_radius
 # so position-based search cannot accidentally find the loop.
@@ -77,6 +77,8 @@ INTER_FRAME_SLEEP_SEC = 0.15
 POST_FEED_DRAIN_SEC = 3.0
 # Poll period when waiting for the playback module to drain.
 POLL_INTERVAL_SEC = 0.25
+# After the first scan goes out, wait this long for PGO to emit anything
+PGO_FIRST_RESPONSE_TIMEOUT_SEC = 20.0
 
 
 def _make_room_points(half_size: float = 20.0, density: float = 0.15) -> np.ndarray:
@@ -228,6 +230,7 @@ def _trajectory_payload(
 class SyntheticDriftPlaybackConfig(ModuleConfig):
     trajectory: list[list[float]]
     inter_frame_sleep_sec: float = INTER_FRAME_SLEEP_SEC
+    pgo_first_response_timeout_sec: float = PGO_FIRST_RESPONSE_TIMEOUT_SEC
     room_half_size: float = 20.0
     room_density: float = 0.15
 
@@ -239,58 +242,95 @@ class SyntheticDriftPlaybackModule(Module):
 
     registered_scan: Out[PointCloud2]
     odometry: Out[Odometry]
+    # Subscribed only so we can detect when PGO has come up and processed the
+    # first scan — see _run_playback's "wait for PGO ack" gate.
+    corrected_odometry: In[Odometry]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._frames_published: int = 0
         self._playback_finished: bool = False
+        self._playback_error: str | None = None
+        self._pgo_first_response: asyncio.Event | None = None
+
+    async def handle_corrected_odometry(self, value: Odometry) -> None:
+        if self._pgo_first_response is not None:
+            self._pgo_first_response.set()
 
     async def main(self) -> AsyncIterator[None]:
         self._room_points = _make_room_points(self.config.room_half_size, self.config.room_density)
+        # Event lives on self._loop, the same loop _run_playback and
+        # handle_corrected_odometry run on.
+        self._pgo_first_response = asyncio.Event()
         self._playback_task = asyncio.create_task(self._run_playback())
         yield
         self._playback_task.cancel()
 
     async def _run_playback(self) -> None:
-        # Gate on the coordinator's system-ready barrier so the C++ PGO
-        # subprocess has subscribed before we emit the first scan.
-        await self.wait_for_system_ready()
-        for row in self.config.trajectory:
-            (
-                timestamp,
-                true_x,
-                true_y,
-                true_z,
-                true_yaw,
-                drifted_x,
-                drifted_y,
-                drifted_z,
-                drifted_yaw,
-            ) = row
-            true_position = np.array([true_x, true_y, true_z])
-            drifted_position = np.array([drifted_x, drifted_y, drifted_z])
-            body_points = _world_to_body(self._room_points, true_position, true_yaw)
-            world_points = _body_to_world(body_points, drifted_position, drifted_yaw)
-            scan_message = PointCloud2.from_numpy(
-                world_points.astype(np.float32), frame_id="map", timestamp=timestamp
-            )
-            odometry_message = Odometry(
-                ts=timestamp,
-                frame_id="odom",
-                child_frame_id="base_link",
-                pose=_make_pose(
-                    float(drifted_position[0]),
-                    float(drifted_position[1]),
-                    float(drifted_position[2]),
-                    float(drifted_yaw),
-                ),
-            )
-            self.odometry.publish(odometry_message)
-            self.registered_scan.publish(scan_message)
-            self._frames_published += 1
-            if self.config.inter_frame_sleep_sec > 0:
-                await asyncio.sleep(self.config.inter_frame_sleep_sec)
-        self._playback_finished = True
+        # finally guarantees is_finished() flips to True even if a
+        # publish raises. Without it, _run_pgo's poll loop hangs and
+        # the coordinator leaks.
+        try:
+            assert self._pgo_first_response is not None
+            for frame_index, row in enumerate(self.config.trajectory):
+                (
+                    timestamp,
+                    true_x,
+                    true_y,
+                    true_z,
+                    true_yaw,
+                    drifted_x,
+                    drifted_y,
+                    drifted_z,
+                    drifted_yaw,
+                ) = row
+                true_position = np.array([true_x, true_y, true_z])
+                drifted_position = np.array([drifted_x, drifted_y, drifted_z])
+                body_points = _world_to_body(self._room_points, true_position, true_yaw)
+                world_points = _body_to_world(body_points, drifted_position, drifted_yaw)
+                scan_message = PointCloud2.from_numpy(
+                    world_points.astype(np.float32),
+                    frame_id="map",  # FIXME: this should be derived from something
+                    timestamp=timestamp,
+                )
+                odometry_message = Odometry(
+                    ts=timestamp,
+                    frame_id="odom",  # FIXME: this should be derived from something
+                    child_frame_id="base_link",  # FIXME: this should be derived from something
+                    pose=_make_pose(
+                        float(drifted_position[0]),
+                        float(drifted_position[1]),
+                        float(drifted_position[2]),
+                        float(drifted_yaw),
+                    ),
+                )
+                self.odometry.publish(odometry_message)
+                self.registered_scan.publish(scan_message)
+                self._frames_published += 1
+                if frame_index == 0:
+                    # Wait for PGO to publish anything (corrected_odometry)
+                    # before sending the rest of the trajectory, so we don't
+                    # race PGO's startup.
+                    try:
+                        await asyncio.wait_for(
+                            self._pgo_first_response.wait(),
+                            timeout=self.config.pgo_first_response_timeout_sec,
+                        )
+                    except asyncio.TimeoutError:
+                        raise RuntimeError(
+                            "PGO didn't start in time: no corrected_odometry "
+                            f"received within {self.config.pgo_first_response_timeout_sec:.1f}s "
+                            "of the first scan. Bump PGO_FIRST_RESPONSE_TIMEOUT_SEC "
+                            "(top of test_pgo_synthetic_drift.py) if PGO needs longer to "
+                            "start on this host."
+                        ) from None
+                if self.config.inter_frame_sleep_sec > 0:
+                    await asyncio.sleep(self.config.inter_frame_sleep_sec)
+        except Exception as exc:
+            self._playback_error = f"{type(exc).__name__}: {exc}"
+            raise
+        finally:
+            self._playback_finished = True
 
     @rpc
     def is_finished(self) -> bool:
@@ -301,14 +341,9 @@ class SyntheticDriftPlaybackModule(Module):
         return self._frames_published
 
 
-class LoopClosureCounterConfig(ModuleConfig):
-    pass
-
-
 class LoopClosureCounterModule(Module):
     """Counts loop_closure events from any pose-graph SLAM module."""
 
-    config: LoopClosureCounterConfig
     loop_closure: In[NavPath]
 
     def __init__(self, **kwargs: Any) -> None:
@@ -344,6 +379,7 @@ def _run_pgo(
         trajectory=_trajectory_payload(trajectory),
     )
     pgo_blueprint = PGO.blueprint(
+        debug=True,
         use_scan_context=use_scan_context,
         key_pose_delta_trans=0.4,
         loop_search_radius=LOOP_SEARCH_RADIUS_M,
