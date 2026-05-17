@@ -50,7 +50,7 @@ nav_config: dict[str, Any] = dict(
     },
 )
 
-go2_nav = (
+unitree_go2_nav = (
     autoconnect(
         FastLio2.blueprint(
             host_ip=os.getenv("LIDAR_HOST_IP", "192.168.123.18"),
@@ -84,4 +84,4 @@ go2_nav = (
     .global_config(n_workers=8, robot_model="unitree_go2")
 )
 
-__all__ = ["go2_nav", "nav_config"]
+__all__ = ["nav_config", "unitree_go2_nav"]
