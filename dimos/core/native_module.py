@@ -83,11 +83,6 @@ else:
 
 logger = setup_logger()
 
-# Native binaries emit this marker on stderr after their LCM subscribes are
-# live. NativeModule.start() blocks until it sees it, ensuring upstream
-# publishers don't race ahead and drop messages.
-_READY_MARKER = "[DIMOS_NATIVE_READY]"
-
 
 class LogFormat(enum.Enum):
     TEXT = "text"
@@ -407,9 +402,6 @@ class NativeModule(Module):
         for raw in stream:
             line = raw.decode("utf-8", errors="replace").rstrip()
             if not line:
-                continue
-            if _READY_MARKER in line:
-                self._ready_event.set()
                 continue
             if self.config.log_format == LogFormat.JSON:
                 try:
