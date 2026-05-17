@@ -46,13 +46,6 @@ POLL_INTERVAL_SEC = 0.25
 
 
 class PgoOutputCollectorModule(Module):
-    """Captures PGO's corrected_odometry and global_map streams.
-
-    PGO no longer publishes ``corrected_tf`` (the C++ binary writes
-    ``tf2_msgs/TFMessage`` straight to ``/tf`` now); TF verification
-    would need a raw LCM subscribe on that channel — not wired up here.
-    """
-
     corrected_odometry: In[Odometry]
     global_map: In[PointCloud2]
 
@@ -132,7 +125,6 @@ class TestPGORosbag:
         finally:
             coordinator.stop()
 
-        # -- Analysis --
         corrected_count = len(corrected_positions)
         global_map_count = len(global_map_point_counts)
 
