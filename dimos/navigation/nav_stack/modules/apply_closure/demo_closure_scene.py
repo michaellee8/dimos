@@ -34,7 +34,7 @@ back to the start. Then ApplyClosure warps the accumulated DynamicCloud and
 the corrected map is logged.
 
 Run:
-    uv run python -m dimos.navigation.nav_stack.modules.apply_closure.demo_closure_scene
+    uv run python -m dimos.navigation.nav_stack.modules.apply_closure.demo_closure_scene --step-ms 200
 
 Flags:
     --no-spawn   Do not auto-launch the rerun viewer.

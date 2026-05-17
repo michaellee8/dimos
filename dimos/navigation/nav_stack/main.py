@@ -22,6 +22,7 @@ import numpy as np
 
 from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.core.module import ModuleBase
+from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.navigation.nav_stack.modules.far_planner.far_planner import FarPlanner
 from dimos.navigation.nav_stack.modules.local_planner.local_planner import LocalPlanner
 from dimos.navigation.nav_stack.modules.path_follower.path_follower import PathFollower
@@ -41,6 +42,8 @@ def create_nav_stack(
     *,
     use_tare: bool = False,
     use_terrain_map_ext: bool = True,
+    use_ray_tracing: bool = True,
+    use_apply_closure: bool = True,
     planner: str = "far",
     vehicle_height: float | None = None,
     max_speed: float | None = None,
@@ -57,6 +60,8 @@ def create_nav_stack(
     pgo: dict[str, Any] | None = None,
     tare_planner: dict[str, Any] | None = None,
     nav_record: dict[str, Any] | None = None,
+    ray_tracing: dict[str, Any] | None = None,
+    apply_closure: dict[str, Any] | None = None,
 ) -> Blueprint:
     """Compose a nav stack Blueprint.
 
@@ -170,6 +175,17 @@ def create_nav_stack(
         )
     if use_tare:
         modules.append(TarePlanner.blueprint(**(tare_planner or {})))
+    if use_ray_tracing:
+        modules.append(RayTracingVoxelMap.blueprint(**(ray_tracing or {})))
+    if use_apply_closure:
+        # ApplyClosure transitively imports GraphDelta3D → Graph3D. Defer the
+        # import so callers that explicitly disable apply_closure don't hit
+        # the dependency on environments where Graph3D isn't installed.
+        from dimos.navigation.nav_stack.modules.apply_closure.apply_closure import (
+            ApplyClosure,
+        )
+
+        modules.append(ApplyClosure.blueprint(**(apply_closure or {})))
     record_remappings: list[tuple[type[ModuleBase], str, str | type[ModuleBase] | type[Spec]]] = []
     if record:
         # Lazy: breaks on G1 onboard (linux-aarch64 TLS allocation failure)
@@ -218,6 +234,7 @@ def nav_stack_rerun_config(
     visual_override.setdefault("world/global_map", _global_map_colors)
     visual_override.setdefault("world/global_map_pgo", _global_map_colors)
     visual_override.setdefault("world/global_map_fastlio", _global_map_colors)
+    visual_override.setdefault("world/corrected_global_map", _global_map_colors)
     visual_override.setdefault(
         "world/registered_scan", _registered_scan_colors if show_registered_scan else _hide
     )
@@ -286,7 +303,13 @@ def _sensor_scan_colors(cloud: Any) -> Any:
 def _global_map_colors(cloud: Any) -> Any:
     import rerun as rr
 
-    points, _ = cloud.as_numpy()
+    # Polymorphic over PointCloud2 (``as_numpy``) and DynamicCloud
+    # (``world_positions``) so the same coloring rule applies to whichever
+    # stream is feeding ``world/global_map``.
+    if hasattr(cloud, "as_numpy"):
+        points, _ = cloud.as_numpy()
+    else:
+        points = cloud.world_positions()
     if len(points) == 0:
         return None
 
