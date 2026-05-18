@@ -942,7 +942,7 @@ HTML = r"""<!doctype html>
           colors[i * 4 + 0] = packedColors[i * 3 + 0] / 255;
           colors[i * 4 + 1] = packedColors[i * 3 + 1] / 255;
           colors[i * 4 + 2] = packedColors[i * 3 + 2] / 255;
-          colors[i * 4 + 3] = 0.86;
+          colors[i * 4 + 3] = 1;
         }
 
         const nextMesh = new BABYLON.Mesh("lidarCloud", scene);
@@ -950,17 +950,16 @@ HTML = r"""<!doctype html>
         vertexData.positions = positions;
         vertexData.colors = colors;
         vertexData.applyToMesh(nextMesh, true);
-        nextMesh.hasVertexAlpha = true;
         nextMesh.alwaysSelectAsActiveMesh = true;
         nextMesh.isPickable = false;
 
-        if (!lidarMaterial) {
-          lidarMaterial = new BABYLON.StandardMaterial("lidarMaterial", scene);
+        if(!lidarMaterial){
+          let s=BABYLON.Effect.ShadersStore;
+          s.lidarPointVertexShader = "attribute vec3 position;attribute vec4 color;uniform mat4 worldViewProjection;uniform float pointSize;varying vec4 c;void main(){gl_Position=worldViewProjection*vec4(position,1.);gl_PointSize=pointSize;c=color;}";
+          s.lidarPointFragmentShader = "precision mediump float;varying vec4 c;void main(){gl_FragColor=c;}";
+          lidarMaterial = new BABYLON.ShaderMaterial("lidarMaterial",scene,{vertex:"lidarPoint",fragment:"lidarPoint"},{attributes:["position","color"],uniforms:["worldViewProjection","pointSize"]});
           lidarMaterial.pointsCloud = true;
-          lidarMaterial.pointSize = 2.4;
-          lidarMaterial.disableLighting = true;
-          lidarMaterial.emissiveColor = BABYLON.Color3.White();
-          lidarMaterial.alpha = 0.9;
+          lidarMaterial.setFloat("pointSize", 5);
         }
         nextMesh.material = lidarMaterial;
         nextMesh.setEnabled(lidarVisible);
