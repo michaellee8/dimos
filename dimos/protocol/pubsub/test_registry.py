@@ -108,7 +108,14 @@ def test_make_pubsub_transport_shm_uses_SHMTransport() -> None:
 
 
 def test_make_pubsub_transport_jpeg_shm_uses_JpegShmTransport() -> None:
-    pytest.importorskip("turbojpeg")
+    # The Python `turbojpeg` package is importable even when the native
+    # libturbojpeg.so is missing; the RuntimeError only fires when TurboJPEG()
+    # is actually constructed. Probe by trying to instantiate it.
+    turbojpeg = pytest.importorskip("turbojpeg")
+    try:
+        turbojpeg.TurboJPEG()
+    except RuntimeError as exc:
+        pytest.skip(f"libturbojpeg not available: {exc}")
     t = make_pubsub_transport("jpeg_shm:color_image")
     assert isinstance(t, JpegShmTransport)
 

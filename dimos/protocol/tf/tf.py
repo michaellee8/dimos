@@ -173,11 +173,9 @@ class MultiTBuffer:
         complex = self.get_transform_search(*args, **kwargs)
 
         if complex is None:
-            parent_frame, child_frame = (
-                args[0],
-                args[1],
-            )
-            time_point = args[2] if len(args) > 2 else time.time()
+            parent_frame = args[0] if len(args) > 0 else kwargs.get("parent_frame", "?")
+            child_frame = args[1] if len(args) > 1 else kwargs.get("child_frame", "?")
+            time_point = args[2] if len(args) > 2 else kwargs.get("time_point") or time.time()
 
             logger.warning(
                 f"No direct transform found between '{parent_frame}' and '{child_frame}' at '{to_human_readable(time_point)}', {self}"
