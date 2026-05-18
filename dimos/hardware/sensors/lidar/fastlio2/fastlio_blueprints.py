@@ -177,7 +177,7 @@ mid360_fastlio_ray_trace_replay = autoconnect(
             },
         },
     ),
-).global_config(n_workers=3, robot_model="mid360_fastlio2_ray_trace_replay")
+).global_config(n_workers=5, robot_model="mid360_fastlio2_ray_trace_replay")
 
 
 mid360_fastlio_ray_trace = autoconnect(
