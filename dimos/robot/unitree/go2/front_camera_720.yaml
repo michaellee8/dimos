@@ -1,6 +1,6 @@
 image_width: 1280
 image_height: 720
-camera_name: webcam
+camera_name: go2_front_camera_720p
 distortion_model: equidistant
 camera_matrix:
   rows: 3

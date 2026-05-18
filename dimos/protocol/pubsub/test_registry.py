@@ -108,6 +108,7 @@ def test_make_pubsub_transport_shm_uses_SHMTransport() -> None:
 
 
 def test_make_pubsub_transport_jpeg_shm_uses_JpegShmTransport() -> None:
+    pytest.importorskip("turbojpeg")
     t = make_pubsub_transport("jpeg_shm:color_image")
     assert isinstance(t, JpegShmTransport)
 

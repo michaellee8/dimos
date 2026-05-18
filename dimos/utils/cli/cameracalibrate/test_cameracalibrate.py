@@ -600,7 +600,8 @@ def test_cli_topic_source_without_topic_flag_is_rejected() -> None:
         ],
     )
     assert result.exit_code != 0
-    assert "--topic is required" in result.output
+    output_plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    assert "--topic is required" in output_plain
 
 
 def test_load_frames_from_folder_count_order_and_pixels(tmp_path: Path) -> None:

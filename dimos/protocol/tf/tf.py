@@ -179,7 +179,7 @@ class MultiTBuffer:
             )
             time_point = args[2] if len(args) > 2 else time.time()
 
-            logger.warn(
+            logger.warning(
                 f"No direct transform found between '{parent_frame}' and '{child_frame}' at '{to_human_readable(time_point)}', {self}"
             )
             return None

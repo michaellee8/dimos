@@ -136,7 +136,13 @@ def estimate_marker_pose(
     obj = _aruco_marker_object_points(marker_length_m)
     img: np.ndarray = corners_px.reshape(4, 1, 2).astype(np.float32)
     if _is_fisheye_model(distortion_model):
-        d_fisheye = np.asarray(dist_coeffs, dtype=np.float64).reshape(-1)[:4].reshape(4, 1)
+        d_flat = np.asarray(dist_coeffs, dtype=np.float64).reshape(-1)
+        if d_flat.size < 4:
+            raise ValueError(
+                f"Fisheye/equidistant distortion model requires at least 4 coefficients; "
+                f"got {d_flat.size}. Check CameraInfo.D."
+            )
+        d_fisheye = d_flat[:4].reshape(4, 1)
         img = cv2.fisheye.undistortPoints(img, camera_matrix, d_fisheye, P=camera_matrix)
         solve_dist: np.ndarray = np.zeros((0, 1), dtype=np.float64)
     else:
@@ -146,7 +152,7 @@ def estimate_marker_pose(
         img,
         camera_matrix,
         solve_dist,
-        flags=cv2.SOLVEPNP_ITERATIVE,
+        flags=cv2.SOLVEPNP_IPPE_SQUARE,
     )
     if not ok:
         return None

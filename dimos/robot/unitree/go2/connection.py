@@ -13,7 +13,7 @@
 # limitations under the License.
 
 from enum import Enum
-from importlib.resources import files as _resource_files
+from importlib.resources import as_file as _resource_as_file, files as _resource_files
 import sys
 from threading import Thread
 import time
@@ -90,7 +90,8 @@ _FRONT_CAMERA_720_YAML = _resource_files("dimos.robot.unitree.go2").joinpath(
 
 
 def _camera_info_static() -> CameraInfo:
-    return CameraInfo.from_yaml(str(_FRONT_CAMERA_720_YAML))
+    with _resource_as_file(_FRONT_CAMERA_720_YAML) as yaml_path:
+        return CameraInfo.from_yaml(str(yaml_path))
 
 
 # Static camera mount chain: base_link -> camera_link -> camera_optical.

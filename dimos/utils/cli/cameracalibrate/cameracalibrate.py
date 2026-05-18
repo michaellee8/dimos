@@ -24,6 +24,7 @@ from pathlib import Path
 import threading
 import time
 from typing import Any, TypedDict, cast
+import warnings
 
 # Default OpenCL off: on Apple Silicon, CPU chessboard detection is often faster and more stable here.
 # Use setdefault so an explicit OPENCV_OPENCL_RUNTIME from the environment still wins.
@@ -917,8 +918,16 @@ def run_calibration(
     if preview_out is not None:
         preview_out.parent.mkdir(parents=True, exist_ok=True)
         pattern_cols, pattern_rows = result["pattern_size"]
-        write_preview_overlay_png(frames, int(pattern_cols), int(pattern_rows), preview_out)
-        result["preview_path"] = preview_out
+        # Preview is best-effort: a chessboard-detection failure here must not mask
+        # the fact that the YAML was already written above.
+        try:
+            write_preview_overlay_png(frames, int(pattern_cols), int(pattern_rows), preview_out)
+            result["preview_path"] = preview_out
+        except ValueError as exc:
+            warnings.warn(
+                f"Preview PNG skipped ({exc}). Camera info YAML was still written to {out}.",
+                stacklevel=2,
+            )
 
     return result
 
