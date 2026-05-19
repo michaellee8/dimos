@@ -77,8 +77,11 @@ INTER_FRAME_SLEEP_SEC = 0.15
 POST_FEED_DRAIN_SEC = 3.0
 # Poll period when waiting for the playback module to drain.
 POLL_INTERVAL_SEC = 0.25
-# After the first scan goes out, wait this long for PGOCpp to emit anything
-PGO_FIRST_RESPONSE_TIMEOUT_SEC = 20.0
+# After the first scan goes out, wait this long for PGOCpp to emit anything.
+# Bumped 20→60 — first-publish latency can spike to ~25-35s on cold-start when
+# the binary loads gtsam through nix. 60s keeps slack while still catching real
+# start-up regressions.
+PGO_FIRST_RESPONSE_TIMEOUT_SEC = 60.0
 
 
 def _make_room_points(half_size: float = 20.0, density: float = 0.15) -> np.ndarray:

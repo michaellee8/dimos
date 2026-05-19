@@ -63,9 +63,24 @@ pub fn align(source: &[[f64; 3]], target: &[[f64; 3]], config: &Config) -> IcpRe
         };
     }
 
+    // kiddo panics if more than 2 × bucket_size points share identical
+    // coordinates on any single axis ("Too many items with the same position
+    // on one axis"). LiDAR scans routinely produce coincident points (sensor
+    // noise floor, ground-plane returns, voxel-grid pre-downsampling).
+    // Dedupe by quantizing to a 1 µm grid before tree insertion — far below
+    // sensor noise, harmless for correspondence search, and idempotent.
     let mut tree: KdTree<f64, u32, 3, KD_BUCKET_SIZE, u32> = KdTree::with_capacity(target.len());
+    let mut seen: std::collections::HashSet<(i64, i64, i64)> = std::collections::HashSet::with_capacity(target.len());
+    let scale = 1.0e6_f64;
     for (index, point) in target.iter().enumerate() {
-        tree.add(point, index as u32);
+        let key = (
+            (point[0] * scale).round() as i64,
+            (point[1] * scale).round() as i64,
+            (point[2] * scale).round() as i64,
+        );
+        if seen.insert(key) {
+            tree.add(point, index as u32);
+        }
     }
     let max_sq_dist = config.max_correspondence_distance * config.max_correspondence_distance;
 

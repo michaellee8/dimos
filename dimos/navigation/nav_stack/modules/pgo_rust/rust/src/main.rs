@@ -154,6 +154,11 @@ impl PgoRust {
         if self.config.debug {
             eprintln!("pgo_rust: initialized with GtsamOptimizer (iSAM2 via cxx FFI)");
         }
+        // Marker the Python NativeModule.start() waits for before declaring
+        // the subprocess ready (see ready_timeout_sec). Without this the
+        // host races the binary's LCM subscribes, and the first publisher's
+        // messages get dropped. C++ pgo emits the same marker from main.cpp.
+        eprintln!("[DIMOS_NATIVE_READY]");
     }
 
     async fn on_odometry(&mut self, msg: Odometry) {
