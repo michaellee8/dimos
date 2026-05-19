@@ -83,6 +83,66 @@ def _flat_floor(
     return np.stack([fx[mask], fy[mask], np.full(int(mask.sum()), z_center)], axis=1)
 
 
+def _staircase(
+    voxel_size: float,
+    x_extent: tuple[float, float],
+    y_start: float,
+    n_steps: int,
+    step_height: float,
+    step_depth: float,
+    base_z_voxel: int = 0,
+) -> np.ndarray:
+    """Staircase of ``n_steps`` ascending in +y starting at ``y_start``.
+
+    Step ``k`` (1-indexed) has its tread top voxel at z-index
+    ``base_z_voxel + k * step_height_voxels``, occupying a y-range of
+    ``step_depth`` starting at ``y_start + (k-1) * step_depth``. For
+    single-voxel-tall steps the tread corner doubles as the riser face;
+    multi-voxel-tall steps also emit explicit riser voxels.
+    """
+    xmin, xmax = x_extent
+    step_height_v = max(1, round(step_height / voxel_size))
+    step_depth_v = max(1, round(step_depth / voxel_size))
+    y_start_v = math.floor(y_start / voxel_size)
+    x_min_v = math.floor(xmin / voxel_size)
+    x_max_v = math.floor(xmax / voxel_size)
+    half = 0.5 * voxel_size
+
+    parts: list[np.ndarray] = []
+    for k in range(1, n_steps + 1):
+        z_top_v = base_z_voxel + k * step_height_v
+        y_front_v = y_start_v + (k - 1) * step_depth_v
+        y_back_v = y_start_v + k * step_depth_v - 1
+
+        ix = np.arange(x_min_v, x_max_v + 1)
+        iy = np.arange(y_front_v, y_back_v + 1)
+        gx, gy = np.meshgrid(ix, iy, indexing="ij")
+        tread = np.stack(
+            [
+                gx.ravel() * voxel_size + half,
+                gy.ravel() * voxel_size + half,
+                np.full(gx.size, z_top_v * voxel_size + half),
+            ],
+            axis=1,
+        )
+        parts.append(tread)
+
+        if step_height_v > 1:
+            iz = np.arange(z_top_v - step_height_v + 1, z_top_v)
+            gx2, gz = np.meshgrid(ix, iz, indexing="ij")
+            riser = np.stack(
+                [
+                    gx2.ravel() * voxel_size + half,
+                    np.full(gx2.size, y_front_v * voxel_size + half),
+                    gz.ravel() * voxel_size + half,
+                ],
+                axis=1,
+            )
+            parts.append(riser)
+
+    return np.concatenate(parts, axis=0)
+
+
 def _box_shell(
     voxel_size: float,
     bounds: tuple[float, float, float, float, float, float],
@@ -115,13 +175,15 @@ def _box_shell(
 
 
 def default_scene(voxel_size: float = 0.1) -> Scene:
-    """Lidar-realistic shell scene: floor with a box obstacle (shell only).
+    """Lidar-realistic shell scene: floor + box obstacle + staircase.
 
-    The robot starts at x=-3 and must reach x=+3. A 1m x 1m x 0.3m box sits in
-    the middle. Voxels are only on observed surfaces (lidar shells): floor
-    everywhere except under the box's footprint, box top + 4 side walls, no
-    interior or bottom. A stub straight-line path clips through the box; the
-    real planner should route around it.
+    Robot starts at (-3, 0) on the floor and the goal is at (3, 0). A 1m square,
+    0.3m-tall box sits at the origin. A staircase climbs from z=0 to z=2m in
+    20 steps (each 0.1m tall, 0.2m deep) starting at the floor's -y edge and
+    spanning over the floor in +y. This exercises the column walker's
+    robot-height clearance check: columns under low steps see only the step
+    (gap to floor too small); columns under high steps see both floor and step.
+    Voxels are lidar-shells: only observable surfaces, no interiors or bottoms.
     """
     box = (-0.5, 0.5, -0.5, 0.5, 0.0, 0.3)
     floor = _flat_floor(
@@ -130,22 +192,29 @@ def default_scene(voxel_size: float = 0.1) -> Scene:
         holes=[(box[0], box[1], box[2], box[3])],
     )
     box_voxels = _box_shell(voxel_size, box)
-    voxels = np.concatenate([floor, box_voxels], axis=0).astype(np.float32)
+    stairs = _staircase(
+        voxel_size,
+        x_extent=(-2.0, 2.0),
+        y_start=-5.0,
+        n_steps=20,
+        step_height=0.1,
+        step_depth=0.2,
+    )
+    voxels = np.concatenate([floor, box_voxels, stairs], axis=0).astype(np.float32)
 
     return Scene(
         voxels=voxels,
         voxel_size=voxel_size,
         start_position=(-3.0, 0.0, 0.5),
         goal_position=(3.0, 0.0, 0.5),
-        name="default_floor_with_box_shell",
+        name="default_floor_box_staircase",
     )
 
 
 class EvaluatorConfig(ModuleConfig):
     world_frame: str = "world"
     body_frame: str = "body"
-    publish_rate: float = 1.0  # Hz — map + odom republish for late subscribers
-    goal_delay: float = 2.0  # s — wait before publishing goal so planner is ready
+    publish_period: float = 5.0  # s — republish all messages this often
 
 
 class Evaluator(Module):
@@ -165,29 +234,23 @@ class Evaluator(Module):
     def __init__(self, scene: Scene | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._scene: Scene = scene if scene is not None else default_scene()
-        self._start_time: float = 0.0
-        self._goal_published: bool = False
         self._lock = threading.Lock()
 
     @rpc
     def start(self) -> None:
         super().start()
-        self._start_time = time.time()
         self.register_disposable(Disposable(self.path.subscribe(self._on_path)))
-        tick = interval(1.0 / self.config.publish_rate).subscribe(self._tick)
-        self.register_disposable(Disposable(tick))
+        self.register_disposable(interval(self.config.publish_period).subscribe(self._publish_all))
         logger.info("Evaluator started with scene=%s", self._scene.name)
 
     @rpc
     def stop(self) -> None:
         super().stop()
 
-    def _tick(self, _: Any) -> None:
+    def _publish_all(self, _: Any) -> None:
         self._publish_map()
         self._publish_odom()
-        if not self._goal_published and time.time() - self._start_time >= self.config.goal_delay:
-            self._publish_goal()
-            self._goal_published = True
+        self._publish_goal()
 
     def _publish_map(self) -> None:
         cloud = PointCloud2.from_numpy(
