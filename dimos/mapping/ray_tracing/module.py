@@ -17,8 +17,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from reactivex.disposable import Disposable
+
+from dimos.core.core import rpc
+from dimos.core.module import Module
 from dimos.core.native_module import NativeModule, NativeModuleConfig
 from dimos.core.stream import In, Out
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.spec import mapping
@@ -55,6 +60,29 @@ class RayTracingVoxelMap(NativeModule, mapping.GlobalPointcloud):
     global_map: Out[PointCloud2]
 
 
+class PoseStampedToOdometry(Module):
+    """Bridge PoseStamped odometry streams to nav_msgs.Odometry for native nav modules."""
+
+    odom: In[PoseStamped]
+    odometry: Out[Odometry]
+
+    @rpc
+    def start(self) -> None:
+        super().start()
+        self.register_disposable(Disposable(self.odom.subscribe(self._on_odom)))
+
+    def _on_odom(self, msg: PoseStamped) -> None:
+        self.odometry.publish(
+            Odometry(
+                ts=msg.ts,
+                frame_id=msg.frame_id,
+                child_frame_id="base_link",
+                pose=msg,
+            )
+        )
+
+
 # Verify protocol port compliance (mypy will flag missing ports)
 if TYPE_CHECKING:
     RayTracingVoxelMap()
+    PoseStampedToOdometry()

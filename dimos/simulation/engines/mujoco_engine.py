@@ -61,14 +61,16 @@ class CameraConfig:
     width: int = 640
     height: int = 480
     fps: float = 15.0
+    render_rgb: bool = True
+    render_depth: bool = True
     scene_option: mujoco.MjvOption | None = None
     max_geom: int | None = None
 
 
 @dataclass
 class CameraFrame:
-    rgb: NDArray[np.uint8]
-    depth: NDArray[np.float32]
+    rgb: NDArray[np.uint8] | None
+    depth: NDArray[np.float32] | None
     cam_pos: NDArray[np.float64]
     cam_mat: NDArray[np.float64]
     fovy: float
@@ -79,8 +81,8 @@ class CameraFrame:
 class _CameraRendererState:
     cfg: CameraConfig
     cam_id: int
-    rgb_renderer: mujoco.Renderer
-    depth_renderer: mujoco.Renderer
+    rgb_renderer: mujoco.Renderer | None
+    depth_renderer: mujoco.Renderer | None
     interval: float
     last_render_time: float = 0.0
 
@@ -362,19 +364,28 @@ class MujocoEngine(SimulationEngine):
                 logger.warning("Camera not found in MJCF, skipping", camera_name=cfg.name)
                 continue
             max_geom = cfg.max_geom or max(int(self._model.ngeom) + _RENDERER_GEOM_HEADROOM, 10000)
-            rgb_renderer = mujoco.Renderer(
-                self._model,
-                height=cfg.height,
-                width=cfg.width,
-                max_geom=max_geom,
+            rgb_renderer = (
+                mujoco.Renderer(
+                    self._model,
+                    height=cfg.height,
+                    width=cfg.width,
+                    max_geom=max_geom,
+                )
+                if cfg.render_rgb
+                else None
             )
-            depth_renderer = mujoco.Renderer(
-                self._model,
-                height=cfg.height,
-                width=cfg.width,
-                max_geom=max_geom,
+            depth_renderer = (
+                mujoco.Renderer(
+                    self._model,
+                    height=cfg.height,
+                    width=cfg.width,
+                    max_geom=max_geom,
+                )
+                if cfg.render_depth
+                else None
             )
-            depth_renderer.enable_depth_rendering()
+            if depth_renderer is not None:
+                depth_renderer.enable_depth_rendering()
             interval = 1.0 / cfg.fps if cfg.fps > 0 else float("inf")
             cam_renderers[cfg.name] = _CameraRendererState(
                 cfg=cfg,
@@ -392,29 +403,33 @@ class MujocoEngine(SimulationEngine):
                 continue
             state.last_render_time = now
 
-            if state.cfg.scene_option is None:
-                state.rgb_renderer.update_scene(self._data, camera=state.cam_id)
-            else:
-                state.rgb_renderer.update_scene(
-                    self._data,
-                    camera=state.cam_id,
-                    scene_option=state.cfg.scene_option,
-                )
-            rgb = state.rgb_renderer.render().copy()
+            rgb: NDArray[np.uint8] | None = None
+            if state.rgb_renderer is not None:
+                if state.cfg.scene_option is None:
+                    state.rgb_renderer.update_scene(self._data, camera=state.cam_id)
+                else:
+                    state.rgb_renderer.update_scene(
+                        self._data,
+                        camera=state.cam_id,
+                        scene_option=state.cfg.scene_option,
+                    )
+                rgb = state.rgb_renderer.render().copy()
 
-            if state.cfg.scene_option is None:
-                state.depth_renderer.update_scene(self._data, camera=state.cam_id)
-            else:
-                state.depth_renderer.update_scene(
-                    self._data,
-                    camera=state.cam_id,
-                    scene_option=state.cfg.scene_option,
-                )
-            depth = state.depth_renderer.render().copy()
+            depth: NDArray[np.float32] | None = None
+            if state.depth_renderer is not None:
+                if state.cfg.scene_option is None:
+                    state.depth_renderer.update_scene(self._data, camera=state.cam_id)
+                else:
+                    state.depth_renderer.update_scene(
+                        self._data,
+                        camera=state.cam_id,
+                        scene_option=state.cfg.scene_option,
+                    )
+                depth = state.depth_renderer.render().astype(np.float32, copy=True)
 
             frame = CameraFrame(
                 rgb=rgb,
-                depth=depth.astype(np.float32),
+                depth=depth,
                 cam_pos=self._data.cam_xpos[state.cam_id].copy(),
                 cam_mat=self._data.cam_xmat[state.cam_id].copy(),
                 fovy=float(self._model.cam_fovy[state.cam_id]),
@@ -426,8 +441,10 @@ class MujocoEngine(SimulationEngine):
     @staticmethod
     def _close_cam_renderers(cam_renderers: dict[str, _CameraRendererState]) -> None:
         for state in cam_renderers.values():
-            state.rgb_renderer.close()
-            state.depth_renderer.close()
+            if state.rgb_renderer is not None:
+                state.rgb_renderer.close()
+            if state.depth_renderer is not None:
+                state.depth_renderer.close()
 
     def _reset_unlocked(self) -> None:
         if self._model.nkey > 0:

@@ -29,6 +29,7 @@ from functools import lru_cache
 import logging
 import os
 from pathlib import Path
+import shutil
 import sys
 from typing import Any
 
@@ -53,6 +54,7 @@ from dimos.msgs.geometry_msgs.PointStamped import PointStamped
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
+from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path as PathMsg
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.Imu import Imu
@@ -85,6 +87,9 @@ _DEFAULT_LIDAR_CAMERA_WIDTH = 640
 _DEFAULT_LIDAR_CAMERA_HEIGHT = 360
 _DEFAULT_GLOBAL_MAP_VOXEL_SIZE_M = 0.05
 _DEFAULT_G1_SPAWN_Z_M = 0.793
+_RAYTRACE_EXECUTABLE_PATH = (
+    _REPO_ROOT / "dimos/mapping/ray_tracing/rust/target/release/voxel_ray_tracing"
+)
 
 
 @dataclass(frozen=True)
@@ -131,6 +136,10 @@ def _env_int(name: str, default: int) -> int:
 
 def _babylon_enabled() -> bool:
     return _env_bool("DIMOS_ENABLE_BABYLON", bool(global_config.simulation))
+
+
+def _raytrace_mapper_available() -> bool:
+    return _RAYTRACE_EXECUTABLE_PATH.exists() or shutil.which("cargo") is not None
 
 
 @lru_cache(maxsize=1)
@@ -277,25 +286,64 @@ def _sim_support_blueprints(mujoco_mjcf_path: str | Path) -> tuple[Blueprint, ..
         return ()
 
     from dimos.mapping.costmapper import CostMapper
+    from dimos.mapping.ray_tracing.module import PoseStampedToOdometry, RayTracingVoxelMap
     from dimos.mapping.static_costmap import StaticCostmapModule
     from dimos.mapping.voxels import VoxelGridMapper
     from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 
     lidar_disabled = _env_bool("DIMOS_DISABLE_LIDAR", False)
     scene_package = _scene_package_config()
+    global_map_voxel_size = _env_float(
+        "DIMOS_GLOBAL_MAP_VOXEL_SIZE", _DEFAULT_GLOBAL_MAP_VOXEL_SIZE_M
+    )
+    map_backend = os.environ.get("DIMOS_GLOBAL_MAP_BACKEND", "raytrace").lower()
 
-    mapping_stack: tuple[Blueprint, ...] = (
-        (StaticCostmapModule.blueprint(),)
-        if lidar_disabled or scene_package is None or sys.platform == "darwin"
-        else (
-            VoxelGridMapper.blueprint(
-                voxel_size=_env_float(
-                    "DIMOS_GLOBAL_MAP_VOXEL_SIZE", _DEFAULT_GLOBAL_MAP_VOXEL_SIZE_M
-                )
-            ).transports({("lidar", PointCloud2): LCMTransport("/lidar", PointCloud2)}),
+    if lidar_disabled or scene_package is None or sys.platform == "darwin":
+        mapping_stack: tuple[Blueprint, ...] = (StaticCostmapModule.blueprint(),)
+    elif map_backend in {"voxel", "python"}:
+        mapping_stack = (
+            VoxelGridMapper.blueprint(voxel_size=global_map_voxel_size).transports(
+                {("lidar", PointCloud2): LCMTransport("/lidar", PointCloud2)}
+            ),
             CostMapper.blueprint(),
         )
-    )
+    elif not _raytrace_mapper_available():
+        logger.warning(
+            "Rust ray-tracing mapper unavailable; falling back to Python VoxelGridMapper. "
+            "Install cargo or build %s to enable it.",
+            _RAYTRACE_EXECUTABLE_PATH,
+        )
+        mapping_stack = (
+            VoxelGridMapper.blueprint(voxel_size=global_map_voxel_size).transports(
+                {("lidar", PointCloud2): LCMTransport("/lidar", PointCloud2)}
+            ),
+            CostMapper.blueprint(),
+        )
+    else:
+        mapping_stack = (
+            PoseStampedToOdometry.blueprint().transports(
+                {
+                    ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
+                    ("odometry", Odometry): LCMTransport("/odometry", Odometry),
+                }
+            ),
+            RayTracingVoxelMap.blueprint(
+                voxel_size=global_map_voxel_size,
+                max_range=_env_float("DIMOS_RAYTRACE_MAX_RANGE", 30.0),
+                ray_subsample=_env_int("DIMOS_RAYTRACE_SUBSAMPLE", 1),
+                shadow_depth=_env_float("DIMOS_RAYTRACE_SHADOW_DEPTH", 0.2),
+                grace_depth=_env_float("DIMOS_RAYTRACE_GRACE_DEPTH", 0.2),
+                min_health=_env_int("DIMOS_RAYTRACE_MIN_HEALTH", -2),
+                max_health=_env_int("DIMOS_RAYTRACE_MAX_HEALTH", 1),
+            ).transports(
+                {
+                    ("lidar", PointCloud2): LCMTransport("/lidar", PointCloud2),
+                    ("odometry", Odometry): LCMTransport("/odometry", Odometry),
+                    ("global_map", PointCloud2): LCMTransport("/global_map", PointCloud2),
+                }
+            ),
+            CostMapper.blueprint(),
+        )
 
     viser_stack: tuple[Blueprint, ...] = ()
     if _env_bool("DIMOS_ENABLE_VISER", False):

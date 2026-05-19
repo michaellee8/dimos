@@ -310,6 +310,10 @@ class MujocoSimModule(
                     width=self.config.width,
                     height=self.config.height,
                     fps=float(self.config.fps),
+                    render_rgb=self.config.enable_color
+                    or (self.config.enable_pointcloud and not self.config.lidar_camera_names),
+                    render_depth=self.config.enable_depth
+                    or (self.config.enable_pointcloud and not self.config.lidar_camera_names),
                     max_geom=max_geom,
                 )
             )
@@ -327,6 +331,8 @@ class MujocoSimModule(
                     width=self.config.lidar_camera_width,
                     height=self.config.lidar_camera_height,
                     fps=float(self.config.pointcloud_fps),
+                    render_rgb=False,
+                    render_depth=True,
                     scene_option=lidar_scene_option,
                     max_geom=max_geom,
                 )
@@ -712,7 +718,7 @@ class MujocoSimModule(
             last_timestamp = frame.timestamp
             ts = time.time()
 
-            if self.config.enable_color:
+            if self.config.enable_color and frame.rgb is not None:
                 color_img = Image(
                     data=frame.rgb,
                     format=ImageFormat.RGB,
@@ -721,7 +727,7 @@ class MujocoSimModule(
                 )
                 self.color_image.publish(color_img)
 
-            if self.config.enable_depth:
+            if self.config.enable_depth and frame.depth is not None:
                 depth_img = Image(
                     data=frame.depth,
                     format=ImageFormat.DEPTH,
@@ -736,8 +742,8 @@ class MujocoSimModule(
             if published_count == 1:
                 logger.info(
                     "MujocoSimModule first frame published",
-                    rgb_shape=frame.rgb.shape,
-                    depth_shape=frame.depth.shape,
+                    rgb_shape=frame.rgb.shape if frame.rgb is not None else None,
+                    depth_shape=frame.depth.shape if frame.depth is not None else None,
                 )
 
             elapsed = time.time() - ts
@@ -808,7 +814,7 @@ class MujocoSimModule(
         if self._camera_info_base is None:
             return
         frame = self._engine.read_camera(self.config.camera_name)
-        if frame is None:
+        if frame is None or frame.rgb is None or frame.depth is None:
             return
         try:
             color_img = Image(
@@ -844,7 +850,7 @@ class MujocoSimModule(
             latest_ts = 0.0
             for camera_name in self.config.lidar_camera_names:
                 frame = self._engine.read_camera(camera_name)
-                if frame is None:
+                if frame is None or frame.depth is None:
                     continue
                 points = depth_image_to_point_cloud(
                     frame.depth,
