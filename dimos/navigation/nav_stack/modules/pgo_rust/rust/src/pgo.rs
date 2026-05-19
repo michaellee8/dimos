@@ -167,8 +167,16 @@ impl PgoState {
         }
         let query_index = self.keyframes.len() - 1;
         let query = &self.keyframes[query_index];
-        if query.timestamp - self.last_loop_check_time < self.config.min_loop_detect_duration {
-            return None;
+        // Mirror cpp/simple_pgo.cpp:214-223 — gate against the LAST DETECTED
+        // loop's source-keyframe time, NOT every search attempt.  This lets
+        // search run on every keyframe until the first closure fires.
+        if self.config.min_loop_detect_duration > 0.0 {
+            if let Some(&(_, last_loop_source)) = self.history_pairs.last() {
+                let last_loop_time = self.keyframes[last_loop_source].timestamp;
+                if query.timestamp - last_loop_time < self.config.min_loop_detect_duration {
+                    return None;
+                }
+            }
         }
         self.last_loop_check_time = query.timestamp;
 
