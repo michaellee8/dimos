@@ -10,12 +10,12 @@
   "precision": null,
   "recall": 0.0,
   "f1": 0.0,
-  "per_frame_median_ms": 0.22399192675948143,
-  "corrected_odometry_samples": 241,
+  "per_frame_median_ms": 0.17336802557110786,
+  "corrected_odometry_samples": 207,
   "ate_meters": 0.0,
-  "ate_samples": 241,
-  "wallclock_seconds": 26.110414267983288,
+  "ate_samples": 207,
+  "wallclock_seconds": 25.183351379819214,
   "sequence_id": 2,
-  "peak_rss_mb": 2710.8671875,
-  "git_sha": "9fd6d3f7d61999d08d7ec2e71b825d6a199beb4a"
+  "peak_rss_mb": 2751.77734375,
+  "git_sha": "7afd98c40ed068bc8a3311bd7fdb7d0d632f2863"
 }
