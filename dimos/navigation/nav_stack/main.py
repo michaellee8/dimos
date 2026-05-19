@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -62,7 +62,7 @@ def create_nav_stack(
     pgo: dict[str, Any] | None = None,
     tare_planner: dict[str, Any] | None = None,
     nav_record: dict[str, Any] | None = None,
-    loop_closure: str = "pgo_rust",
+    loop_closure: Literal["pgo_cpp", "pgo_rust"] = "pgo_rust",
 ) -> Blueprint:
     """Compose a nav stack Blueprint.
 

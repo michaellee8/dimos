@@ -28,8 +28,12 @@ use serde::Deserialize;
 // Same relinearization threshold as the C++ build (cpp/simple_pgo.cpp).
 const ISAM2_RELINEARIZE_THRESHOLD: f64 = 0.01;
 
+// All fields default. Python's `NativeModuleConfig.to_config_dict()` excludes
+// fields inherited from `ModuleConfig` (`frame_id`, `tf_transport`, etc.) from
+// the stdin JSON, so the Rust side must tolerate their absence. Unknown extra
+// keys are also accepted — defensive against future Python-side additions.
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default)]
 struct Config {
     frame_id: String,
     child_frame_id: String,
@@ -61,6 +65,37 @@ struct Config {
     scan_context_lidar_height_m: f64,
 
     debug: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            frame_id: "map".to_string(),
+            child_frame_id: "start_point".to_string(),
+            parent_frame: "world".to_string(),
+            body_frame: "current_point".to_string(),
+            tf_channel: "/tf#tf2_msgs.TFMessage".to_string(),
+            key_pose_delta_deg: 10.0,
+            key_pose_delta_trans: 0.5,
+            loop_search_radius: 1.0,
+            loop_time_thresh: 60.0,
+            loop_score_thresh: 0.15,
+            loop_submap_half_range: 5,
+            submap_resolution: 0.1,
+            min_loop_detect_duration: 5.0,
+            unregister_input: true,
+            global_map_voxel_size: 0.1,
+            global_map_publish_rate: 1.0,
+            use_scan_context: true,
+            scan_context_num_rings: 20,
+            scan_context_num_sectors: 60,
+            scan_context_max_range_m: 80.0,
+            scan_context_top_k: 10,
+            scan_context_match_threshold: 0.4,
+            scan_context_lidar_height_m: 2.0,
+            debug: false,
+        }
+    }
 }
 
 #[derive(Module)]
@@ -169,11 +204,127 @@ impl PgoRust {
                     pair.source_index, pair.target_index, pair.score
                 );
             }
+            let delta = build_loop_closure_event(state, pair);
+            let _ = self.loop_closure_event.publish(&delta).await;
         }
+        let graph = build_pose_graph(state, timestamp);
+        let _ = self.pose_graph.publish(&graph).await;
+
+        // Publish a downsampled global map periodically — once every N
+        // keyframes to keep wire traffic bounded.  N = 5 mirrors the C++
+        // default at the 1Hz publish rate when keyframes arrive at ~5Hz.
+        if index % 5 == 0 {
+            let cloud = build_global_map(state, &msg, &self.config);
+            let _ = self.global_map.publish(&cloud).await;
+        }
+
         if self.config.debug && index % 10 == 0 {
             eprintln!("pgo_rust: keyframes = {}", index + 1);
         }
     }
+}
+
+fn build_pose_graph(state: &PgoState, timestamp: f64) -> Graph3D {
+    let mut graph = Graph3D { ts: timestamp, nodes: Vec::new(), edges: Vec::new() };
+    let mut last_index: Option<u64> = None;
+    for (index, keyframe) in state.keyframes().iter().enumerate() {
+        let pose = state.correct(keyframe.raw_pose);
+        let translation = pose.translation.vector;
+        let rotation = pose.rotation.into_inner();
+        graph.nodes.push(local_msgs::Node3D {
+            pose: local_msgs::PoseStamped {
+                ts: keyframe.timestamp,
+                frame_id: "map".to_string(),
+                position: [translation.x, translation.y, translation.z],
+                orientation: [rotation.i, rotation.j, rotation.k, rotation.w],
+            },
+            id: index as u64,
+            metadata_id: 0,
+        });
+        if let Some(previous) = last_index {
+            graph.edges.push(local_msgs::Edge {
+                start_id: previous,
+                end_id: index as u64,
+                timestamp: keyframe.timestamp,
+                metadata_id: 0,
+            });
+        }
+        last_index = Some(index as u64);
+    }
+    for (start_id, end_id) in state.history_pairs() {
+        graph.edges.push(local_msgs::Edge {
+            start_id: *start_id as u64,
+            end_id: *end_id as u64,
+            timestamp,
+            metadata_id: 1, // loop-closure metadata, matches Python's far_planner enum
+        });
+    }
+    graph
+}
+
+fn build_loop_closure_event(state: &PgoState, pair: pgo::LoopPair) -> GraphDelta3D {
+    // A single keyframe-with-delta payload: the closed-loop node and the
+    // SE(3) transform iSAM2 just applied to it.  Mirrors the C++ shape.
+    let mut delta = GraphDelta3D::default();
+    if let Some(keyframe) = state.keyframes().get(pair.source_index) {
+        let pose = state.correct(keyframe.raw_pose);
+        let translation = pose.translation.vector;
+        let rotation = pose.rotation.into_inner();
+        delta.ts = keyframe.timestamp;
+        delta.nodes.push(local_msgs::Node3D {
+            pose: local_msgs::PoseStamped {
+                ts: keyframe.timestamp,
+                frame_id: "map".to_string(),
+                position: [translation.x, translation.y, translation.z],
+                orientation: [rotation.i, rotation.j, rotation.k, rotation.w],
+            },
+            id: pair.source_index as u64,
+            metadata_id: 0,
+        });
+        let relative = pair.relative_pose;
+        let translation = relative.translation.vector;
+        let rotation = relative.rotation.into_inner();
+        delta.transforms.push(local_msgs::Transform {
+            translation: [translation.x, translation.y, translation.z],
+            rotation: [rotation.i, rotation.j, rotation.k, rotation.w],
+        });
+    }
+    delta
+}
+
+fn build_global_map(state: &PgoState, template: &PointCloud2, config: &Config) -> PointCloud2 {
+    // Concatenate every keyframe's body cloud into world frame, then voxel-
+    // downsample at the configured resolution.  Re-uses the template's
+    // PointField layout / header for transport-side consistency.
+    let mut all_points: Vec<[f64; 3]> = Vec::new();
+    for keyframe in state.keyframes() {
+        let world_pose = state.correct(keyframe.raw_pose);
+        for point in &keyframe.body_cloud {
+            let p = world_pose * nalgebra::Point3::new(point[0], point[1], point[2]);
+            all_points.push([p.x, p.y, p.z]);
+        }
+    }
+    let downsampled = voxel_grid::VoxelGrid::new(config.global_map_voxel_size).downsample(&all_points);
+    let mut data = Vec::with_capacity(downsampled.len() * 12);
+    for point in &downsampled {
+        data.extend_from_slice(&(point[0] as f32).to_le_bytes());
+        data.extend_from_slice(&(point[1] as f32).to_le_bytes());
+        data.extend_from_slice(&(point[2] as f32).to_le_bytes());
+    }
+    let mut cloud = template.clone();
+    cloud.width = downsampled.len() as i32;
+    cloud.height = 1;
+    cloud.point_step = 12;
+    cloud.row_step = data.len() as i32;
+    cloud.data = data;
+    // Override fields to a clean xyz-f32 layout independent of input cloud.
+    cloud.fields = vec![
+        lcm_msgs::sensor_msgs::PointField { name: "x".into(), offset: 0, datatype: 7, count: 1 },
+        lcm_msgs::sensor_msgs::PointField { name: "y".into(), offset: 4, datatype: 7, count: 1 },
+        lcm_msgs::sensor_msgs::PointField { name: "z".into(), offset: 8, datatype: 7, count: 1 },
+    ];
+    cloud.is_dense = true;
+    cloud
 }
 
 #[tokio::main]
