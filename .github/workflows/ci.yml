@@ -5,9 +5,8 @@ on:
   pull_request:
 
 concurrency:
-  # Cancels runs from previous pushes in a PR.
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions: {}
 
