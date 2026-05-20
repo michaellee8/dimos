@@ -332,13 +332,12 @@ class RerunBridgeModule(Module):
             try:
                 import rerun_bindings
 
-                ws_url = f"ws://{self.host}:{self.config.g.rerun_websocket_server_port}/ws"
                 # Use --connect so the viewer connects to the bridge's gRPC
                 # server rather than starting its own (which would conflict).
                 rerun_bindings.spawn(
                     executable_name="dimos-viewer",
                     memory_limit=self.config.memory_limit,
-                    extra_args=["--connect", server_uri, "--ws-url", ws_url],
+                    extra_args=["--connect", server_uri],
                 )
                 spawned = True
             except ImportError:
