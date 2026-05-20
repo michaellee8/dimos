@@ -244,6 +244,11 @@ impl PgoRust {
             let delta = build_loop_closure_event(state, pair);
             let _ = self.loop_closure_event.publish(&delta).await;
         }
+        // Publish pose_graph on every keyframe so the scoring module's
+        // `id_to_node_ts` map stays populated for every keyframe id —
+        // loop edges can reference any historic keyframe, so omitting
+        // intermediate node entries would cause the scorer to drop the
+        // edge during timestamp→frame_id lookup.
         let graph = build_pose_graph(state, timestamp);
         let _ = self.pose_graph.publish(&graph).await;
 
