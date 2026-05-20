@@ -12,7 +12,7 @@ pub struct PoseStamped {
     pub ts: f64,
     pub frame_id: String,
     pub position: [f64; 3],
-    pub orientation: [f64; 4],  // xyzw
+    pub orientation: [f64; 4], // xyzw
 }
 
 #[derive(Debug, Clone)]
@@ -57,7 +57,11 @@ impl Graph3D {
 
     fn estimated_size(&self) -> usize {
         // 24B header + per-node (8+4+frame_id+56+16) + per-edge 32B
-        let nodes = self.nodes.iter().map(|n| 84 + n.pose.frame_id.len()).sum::<usize>();
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|n| 84 + n.pose.frame_id.len())
+            .sum::<usize>();
         24 + nodes + self.edges.len() * 32
     }
 }
@@ -65,7 +69,7 @@ impl Graph3D {
 #[derive(Debug, Clone)]
 pub struct Transform {
     pub translation: [f64; 3],
-    pub rotation: [f64; 4],  // xyzw
+    pub rotation: [f64; 4], // xyzw
 }
 
 #[derive(Debug, Clone, Default)]
@@ -89,7 +93,11 @@ impl GraphDelta3D {
             encode_node(node, &mut buf);
         }
         for transform in &delta.transforms {
-            for value in transform.translation.iter().chain(transform.rotation.iter()) {
+            for value in transform
+                .translation
+                .iter()
+                .chain(transform.rotation.iter())
+            {
                 buf.extend_from_slice(&value.to_be_bytes());
             }
         }
@@ -98,7 +106,11 @@ impl GraphDelta3D {
 
     fn estimated_size(&self) -> usize {
         // 16B header + per-node + per-transform 56B
-        let nodes = self.nodes.iter().map(|n| 84 + n.pose.frame_id.len()).sum::<usize>();
+        let nodes = self
+            .nodes
+            .iter()
+            .map(|n| 84 + n.pose.frame_id.len())
+            .sum::<usize>();
         16 + nodes + self.transforms.len() * 56
     }
 }
@@ -108,7 +120,12 @@ fn encode_node(node: &Node3D, buf: &mut Vec<u8>) {
     buf.extend_from_slice(&node.pose.ts.to_be_bytes());
     buf.extend_from_slice(&(frame_id_bytes.len() as u32).to_be_bytes());
     buf.extend_from_slice(frame_id_bytes);
-    for value in node.pose.position.iter().chain(node.pose.orientation.iter()) {
+    for value in node
+        .pose
+        .position
+        .iter()
+        .chain(node.pose.orientation.iter())
+    {
         buf.extend_from_slice(&value.to_be_bytes());
     }
     buf.extend_from_slice(&node.id.to_be_bytes());
@@ -121,7 +138,11 @@ mod tests {
 
     #[test]
     fn graph3d_empty_header() {
-        let graph = Graph3D { ts: 1.5, nodes: vec![], edges: vec![] };
+        let graph = Graph3D {
+            ts: 1.5,
+            nodes: vec![],
+            edges: vec![],
+        };
         let bytes = Graph3D::encode(&graph);
         assert_eq!(bytes.len(), 24);
         // edge_count=0, node_count=0, ts=1.5
@@ -142,8 +163,17 @@ mod tests {
             id: 42,
             metadata_id: 1,
         };
-        let edge = Edge { start_id: 0, end_id: 42, timestamp: 3.0, metadata_id: 0 };
-        let graph = Graph3D { ts: 1.0, nodes: vec![node], edges: vec![edge] };
+        let edge = Edge {
+            start_id: 0,
+            end_id: 42,
+            timestamp: 3.0,
+            metadata_id: 0,
+        };
+        let graph = Graph3D {
+            ts: 1.0,
+            nodes: vec![node],
+            edges: vec![edge],
+        };
         let bytes = Graph3D::encode(&graph);
         // 24 header + (8 pose_ts + 4 fr_len + 3 "map" + 56 pose_xyz + 16 ids) + 32 edge
         assert_eq!(bytes.len(), 24 + (8 + 4 + 3 + 56 + 16) + 32);
@@ -156,12 +186,18 @@ mod tests {
     fn graph_delta_aligned() {
         let node = Node3D {
             pose: PoseStamped {
-                ts: 0.0, frame_id: String::new(),
-                position: [0.0; 3], orientation: [0.0, 0.0, 0.0, 1.0],
+                ts: 0.0,
+                frame_id: String::new(),
+                position: [0.0; 3],
+                orientation: [0.0, 0.0, 0.0, 1.0],
             },
-            id: 0, metadata_id: 0,
+            id: 0,
+            metadata_id: 0,
         };
-        let transform = Transform { translation: [0.1, 0.2, 0.3], rotation: [0.0, 0.0, 0.0, 1.0] };
+        let transform = Transform {
+            translation: [0.1, 0.2, 0.3],
+            rotation: [0.0, 0.0, 0.0, 1.0],
+        };
         let delta = GraphDelta3D {
             ts: 0.5,
             nodes: vec![node],
@@ -179,10 +215,13 @@ mod tests {
             ts: 0.0,
             nodes: vec![Node3D {
                 pose: PoseStamped {
-                    ts: 0.0, frame_id: String::new(),
-                    position: [0.0; 3], orientation: [0.0, 0.0, 0.0, 1.0],
+                    ts: 0.0,
+                    frame_id: String::new(),
+                    position: [0.0; 3],
+                    orientation: [0.0, 0.0, 0.0, 1.0],
                 },
-                id: 0, metadata_id: 0,
+                id: 0,
+                metadata_id: 0,
             }],
             transforms: vec![],
         };

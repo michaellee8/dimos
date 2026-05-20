@@ -86,7 +86,8 @@ pub fn align(source: &[[f64; 3]], target: &[[f64; 3]], config: &Config) -> IcpRe
     // dedupe at a 1 µm grid (well below sensor noise) so identical-XYZ
     // duplicates from voxel pre-downsampling don't burn bucket capacity.
     let mut tree: KdTree<f64, u32, 3, KD_BUCKET_SIZE, u32> = KdTree::with_capacity(target.len());
-    let mut seen: std::collections::HashSet<(i64, i64, i64)> = std::collections::HashSet::with_capacity(target.len());
+    let mut seen: std::collections::HashSet<(i64, i64, i64)> =
+        std::collections::HashSet::with_capacity(target.len());
     let scale = 1.0e6_f64;
     for (index, point) in target.iter().enumerate() {
         let key = (
@@ -111,7 +112,8 @@ pub fn align(source: &[[f64; 3]], target: &[[f64; 3]], config: &Config) -> IcpRe
         let mut squared_error_sum = 0.0;
 
         for source_point in source {
-            let transformed = current * Vector3::new(source_point[0], source_point[1], source_point[2]).into_point();
+            let transformed = current
+                * Vector3::new(source_point[0], source_point[1], source_point[2]).into_point();
             let q = [transformed.x, transformed.y, transformed.z];
             let nearest = tree.nearest_one::<SquaredEuclidean>(&q);
             if nearest.distance > max_sq_dist {
@@ -119,7 +121,11 @@ pub fn align(source: &[[f64; 3]], target: &[[f64; 3]], config: &Config) -> IcpRe
             }
             let target_point = target[nearest.item as usize];
             src_pairs.push(transformed.coords);
-            tgt_pairs.push(Vector3::new(target_point[0], target_point[1], target_point[2]));
+            tgt_pairs.push(Vector3::new(
+                target_point[0],
+                target_point[1],
+                target_point[2],
+            ));
             squared_error_sum += nearest.distance;
         }
 
@@ -135,7 +141,8 @@ pub fn align(source: &[[f64; 3]], target: &[[f64; 3]], config: &Config) -> IcpRe
 
         let translation_delta = delta.translation.vector.norm();
         let rotation_delta = delta.rotation.angle();
-        if translation_delta < config.transform_epsilon && rotation_delta < config.transform_epsilon {
+        if translation_delta < config.transform_epsilon && rotation_delta < config.transform_epsilon
+        {
             termination = TerminationReason::Converged;
             return IcpResult {
                 transform: current,
@@ -207,8 +214,10 @@ mod tests {
     fn pseudo_random_cloud(n: usize) -> Vec<[f64; 3]> {
         let mut state: u64 = 0xDEADBEEFCAFEBABE;
         let mut next = || -> f64 {
-            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            ((state >> 33) as f64) / (u32::MAX as f64) * 10.0 - 5.0  // ∈ [-5, 5]
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 33) as f64) / (u32::MAX as f64) * 10.0 - 5.0 // ∈ [-5, 5]
         };
         (0..n).map(|_| [next(), next(), next()]).collect()
     }
@@ -230,7 +239,8 @@ mod tests {
         // Both translation and rotation should be near identity.
         assert!(
             result.transform.translation.vector.norm() < 1e-6,
-            "got translation {:?}", result.transform.translation
+            "got translation {:?}",
+            result.transform.translation
         );
         let angle = result.transform.rotation.angle();
         assert!(angle.abs() < 1e-6, "angle = {angle}");
@@ -239,19 +249,30 @@ mod tests {
     #[test]
     fn pure_translation_recovered() {
         let target = pseudo_random_cloud(100);
-        let truth = Isometry3::from_parts(Translation3::new(0.2, -0.3, 0.05), UnitQuaternion::identity());
+        let truth = Isometry3::from_parts(
+            Translation3::new(0.2, -0.3, 0.05),
+            UnitQuaternion::identity(),
+        );
         let source = apply(&truth.inverse(), &target);
         let result = align(&source, &target, &Config::default());
         let translation = result.transform.translation.vector;
         assert!((translation.x - 0.2).abs() < 1e-4, "tx = {}", translation.x);
-        assert!((translation.y - (-0.3)).abs() < 1e-4, "ty = {}", translation.y);
-        assert!((translation.z - 0.05).abs() < 1e-4, "tz = {}", translation.z);
+        assert!(
+            (translation.y - (-0.3)).abs() < 1e-4,
+            "ty = {}",
+            translation.y
+        );
+        assert!(
+            (translation.z - 0.05).abs() < 1e-4,
+            "tz = {}",
+            translation.z
+        );
     }
 
     #[test]
     fn small_rotation_recovered() {
         let target = pseudo_random_cloud(100);
-        let true_angle = FRAC_PI_4 / 8.0;  // ~5.6°
+        let true_angle = FRAC_PI_4 / 8.0; // ~5.6°
         let truth = Isometry3::from_parts(
             Translation3::identity(),
             UnitQuaternion::from_axis_angle(&Vector3::z_axis(), true_angle),

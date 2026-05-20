@@ -192,7 +192,6 @@ dependencies = [
 [[package]]
 name = "dimos-lcm"
 version = "0.1.0"
-source = "git+https://github.com/dimensionalOS/dimos-lcm.git?branch=rust-codegen#e7c9428b7201cdfeadecd181c77c9e2d60a14503"
 dependencies = [
  "byteorder",
  "socket2 0.5.10",
@@ -225,6 +224,7 @@ version = "0.1.0"
 dependencies = [
  "cxx",
  "cxx-build",
+ "dimos-lcm",
  "dimos-module",
  "kiddo",
  "lcm-msgs",
@@ -377,7 +377,6 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lcm-msgs"
 version = "0.1.0"
-source = "git+https://github.com/dimensionalOS/dimos-lcm.git?branch=rust-codegen#e7c9428b7201cdfeadecd181c77c9e2d60a14503"
 dependencies = [
  "byteorder",
 ]

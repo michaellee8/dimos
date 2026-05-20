@@ -176,7 +176,10 @@ impl PgoState {
             let ring_key = scan_context::make_ring_key(&descriptor);
             (descriptor, ring_key)
         } else {
-            (scan_context::Descriptor::zeros(0, 0), scan_context::RingKey::zeros(0))
+            (
+                scan_context::Descriptor::zeros(0, 0),
+                scan_context::RingKey::zeros(0),
+            )
         };
         let index = self.keyframes.len();
         let corrected_pose = self.pose_offset * raw_pose;
@@ -190,7 +193,8 @@ impl PgoState {
             ring_key,
         };
         if index == 0 {
-            self.optimizer.add_prior(0, corrected_pose, self.config.prior_noise);
+            self.optimizer
+                .add_prior(0, corrected_pose, self.config.prior_noise);
             self.optimizer.insert_initial(0, corrected_pose);
         } else {
             let prev = &self.keyframes[index - 1];
@@ -288,15 +292,14 @@ impl PgoState {
         // comment at simple_pgo.cpp:244-247).
         let mut init_guess = Isometry3::<f64>::identity();
         if sector_shift != 0 {
-            let yaw = scan_context::yaw_from_shift(sector_shift, self.config.scan_context.n_sectors);
-            let rotation = nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::z_axis(), yaw);
+            let yaw =
+                scan_context::yaw_from_shift(sector_shift, self.config.scan_context.n_sectors);
+            let rotation =
+                nalgebra::UnitQuaternion::from_axis_angle(&nalgebra::Vector3::z_axis(), yaw);
             let source_world_pos = self.keyframes[query_index].world_pose.translation.vector;
             // init = T(p) · Rz(yaw) · T(-p)
             let translation = source_world_pos - rotation * source_world_pos;
-            init_guess = Isometry3::from_parts(
-                nalgebra::Translation3::from(translation),
-                rotation,
-            );
+            init_guess = Isometry3::from_parts(nalgebra::Translation3::from(translation), rotation);
         }
 
         // When SC is disabled, the detector relies on `raw_pose` for
@@ -381,14 +384,18 @@ impl PgoState {
             if candidate_index == query_index || !self.is_time_eligible(query, candidate) {
                 continue;
             }
-            let (distance, shift) = scan_context::best_distance(&query.descriptor, &candidate.descriptor);
+            let (distance, shift) =
+                scan_context::best_distance(&query.descriptor, &candidate.descriptor);
             if distance < self.config.scan_context.match_threshold {
                 ranked.push((candidate_index, distance, shift));
             }
         }
         ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         ranked.truncate(top_k);
-        ranked.into_iter().map(|(idx, _, shift)| (idx, shift)).collect()
+        ranked
+            .into_iter()
+            .map(|(idx, _, shift)| (idx, shift))
+            .collect()
     }
 
     fn search_by_position(&self, query_index: usize) -> Option<usize> {
@@ -481,7 +488,8 @@ impl PgoState {
             scaled_noise,
         );
         self.pending_loops.push(pair);
-        self.history_pairs.push((pair.target_index, pair.source_index));
+        self.history_pairs
+            .push((pair.target_index, pair.source_index));
     }
 
     /// Run optimizer.update() and update pose_offset from the most-recent key's
@@ -631,8 +639,11 @@ mod tests {
         let relative = target_world.inverse() * source_corrected;
         // T_target * relative should give corrected source ( = origin ).
         let composed = target_world * relative;
-        assert!(composed.translation.vector.norm() < 1e-9,
-            "expected corrected source at origin, got {:?}", composed.translation);
+        assert!(
+            composed.translation.vector.norm() < 1e-9,
+            "expected corrected source at origin, got {:?}",
+            composed.translation
+        );
     }
 
     #[test]

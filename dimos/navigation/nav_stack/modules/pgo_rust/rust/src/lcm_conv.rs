@@ -24,7 +24,10 @@ fn find_xyz_offsets(cloud: &PointCloud2) -> Option<(FieldOffset, FieldOffset, Fi
     let mut y: Option<FieldOffset> = None;
     let mut z: Option<FieldOffset> = None;
     for field in &cloud.fields {
-        let entry = FieldOffset { offset: field.offset as usize, datatype: field.datatype };
+        let entry = FieldOffset {
+            offset: field.offset as usize,
+            datatype: field.datatype,
+        };
         match field.name.as_str() {
             "x" => x = Some(entry),
             "y" => y = Some(entry),
@@ -62,9 +65,15 @@ pub fn point_cloud_to_xyz(cloud: &PointCloud2) -> Vec<[f64; 3]> {
     let mut points = Vec::with_capacity(n_points);
     for i in 0..n_points {
         let base = i * point_step;
-        let Some(x) = read_field(&cloud.data, base, fx) else { continue };
-        let Some(y) = read_field(&cloud.data, base, fy) else { continue };
-        let Some(z) = read_field(&cloud.data, base, fz) else { continue };
+        let Some(x) = read_field(&cloud.data, base, fx) else {
+            continue;
+        };
+        let Some(y) = read_field(&cloud.data, base, fy) else {
+            continue;
+        };
+        let Some(z) = read_field(&cloud.data, base, fz) else {
+            continue;
+        };
         if x.is_finite() && y.is_finite() && z.is_finite() {
             points.push([x, y, z]);
         }
@@ -104,9 +113,24 @@ mod tests {
         cloud.height = 1;
         cloud.data = data;
         cloud.fields = vec![
-            PointField { name: "x".into(), offset: 0, datatype: DATATYPE_FLOAT32, count: 1 },
-            PointField { name: "y".into(), offset: 4, datatype: DATATYPE_FLOAT32, count: 1 },
-            PointField { name: "z".into(), offset: 8, datatype: DATATYPE_FLOAT32, count: 1 },
+            PointField {
+                name: "x".into(),
+                offset: 0,
+                datatype: DATATYPE_FLOAT32,
+                count: 1,
+            },
+            PointField {
+                name: "y".into(),
+                offset: 4,
+                datatype: DATATYPE_FLOAT32,
+                count: 1,
+            },
+            PointField {
+                name: "z".into(),
+                offset: 8,
+                datatype: DATATYPE_FLOAT32,
+                count: 1,
+            },
         ];
         cloud
     }

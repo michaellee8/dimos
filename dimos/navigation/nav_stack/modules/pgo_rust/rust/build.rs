@@ -22,7 +22,9 @@ fn resolve_include(env_name: &str, pkg: &str, fallback: &str) -> PathBuf {
 }
 
 fn resolve_lib(env_name: &str, fallback: &str) -> PathBuf {
-    env_var(env_name).map(PathBuf::from).unwrap_or_else(|| PathBuf::from(fallback))
+    env_var(env_name)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(fallback))
 }
 
 fn main() {
@@ -59,9 +61,7 @@ fn main() {
     // process startup.  Pinning cephes-gtsam (and libm, which cephes itself
     // needs but the linker can't otherwise prove without --no-as-needed) into
     // DT_NEEDED mirrors how the C++ pgo binary's CMake build links them.
-    println!(
-        "cargo:rustc-link-arg=-Wl,--push-state,--no-as-needed,-lcephes-gtsam,-lm,--pop-state"
-    );
+    println!("cargo:rustc-link-arg=-Wl,--push-state,--no-as-needed,-lcephes-gtsam,-lm,--pop-state");
 
     // GTSAM 4.3a1 is built against TBB for ISAM2's concurrent containers.
     let tbb_lib = resolve_lib("TBB_LIB_DIR", "/usr/lib");
@@ -80,7 +80,11 @@ mod pkg_config {
     }
 
     pub fn probe_library(name: &str) -> Result<Library, ()> {
-        let output = Command::new("pkg-config").arg("--cflags-only-I").arg(name).output().map_err(|_| ())?;
+        let output = Command::new("pkg-config")
+            .arg("--cflags-only-I")
+            .arg(name)
+            .output()
+            .map_err(|_| ())?;
         if !output.status.success() {
             return Err(());
         }

@@ -166,7 +166,12 @@ mod tests {
     use super::*;
 
     fn cfg() -> Config {
-        Config { n_rings: 20, n_sectors: 60, max_range_m: 80.0, ..Default::default() }
+        Config {
+            n_rings: 20,
+            n_sectors: 60,
+            max_range_m: 80.0,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -256,7 +261,10 @@ mod tests {
         // Shifting query by +2 should produce candidate's column-0 perspective.
         // best_distance should find a shift where distance ≈ 0.
         let (distance, _shift) = best_distance(&query, &candidate);
-        assert!(distance < 1e-5, "expected near-zero distance, got {distance}");
+        assert!(
+            distance < 1e-5,
+            "expected near-zero distance, got {distance}"
+        );
     }
 
     #[test]

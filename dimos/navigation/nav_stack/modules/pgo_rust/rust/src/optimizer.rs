@@ -20,7 +20,10 @@ pub struct PoseNoise {
 
 impl PoseNoise {
     pub const fn isotropic(translation_sigma: f64, rotation_sigma: f64) -> Self {
-        Self { translation_sigma, rotation_sigma }
+        Self {
+            translation_sigma,
+            rotation_sigma,
+        }
     }
 }
 
@@ -110,7 +113,8 @@ impl GtsamOptimizer {
 
 impl GraphOptimizer for GtsamOptimizer {
     fn add_prior(&mut self, key: u64, pose: Isometry3<f64>, noise: PoseNoise) {
-        self.backend.add_prior(key, pose, noise.translation_sigma, noise.rotation_sigma);
+        self.backend
+            .add_prior(key, pose, noise.translation_sigma, noise.rotation_sigma);
     }
 
     fn add_between(
@@ -160,7 +164,10 @@ impl GraphOptimizer for GtsamOptimizer {
     }
 
     fn estimate(&self, key: u64) -> Option<Isometry3<f64>> {
-        self.last_estimates.get(&key).copied().or_else(|| self.backend.estimate(key))
+        self.last_estimates
+            .get(&key)
+            .copied()
+            .or_else(|| self.backend.estimate(key))
     }
 }
 
@@ -172,10 +179,8 @@ mod tests {
     #[test]
     fn stub_remembers_inserts() {
         let mut optimizer = StubOptimizer::new();
-        let pose = Isometry3::from_parts(
-            Translation3::new(1.0, 2.0, 3.0),
-            UnitQuaternion::identity(),
-        );
+        let pose =
+            Isometry3::from_parts(Translation3::new(1.0, 2.0, 3.0), UnitQuaternion::identity());
         optimizer.insert_initial(42, pose);
         let recovered = optimizer.estimate(42).unwrap();
         assert!((recovered.translation.vector.x - 1.0).abs() < 1e-9);
@@ -201,12 +206,7 @@ mod tests {
         let mut optimizer = StubOptimizer::new();
         // Should not panic, even though no actual graph is maintained.
         optimizer.add_prior(0, Isometry3::identity(), PoseNoise::isotropic(0.1, 0.05));
-        optimizer.add_between(
-            0,
-            1,
-            Isometry3::identity(),
-            PoseNoise::isotropic(0.1, 0.05),
-        );
+        optimizer.add_between(0, 1, Isometry3::identity(), PoseNoise::isotropic(0.1, 0.05));
     }
 
     // GTSAM-backed tests below require `nix develop` to set up
@@ -223,21 +223,22 @@ mod tests {
         let odom_noise = PoseNoise::isotropic(0.05, 0.02);
 
         let pose_0 = Isometry3::identity();
-        let pose_1 = Isometry3::from_parts(
-            Translation3::new(1.0, 0.0, 0.0),
-            UnitQuaternion::identity(),
-        );
-        let pose_2 = Isometry3::from_parts(
-            Translation3::new(2.0, 0.0, 0.0),
-            UnitQuaternion::identity(),
-        );
+        let pose_1 =
+            Isometry3::from_parts(Translation3::new(1.0, 0.0, 0.0), UnitQuaternion::identity());
+        let pose_2 =
+            Isometry3::from_parts(Translation3::new(2.0, 0.0, 0.0), UnitQuaternion::identity());
 
         // Initial guesses match the truth to keep this a sanity check.
         optimizer.add_prior(0, pose_0, prior_noise);
         optimizer.insert_initial(0, pose_0);
         optimizer.add_between(0, 1, pose_1, odom_noise);
         optimizer.insert_initial(1, pose_1);
-        optimizer.add_between(1, 2, Isometry3::from_parts(Translation3::new(1.0, 0.0, 0.0), UnitQuaternion::identity()), odom_noise);
+        optimizer.add_between(
+            1,
+            2,
+            Isometry3::from_parts(Translation3::new(1.0, 0.0, 0.0), UnitQuaternion::identity()),
+            odom_noise,
+        );
         optimizer.insert_initial(2, pose_2);
 
         let _deltas = optimizer.update();
@@ -246,9 +247,21 @@ mod tests {
         let estimate_1 = optimizer.estimate(1).expect("missing 1");
         let estimate_2 = optimizer.estimate(2).expect("missing 2");
 
-        assert!(estimate_0.translation.vector.norm() < 1e-4, "pose 0 = {:?}", estimate_0.translation);
-        assert!((estimate_1.translation.vector.x - 1.0).abs() < 1e-4, "pose 1.x = {}", estimate_1.translation.vector.x);
-        assert!((estimate_2.translation.vector.x - 2.0).abs() < 1e-4, "pose 2.x = {}", estimate_2.translation.vector.x);
+        assert!(
+            estimate_0.translation.vector.norm() < 1e-4,
+            "pose 0 = {:?}",
+            estimate_0.translation
+        );
+        assert!(
+            (estimate_1.translation.vector.x - 1.0).abs() < 1e-4,
+            "pose 1.x = {}",
+            estimate_1.translation.vector.x
+        );
+        assert!(
+            (estimate_2.translation.vector.x - 2.0).abs() < 1e-4,
+            "pose 2.x = {}",
+            estimate_2.translation.vector.x
+        );
     }
 
     #[test]
@@ -258,18 +271,22 @@ mod tests {
         // actually coincide.  After update, pose 2 should be pulled back toward 0.
         let mut optimizer = GtsamOptimizer::new(0.01);
         let prior_noise = PoseNoise::isotropic(1e-6, 1e-6);
-        let odom_noise = PoseNoise::isotropic(0.5, 0.2);  // loose
-        let loop_noise = PoseNoise::isotropic(0.01, 0.01);  // tight
+        let odom_noise = PoseNoise::isotropic(0.5, 0.2); // loose
+        let loop_noise = PoseNoise::isotropic(0.01, 0.01); // tight
 
         let identity = Isometry3::identity();
-        let drift = Isometry3::from_parts(Translation3::new(1.0, 0.0, 0.0), UnitQuaternion::identity());
+        let drift =
+            Isometry3::from_parts(Translation3::new(1.0, 0.0, 0.0), UnitQuaternion::identity());
 
         // Odometry says 0 → 1 → 2 (so 2 should be at (2,0,0))
         optimizer.add_prior(0, identity, prior_noise);
         optimizer.insert_initial(0, identity);
         optimizer.insert_initial(1, drift);
         optimizer.add_between(0, 1, drift, odom_noise);
-        optimizer.insert_initial(2, Isometry3::from_parts(Translation3::new(2.0, 0.0, 0.0), UnitQuaternion::identity()));
+        optimizer.insert_initial(
+            2,
+            Isometry3::from_parts(Translation3::new(2.0, 0.0, 0.0), UnitQuaternion::identity()),
+        );
         optimizer.add_between(1, 2, drift, odom_noise);
 
         // Tight loop-closure factor saying 2 ≡ 0

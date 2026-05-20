@@ -1,0 +1,29 @@
+name: Release to PyPI
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # for trusted publishing
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v27
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      # likely we don't need to have these bindings in the actual repo
+      - name: Generate LCM bindings
+        run: nix develop --command ./generate.sh
+
+      - name: Build package
+        run: nix develop --command python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

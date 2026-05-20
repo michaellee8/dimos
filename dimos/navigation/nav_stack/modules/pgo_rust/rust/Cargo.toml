@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 dimos-module = { path = "../../../../../../native/rust/dimos-module" }
+dimos-lcm = { git = "https://github.com/dimensionalOS/dimos-lcm.git", branch = "rust-codegen" }
 lcm-msgs = { git = "https://github.com/dimensionalOS/dimos-lcm.git", branch = "rust-codegen" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 serde = { version = "1", features = ["derive"] }
@@ -24,3 +25,16 @@ cxx-build = "1.0"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# Override the upstream dimos-lcm git dependency with a locally-vendored
+# copy so we can build with `LcmOptions.recv_buf_size` set to ~16 MB —
+# upstream's LcmOptions has no buffer-size field, and the default OS
+# socket buffer (~256 KB on Linux despite rmem_default=64 MB) is far
+# too small for ~500 KB PointCloud2 messages fragmented across ~7 UDP
+# datagrams at 10 Hz. The vendored copy adds the field and calls
+# socket2::set_recv_buffer_size before binding. See
+# `vendor-dimos-lcm/tools/rust/lcm/src/transport.rs`. Once the change
+# lands upstream the override can be deleted.
+[patch."https://github.com/dimensionalOS/dimos-lcm.git"]
+dimos-lcm = { path = "vendor-dimos-lcm/tools/rust/lcm" }
+lcm-msgs = { path = "vendor-dimos-lcm/generated/rust_lcm_msgs" }

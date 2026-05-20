@@ -16,6 +16,7 @@ mod pgo;
 mod scan_context;
 mod voxel_grid;
 
+use dimos_lcm::LcmOptions;
 use dimos_module::{run, Input, LcmTransport, Module, Output};
 use lcm_msgs::nav_msgs::Odometry;
 use lcm_msgs::sensor_msgs::PointCloud2;
@@ -182,7 +183,9 @@ impl PgoRust {
         let pose = lcm_conv::odometry_to_isometry(&msg);
         let ts = msg.header.stamp.sec as f64 + msg.header.stamp.nsec as f64 * 1e-9;
         self.last_odometry = Some((ts, pose));
-        let Some(state) = self.state.as_ref() else { return };
+        let Some(state) = self.state.as_ref() else {
+            return;
+        };
         let corrected = state.correct(pose);
         // Republish corrected odometry — pose_offset is identity under the
         // stub optimizer, so this is a pass-through until Phase 3 lands.
@@ -204,8 +207,12 @@ impl PgoRust {
         // that the GT criterion (min_frame_gap) also uses.
         let scan_index = self.scan_count;
         self.scan_count += 1;
-        let Some(state) = self.state.as_mut() else { return };
-        let Some((odom_ts, raw_pose)) = self.last_odometry else { return };
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let Some((odom_ts, raw_pose)) = self.last_odometry else {
+            return;
+        };
         // Require the odom and scan timestamps to match within 1 ms — KITTI
         // playback emits both with the SAME `ts` for each frame; an LCM drop
         // that mispairs them would attach the wrong pose to this scan and
@@ -224,7 +231,8 @@ impl PgoRust {
             lcm_conv::point_cloud_to_xyz(&msg)
                 .into_iter()
                 .map(|point| {
-                    let body = raw_pose.inverse() * nalgebra::Point3::new(point[0], point[1], point[2]);
+                    let body =
+                        raw_pose.inverse() * nalgebra::Point3::new(point[0], point[1], point[2]);
                     [body.x, body.y, body.z]
                 })
                 .collect()
@@ -267,8 +275,11 @@ impl PgoRust {
 }
 
 fn build_pose_graph(state: &PgoState, timestamp: f64) -> Graph3D {
-    let mut graph = Graph3D { ts: timestamp, nodes: Vec::new(), edges: Vec::new() };
-    let mut last_index: Option<u64> = None;
+    let mut graph = Graph3D {
+        ts: timestamp,
+        nodes: Vec::new(),
+        edges: Vec::new(),
+    };
     for (index, keyframe) in state.keyframes().iter().enumerate() {
         let pose = state.correct(keyframe.raw_pose);
         let translation = pose.translation.vector;
@@ -283,16 +294,15 @@ fn build_pose_graph(state: &PgoState, timestamp: f64) -> Graph3D {
             id: index as u64,
             metadata_id: 0,
         });
-        if let Some(previous) = last_index {
-            graph.edges.push(local_msgs::Edge {
-                start_id: previous,
-                end_id: index as u64,
-                timestamp: keyframe.timestamp,
-                metadata_id: 0,
-            });
-        }
-        last_index = Some(index as u64);
     }
+    // Odometry edges (consecutive-keyframe `metadata_id=0` edges) were
+    // previously emitted on every pose_graph publish for graph completeness.
+    // The scoring module filters by `metadata_id == EDGE_LOOP_CLOSURE` and
+    // skips odometry edges, so emitting them is pure cost on its callback
+    // hot path — at N keyframes the callback iterates N edges PER message,
+    // turning the receiver into an O(N^2) bottleneck that starves its LCM
+    // subscriber. Drop them; loop edges below carry all the scoring-
+    // relevant information.
     for (start_id, end_id) in state.history_pairs() {
         graph.edges.push(local_msgs::Edge {
             start_id: *start_id as u64,
@@ -346,7 +356,8 @@ fn build_global_map(state: &PgoState, template: &PointCloud2, config: &Config) -
             all_points.push([p.x, p.y, p.z]);
         }
     }
-    let downsampled = voxel_grid::VoxelGrid::new(config.global_map_voxel_size).downsample(&all_points);
+    let downsampled =
+        voxel_grid::VoxelGrid::new(config.global_map_voxel_size).downsample(&all_points);
     let mut data = Vec::with_capacity(downsampled.len() * 12);
     for point in &downsampled {
         data.extend_from_slice(&(point[0] as f32).to_le_bytes());
@@ -361,9 +372,24 @@ fn build_global_map(state: &PgoState, template: &PointCloud2, config: &Config) -
     cloud.data = data;
     // Override fields to a clean xyz-f32 layout independent of input cloud.
     cloud.fields = vec![
-        lcm_msgs::sensor_msgs::PointField { name: "x".into(), offset: 0, datatype: 7, count: 1 },
-        lcm_msgs::sensor_msgs::PointField { name: "y".into(), offset: 4, datatype: 7, count: 1 },
-        lcm_msgs::sensor_msgs::PointField { name: "z".into(), offset: 8, datatype: 7, count: 1 },
+        lcm_msgs::sensor_msgs::PointField {
+            name: "x".into(),
+            offset: 0,
+            datatype: 7,
+            count: 1,
+        },
+        lcm_msgs::sensor_msgs::PointField {
+            name: "y".into(),
+            offset: 4,
+            datatype: 7,
+            count: 1,
+        },
+        lcm_msgs::sensor_msgs::PointField {
+            name: "z".into(),
+            offset: 8,
+            datatype: 7,
+            count: 1,
+        },
     ];
     cloud.is_dense = true;
     cloud
@@ -371,8 +397,20 @@ fn build_global_map(state: &PgoState, template: &PointCloud2, config: &Config) -
 
 #[tokio::main]
 async fn main() {
-    let transport = LcmTransport::new()
+    // 64 MB requested SO_RCVBUF — the kernel doubles this internally so
+    // the actual usable buffer is ~128 MB. We explicitly set it (rather
+    // than relying on net.core.rmem_default) because setsockopt with a
+    // smaller value would otherwise be the only effective change, and
+    // we want a known-large buffer regardless of host sysctl state.
+    // BufferConfiguratorLinux already sets rmem_max=64 MB so this clamp
+    // succeeds on a configured host.
+    const RECV_BUF_SIZE_BYTES: usize = 64 * 1024 * 1024;
+    let mut opts = LcmOptions::default();
+    opts.recv_buf_size = Some(RECV_BUF_SIZE_BYTES);
+    let transport = LcmTransport::with_options(opts)
         .await
         .expect("failed to create LCM transport");
-    run::<PgoRust, _>(transport).await.expect("pgo_rust run failed");
+    run::<PgoRust, _>(transport)
+        .await
+        .expect("pgo_rust run failed");
 }

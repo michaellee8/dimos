@@ -69,23 +69,23 @@ mod ffi {
             initial: Pin<&mut Values>,
             extra_iterations: u32,
         );
-        fn estimate_all(
-            self: &Solver,
-            keys: &mut Vec<u64>,
-            pose_components: &mut Vec<f64>,
-        );
-        fn estimate_one(
-            self: &Solver,
-            key: u64,
-            pose_components: &mut Vec<f64>,
-        ) -> bool;
+        fn estimate_all(self: &Solver, keys: &mut Vec<u64>, pose_components: &mut Vec<f64>);
+        fn estimate_one(self: &Solver, key: u64, pose_components: &mut Vec<f64>) -> bool;
     }
 }
 
 fn isometry_to_components(pose: &Isometry3<f64>) -> [f64; 7] {
     let translation = pose.translation.vector;
     let rotation = pose.rotation.into_inner();
-    [translation.x, translation.y, translation.z, rotation.i, rotation.j, rotation.k, rotation.w]
+    [
+        translation.x,
+        translation.y,
+        translation.z,
+        rotation.i,
+        rotation.j,
+        rotation.k,
+        rotation.w,
+    ]
 }
 
 fn components_to_isometry(c: &[f64]) -> Isometry3<f64> {
@@ -126,7 +126,16 @@ impl GtsamBackend {
     ) {
         let c = isometry_to_components(&pose);
         self.graph.pin_mut().add_prior(
-            key, c[0], c[1], c[2], c[3], c[4], c[5], c[6], translation_sigma, rotation_sigma,
+            key,
+            c[0],
+            c[1],
+            c[2],
+            c[3],
+            c[4],
+            c[5],
+            c[6],
+            translation_sigma,
+            rotation_sigma,
         );
     }
 
@@ -156,7 +165,9 @@ impl GtsamBackend {
 
     pub fn insert_initial(&mut self, key: u64, pose: Isometry3<f64>) {
         let c = isometry_to_components(&pose);
-        self.initial.pin_mut().insert(key, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
+        self.initial
+            .pin_mut()
+            .insert(key, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
     }
 
     pub fn update(&mut self, extra_iterations: u32) {
