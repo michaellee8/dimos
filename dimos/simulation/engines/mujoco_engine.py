@@ -567,8 +567,7 @@ def engine_main(
     imu_gyro_slice = _find_sensor_slice_inline(eng.model, imu_gyro_sensor_names)
     imu_accel_slice = _find_sensor_slice_inline(eng.model, imu_accel_sensor_names)
     has_freejoint = bool(
-        eng.model.njnt > 0
-        and int(eng.model.jnt_type[0]) == int(mujoco.mjtJoint.mjJNT_FREE)
+        eng.model.njnt > 0 and int(eng.model.jnt_type[0]) == int(mujoco.mjtJoint.mjJNT_FREE)
     )
 
     # SHM bridge — runs in the engine's sim loop.
