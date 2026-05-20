@@ -1,17 +1,29 @@
 use byteorder::{BigEndian, ByteOrder};
 use socket2::{Domain, Protocol, Socket, Type};
+use tokio::net::UdpSocket;
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
-use tokio::net::UdpSocket;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Instant;
 
 const MAGIC_SHORT: u32 = 0x4c433032; // "LC02"
-const MAGIC_LONG: u32 = 0x4c433033; // "LC03"
+const MAGIC_LONG: u32 = 0x4c433033;  // "LC03"
 const SHORT_HEADER_SIZE: usize = 8;
 const FRAGMENT_HEADER_SIZE: usize = 20;
 const MAX_DATAGRAM_SIZE: usize = 65507;
+
+// Reassembly buffer caps. Mirrors the C LCM library's
+// MAX_FRAG_BUF_TOTAL_SIZE / MAX_NUM_FRAG_BUFS in `udpm_util.h`. When either
+// limit is exceeded, the least-recently-updated entry is evicted to make
+// room — preventing the reassembly map from growing unbounded when fragments
+// are dropped at the UDP layer (any of N datagrams lost = the other N-1
+// stuck in the map). Without eviction, a single dropped packet leaks ~500 KB
+// forever, and over a sustained large-message stream the map fills, lock
+// contention degrades the receive thread, and drop rates cascade.
+const MAX_FRAG_BUF_TOTAL_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+const MAX_NUM_FRAG_BUFS: usize = 1000;
 
 /// Default LCM multicast group address.
 pub const DEFAULT_MULTICAST_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 76, 67);
@@ -20,11 +32,55 @@ pub const DEFAULT_PORT: u16 = 7667;
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
 
+
 struct FragmentBuffer {
     channel: String,
     num_fragments: u16,
     received: u16,
     data: Vec<u8>,
+    /// Monotonic time of the last fragment arrival on this entry. Used to
+    /// pick the LRU entry for eviction when the reassembly map fills.
+    last_update: Instant,
+}
+
+/// Container for in-flight fragment buffers, with LRU eviction. Wraps a
+/// `HashMap` keyed by `(sender, seqno)` and tracks total buffered bytes so
+/// we can enforce both an entry-count cap and a memory cap. Mirrors the
+/// behavior of `lcm_frag_buf_store` in upstream LCM's `udpm_util.{c,h}`.
+struct FragStore {
+    map: HashMap<(SocketAddr, u32), FragmentBuffer>,
+    total_bytes: usize,
+}
+
+impl FragStore {
+    fn new() -> Self {
+        Self { map: HashMap::new(), total_bytes: 0 }
+    }
+
+    /// Evict the single least-recently-updated entry, returning true if one
+    /// was found. Caller loops until both caps are satisfied.
+    fn evict_lru(&mut self) -> bool {
+        let lru_key = self.map.iter()
+            .min_by_key(|(_, fb)| fb.last_update)
+            .map(|(key, _)| *key);
+        if let Some(key) = lru_key {
+            if let Some(fb) = self.map.remove(&key) {
+                self.total_bytes = self.total_bytes.saturating_sub(fb.data.len());
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Ensure both caps are honored. Eviction continues until the store
+    /// fits within `max_total_bytes` AND `max_entries`. Called after each
+    /// new entry insert.
+    fn enforce_caps(&mut self) {
+        while (self.total_bytes > MAX_FRAG_BUF_TOTAL_BYTES
+            || self.map.len() > MAX_NUM_FRAG_BUFS)
+            && self.evict_lru()
+        {}
+    }
 }
 
 /// Configuration for an LCM transport instance.
@@ -74,9 +130,7 @@ fn fragment_params(msg_size: usize, channel_len: usize) -> (usize, usize, usize)
     let num_fragments = if msg_size <= first_payload_size {
         1
     } else {
-        1 + msg_size
-            .saturating_sub(first_payload_size)
-            .div_ceil(subsequent_payload_size)
+        1 + msg_size.saturating_sub(first_payload_size).div_ceil(subsequent_payload_size)
     };
     (first_payload_size, subsequent_payload_size, num_fragments)
 }
@@ -85,7 +139,7 @@ fn fragment_params(msg_size: usize, channel_len: usize) -> (usize, usize, usize)
 pub struct Lcm {
     socket: UdpSocket,
     multicast_addr: SocketAddrV4,
-    reassembly: Mutex<HashMap<(SocketAddr, u32), FragmentBuffer>>,
+    reassembly: Mutex<FragStore>,
 }
 
 impl Lcm {
@@ -124,7 +178,7 @@ impl Lcm {
         Ok(Self {
             socket,
             multicast_addr: SocketAddrV4::new(opts.multicast_group, opts.port),
-            reassembly: Mutex::new(HashMap::new()),
+            reassembly: Mutex::new(FragStore::new()),
         })
     }
 
@@ -158,12 +212,7 @@ impl Lcm {
         Ok(())
     }
 
-    async fn publish_fragmented(
-        &self,
-        channel_bytes: &[u8],
-        data: &[u8],
-        seqno: u32,
-    ) -> io::Result<()> {
+    async fn publish_fragmented(&self, channel_bytes: &[u8], data: &[u8], seqno: u32) -> io::Result<()> {
         let msg_size = data.len();
         let (first_payload_size, subsequent_payload_size, num_fragments) =
             fragment_params(msg_size, channel_bytes.len());
@@ -173,19 +222,15 @@ impl Lcm {
         for fragment_no in 0..num_fragments {
             let is_first = fragment_no == 0;
             let channel_size = if is_first { channel_bytes.len() + 1 } else { 0 };
-            let max_payload = if is_first {
-                first_payload_size
-            } else {
-                subsequent_payload_size
-            };
+            let max_payload = if is_first { first_payload_size } else { subsequent_payload_size };
             let payload_len = (msg_size - payload_offset).min(max_payload);
 
             let datagram_size = FRAGMENT_HEADER_SIZE + channel_size + payload_len;
             let mut buf = vec![0u8; datagram_size];
 
-            BigEndian::write_u32(&mut buf[0..4], MAGIC_LONG);
-            BigEndian::write_u32(&mut buf[4..8], seqno);
-            BigEndian::write_u32(&mut buf[8..12], msg_size as u32);
+            BigEndian::write_u32(&mut buf[0..4],   MAGIC_LONG);
+            BigEndian::write_u32(&mut buf[4..8],   seqno);
+            BigEndian::write_u32(&mut buf[8..12],  msg_size as u32);
             BigEndian::write_u32(&mut buf[12..16], payload_offset as u32);
             BigEndian::write_u16(&mut buf[16..18], fragment_no as u16);
             BigEndian::write_u16(&mut buf[18..20], num_fragments as u16);
@@ -217,9 +262,7 @@ impl Lcm {
             let (n, sender) = self.socket.recv_from(&mut buf).await?;
             let pkt = &buf[..n];
 
-            if pkt.len() < 4 {
-                continue;
-            }
+            if pkt.len() < 4 { continue; }
             let magic = BigEndian::read_u32(&pkt[0..4]);
 
             if magic == MAGIC_SHORT {
@@ -235,20 +278,16 @@ impl Lcm {
         }
     }
 
-    fn process_fragment(
-        &self,
-        sender: SocketAddr,
-        buf: &[u8],
-    ) -> io::Result<Option<ReceivedMessage>> {
+    fn process_fragment(&self, sender: SocketAddr, buf: &[u8]) -> io::Result<Option<ReceivedMessage>> {
         if buf.len() < FRAGMENT_HEADER_SIZE {
             return Ok(None);
         }
 
-        let seqno = BigEndian::read_u32(&buf[4..8]);
-        let total_size = BigEndian::read_u32(&buf[8..12]) as usize;
+        let seqno           = BigEndian::read_u32(&buf[4..8]);
+        let total_size      = BigEndian::read_u32(&buf[8..12]) as usize;
         let fragment_offset = BigEndian::read_u32(&buf[12..16]) as usize;
-        let fragment_no = BigEndian::read_u16(&buf[16..18]);
-        let num_fragments = BigEndian::read_u16(&buf[18..20]);
+        let fragment_no     = BigEndian::read_u16(&buf[16..18]);
+        let num_fragments   = BigEndian::read_u16(&buf[18..20]);
 
         let mut offset = FRAGMENT_HEADER_SIZE;
 
@@ -270,12 +309,18 @@ impl Lcm {
         let key = (sender, seqno);
 
         let mut reassembly = self.reassembly.lock().unwrap();
-        let entry = reassembly.entry(key).or_insert_with(|| FragmentBuffer {
+        let is_new = !reassembly.map.contains_key(&key);
+        reassembly.map.entry(key).or_insert_with(|| FragmentBuffer {
             channel: channel.clone().unwrap_or_default(),
             num_fragments,
             received: 0,
             data: vec![0u8; total_size],
+            last_update: Instant::now(),
         });
+        if is_new {
+            reassembly.total_bytes = reassembly.total_bytes.saturating_add(total_size);
+        }
+        let entry = reassembly.map.get_mut(&key).unwrap();
 
         // First fragment also sets the channel name on an existing entry
         if let Some(ch) = channel {
@@ -285,13 +330,23 @@ impl Lcm {
         let end = (fragment_offset + payload.len()).min(total_size);
         entry.data[fragment_offset..end].copy_from_slice(&payload[..end - fragment_offset]);
         entry.received += 1;
+        entry.last_update = Instant::now();
 
         if entry.received == entry.num_fragments {
-            let complete = reassembly.remove(&key).unwrap();
+            let complete = reassembly.map.remove(&key).unwrap();
+            reassembly.total_bytes = reassembly.total_bytes.saturating_sub(complete.data.len());
             return Ok(Some(ReceivedMessage {
                 channel: complete.channel,
                 data: complete.data,
             }));
+        }
+
+        // Apply the LRU eviction caps. Done on every fragment so a single
+        // long-lived dropped-fragment entry doesn't persist past ~1000
+        // subsequent messages or 16 MB of accumulated incomplete payloads.
+        // Mirrors lcm_frag_buf_store_add in upstream LCM's udpm_util.c.
+        if is_new {
+            reassembly.enforce_caps();
         }
 
         Ok(None)
@@ -391,5 +446,92 @@ mod tests {
         BigEndian::write_u32(&mut buf[4..8], 0);
         buf[SHORT_HEADER_SIZE..SHORT_HEADER_SIZE + 4].copy_from_slice(b"CHAN");
         assert!(Lcm::decode_small(&buf).unwrap().is_none());
+    }
+
+    // --- FragStore (reassembly map) tests ---
+
+    fn make_buf(data_size: usize) -> FragmentBuffer {
+        FragmentBuffer {
+            channel: String::new(),
+            num_fragments: 2,
+            received: 0,
+            data: vec![0u8; data_size],
+            last_update: Instant::now(),
+        }
+    }
+
+    #[test]
+    fn frag_store_evicts_when_over_byte_cap() {
+        // Insert entries totaling more than MAX_FRAG_BUF_TOTAL_BYTES,
+        // verify the oldest are evicted to bring total under the cap.
+        let mut store = FragStore::new();
+        let big = MAX_FRAG_BUF_TOTAL_BYTES / 2 + 1; // each entry > half the cap
+        for i in 0..3 {
+            let buf = make_buf(big);
+            store.total_bytes += buf.data.len();
+            // Use a u32 seqno; sender is the same for all to test eviction
+            // happens regardless of sender identity.
+            store.map.insert((SocketAddr::from(([127, 0, 0, 1], 0)), i), buf);
+            // Stagger update timestamps so LRU has a stable order.
+            std::thread::sleep(std::time::Duration::from_millis(1));
+            store.enforce_caps();
+        }
+        assert!(
+            store.total_bytes <= MAX_FRAG_BUF_TOTAL_BYTES,
+            "total {} must be <= cap {}",
+            store.total_bytes,
+            MAX_FRAG_BUF_TOTAL_BYTES,
+        );
+        assert!(
+            store.map.len() < 3,
+            "at least one entry must have been evicted; got {} entries",
+            store.map.len(),
+        );
+    }
+
+    #[test]
+    fn frag_store_evicts_when_over_entry_cap() {
+        // Insert MAX_NUM_FRAG_BUFS + 5 small entries, verify count is
+        // bounded at MAX_NUM_FRAG_BUFS after enforce_caps runs.
+        let mut store = FragStore::new();
+        for i in 0..(MAX_NUM_FRAG_BUFS as u32 + 5) {
+            let buf = make_buf(8);
+            store.total_bytes += buf.data.len();
+            store.map.insert((SocketAddr::from(([127, 0, 0, 1], 0)), i), buf);
+            store.enforce_caps();
+        }
+        assert_eq!(
+            store.map.len(),
+            MAX_NUM_FRAG_BUFS,
+            "entry count must be exactly the cap after enforce_caps",
+        );
+    }
+
+    #[test]
+    fn frag_store_evict_lru_picks_oldest() {
+        // The eviction picks the entry whose `last_update` is oldest, not
+        // (e.g.) by insertion order or by hash position.
+        let mut store = FragStore::new();
+        let mut older = make_buf(8);
+        older.last_update = Instant::now();
+        // Make a slightly newer one
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let mut newer = make_buf(8);
+        newer.last_update = Instant::now();
+        let older_key = (SocketAddr::from(([127, 0, 0, 1], 0)), 1u32);
+        let newer_key = (SocketAddr::from(([127, 0, 0, 1], 0)), 2u32);
+        store.map.insert(older_key, older);
+        store.map.insert(newer_key, newer);
+        store.total_bytes = 16;
+        assert!(store.evict_lru());
+        assert!(
+            !store.map.contains_key(&older_key),
+            "older entry should have been evicted; map: {:?}",
+            store.map.keys().collect::<Vec<_>>(),
+        );
+        assert!(
+            store.map.contains_key(&newer_key),
+            "newer entry should still be present",
+        );
     }
 }

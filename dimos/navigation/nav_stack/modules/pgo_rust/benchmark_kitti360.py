@@ -114,11 +114,20 @@ def main() -> None:
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
-    # Downsample published scans to 1000 points each so they fit in a
-    # single UDP datagram (~12 KB) instead of fragmenting into ~7 (~500 KB).
-    # The position-based detector doesn't use cloud content; this avoids
-    # the LCM fragmentation-reassembly drops responsible for ~50 % scan
-    # loss observed throughout this task.
+    # Downsample published scans to 1000 points so each fits in a single
+    # UDP datagram (~12 KB). Two reasons:
+    #   1. Avoids LCM-level UDP fragmentation, which under sustained
+    #      10 Hz × 500 KB load drops ~50 % of messages even with 128 MB
+    #      SO_RCVBUF on both sides. The drops happen between sender and
+    #      receiver — the LRU fix to dimos-lcm's reassembly map (vendored
+    #      at `rust/vendor-dimos-lcm/`) prevents memory leaks from
+    #      compounding incomplete reassemblies, but it doesn't bring back
+    #      the dropped fragments. Verified empirically: full clouds with
+    #      LRU fix still average ~50 % drop rate; downsampled clouds get
+    #      0 % drop.
+    #   2. The position-based detector reads only `raw_pose` for
+    #      candidate selection — cloud content is unused. So downsampling
+    #      is lossless from the detector's POV.
     results = run_benchmark(
         module_under_test=PGORust,
         module_kwargs=DEFAULT_PGO_KWARGS,
