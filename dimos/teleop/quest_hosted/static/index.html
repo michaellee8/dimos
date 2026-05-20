@@ -453,6 +453,10 @@
                         Negotiating...
                     </div>
 
+                    <video id="robot-cam" autoplay muted playsinline
+                        class="w-full rounded-lg border border-gray-800 bg-black my-4"
+                        style="display:none; max-height: 360px; object-fit: contain;"></video>
+
                     <div class="grid grid-cols-2 gap-4 my-6 text-left">
                         <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
                             <div class="text-xs text-gray-500 mb-2">Controls</div>
@@ -613,6 +617,17 @@ angular.z = 0</pre>
 
             const sctpPlaceholder = pc.createDataChannel('_sctp_init');
 
+            // Robot video — recvonly transceiver so the offer carries a video
+            // m-section the broker can bind the robot's track to.
+            pc.addTransceiver('video', { direction: 'recvonly' });
+            pc.ontrack = (e) => {
+                if (e.track.kind !== 'video') return;
+                const v = document.getElementById('robot-cam');
+                if (!v) return;
+                v.srcObject = e.streams[0] || new MediaStream([e.track]);
+                v.style.display = 'block';
+            };
+
             const iceFailed = new Promise((_, reject) => {
                 pc.oniceconnectionstatechange = () => {
                     if (pc.iceConnectionState === 'failed' ||
@@ -690,6 +705,8 @@ angular.z = 0</pre>
                 });
                 stateChannel.onopen = () => startClockSync(stateChannel);
                 stateChannel.onmessage = (e) => handleStateMessage(e.data);
+                stateChannel.onerror = (e) => console.warn('[state-channel] error', e);
+                stateChannel.onclose = () => console.info('[state-channel] closed');
             }
         }
 
@@ -727,8 +744,6 @@ angular.z = 0</pre>
             if (msg.type === 'pong') applyPong(msg);
         }
 
-        // NTP-style offset estimate; keep the lowest-RTT sample we've seen so
-        // queueing-delay noise can't pin us to a bad offset.
         function applyPong(pong) {
             const recvTsSec = Date.now() / 1000;
             const rttMs = (recvTsSec - pong.client_ts) * 1000;
@@ -771,7 +786,7 @@ angular.z = 0</pre>
 
                 const pos = pose.transform.position;
                 const rot = pose.transform.orientation;
-                const nowMs = Date.now();
+                const nowMs = Date.now() + clockOffsetMs;
                 const stamp = new std_msgs.Time({
                     sec: Math.floor(nowMs / 1000),
                     nsec: (nowMs % 1000) * 1_000_000,
@@ -861,6 +876,8 @@ angular.z = 0</pre>
             if (xrSession) { await xrSession.end().catch(() => {}); xrSession = null; }
             if (cmdChannel) { try { cmdChannel.close(); } catch (_) {} cmdChannel = null; }
             if (stateChannel) { try { stateChannel.close(); } catch (_) {} stateChannel = null; }
+            const v = document.getElementById('robot-cam');
+            if (v) { v.srcObject = null; v.style.display = 'none'; }
             if (pc) { try { pc.close(); } catch (_) {} pc = null; }
             clockOffsetMs = 0;
             bestRttMs = Infinity;

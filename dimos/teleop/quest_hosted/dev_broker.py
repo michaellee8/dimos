@@ -113,6 +113,10 @@ class Session:
     robot_channels: dict[str, Any] = field(default_factory=dict)
     operator_pc: RTCPeerConnection | None = None
     operator_channels: dict[str, Any] = field(default_factory=dict)
+    # Video track inbound from robot, stashed at register_robot's on("track")
+    # event so operator_join can forward it. None if robot hasn't announced
+    # a video track yet (older clients, or it just hasn't fired).
+    robot_video_track: Any = None
 
 
 _sessions: dict[str, Session] = {}
@@ -259,6 +263,20 @@ async def register_robot(body: RegisterBody) -> dict[str, str]:
         session.robot_channels[channel.label] = channel
         _wire_forwarding(channel.label, channel, session.operator_channels)
 
+    # Accept the robot's sendonly video track. Stashed so operator_join can
+    # forward it; if operator is already connected, hook it up immediately.
+    robot_pc.addTransceiver("video", direction="recvonly")
+
+    @robot_pc.on("track")
+    def _on_robot_track(track: Any) -> None:
+        if track.kind != "video":
+            return
+        logger.info(f"[{session.robot_name}] robot video track received")
+        session.robot_video_track = track
+        if session.operator_pc is not None:
+            session.operator_pc.addTrack(track)
+            logger.info(f"[{session.robot_name}] forwarded video to existing operator")
+
     @robot_pc.on("connectionstatechange")
     async def _on_state() -> None:
         logger.info(f"[{session.robot_name}] robot PC: {robot_pc.connectionState}")
@@ -371,6 +389,12 @@ async def operator_join(session_id: str, body: JoinBody) -> dict[str, str]:
         session.robot_channels,
         log_prefix=f"[{session.robot_name}] operator",
     )
+
+    # Forward robot's video to operator if the track has already arrived;
+    # otherwise robot_pc's on("track") will hook it up when it fires.
+    if session.robot_video_track is not None:
+        operator_pc.addTrack(session.robot_video_track)
+        logger.info(f"[{session.robot_name}] forwarded existing robot video to operator")
 
     await operator_pc.setRemoteDescription(RTCSessionDescription(sdp=body.sdp_offer, type="offer"))
     answer = await operator_pc.createAnswer()

@@ -36,16 +36,21 @@ from aiortc import (
     RTCPeerConnection,
     RTCSessionDescription,
 )
+from aiortc.mediastreams import VideoStreamTrack
+import av
 from dimos_lcm.geometry_msgs import PoseStamped as LCMPoseStamped, TwistStamped as LCMTwistStamped
 from dimos_lcm.sensor_msgs import Joy as LCMJoy
 import httpx
+import numpy as np
+from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.stream import Out
+from dimos.core.stream import In, Out
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
+from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.Joy import Joy
 from dimos.teleop.quest.quest_types import Buttons, QuestControllerState
 from dimos.teleop.utils.teleop_transforms import webxr_to_robot
@@ -57,6 +62,55 @@ logger = setup_logger()
 class Hand(IntEnum):
     LEFT = 0
     RIGHT = 1
+
+
+# ImageFormat → PyAV pixel-format string. Anything not listed falls back to
+# bgr24 — av will reformat as needed if the encoder requests something else.
+_AV_FORMAT_MAP = {
+    ImageFormat.BGR: "bgr24",
+    ImageFormat.RGB: "rgb24",
+    ImageFormat.BGRA: "bgra",
+    ImageFormat.RGBA: "rgba",
+    ImageFormat.GRAY: "gray",
+}
+
+
+class CameraVideoTrack(VideoStreamTrack):
+    """aiortc video track that pulls the latest Image from the In port.
+
+    Latest-frame-wins — when aiortc calls ``recv()`` (paced by the negotiated
+    frame rate), we encode the most recent Image we've received. Earlier
+    frames are dropped, not queued. Lowest end-to-end latency.
+
+    Until the first Image arrives, ``recv()`` returns a black 640x480
+    placeholder so the operator's ``<video>`` element gets *something* and
+    doesn't time out.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+        self._latest: Image | None = None
+
+    def set_latest(self, img: Image) -> None:
+        """Subscribe callback — overwrite the latest frame, no queuing."""
+        with self._lock:
+            self._latest = img
+
+    async def recv(self) -> av.VideoFrame:
+        pts, time_base = await self.next_timestamp()
+        with self._lock:
+            img = self._latest
+        if img is None:
+            arr = np.zeros((480, 640, 3), dtype=np.uint8)
+            fmt = "bgr24"
+        else:
+            arr = img.data
+            fmt = _AV_FORMAT_MAP.get(img.format, "bgr24")
+        frame = av.VideoFrame.from_ndarray(arr, format=fmt)
+        frame.pts = pts
+        frame.time_base = time_base
+        return frame
 
 
 class HostedTeleopConfig(ModuleConfig):
@@ -89,6 +143,7 @@ class HostedTeleopModule(Module):
     buttons: Out[Buttons]
     cmd_vel: Out[Twist]
     cmd_vel_stamped: Out[TwistStamped]
+    color_image: In[Image]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -120,6 +175,8 @@ class HostedTeleopModule(Module):
         # low-rate control-plane events (mode switch, etc.) ride here too.
         self._state_channel = None
         self._state_channel_id: int | None = None
+        
+        self._video_track = CameraVideoTrack()
 
         self._control_loop_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
@@ -134,6 +191,8 @@ class HostedTeleopModule(Module):
     @rpc
     def start(self) -> None:
         super().start()
+        unsub = self.color_image.subscribe(self._video_track.set_latest)
+        self.register_disposable(Disposable(unsub))
         self._start_event_loop()
         self._connect_blocking()
         self._start_heartbeat()
@@ -202,6 +261,11 @@ class HostedTeleopModule(Module):
         # the SFU has a transport to bind cmd_unreliable to later. Closed
         # as soon as the answer is applied.
         sctp_init = self._pc.createDataChannel("_sctp_init")
+
+        # Video track must be added before createOffer so its m-section
+        # appears in the initial SDP. Track is sendonly from the robot's
+        # perspective; broker mirrors it sendonly toward the operator.
+        self._pc.addTrack(self._video_track)
 
         @self._pc.on("connectionstatechange")
         async def _on_state() -> None:
