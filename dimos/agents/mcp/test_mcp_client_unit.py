@@ -17,12 +17,16 @@ import json
 from queue import Empty, Queue
 from unittest.mock import MagicMock, patch
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.base import BaseMessage
 from langgraph.types import Command
 import pytest
 
-from dimos.agents.mcp.mcp_client import McpClient
+from dimos.agents.mcp.mcp_client import (
+    McpClient,
+    _fix_parallel_tool_batches,
+    _reorder_tool_responses,
+)
 from dimos.utils.sequential_ids import SequentialIds
 
 
@@ -246,6 +250,18 @@ def test_structured_tool_invocation_injects_tool_call_id(mcp_client: McpClient) 
     assert messages[0].tool_call_id == "tc-via-invoke"
 
 
+def test_structured_tool_invocation_without_toolcall_raises(mcp_client: McpClient) -> None:
+    """Bare-dict invocation (no ToolCall envelope) must fail loud, so a
+    future langchain change that bypasses our `invoke` override is caught
+    by tests instead of silently dropping `tool_call_id`.
+    """
+    tools = mcp_client._fetch_tools()
+    picture_tool = next(t for t in tools if t.name == "take_picture")
+
+    with pytest.raises(ValueError, match="ToolCall"):
+        picture_tool.invoke({"name": "take_picture", "args": {}})
+
+
 def test_mcp_request_error_propagation(mcp_client: McpClient) -> None:
     def error_post(url: str, **kwargs: object) -> MagicMock:
         resp = MagicMock()
@@ -325,6 +341,117 @@ def test_tool_stream_progress_frame_becomes_human_message(mcp_client: McpClient)
     msg: BaseMessage = mcp_client._message_queue.get_nowait()
     assert isinstance(msg, HumanMessage)
     assert str(msg.content) == "[tool:follow_person] Found a person"
+
+
+def _ai_with_parallel_calls(call_ids: list[str]) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[{"name": f"t{i}", "args": {}, "id": cid} for i, cid in enumerate(call_ids)],
+    )
+
+
+def _image_human(tool_call_id: str) -> HumanMessage:
+    return HumanMessage(
+        content=[{"type": "text", "text": "img"}],
+        additional_kwargs={"tool_call_id": tool_call_id},
+    )
+
+
+def test_fix_parallel_tool_batches_reorders_interleaved_responses() -> None:
+    """[AI(parallel), Tool₁, Human₁, Tool₂, Human₂] should become
+    [AI, Tool₁, Tool₂, Human₁, Human₂] so OpenAI doesn't reject the next
+    turn for non-contiguous parallel tool responses."""
+    messages: list[BaseMessage] = [
+        _ai_with_parallel_calls(["a", "b"]),
+        ToolMessage(content="summary-a", tool_call_id="a"),
+        _image_human("a"),
+        ToolMessage(content="summary-b", tool_call_id="b"),
+        _image_human("b"),
+    ]
+
+    out = _fix_parallel_tool_batches(messages)
+
+    assert isinstance(out[0], AIMessage)
+    assert isinstance(out[1], ToolMessage) and out[1].tool_call_id == "a"
+    assert isinstance(out[2], ToolMessage) and out[2].tool_call_id == "b"
+    assert isinstance(out[3], HumanMessage)
+    assert out[3].additional_kwargs["tool_call_id"] == "a"
+    assert isinstance(out[4], HumanMessage)
+    assert out[4].additional_kwargs["tool_call_id"] == "b"
+
+
+def test_fix_parallel_tool_batches_leaves_single_tool_call_alone() -> None:
+    """Single tool calls already satisfy the contiguity rule — don't touch them."""
+    messages: list[BaseMessage] = [
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "t", "args": {}, "id": "solo"}],
+        ),
+        ToolMessage(content="summary", tool_call_id="solo"),
+        _image_human("solo"),
+    ]
+
+    out = _fix_parallel_tool_batches(messages)
+    assert out == messages
+
+
+def test_fix_parallel_tool_batches_leaves_already_ordered_alone() -> None:
+    """[AI, Tool₁, Tool₂, Human₁, Human₂] is already valid; don't reshuffle it."""
+    messages: list[BaseMessage] = [
+        _ai_with_parallel_calls(["a", "b"]),
+        ToolMessage(content="sa", tool_call_id="a"),
+        ToolMessage(content="sb", tool_call_id="b"),
+        _image_human("a"),
+        _image_human("b"),
+    ]
+
+    out = _fix_parallel_tool_batches(messages)
+    assert out == messages
+
+
+def test_fix_parallel_tool_batches_skips_untagged_human_messages() -> None:
+    """A plain HumanMessage with no `tool_call_id` tag terminates the run —
+    we won't reorder past it because we can't safely attribute it to a
+    parallel call."""
+    plain_human = HumanMessage(content="just talking")
+    messages: list[BaseMessage] = [
+        _ai_with_parallel_calls(["a", "b"]),
+        ToolMessage(content="sa", tool_call_id="a"),
+        plain_human,
+        ToolMessage(content="sb", tool_call_id="b"),
+    ]
+
+    out = _fix_parallel_tool_batches(messages)
+    # Untouched: we stopped scanning at the plain human, so no rewrite.
+    assert out == messages
+
+
+def test_reorder_tool_responses_merges_then_fixes() -> None:
+    """The reducer runs add_messages first, then applies the fix — so an
+    incoming Command-style append of [Tool, Human] for the second parallel
+    call lands contiguously after the first batch."""
+    left: list[BaseMessage] = [
+        _ai_with_parallel_calls(["a", "b"]),
+        ToolMessage(content="sa", tool_call_id="a"),
+        _image_human("a"),
+    ]
+    right: list[BaseMessage] = [
+        ToolMessage(content="sb", tool_call_id="b"),
+        _image_human("b"),
+    ]
+
+    out = _reorder_tool_responses(left, right)
+
+    tool_ids = [m.tool_call_id for m in out if isinstance(m, ToolMessage)]
+    human_ids = [
+        m.additional_kwargs.get("tool_call_id") for m in out if isinstance(m, HumanMessage)
+    ]
+    assert tool_ids == ["a", "b"]
+    assert human_ids == ["a", "b"]
+    # And critically: both ToolMessages come before either HumanMessage.
+    first_human = next(i for i, m in enumerate(out) if isinstance(m, HumanMessage))
+    last_tool = max(i for i, m in enumerate(out) if isinstance(m, ToolMessage))
+    assert last_tool < first_human
 
 
 def test_mcp_tool_call_sends_progress_token(mcp_client: McpClient) -> None:

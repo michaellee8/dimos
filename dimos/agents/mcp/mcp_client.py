@@ -20,10 +20,11 @@ from typing import Annotated, Any
 import uuid
 
 import httpx
-from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain.agents import AgentState, create_agent
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.messages.base import BaseMessage
 from langchain_core.tools import InjectedToolCallId, StructuredTool
+from langgraph.graph.message import add_messages
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command
 from reactivex.disposable import Disposable
@@ -40,6 +41,59 @@ from dimos.utils.logging_config import setup_logger
 from dimos.utils.sequential_ids import SequentialIds
 
 logger = setup_logger()
+
+
+def _fix_parallel_tool_batches(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Reorder interleaved [Tool, Human, Tool, Human, ...] runs that
+    follow a parallel-tool-call AIMessage into [Tool, Tool, ..., Human,
+    Human, ...] so OpenAI's "all parallel tool responses must be
+    contiguous" rule is satisfied.
+
+    Image-carrying HumanMessages emitted by the MCP tool wrapper are
+    tagged with `additional_kwargs["tool_call_id"]` matching the
+    originating tool call, which is how we pair each Human with its
+    parallel batch.
+    """
+    out = list(messages)
+    i = 0
+    while i < len(out):
+        msg = out[i]
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if isinstance(msg, AIMessage) and len(tool_calls) >= 2:
+            expected_ids = {tc.get("id") for tc in tool_calls if tc.get("id")}
+            tool_msgs: list[BaseMessage] = []
+            other_msgs: list[BaseMessage] = []
+            j = i + 1
+            while j < len(out):
+                m = out[j]
+                if isinstance(m, ToolMessage) and m.tool_call_id in expected_ids:
+                    tool_msgs.append(m)
+                    j += 1
+                elif (
+                    isinstance(m, HumanMessage)
+                    and getattr(m, "additional_kwargs", {}).get("tool_call_id") in expected_ids
+                ):
+                    other_msgs.append(m)
+                    j += 1
+                else:
+                    break
+            if tool_msgs and other_msgs and {m.tool_call_id for m in tool_msgs} == expected_ids:
+                out[i + 1 : j] = [*tool_msgs, *other_msgs]
+        i += 1
+    return out
+
+
+def _reorder_tool_responses(
+    left: list[BaseMessage], right: list[BaseMessage] | BaseMessage
+) -> list[BaseMessage]:
+    """Standard add_messages merge, then fix any parallel-tool batches."""
+    merged = add_messages(left, right)
+    return _fix_parallel_tool_batches(merged)
+
+
+class _OrderedAgentState(AgentState):
+    # Override the messages reducer to keep parallel ToolMessages contiguous.
+    messages: Annotated[list[BaseMessage], _reorder_tool_responses]
 
 
 class McpClientConfig(ModuleConfig):
@@ -186,8 +240,10 @@ class McpClient(Module):
             # carrying the image blocks within the same agent turn.
             #
             # The HumanMessage is tagged with `additional_kwargs["tool_call_id"]`
-            # so the state reducer can pair it with the right ToolMessage when
-            # multiple parallel tool calls return images in one batch.
+            # so `_fix_parallel_tool_batches` can pair it with the right
+            # ToolMessage when multiple parallel tool calls return images
+            # in one batch (OpenAI requires the parallel ToolMessages to
+            # stay contiguous).
             summary = text or f"{name} returned {len(image_blocks)} non-text artefact(s)."
             intro = f"Artefacts returned by '{name}' (image follows):"
             return Command(
@@ -240,6 +296,7 @@ class McpClient(Module):
                 model=model,
                 tools=tools,
                 system_prompt=self.config.system_prompt,
+                state_schema=_OrderedAgentState,
             )
             if not self._thread.is_alive():
                 self._thread.start()
@@ -352,25 +409,49 @@ class McpClient(Module):
 
 
 class _McpStructuredTool(StructuredTool):
-    """StructuredTool that honours `InjectedToolCallId` with a JSON-Schema dict.
+    """StructuredTool that propagates `tool_call_id` to MCP tools whose
+    `args_schema` is a JSON-Schema dict.
 
-    Langchain's `StructuredTool` only auto-injects `tool_call_id` when
-    `args_schema` is a Pydantic model. MCP gives us JSON-Schema dicts (the
-    server's authoritative contract for the LLM), so we extend the dict path
-    to apply the same injection from the function signature — letting tools
-    return a `langgraph` `Command` that references their own `tool_call_id`
-    without having to invent a side-channel for it.
+    Langchain auto-injects `InjectedToolCallId` only when `args_schema` is
+    a Pydantic model; MCP servers supply JSON-Schema dicts (the server's
+    authoritative contract for the LLM), so we have to bridge ourselves.
+
+    The bridge uses only public Runnable surface — `invoke` / `ainvoke`
+    accept a `ToolCall` dict as documented input, and we copy its `id`
+    field into the function's kwargs before delegating.
     """
 
-    def _to_args_and_kwargs(
-        self, tool_input: str | dict[str, Any], tool_call_id: str | None
-    ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        args, kwargs = super()._to_args_and_kwargs(tool_input, tool_call_id)
-        if "tool_call_id" in self._injected_args_keys:
-            if tool_call_id is None:
-                raise ValueError(
-                    "Tool requires an InjectedToolCallId but no tool_call_id was "
-                    "provided; invoke via a ToolCall, not a bare dict."
-                )
-            kwargs["tool_call_id"] = tool_call_id
-        return args, kwargs
+    def invoke(
+        self,
+        input: str | dict[str, Any],
+        config: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        return super().invoke(_inject_tool_call_id(input), config=config, **kwargs)
+
+    async def ainvoke(
+        self,
+        input: str | dict[str, Any],
+        config: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        return await super().ainvoke(_inject_tool_call_id(input), config=config, **kwargs)
+
+
+def _inject_tool_call_id(input: str | dict[str, Any]) -> str | dict[str, Any]:
+    """Copy the `ToolCall.id` field into `args.tool_call_id` so the inner
+    `call_tool` closure receives it as a kwarg. JSON-Schema dicts don't
+    validate against extra keys, so this is transparent to the schema.
+
+    Raises ValueError on any invocation that isn't a `ToolCall`-shaped
+    dict with a non-null `id` — MCP tools have no other valid call path.
+    """
+    if not (isinstance(input, dict) and input.get("type") == "tool_call"):
+        raise ValueError(
+            "MCP tool must be invoked via a ToolCall (a dict with "
+            "type='tool_call' and a non-null id), not a bare input."
+        )
+    tool_call_id = input.get("id")
+    if tool_call_id is None:
+        raise ValueError("MCP tool ToolCall is missing a non-null id.")
+    return {**input, "args": {**(input.get("args") or {}), "tool_call_id": tool_call_id}}
