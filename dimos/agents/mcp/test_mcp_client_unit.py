@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import asyncio
 import json
 from queue import Empty, Queue
 from unittest.mock import MagicMock, patch
@@ -250,6 +251,32 @@ def test_structured_tool_invocation_injects_tool_call_id(mcp_client: McpClient) 
     assert messages[0].tool_call_id == "tc-via-invoke"
 
 
+def test_structured_tool_ainvoke_injects_tool_call_id(mcp_client: McpClient) -> None:
+    """Async mirror of `test_structured_tool_invocation_injects_tool_call_id`:
+    langgraph's tool node may dispatch via `ainvoke` (e.g. under `astream`),
+    so the async path must inject `tool_call_id` the same way the sync path
+    does. A langchain release that changes ainvoke's call convention should
+    fail this test rather than silently drop the id.
+    """
+    tools = mcp_client._fetch_tools()
+    picture_tool = next(t for t in tools if t.name == "take_picture")
+
+    result = asyncio.run(
+        picture_tool.ainvoke(
+            {
+                "name": "take_picture",
+                "args": {},
+                "id": "tc-via-ainvoke",
+                "type": "tool_call",
+            }
+        )
+    )
+
+    assert isinstance(result, Command)
+    messages = result.update["messages"]
+    assert messages[0].tool_call_id == "tc-via-ainvoke"
+
+
 def test_structured_tool_invocation_without_toolcall_raises(mcp_client: McpClient) -> None:
     """Bare-dict invocation (no ToolCall envelope) must fail loud, so a
     future langchain change that bypasses our `invoke` override is caught
@@ -452,6 +479,58 @@ def test_reorder_tool_responses_merges_then_fixes() -> None:
     first_human = next(i for i, m in enumerate(out) if isinstance(m, HumanMessage))
     last_tool = max(i for i, m in enumerate(out) if isinstance(m, ToolMessage))
     assert last_tool < first_human
+
+
+def test_process_message_normalizes_history_after_parallel_tool_batch(
+    mcp_client: McpClient,
+) -> None:
+    """Regression: stream_mode="updates" yields node outputs in completion
+    order, so when two parallel image-returning tools each emit a
+    [ToolMessage, HumanMessage] Command, self._history ends up interleaved
+    as [Tool₁, Human₁, Tool₂, Human₂]. The graph's reducer reorders its
+    own channel state, but langgraph does NOT re-run reducers when an
+    initial state dict is fed back into stream() on the next turn — so
+    without an explicit fix-up here, OpenAI rejects the next user turn
+    for non-contiguous parallel ToolMessages.
+    """
+    mcp_client._history = []
+    mcp_client._message_queue = Queue()
+    mcp_client.agent_idle = MagicMock()
+    mcp_client.agent = MagicMock()
+
+    ai = _ai_with_parallel_calls(["a", "b"])
+    tool_a = ToolMessage(content="sa", tool_call_id="a")
+    human_a = _image_human("a")
+    tool_b = ToolMessage(content="sb", tool_call_id="b")
+    human_b = _image_human("b")
+
+    # Mirror what langgraph's `stream_mode="updates"` looks like when two
+    # parallel ToolNode invocations finish out-of-order with respect to
+    # their image follow-ups: each Command landed [Tool, Human] in the
+    # raw node output stream.
+    fake_graph = MagicMock()
+    fake_graph.stream.return_value = iter(
+        [
+            {"agent": {"messages": [ai]}},
+            {"tools": {"messages": [tool_a, human_a]}},
+            {"tools": {"messages": [tool_b, human_b]}},
+        ]
+    )
+
+    user_msg = HumanMessage(content="look around")
+    mcp_client._process_message(fake_graph, user_msg)
+
+    # Critical post-condition: both ToolMessages are contiguous, and only
+    # then come the image HumanMessages. Without the fix-up, _history
+    # would be [user, ai, tool_a, human_a, tool_b, human_b].
+    tool_positions = [i for i, m in enumerate(mcp_client._history) if isinstance(m, ToolMessage)]
+    human_positions = [
+        i
+        for i, m in enumerate(mcp_client._history)
+        if isinstance(m, HumanMessage) and m.additional_kwargs.get("tool_call_id")
+    ]
+    assert tool_positions == sorted(tool_positions)
+    assert max(tool_positions) < min(human_positions)
 
 
 def test_mcp_tool_call_sends_progress_token(mcp_client: McpClient) -> None:

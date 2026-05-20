@@ -16,12 +16,12 @@ from collections.abc import Callable
 from queue import Empty, Queue
 from threading import Event, RLock, Thread
 import time
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 import uuid
 
 import httpx
 from langchain.agents import AgentState, create_agent
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolCall, ToolMessage
 from langchain_core.messages.base import BaseMessage
 from langchain_core.tools import InjectedToolCallId, StructuredTool
 from langgraph.graph.message import add_messages
@@ -61,7 +61,7 @@ def _fix_parallel_tool_batches(messages: list[BaseMessage]) -> list[BaseMessage]
         tool_calls = getattr(msg, "tool_calls", None) or []
         if isinstance(msg, AIMessage) and len(tool_calls) >= 2:
             expected_ids = {tc.get("id") for tc in tool_calls if tc.get("id")}
-            tool_msgs: list[BaseMessage] = []
+            tool_msgs: list[ToolMessage] = []
             other_msgs: list[BaseMessage] = []
             j = i + 1
             while j < len(out):
@@ -87,13 +87,15 @@ def _reorder_tool_responses(
     left: list[BaseMessage], right: list[BaseMessage] | BaseMessage
 ) -> list[BaseMessage]:
     """Standard add_messages merge, then fix any parallel-tool batches."""
-    merged = add_messages(left, right)
+    # add_messages is typed against langgraph's permissive Messages union;
+    # list[BaseMessage] is invariant so we cast at the boundary.
+    merged = cast(list[BaseMessage], add_messages(cast(Any, left), cast(Any, right)))
     return _fix_parallel_tool_batches(merged)
 
 
-class _OrderedAgentState(AgentState):
+class _OrderedAgentState(AgentState[Any]):
     # Override the messages reducer to keep parallel ToolMessages contiguous.
-    messages: Annotated[list[BaseMessage], _reorder_tool_responses]
+    messages: Annotated[list[BaseMessage], _reorder_tool_responses]  # type: ignore[misc]
 
 
 class McpClientConfig(ModuleConfig):
@@ -296,7 +298,7 @@ class McpClient(Module):
                 model=model,
                 tools=tools,
                 system_prompt=self.config.system_prompt,
-                state_schema=_OrderedAgentState,
+                state_schema=cast(type[AgentState[Any]], _OrderedAgentState),
             )
             if not self._thread.is_alive():
                 self._thread.start()
@@ -404,6 +406,13 @@ class McpClient(Module):
                     pretty_print_langchain_message(msg)
                     self.agent.publish(msg)
 
+        # The graph applies _reorder_tool_responses to its internal channel,
+        # but stream_mode="updates" emits raw node outputs in completion
+        # order — and langgraph does not re-run reducers when an initial
+        # state dict is fed back into stream() on the next turn. Mirror the
+        # reducer here so _history matches what the graph would produce.
+        self._history = _fix_parallel_tool_batches(self._history)
+
         if self._message_queue.empty():
             self.agent_idle.publish(True)
 
@@ -423,7 +432,7 @@ class _McpStructuredTool(StructuredTool):
 
     def invoke(
         self,
-        input: str | dict[str, Any],
+        input: str | dict[Any, Any] | ToolCall,
         config: Any = None,
         **kwargs: Any,
     ) -> Any:
@@ -431,14 +440,16 @@ class _McpStructuredTool(StructuredTool):
 
     async def ainvoke(
         self,
-        input: str | dict[str, Any],
+        input: str | dict[Any, Any] | ToolCall,
         config: Any = None,
         **kwargs: Any,
     ) -> Any:
         return await super().ainvoke(_inject_tool_call_id(input), config=config, **kwargs)
 
 
-def _inject_tool_call_id(input: str | dict[str, Any]) -> str | dict[str, Any]:
+def _inject_tool_call_id(
+    input: str | dict[Any, Any] | ToolCall,
+) -> dict[Any, Any]:
     """Copy the `ToolCall.id` field into `args.tool_call_id` so the inner
     `call_tool` closure receives it as a kwarg. JSON-Schema dicts don't
     validate against extra keys, so this is transparent to the schema.
