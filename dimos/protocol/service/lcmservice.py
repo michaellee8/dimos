@@ -33,9 +33,21 @@ logger = setup_logger()
 
 _DEFAULT_LCM_HOST = "239.255.76.67"
 _DEFAULT_LCM_PORT = "7667"
+# 64 MB UDP receive buffer for the LCM client socket. The C LCM library
+# (lcm_udpm.c) reads `recv_buf_size` from the URL query string and calls
+# setsockopt(SO_RCVBUF, ...). Without this, the receive buffer defaults
+# to a few hundred KB which is far too small for ~500 KB PointCloud2
+# messages fragmented into ~7 UDP datagrams at 10 Hz — the OS drops
+# fragments, the LCM client drops the whole message via reassembly,
+# and ~50% of scans never reach subscribers (verified during the
+# pgo_rust KITTI-360 benchmark work). 64 MB matches the value
+# BufferConfiguratorLinux sets net.core.rmem_max to, so requesting
+# more would be silently clamped anyway.
+_LCM_RECV_BUF_SIZE = 64 * 1024 * 1024
 # LCM_DEFAULT_URL is used by LCM (we didn't pick that env var name)
 _DEFAULT_LCM_URL = os.getenv(
-    "LCM_DEFAULT_URL", f"udpm://{_DEFAULT_LCM_HOST}:{_DEFAULT_LCM_PORT}?ttl=0"
+    "LCM_DEFAULT_URL",
+    f"udpm://{_DEFAULT_LCM_HOST}:{_DEFAULT_LCM_PORT}?ttl=0&recv_buf_size={_LCM_RECV_BUF_SIZE}",
 )
 
 
