@@ -23,8 +23,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 from pathlib import Path
+import subprocess
 
 from dimos.navigation.nav_stack.benchmarks.pose_graph_kitti360.runner import (
     run_benchmark,
@@ -42,27 +42,36 @@ def _resolve_git_sha() -> str:
     """
     try:
         cwd = Path(__file__).parent
-        sha = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=cwd, text=True
-        ).strip()
+        sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=cwd, text=True).strip()
         # Pathspec arguments are matched against the repo-root-relative path
         # printed by `git status --porcelain`, regardless of the process's
         # working directory. Resolve the repo root so we can construct the
         # exclude path consistently.
-        repo_root = Path(subprocess.check_output(
-            ["git", "rev-parse", "--show-toplevel"], cwd=cwd, text=True,
-        ).strip())
+        repo_root = Path(
+            subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=cwd,
+                text=True,
+            ).strip()
+        )
         results_rel = (cwd / "benchmarks" / "results").resolve().relative_to(repo_root)
         status = subprocess.check_output(
             [
-                "git", "status", "--porcelain", "--untracked-files=no",
-                "--", ":(top)", f":(top,exclude){results_rel.as_posix()}",
+                "git",
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+                "--",
+                ":(top)",
+                f":(top,exclude){results_rel.as_posix()}",
             ],
-            cwd=cwd, text=True,
+            cwd=cwd,
+            text=True,
         ).strip()
         return f"{sha}_dirty" if status else sha
     except (subprocess.CalledProcessError, FileNotFoundError):
         return ""
+
 
 # Mirrors better_pgo's tuned KITTI-360 config (see pgo_cpp's variant for the
 # rationale comment). Same kwargs so cpp vs rust F1 is apples-to-apples.
@@ -101,12 +110,15 @@ def main() -> None:
     parser.add_argument("--kitti360-root", type=Path, required=True)
     parser.add_argument("--sequence", type=int, default=2)
     parser.add_argument("--max-scans", type=int, default=None)
-    parser.add_argument(
-        "--publish-interval-sec", type=float, default=DEFAULT_PUBLISH_INTERVAL_SEC
-    )
+    parser.add_argument("--publish-interval-sec", type=float, default=DEFAULT_PUBLISH_INTERVAL_SEC)
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
+    # Downsample published scans to 1000 points each so they fit in a
+    # single UDP datagram (~12 KB) instead of fragmenting into ~7 (~500 KB).
+    # The position-based detector doesn't use cloud content; this avoids
+    # the LCM fragmentation-reassembly drops responsible for ~50 % scan
+    # loss observed throughout this task.
     results = run_benchmark(
         module_under_test=PGORust,
         module_kwargs=DEFAULT_PGO_KWARGS,
@@ -114,6 +126,7 @@ def main() -> None:
         sequence_id=args.sequence,
         max_scans=args.max_scans,
         publish_interval_sec=args.publish_interval_sec,
+        max_cloud_points=1000,
     )
     results["git_sha"] = _resolve_git_sha()
 

@@ -63,6 +63,7 @@ def run_benchmark(
     max_loop_distance_m: float = DEFAULT_MAX_LOOP_DISTANCE_M,
     drain_sec: float = 10.0,
     poll_interval_sec: float = 0.5,
+    max_cloud_points: int = 0,
 ) -> dict[str, Any]:
     """Run a pose-graph SLAM blueprint against KITTI-360 and return scores.
 
@@ -100,11 +101,16 @@ def run_benchmark(
         sequence_id=sequence_id,
         max_scans=max_scans,
         publish_interval_sec=publish_interval_sec,
+        max_cloud_points=max_cloud_points,
     )
     # Ground-truth positions per frame_id, passed into the scoring module so it
     # can compute ATE against corrected_odometry samples.
     groundtruth_positions = {
-        int(frame_id): [float(positions[index][0]), float(positions[index][1]), float(positions[index][2])]
+        int(frame_id): [
+            float(positions[index][0]),
+            float(positions[index][1]),
+            float(positions[index][2]),
+        ]
         for index, frame_id in enumerate(frame_ids)
     }
     scoring_blueprint = PoseGraphScoringModule.blueprint(

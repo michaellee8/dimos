@@ -48,6 +48,15 @@ class Kitti360PlaybackConfig(ModuleConfig):
     max_scans: int | None = None
     publish_interval_sec: float = 0.02
     first_response_timeout_sec: float = FIRST_RESPONSE_TIMEOUT_SEC
+    # Maximum points to include in each published `registered_scan`. KITTI-360
+    # raw scans are ~110k points (~500 KB serialized) and fragment across
+    # ~7 UDP datagrams under LCM multicast — fragment drops cause ~50 % of
+    # scans to fail reassembly at receivers. When the SUT doesn't need the
+    # cloud content (e.g. position-based loop detector that ignores body
+    # geometry), downsampling to a small `max_cloud_points` keeps each
+    # registered_scan in a single UDP datagram (~65 KB), eliminating
+    # fragmentation drops. Set to 0 to publish the full cloud.
+    max_cloud_points: int = 0
 
 
 class Kitti360PlaybackModule(Module):
@@ -103,6 +112,16 @@ class Kitti360PlaybackModule(Module):
                 odometry_message = make_odometry_msg(position, quaternion, ts=timestamp)
                 world_xyz = (pose[:3, :3] @ scan_xyz[:, :3].T).T + position
                 cloud_array = np.column_stack([world_xyz, scan_xyz[:, 3:4]]).astype(np.float32)
+                # Downsample for LCM transport efficiency. See max_cloud_points
+                # docstring — full clouds fragment across UDP datagrams and ~50 %
+                # drop under burst. Uniform stride is fine when downstream
+                # consumers don't rely on cloud content.
+                if (
+                    self.config.max_cloud_points > 0
+                    and len(cloud_array) > self.config.max_cloud_points
+                ):
+                    stride = max(1, len(cloud_array) // self.config.max_cloud_points)
+                    cloud_array = cloud_array[::stride][: self.config.max_cloud_points]
                 cloud_message = make_pointcloud_msg(cloud_array, ts=timestamp)
 
                 # Odometry first so the receiver can stash the latest pose
