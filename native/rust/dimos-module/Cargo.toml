@@ -6,11 +6,11 @@ description = "Rust native module SDK for dimos NativeModule framework"
 license = "Apache-2.0"
 
 [dependencies]
-dimos-lcm = { git = "https://github.com/dimensionalOS/dimos-lcm.git", branch = "rust-codegen" }
+dimos-lcm = { git = "https://github.com/dimensionalOS/dimos-lcm.git", branch = "jeff/fix/rust-frag-reassembly-leak" }
 dimos-module-macros = { version = "=0.1.0", path = "../dimos-module-macros" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "signal", "io-std", "io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
-lcm-msgs = { git = "https://github.com/dimensionalOS/dimos-lcm.git", branch = "rust-codegen" }
+lcm-msgs = { git = "https://github.com/dimensionalOS/dimos-lcm.git", branch = "jeff/fix/rust-frag-reassembly-leak" }

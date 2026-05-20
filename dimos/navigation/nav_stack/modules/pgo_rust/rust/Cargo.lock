@@ -192,6 +192,7 @@ dependencies = [
 [[package]]
 name = "dimos-lcm"
 version = "0.1.0"
+source = "git+https://github.com/dimensionalOS/dimos-lcm.git?branch=jeff%2Ffix%2Frust-frag-reassembly-leak#00ca8b83a0f5d1c6bbbc1b587652d6ad4595815e"
 dependencies = [
  "byteorder",
  "socket2 0.5.10",
@@ -377,6 +378,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lcm-msgs"
 version = "0.1.0"
+source = "git+https://github.com/dimensionalOS/dimos-lcm.git?branch=jeff%2Ffix%2Frust-frag-reassembly-leak#00ca8b83a0f5d1c6bbbc1b587652d6ad4595815e"
 dependencies = [
  "byteorder",
 ]

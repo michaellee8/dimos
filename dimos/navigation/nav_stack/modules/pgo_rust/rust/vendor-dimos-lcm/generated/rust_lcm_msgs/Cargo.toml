@@ -1,8 +1,0 @@
-[package]
-name = "lcm-msgs"
-version = "0.1.0"
-edition = "2021"
-description = "Auto-generated LCM message types for Rust"
-
-[dependencies]
-byteorder = "1"
