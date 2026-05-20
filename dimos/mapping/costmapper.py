@@ -16,7 +16,7 @@ from dataclasses import asdict
 import time
 
 from pydantic import Field
-from reactivex import operators as ops
+from reactivex import combine_latest, operators as ops
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
@@ -26,6 +26,8 @@ from dimos.mapping.pointclouds.occupancy import (
     HeightCostConfig,
     OccupancyConfig,
 )
+from dimos.mapping.utils.merge import merge_pc
+from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.logging_config import setup_logger
@@ -41,11 +43,19 @@ class Config(ModuleConfig):
 class CostMapper(Module):
     config: Config
     global_map: In[PointCloud2]
+    loaded_map: In[PointCloud2]
+    world_to_map: In[Transform]
     global_costmap: Out[OccupancyGrid]
 
     @rpc
     def start(self) -> None:
         super().start()
+
+        def _maybe_merge(triple: tuple[PointCloud2, PointCloud2 | None, Transform | None]) -> PointCloud2:
+            gmap, lmap, tf = triple
+            if lmap is not None and tf is not None:
+                return merge_pc(gmap, lmap, tf)
+            return gmap
 
         def _publish_costmap(grid: OccupancyGrid, calc_time_ms: float, rx_monotonic: float) -> None:
             self.global_costmap.publish(grid)
@@ -59,8 +69,14 @@ class CostMapper(Module):
             elapsed_ms = (time.perf_counter() - start) * 1000
             return grid, elapsed_ms, rx_monotonic
 
+
         self.register_disposable(
-            self.global_map.observable()  # type: ignore[no-untyped-call]
+            combine_latest(
+                self.global_map.observable(),  # type: ignore[no-untyped-call]
+                self.loaded_map.observable().pipe(ops.start_with(None)),    # type: ignore[no-untyped-call]
+                self.world_to_map.observable().pipe(ops.start_with(None)),  # type: ignore[no-untyped-call]
+            )
+            .pipe(ops.map(_maybe_merge))
             .pipe(ops.map(_calculate_and_time))
             .subscribe(lambda result: _publish_costmap(result[0], result[1], result[2]))
         )

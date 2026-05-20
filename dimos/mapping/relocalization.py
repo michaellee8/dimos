@@ -20,7 +20,7 @@ from reactivex.disposable import Disposable
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
-from dimos.core.module import Module
+from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -30,6 +30,7 @@ from dimos.utils.logging_config import setup_logger
 from dimos.utils.data import get_data
 
 from dimos.mapping.relocalize import relocalize as _relocalize
+from dimos.mapping.utils.merge import merge_pc
 
 logger = setup_logger()
 
@@ -42,9 +43,17 @@ RELOC_INTERVAL = 2.0
 MIN_LOCAL_POINTS = 20000
 
 
+class Config(ModuleConfig):
+    publish_loaded_map: bool = True
+    publish_merged: bool = False        # turn on by `-o relocalizationmodule.publish_merged=true`
+
+
 class RelocalizationModule(Module):
+    config: Config
     global_map: In[PointCloud2]
     loaded_map: Out[PointCloud2]
+    merged_map_viz: Out[PointCloud2]
+    world_to_map: Out[Transform]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -158,11 +167,21 @@ class RelocalizationModule(Module):
         while self._running:
             if self._premap is None or not self._relocalized:
                 continue
-            self.loaded_map.publish(self._premap)
 
             with self._tf_lock:
                 tf = self._world_to_map
+
+            if self.config.publish_loaded_map:
+                self.loaded_map.publish(self._premap)
+
+            if self.config.publish_merged:
+                with self._local_lock:
+                    local = self._local_map
+                if local is not None:
+                    self.merged_map_viz.publish(merge_pc(local, self._premap, tf))
+
             self.tf.publish(tf)
+            self.world_to_map.publish(tf)
 
             time.sleep(PUBLISH_INTERVAL)
 
