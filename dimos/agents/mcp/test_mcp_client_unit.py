@@ -70,6 +70,11 @@ def _mock_post(url: str, **kwargs: object) -> MagicMock:
                     "description": "Take a picture",
                     "inputSchema": {"type": "object", "properties": {}},
                 },
+                {
+                    "name": "narrate_picture",
+                    "description": "Take a picture and describe what's in it",
+                    "inputSchema": {"type": "object", "properties": {}},
+                },
             ]
         }
     elif method == "tools/call":
@@ -89,6 +94,21 @@ def _mock_post(url: str, **kwargs: object) -> MagicMock:
                         "type": "image_url",
                         "image_url": {"url": "data:image/jpeg;base64,FAKEPAYLOAD"},
                     }
+                ]
+            }
+        elif name == "narrate_picture":
+            # Tool that returns both prose AND an image (e.g. a VLM
+            # describing what it sees). Exercises the `summary = text`
+            # branch of the Command-building path — the fallback
+            # "{name} returned N artefact(s)" sentinel must NOT be used
+            # when the tool already provided real text.
+            result = {
+                "content": [
+                    {"type": "text", "text": "I see a chair and a window."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "data:image/jpeg;base64,FAKEPAYLOAD"},
+                    },
                 ]
             }
         else:
@@ -130,7 +150,7 @@ def mcp_client() -> McpClient:
 def test_fetch_tools_from_mcp_server(mcp_client: McpClient) -> None:
     tools = mcp_client._fetch_tools()
 
-    assert [t.name for t in tools] == ["add", "greet", "take_picture"]
+    assert [t.name for t in tools] == ["add", "greet", "take_picture", "narrate_picture"]
 
 
 def test_tool_invocation_via_mcp(mcp_client: McpClient) -> None:
@@ -175,6 +195,33 @@ def test_image_tool_returns_langgraph_command(mcp_client: McpClient) -> None:
     assert blocks[0]["type"] == "text"
     assert any(
         b.get("type") == "image_url" and "FAKEPAYLOAD" in b["image_url"]["url"] for b in blocks[1:]
+    )
+
+
+def test_image_tool_with_text_uses_real_text_as_tool_message(mcp_client: McpClient) -> None:
+    """When a tool returns BOTH text and image content, the ToolMessage
+    carries the tool's actual narration — not the
+    "{name} returned N artefact(s)" fallback sentinel. The image still
+    rides back on the follow-up HumanMessage as usual.
+    """
+    tools = mcp_client._fetch_tools()
+    narrate_tool = next(t for t in tools if t.name == "narrate_picture")
+
+    out = narrate_tool.func(tool_call_id="tc-narrate")
+
+    assert isinstance(out, Command)
+    tool_msg, human_msg = out.update["messages"]
+
+    assert isinstance(tool_msg, ToolMessage)
+    assert tool_msg.content == "I see a chair and a window."
+    assert "artefact" not in str(tool_msg.content)
+
+    assert isinstance(human_msg, HumanMessage)
+    blocks = human_msg.content
+    assert isinstance(blocks, list)
+    assert any(
+        b.get("type") == "image_url" and "FAKEPAYLOAD" in b["image_url"]["url"]
+        for b in blocks[1:]
     )
 
 
