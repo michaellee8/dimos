@@ -187,6 +187,7 @@ class RelocalizationModule(Module):
     def _publish_loop(self) -> None:
         while self._running:
             if self._premap is None or not self._relocalized:
+                time.sleep(0.1)
                 continue
 
             with self._tf_lock:
