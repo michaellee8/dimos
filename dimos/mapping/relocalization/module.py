@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import threading, time
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -28,7 +27,7 @@ from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.logging_config import setup_logger
-from dimos.utils.data import get_data
+from dimos.utils.data import resolve_named_path
 
 from dimos.mapping.relocalization.relocalize import relocalize as _relocalize
 
@@ -88,13 +87,8 @@ class RelocalizationModule(Module):
             logger.info("Relocalization module disabled (no map_file configured)")
             return
 
-        name = self.config.map_file
-        if not name.endswith(MAP_SUFFIX):
-            name = name + MAP_SUFFIX
-        path = Path(name)
-        data = path.read_bytes() if path.is_absolute() or path.exists() else get_data(name).read_bytes()
-
-        self._premap = PointCloud2.lcm_decode(data)
+        path = resolve_named_path(self.config.map_file, MAP_SUFFIX)
+        self._premap = PointCloud2.lcm_decode(path.read_bytes())
         self._premap.frame_id = FRAME_MAP
         self._running = True
         self.register_disposable(Disposable(self.global_map.subscribe(self._on_global_map)))

@@ -667,7 +667,7 @@ def send(
 
 @main.command(name="export-premap")
 def export_premap_cmd(
-    dataset: str = typer.Argument(..., help="Dataset .db name (resolved via get_data) or path"),
+    dataset: str = typer.Argument(..., help="Dataset .db: bare name (cwd or data/) or path"),
     output: Path | None = typer.Option(None, "-o", "--output", help="Output .pc2.lcm path"),
     voxel_size: float = typer.Option(0.05, "--voxel-size", help="Voxel size for the rebuild"),
     duration: float | None = typer.Option(
@@ -677,11 +677,9 @@ def export_premap_cmd(
     """Export a twopass relocalization premap (.pc2.lcm) from a recorded SQLite dataset."""
     from dimos.mapping.relocalization.pgo import pgo_then_voxels
     from dimos.memory2.store.sqlite import SqliteStore
-    from dimos.utils.data import get_data, get_data_dir
+    from dimos.utils.data import get_data_dir, resolve_named_path
 
-    name = dataset if dataset.endswith(".db") else f"{dataset}.db"
-    path = Path(name)
-    db_path = path if path.is_absolute() or path.exists() else get_data(name)
+    db_path = resolve_named_path(dataset, ".db")
 
     store = SqliteStore(path=db_path)
     lidar = store.streams.lidar
@@ -692,8 +690,8 @@ def export_premap_cmd(
     twopass_map = pgo_then_voxels(lidar, voxel_size=voxel_size)
 
     if output is None:
-        stem = Path(name).stem
-        output = get_data_dir() / f"{stem}_twopass_map.pc2.lcm"
+        output = get_data_dir() / f"{db_path.stem}_twopass_map.pc2.lcm"
+    output.parent.mkdir(parents=True, exist_ok=True)
     output.write_bytes(twopass_map.lcm_encode())
     typer.echo(f"wrote {output}")
 

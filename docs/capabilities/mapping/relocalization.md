@@ -22,60 +22,75 @@ the `--robot-ip` flag:
 dimos run unitree-go2-memory
 ```
 
-This writes `recording_go2.db` to the repo root.
-
-Move it into `data/` and rename it after the place you scanned (e.g.
-`go2_hongkong_office.db`) so the export tool can resolve it by name and
-your premap ends up with a useful filename:
-
-```bash
-mv recording_go2.db data/{DB_NAME}.db
-```
-
-`{DB_NAME}` is the stem (no `.db`); the next steps refer to it.
+This writes `recording_go2.db` to the repo root. Run the next command
+from the repo root so the bare-name lookup finds this file. In the next
+steps `{DB_NAME}` refers to the stem of your recording - `recording_go2`
+if you kept the default.
 
 ## 2. Export the premap
 
-Convert the recording to a relocalization premap (`.pc2.lcm`). If you
-kept the default recording filename:
+Convert the recording to a relocalization premap (`.pc2.lcm`):
 
 ```bash
+# default name from step 1:
 dimos export-premap recording_go2
+
+# renamed:
+dimos export-premap {DB_NAME}
 ```
 
-Otherwise pass the name of the `.db` you produced:
+`{DB_NAME}` can be a file name (with or without extension), or a relative / absolute path.
+
+When a bare file name is given, the tool searches in:
+
+1. current working directory
+2. `data/` (where LFS files live)
+
+Examples:
 
 ```bash
-dimos export-premap {DB_NAME}
+dimos export-premap go2_hongkong_office
+dimos export-premap ./go2_hongkong_office.db
+dimos export-premap data/go2_hongkong_office.db
+dimos export-premap /abs/path/to/scan.db
+```
+
+Output defaults to `data/{basename}_twopass_map.pc2.lcm`. Pass `-o
+<path>` to save elsewhere. Relative paths resolve against the current
+working directory; parent directories are created on demand.
+
+```bash
+dimos export-premap recording_go2 -o /tmp/scan.pc2.lcm
+dimos export-premap recording_go2 -o ./recording_go2_twopass_map.pc2.lcm
 ```
 
 Sample log:
 
 ```
-computing twopass map from /Users/dimos/Desktop/dimos-reloc/data/go2_hongkong_office_2.db (voxel_size=0.05)...
+computing twopass map from /Users/dimos/Desktop/dimos-reloc/recording_go2.db (voxel_size=0.05)...
   Pass 1: 908 frames, 1 keyframes
 12:54:32.025[inf][dimos/mapping/voxels.py       ] VoxelGrid using device: CPU:0
-wrote /Users/dimos/Desktop/dimos-reloc/data/go2_hongkong_office_2_twopass_map.pc2.lcm
+wrote /Users/dimos/Desktop/dimos-reloc/data/recording_go2_twopass_map.pc2.lcm
 ```
 
-The output filename is `{DB_NAME}_twopass_map.pc2.lcm`, stored in `data/`.
+## 3. Relocalize against replay
 
-## 3. Relocalize against the premap (replay smoke test)
-
-Replay the same recording and have the relocalization module localize
-against the premap you just exported. Use the `unitree-go2-relocalization`
-blueprint — it's the standard `unitree-go2` stack plus
-`RelocalizationModule`:
+Replay a recording and have the relocalization module localize against
+the premap. Use the `unitree-go2-relocalization` blueprint — it's the
+standard `unitree-go2` stack plus `RelocalizationModule`:
 
 ```bash
 dimos --replay --replay-db {DB_NAME} run unitree-go2-relocalization \
   -o relocalizationmodule.map_file={DB_NAME}_twopass_map
 ```
 
+`{DB_NAME}_twopass_map` is resolved the same way as in section 2: cwd
+first, then `data/`.
+
 Sample log:
 
 ```
-12:58:51.469[inf][imos/mapping/relocalization.py] Relocalization module started: map_file='go2_hongkong_office_2_twopass_map'  loaded_map.frame_id='map'  placeholder TF 'world' -> 'map'  z_offset=20.0
+12:58:51.469[inf][imos/mapping/relocalization.py] Relocalization module started: map_file='recording_go2_twopass_map'  loaded_map.frame_id='map'  placeholder TF 'world' -> 'map'  z_offset=20.0
 12:58:56.528[war][imos/mapping/relocalization.py] relocalize skipped: n_pts=14198 < MIN_LOCAL_POINTS=20000
 12:59:04.777[war][imos/mapping/relocalization.py] relocalize rejected: fitness=0.466 < threshold=0.6 time_cost=5.3s n_pts=20231
 12:59:14.880[war][imos/mapping/relocalization.py] relocalize rejected: fitness=0.433 < threshold=0.6 time_cost=8.1s n_pts=37770
@@ -105,7 +120,7 @@ With the loaded map hidden you see the partial pointcloud from the
 scanning replay plus the full costmap from the merged current scan +
 premap.
 
-Also, you can also replay a different recording taken in the same physical
+You can also replay a different recording taken in the same physical
 space against the same premap.
 
 
