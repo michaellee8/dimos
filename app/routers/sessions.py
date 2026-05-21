@@ -302,21 +302,24 @@ async def bridge_datachannel(
             detail=f"Datachannel bridge failed ({type(e).__name__}): {e}",
         )
 
-    if (
-        not pub
-        or not sub
-        or len(pub) != len(channel_names)
-        or len(sub) != len(channel_names)
-        or any("id" not in entry for entry in pub)
-        or any("id" not in entry for entry in sub)
-    ):
+    # Index by dataChannelName from the response, not by request position —
+    # don't assume CF preserves order across the array.
+    try:
+        pub_ids = {entry["dataChannelName"]: int(entry["id"]) for entry in pub}
+        sub_ids = {entry["dataChannelName"]: int(entry["id"]) for entry in sub}
+    except (KeyError, TypeError, ValueError) as e:
         raise HTTPException(
             status_code=502,
-            detail="Cloudflare did not return DataChannel ids for all channels",
+            detail=f"Cloudflare returned malformed DataChannel entry: {e}",
         )
 
-    pub_ids = {name: int(entry["id"]) for name, entry in zip(channel_names, pub)}
-    sub_ids = {name: int(entry["id"]) for name, entry in zip(channel_names, sub)}
+    missing = [n for n in channel_names if n not in pub_ids or n not in sub_ids]
+    if missing:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cloudflare missing DataChannel id for: {', '.join(missing)}",
+        )
+
     _robot_subscriber_dc_ids[session.id] = sub_ids
 
     return BridgeDatachannelResponse(
