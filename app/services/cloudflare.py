@@ -1,5 +1,6 @@
 """Cloudflare Realtime SFU API client."""
 
+import asyncio
 import logging
 
 import httpx
@@ -7,6 +8,18 @@ import httpx
 from config import settings
 
 log = logging.getLogger(__name__)
+
+# CF Realtime sessions report `pc.connectionState === 'connected'` to the
+# client a few hundred ms before the server-side session is considered ready
+# for /datachannels/new. Retry on that specific error before giving up.
+_ADD_DC_RETRY_DELAYS_SEC = (0.25, 0.5, 1.0, 2.0)
+
+
+def _is_session_not_ready(error_code: str, error_description: str) -> bool:
+    return (
+        error_code == "session_error"
+        and "not ready" in (error_description or "").lower()
+    )
 
 
 class CloudflareRealtimeError(Exception):
@@ -61,31 +74,53 @@ class CloudflareRealtime:
 
     async def add_datachannels(self, session_id: str, channels: list[dict]) -> list[dict]:
         url = f"{self.base_url}/sessions/{session_id}/datachannels/new"
-        log.info("CF add_datachannels POST %s body=%s", url, channels)
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    url,
-                    headers=self.headers,
-                    json={"dataChannels": channels},
-                    timeout=30.0,
-                )
-        except httpx.HTTPError as e:
-            log.error("CF add_datachannels %s failed: %r", type(e).__name__, e)
-            raise
-        log.info(
-            "CF add_datachannels response status=%s body=%s",
-            resp.status_code, resp.text[:500],
-        )
-        if resp.status_code not in (200, 201):
-            raise CloudflareRealtimeError(resp.status_code, resp.text)
-        data = resp.json()
-        if data.get("errorCode"):
-            raise CloudflareRealtimeError(
-                resp.status_code,
-                f"{data['errorCode']}: {data.get('errorDescription', '')}",
+        attempts = 1 + len(_ADD_DC_RETRY_DELAYS_SEC)
+        last_err: CloudflareRealtimeError | None = None
+
+        for attempt in range(1, attempts + 1):
+            log.info(
+                "CF add_datachannels POST %s attempt=%d/%d body=%s",
+                url, attempt, attempts, channels,
             )
-        return data.get("dataChannels", [])
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.post(
+                        url,
+                        headers=self.headers,
+                        json={"dataChannels": channels},
+                        timeout=30.0,
+                    )
+            except httpx.HTTPError as e:
+                log.error("CF add_datachannels %s failed: %r", type(e).__name__, e)
+                raise
+            log.info(
+                "CF add_datachannels attempt=%d status=%s body=%s",
+                attempt, resp.status_code, resp.text[:500],
+            )
+            if resp.status_code not in (200, 201):
+                raise CloudflareRealtimeError(resp.status_code, resp.text)
+            data = resp.json()
+            error_code = data.get("errorCode")
+            if not error_code:
+                return data.get("dataChannels", [])
+
+            last_err = CloudflareRealtimeError(
+                resp.status_code,
+                f"{error_code}: {data.get('errorDescription', '')}",
+            )
+            if not _is_session_not_ready(error_code, data.get("errorDescription", "")):
+                raise last_err
+            if attempt >= attempts:
+                break
+            delay = _ADD_DC_RETRY_DELAYS_SEC[attempt - 1]
+            log.warning(
+                "CF add_datachannels attempt=%d session-not-ready, retrying in %.2fs",
+                attempt, delay,
+            )
+            await asyncio.sleep(delay)
+
+        assert last_err is not None
+        raise last_err
 
     async def get_session(self, session_id: str) -> dict | None:
         """Get session info. Returns None if not found."""
