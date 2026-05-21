@@ -36,11 +36,14 @@
 
 // dimos LCM message headers
 #include "geometry_msgs/Quaternion.hpp"
+#include "geometry_msgs/Transform.hpp"
+#include "geometry_msgs/TransformStamped.hpp"
 #include "geometry_msgs/Vector3.hpp"
 #include "nav_msgs/Odometry.hpp"
 #include "sensor_msgs/Imu.hpp"
 #include "sensor_msgs/PointCloud2.hpp"
 #include "sensor_msgs/PointField.hpp"
+#include "tf2_msgs/TFMessage.hpp"
 
 // FAST-LIO (header-only core, compiled sources linked via CMake)
 #include "fast_lio.hpp"
@@ -62,6 +65,7 @@ static FastLio* g_fastlio = nullptr;
 static std::string g_lidar_topic;
 static std::string g_odometry_topic;
 static std::string g_map_topic;
+static std::string g_tf_topic;        // shared /tf channel (optional, default /tf#tf2_msgs.TFMessage)
 static std::string g_frame_id;        // required via --frame_id
 static std::string g_child_frame_id;   // required via --child_frame_id
 static float g_frequency = 10.0f;
@@ -258,6 +262,63 @@ static void publish_odometry(const custom_messages::Odometry& odom, double times
 }
 
 // ---------------------------------------------------------------------------
+// Publish TF
+//
+// Per REP-105, an odometry source publishes the parent → child transform on
+// /tf alongside its Odometry message.  Same frame chain as publish_odometry
+// (g_frame_id → g_child_frame_id), same init_pose offset applied.
+// ---------------------------------------------------------------------------
+
+static void publish_tf(const custom_messages::Odometry& odom, double timestamp) {
+    if (!g_lcm || g_tf_topic.empty()) return;
+
+    geometry_msgs::TransformStamped t;
+    t.header = make_header(g_frame_id, timestamp);
+    t.child_frame_id = g_child_frame_id;
+
+    // Same init_pose offset publish_odometry applies (kept in lockstep so
+    // /tf and /odometry never disagree on where base_link is).
+    double px, py, pz;
+    double qx, qy, qz, qw;
+    if (has_init_pose()) {
+        quat_rotate(g_init_qx, g_init_qy, g_init_qz, g_init_qw,
+                    odom.pose.pose.position.x,
+                    odom.pose.pose.position.y,
+                    odom.pose.pose.position.z,
+                    px, py, pz);
+        px += g_init_x; py += g_init_y; pz += g_init_z;
+        quat_mul(g_init_qx, g_init_qy, g_init_qz, g_init_qw,
+                 odom.pose.pose.orientation.x,
+                 odom.pose.pose.orientation.y,
+                 odom.pose.pose.orientation.z,
+                 odom.pose.pose.orientation.w,
+                 qx, qy, qz, qw);
+    } else {
+        px = odom.pose.pose.position.x;
+        py = odom.pose.pose.position.y;
+        pz = odom.pose.pose.position.z;
+        qx = odom.pose.pose.orientation.x;
+        qy = odom.pose.pose.orientation.y;
+        qz = odom.pose.pose.orientation.z;
+        qw = odom.pose.pose.orientation.w;
+    }
+
+    t.transform.translation.x = px;
+    t.transform.translation.y = py;
+    t.transform.translation.z = pz;
+    t.transform.rotation.x = qx;
+    t.transform.rotation.y = qy;
+    t.transform.rotation.z = qz;
+    t.transform.rotation.w = qw;
+
+    tf2_msgs::TFMessage tf_msg;
+    tf_msg.transforms.push_back(t);
+    tf_msg.transforms_length = static_cast<int32_t>(tf_msg.transforms.size());
+
+    g_lcm->publish(g_tf_topic, &tf_msg);
+}
+
+// ---------------------------------------------------------------------------
 // Livox SDK callbacks
 // ---------------------------------------------------------------------------
 
@@ -379,6 +440,11 @@ int main(int argc, char** argv) {
     g_odometry_topic = mod.has("odometry") ? mod.topic("odometry") : "";
     g_map_topic = mod.has("global_map") ? mod.topic("global_map") : "";
 
+    // Shared /tf channel.  Per REP-105, fastlio (the odometry source)
+    // publishes g_frame_id → g_child_frame_id on /tf alongside Odometry.
+    // Set --tf_channel "" to disable.
+    g_tf_topic = mod.arg("tf_channel", "/tf#tf2_msgs.TFMessage");
+
     if (g_lidar_topic.empty() && g_odometry_topic.empty()) {
         fprintf(stderr, "Error: at least one of --lidar or --odometry is required\n");
         return 1;
@@ -460,6 +526,8 @@ int main(int argc, char** argv) {
                g_odometry_topic.empty() ? "(disabled)" : g_odometry_topic.c_str());
         printf("[fastlio2] global_map topic: %s\n",
                g_map_topic.empty() ? "(disabled)" : g_map_topic.c_str());
+        printf("[fastlio2] tf topic: %s\n",
+               g_tf_topic.empty() ? "(disabled)" : g_tf_topic.c_str());
         printf("[fastlio2] config: %s\n", config_path.c_str());
         printf("[fastlio2] host_ip: %s  lidar_ip: %s  frequency: %.1f Hz\n",
                host_ip.c_str(), lidar_ip.c_str(), g_frequency);
@@ -607,9 +675,13 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Publish odometry (rate-limited to odom_freq)
+            // Publish odometry + matching TF (rate-limited to odom_freq).
+            // /tf is gated on the odometry topic being enabled so the two
+            // never disagree about whether we're publishing a pose at all.
             if (!g_odometry_topic.empty() && (now - last_odom_publish >= odom_interval)) {
-                publish_odometry(fast_lio.get_odometry(), ts);
+                auto fl_odom = fast_lio.get_odometry();
+                publish_odometry(fl_odom, ts);
+                publish_tf(fl_odom, ts);
                 last_odom_publish = now;
             }
         }

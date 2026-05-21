@@ -34,11 +34,9 @@ from __future__ import annotations
 import ipaddress
 from pathlib import Path
 import socket
-import time
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic.experimental.pipeline import validate_as
-from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
 from dimos.core.native_module import NativeModule, NativeModuleConfig
@@ -56,9 +54,6 @@ from dimos.hardware.sensors.lidar.livox.ports import (
     SDK_PUSH_MSG_PORT,
 )
 from dimos.msgs.geometry_msgs.Pose import Pose
-from dimos.msgs.geometry_msgs.Quaternion import Quaternion
-from dimos.msgs.geometry_msgs.Transform import Transform
-from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.nav_stack.frames import FRAME_BODY, FRAME_ODOM
@@ -113,6 +108,11 @@ class FastLio2Config(NativeModuleConfig):
         Path, validate_as(...).transform(lambda p: p if p.is_absolute() else _CONFIG_DIR / p)
     ] = Path("mid360.yaml")
 
+    # Shared /tf channel.  The C++ binary publishes
+    # frame_id → child_frame_id (odom → base_link) on /tf alongside
+    # Odometry, per REP-105.  Set to empty string to disable.
+    tf_channel: str = "/tf#tf2_msgs.TFMessage"
+
     debug: bool = False
 
     # SDK port configuration (see livox/ports.py for defaults)
@@ -164,29 +164,6 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry, mapping.Glob
     def start(self) -> None:
         self._validate_network()
         super().start()
-        self.register_disposable(
-            Disposable(self.odometry.transport.subscribe(self._on_odom_for_tf, self.odometry))
-        )
-
-    def _on_odom_for_tf(self, msg: Odometry) -> None:
-        self.tf.publish(
-            Transform(
-                frame_id=FRAME_ODOM,
-                child_frame_id=FRAME_BODY,
-                translation=Vector3(
-                    msg.pose.position.x,
-                    msg.pose.position.y,
-                    msg.pose.position.z,
-                ),
-                rotation=Quaternion(
-                    msg.pose.orientation.x,
-                    msg.pose.orientation.y,
-                    msg.pose.orientation.z,
-                    msg.pose.orientation.w,
-                ),
-                ts=msg.ts or time.time(),
-            )
-        )
 
     @rpc
     def stop(self) -> None:
