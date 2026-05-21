@@ -81,12 +81,11 @@ class RelocalizationModule(Module):
             .pipe(
                 ops.throttle_first(RELOC_INTERVAL),
                 ops.do_action(self._maybe_log_skip),
-                ops.filter(lambda m: len(m) >= MIN_LOCAL_POINTS),
+                ops.filter(self._has_enough_points),
                 ops.observe_on(get_scheduler()),
                 ops.map(self._try_relocalize),
-                ops.filter(lambda tf: tf is not None),
             )
-            .subscribe(self.world_to_map.publish)
+            .subscribe(self._publish_tf)
         )
 
         self.register_disposable(
@@ -110,15 +109,22 @@ class RelocalizationModule(Module):
         )
 
     def _maybe_log_skip(self, msg: PointCloud2) -> None:
-        n_pts = len(msg)
-        if n_pts >= MIN_LOCAL_POINTS:
+        if self._has_enough_points(msg):
             return
         now = time.monotonic()
         if now - self._last_skip_log > 5.0:
             logger.warning(
-                f"relocalize skipped: n_pts={n_pts} < MIN_LOCAL_POINTS={MIN_LOCAL_POINTS}"
+                f"relocalize skipped: n_pts={len(msg)} < MIN_LOCAL_POINTS={MIN_LOCAL_POINTS}"
             )
             self._last_skip_log = now
+
+    def _has_enough_points(self, msg: PointCloud2) -> bool:
+        return len(msg) >= MIN_LOCAL_POINTS
+
+    def _publish_tf(self, tf: Transform | None) -> None:
+        if tf is None:
+            return
+        self.world_to_map.publish(tf)
 
     def _try_relocalize(self, msg: PointCloud2) -> Transform | None:
         assert self._premap is not None
