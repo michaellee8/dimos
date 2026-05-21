@@ -105,7 +105,11 @@ class G1HighLevelDdsSdk(Module, HighLevelG1Spec):
 
         # Initialise DDS channel factory
         logger.info(f"Initializing DDS on interface: {network_interface}")
-        ChannelFactoryInitialize(0, network_interface)
+        try:
+            ChannelFactoryInitialize(0, network_interface)
+        except Exception as e:
+            # Idempotent — already initialised by a sibling participant is fine.
+            logger.debug(f"ChannelFactoryInitialize raised (likely already init'd): {e}")
 
         # Motion switcher (required before LocoClient commands work)
         self.motion_switcher = MotionSwitcherClient()
