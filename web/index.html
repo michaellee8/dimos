@@ -893,6 +893,8 @@ angular.z = 0</pre>
         else navigate('auth');
 
         // DevTools-only preview hook — no broker required.
+        // Getters return live module-scoped refs so `_teleopDev.pc` etc. are
+        // inspectable from the console (modules don't expose locals on window).
         window._teleopDev = {
             previewKeyboard() {
                 cmdChannel = { readyState: 'open', send: () => {} };
@@ -904,6 +906,13 @@ angular.z = 0</pre>
                 navigate('teleop');
             },
             navigate,
+            get pc() { return pc; },
+            get cmdChannel() { return cmdChannel; },
+            get stateChannel() { return stateChannel; },
+            get xrSession() { return xrSession; },
+            get activeRobot() { return activeRobot; },
+            get clockOffsetMs() { return clockOffsetMs; },
+            get bestRttMs() { return bestRttMs; },
         };
     </script>
 </body>
