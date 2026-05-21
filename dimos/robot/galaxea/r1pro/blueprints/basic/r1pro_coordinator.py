@@ -21,14 +21,19 @@ through ``TransportTwistAdapter``. No R1Pro-specific adapter code — same
 shape as the G1 wiring.
 
 Usage:
-    dimos run r1pro-coordinator
+    dimos run r1pro-coordinator                # no viewer
+    dimos --viewer rerun run r1pro-coordinator # composes the rerun bridge
+    dimos --viewer rerun-web run r1pro-coordinator
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 from dimos.control.components import HardwareComponent, HardwareType, make_twist_base_joints
 from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
+from dimos.core.global_config import global_config
 from dimos.core.transport import LCMTransport
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
@@ -37,11 +42,64 @@ from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.MotorCommandArray import MotorCommandArray
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.protocol.pubsub.impl.lcmpubsub import LCM
 from dimos.robot.galaxea.r1pro.connection import R1PRO_UPPER_BODY_JOINTS, R1ProConnection
 
 _chassis_joints = make_twist_base_joints("chassis")
 
-r1pro_coordinator = (
+
+def _r1pro_rerun_blueprint() -> Any:
+    """Two-tab viewer layout: main (wrist+head+3D) and surround chassis cams + depth.
+
+    Entity paths assume the bridge's default ``entity_prefix="world"`` — so
+    LCM topic ``/r1pro/head_color`` lands at ``world/r1pro/head_color``.
+    """
+    import rerun as rr
+    import rerun.blueprint as rrb
+
+    main_tab = rrb.Horizontal(
+        rrb.Vertical(
+            rrb.Spatial2DView(origin="world/r1pro/wrist_left_color", name="Left wrist"),
+            rrb.Spatial2DView(origin="world/r1pro/wrist_right_color", name="Right wrist"),
+            rrb.Spatial2DView(origin="world/r1pro/head_color", name="Head"),
+        ),
+        rrb.Spatial3DView(
+            origin="world",
+            name="3D",
+            background=rrb.Background(kind="SolidColor", color=[0, 0, 0]),
+            line_grid=rrb.LineGrid3D(
+                plane=rr.components.Plane3D.XY.with_distance(0.5),
+            ),
+        ),
+        column_shares=[1, 2],
+        name="Main",
+    )
+
+    surround_tab = rrb.Grid(
+        rrb.Spatial2DView(origin="world/r1pro/chassis_front_left", name="Front-left"),
+        rrb.Spatial2DView(origin="world/r1pro/chassis_front_right", name="Front-right"),
+        rrb.Spatial2DView(origin="world/r1pro/chassis_left", name="Left"),
+        rrb.Spatial2DView(origin="world/r1pro/chassis_right", name="Right"),
+        rrb.Spatial2DView(origin="world/r1pro/chassis_rear", name="Rear"),
+        rrb.Spatial2DView(origin="world/r1pro/head_depth", name="Head depth"),
+        grid_columns=3,
+        name="Surround + depth",
+    )
+
+    return rrb.Blueprint(
+        rrb.Tabs(main_tab, surround_tab),
+        rrb.TimePanel(state="hidden"),
+        rrb.SelectionPanel(state="hidden"),
+    )
+
+
+_rerun_config = {
+    "blueprint": _r1pro_rerun_blueprint,
+    "pubsubs": [LCM()],
+}
+
+
+_r1pro_base = (
     autoconnect(
         R1ProConnection.blueprint(),
         ControlCoordinator.blueprint(
@@ -98,6 +156,12 @@ r1pro_coordinator = (
             # Twist bridge (hw_id="chassis").
             ("chassis_cmd_vel", Twist): LCMTransport("/chassis/cmd_vel", Twist),
             ("chassis_odom", PoseStamped): LCMTransport("/chassis/odom", PoseStamped),
+            # Public Twist bus on /cmd_vel — `cmd_vel` covers any module's Out
+            # (KeyboardTeleop, phone teleop, etc.); `twist_command` is the
+            # ControlCoordinator's matching In. Both pinned to the same LCM
+            # topic so any Twist publisher drives the chassis.
+            ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
+            ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
             # Sensor pass-throughs — downstream consumers (rerun bridge,
             # perception modules, etc.) attach to these topics directly.
             ("head_color", Image): LCMTransport("/r1pro/head_color", Image),
@@ -120,6 +184,22 @@ r1pro_coordinator = (
         }
     )
 )
+
+
+# Compose the rerun bridge when the user asks for it via `dimos --viewer rerun`.
+# Mirrors `unitree_go2_basic` / `uintree_g1_primitive_no_nav` — gate on
+# global_config.viewer.startswith("rerun") so "rerun", "rerun-web", and
+# "rerun-connect" all light up. Without the flag, no bridge is attached and
+# nothing changes from the headless coordinator path.
+if global_config.viewer.startswith("rerun"):
+    from dimos.visualization.rerun.bridge import RerunBridgeModule, _resolve_viewer_mode
+
+    r1pro_coordinator = autoconnect(
+        _r1pro_base,
+        RerunBridgeModule.blueprint(viewer_mode=_resolve_viewer_mode(), **_rerun_config),
+    )
+else:
+    r1pro_coordinator = _r1pro_base
 
 
 __all__ = ["r1pro_coordinator"]
