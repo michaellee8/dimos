@@ -109,14 +109,12 @@ quality, disable the gate:
 -o relocalizationmodule.fitness_threshold=0.0
 ```
 
-You can watch the alignment in Rerun. The loaded premap is published on
+You can watch the alignment in Rerun. The merged map is published on
 its own entity — to compare the merged costmap (live scan + premap)
-against the live scan alone, click the eye icon next to the loaded-map
-entity to toggle it off (you can hide both loaded_map and merged_map).
+against the live scan alone, click the eye icon next to the merged map
+entity to toggle it off.
 
-![toggle loaded map](assets/reloc_hide_loaded_map.webp)
-
-With the loaded map hidden you see the partial pointcloud from the
+With the merged map hidden you see the partial pointcloud from the
 scanning replay plus the full costmap from the merged current scan +
 premap.
 
