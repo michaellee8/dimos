@@ -44,6 +44,7 @@ Recommended to setup [tailscale](https://tailscale.com/tailscale-ssh) to avoid n
 SSH into the robot, then:
 
 ```bash
+export CYCLONEDDS_HOME="$HOME/cyclonedds/install"
 # pick the "developer" setup
 DIM_BRANCH=main bash <(curl -fsSL https://pub-4767fdd15e6a41b6b2ce2558d71ec8d9.r2.dev/install.sh)
 ```
