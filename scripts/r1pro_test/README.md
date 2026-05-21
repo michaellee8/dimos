@@ -237,10 +237,16 @@ are inside this Module.
 | `dimos/robot/galaxea/r1pro/connection.py` | `R1ProConnection` Module + `R1PRO_UPPER_BODY_JOINTS` constant + `R1ProConnectionConfig` |
 | `dimos/robot/galaxea/r1pro/blueprints/basic/r1pro_coordinator.py` | Coordinator blueprint: `autoconnect(R1ProConnection, ControlCoordinator)` with WHOLE_BODY + BASE hardware components, both wired through `transport_lcm` |
 | `dimos/robot/galaxea/r1pro/blueprints/basic/r1pro_keyboard_teleop.py` | Composes `r1pro_coordinator` + `KeyboardTeleop` for chassis Twist (display throttled to 10 Hz to survive X11 forwarding — see §12.D) |
-| `dimos/robot/galaxea/r1pro/rerun.py` | `r1pro_rerun_blueprint()` — Rerun viewer layout (tabs: Main / Surround + depth) |
 | `dimos/robot/catalog/galaxea.py` | `R1PRO_MODEL_PATH`, `R1PRO_COLLISION_EXCLUSIONS`, `r1pro_arm()` factory (planner / Drake side only) |
-| `scripts/r1pro_test/run_rerun_bridge.py` | Launches `RerunBridgeModule` with the r1pro layout; ephemeral-port viewer (avoids VS Code port-cache issue, §8) |
 | `dimos/robot/all_blueprints.py` | Registry — `r1pro-coordinator`, `r1pro-keyboard-teleop`, `r1-pro-connection` |
+
+The Rerun viewer layout function (`_r1pro_rerun_blueprint`) lives **inline**
+in `r1pro_coordinator.py`, conditionally composed via
+`RerunBridgeModule.blueprint(...)` when `global_config.viewer.startswith("rerun")`.
+This matches the established Go2 / G1 pattern
+([unitree_go2_basic.py](../../dimos/robot/unitree/go2/blueprints/basic/unitree_go2_basic.py),
+[uintree_g1_primitive_no_nav.py](../../dimos/robot/unitree/g1/blueprints/primitive/uintree_g1_primitive_no_nav.py))
+— no standalone bridge script needed.
 
 **Removed in this refactor** (the old per-segment monolithic adapters from
 `task/mustafa/r1pro-dual-arm-testing`):
@@ -325,25 +331,32 @@ robot side):
 
 ## Rerun bridge
 
-```bash
-# Terminal A
-dimos run r1pro-coordinator
+The bridge is composed into the coordinator blueprint via `--viewer`. One
+process, one command:
 
-# Terminal B
-python scripts/r1pro_test/run_rerun_bridge.py
-# Or: --mode web   (browser viewer at http://localhost:9090)
-# Or: --mode connect --connect-url URL
+```bash
+dimos --viewer rerun run r1pro-coordinator           # native window
+dimos --viewer rerun-web run r1pro-coordinator       # http://localhost:9090
+dimos --viewer rerun-connect run r1pro-coordinator   # connect to existing viewer
 ```
 
-The layout in `dimos/robot/galaxea/r1pro/rerun.py` has two tabs:
+Same flag works for any composing blueprint:
+
+```bash
+dimos --viewer rerun run r1pro-keyboard-teleop       # teleop + rerun
+```
+
+The layout (inline in `r1pro_coordinator.py` as `_r1pro_rerun_blueprint`)
+has two tabs:
 
 - **Main**: wrist_left_color, wrist_right_color, head_color (left column) +
   3D world view (lidar + odom).
 - **Surround + depth**: 3×2 grid of the 5 surround chassis cams + head_depth.
 
 Entity paths are `world/r1pro/<stream_name>` (the bridge prefixes `world/`
-to the LCM topic name). See §8 for the VS Code port-cache workaround that
-the launcher script handles automatically.
+to the LCM topic name). Default ports `9877` (gRPC) / `9090` (web) come
+from `RerunBridgeModule.Config` — override via `--grpc-port` / `--web-port`
+if they collide.
 
 ---
 
@@ -544,17 +557,16 @@ python -c "import rerun, rclpy; print('rerun', rerun.__version__, 'rclpy ok')"
 
 If `xeyes` opens, X11 forwarding works.
 
-**Three-terminal workflow (all inside the same container):**
+**One-or-two-terminal workflow (all inside the same container):**
 
 ```bash
-# Terminal 1 — coordinator
-dimos run r1pro-coordinator
+# Terminal 1 — coordinator + rerun viewer in one process
+dimos --viewer rerun run r1pro-coordinator
+# or for headless: dimos run r1pro-coordinator
 
-# Terminal 2 — Rerun bridge
-python scripts/r1pro_test/run_rerun_bridge.py
-# Optional: --mode web
-
-# Terminal 3 — keyboard teleop / REPL / future manipulation client
+# Terminal 2 (optional) — keyboard teleop / REPL / manipulation client
+# Note: r1pro-keyboard-teleop already includes the coordinator
+dimos --viewer rerun run r1pro-keyboard-teleop
 ```
 
 **Troubleshooting** (preserved from the dual-arm branch):
@@ -568,23 +580,22 @@ python scripts/r1pro_test/run_rerun_bridge.py
 | Window appears but laggy/tearing under Wayland | Going through XWayland | Set `WAYLAND_DISPLAY=` (empty) to force pure X path |
 | `~/.Xauthority` becomes a directory on host | Docker auto-created it | Stop container, `rmdir ~/.Xauthority`, `touch ~/.Xauthority`, restart |
 
-### 8. Why `rr.spawn()` silently fails inside the dev container
+### 8. Why `rr.spawn()` silently fails inside the dev container (historical)
 
 VS Code extension hosts (`urdf-visualizer`, `rde-ros-2`, etc.) cache TCP
 ports they've previously seen Rerun bind, and re-bind them on `127.0.0.1` on
 subsequent VS Code launches. With `network_mode: host`, those collide with
-our viewer subprocess. `rr.spawn(port=9876)` falsely concludes a viewer is
-already there and routes data into a black hole.
+any viewer subprocess.
 
-**Fix is built into [scripts/r1pro_test/run_rerun_bridge.py](run_rerun_bridge.py)** —
-picks an ephemeral port at runtime, launches `rerun` CLI subprocess, polls
-the port, then `rr.connect_grpc()` the bridge to it. Single command:
+**No longer relevant on this branch** — the standalone `run_rerun_bridge.py`
+script that hit this issue was retired during the §12.G refactor. The
+in-process `RerunBridgeModule` deployed via `dimos --viewer rerun run ...`
+uses default ports `9877`/`9090` (not the `9876` VS Code typically caches).
+If a port collision does happen, override via `--grpc-port` / `--web-port`
+flags on `RerunBridgeModule.blueprint(...)`.
 
-```bash
-python scripts/r1pro_test/run_rerun_bridge.py
-```
-
-Escape hatches: `--mode web` (browser, no X needed), `--mode connect --connect-url URL`.
+Kept here for the next person who runs into a phantom-port issue with
+`rr.spawn()` in a similar setup.
 
 ### 9. Manipulation blueprint blocked on missing deps (Drake + trimesh)
 
@@ -800,35 +811,39 @@ Living on the **base coordinator** (not the keyboard-teleop blueprint
 specifically) means any future Twist publisher (phone teleop, joystick,
 autonomous policy) drives the chassis without a new blueprint.
 
-**D. Keyboard teleop laggy in remote / X11-forwarded sessions**
+**D. Keyboard teleop felt heavy on the dev container (open question)**
 
-After fix C, teleop "barely sent any commands". Tracing
-`KeyboardTeleop._pygame_loop()` showed it calls `pygame.display.flip()`
-**every iteration** — a synchronous X11 round-trip. In remote / docker /
-X11-forwarded sessions, `flip()` stalls 100–300 ms per call, throttling
-the entire loop (including `pygame.event.get()` and `cmd_vel.publish()`)
-to 3–10 Hz instead of the intended 50 Hz.
+After fix C, teleop "barely sent any commands". First hypothesis was
+`pygame.display.flip()` stalling on X11 round-trips (a known issue for
+remote / docker / X11-forwarded sessions). A patch was prototyped adding
+a `display_rate_hz` knob to `KeyboardTeleop` that decoupled display
+refresh from the publish loop, with the r1pro blueprint passing
+`display_rate_hz=10.0`.
 
-**Fix** — patched `dimos/robot/unitree/keyboard_teleop.py` (shared
-module, backwards-compatible):
+**That patch was reverted** — it didn't fix the actual lag on hardware,
+and adding a knob to a shared module to compensate for a problem that
+turned out to live somewhere else wasn't worth the cross-robot surface
+area. `KeyboardTeleop` is back to its upstream defaults; the r1pro
+blueprint uses `KeyboardTeleop.blueprint()` with no overrides.
 
-- Added `display_rate_hz: float = 50.0` config knob (default keeps current
-  behavior — Go2 unaffected).
-- Decoupled display refresh from publish loop. Publish + event-poll fire
-  every iteration at 50 Hz; `_update_display` only runs when wall clock
-  crosses the next display deadline. Absolute deadline (not delta-from-flip)
-  so a stalled flip doesn't cause catch-up bursts.
+**Real root cause is still TBD.** End-of-session note from the user:
+"the r1 connection is just so much heavy". Likely candidates to
+investigate next session:
 
-`r1pro_keyboard_teleop.py` blueprint passes `KeyboardTeleop.blueprint(display_rate_hz=10.0)`.
-Status pane updates 5× per second instead of 50×; key capture and Twist
-publish stay at 50 Hz. If still laggy: try `display_rate_hz=2.0` or
-`0.0` (window stays open for SDL key events but never refreshes).
+- LCM RPC hops across worker boundaries (KeyboardTeleop deploys on one
+  worker, ControlCoordinator on another, R1ProConnection on a third —
+  every Twist makes ~3 hops).
+- The 100 Hz coordinator tick + `_on_cmd_vel` lock contention inside
+  `R1ProConnection` (chassis publishes acc + brake + speed under
+  `self._lock`, shared with motor_command, publish_loop, and 3 feedback
+  callbacks).
+- `pygame.event.get()` itself stalling under X11 (independent of `flip()`).
 
-User feedback at end of session: even with the patch, teleop still felt
-heavy — open question whether the bottleneck is now elsewhere (LCM RPC
-crossing worker boundaries, pygame event poll itself stalling on X11) or
-whether `display_rate_hz` needs to go lower. Worth a fresh test next
-session before assuming the patch is insufficient.
+To-do when picking up: re-test `r1pro-keyboard-teleop` on hardware,
+measure where time is actually going (cProfile on the KeyboardTeleop
+worker, or just `lcm-spy` the rate of `/cmd_vel` to see whether the
+keyboard side is slow at all). Don't re-introduce the display_rate_hz
+patch without that measurement.
 
 **E. Manipulation blueprint — researched, not yet built**
 
