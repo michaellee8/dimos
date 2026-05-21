@@ -30,7 +30,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.data import resolve_named_path
 from dimos.utils.logging_config import setup_logger
-from dimos.utils.threadpool import get_scheduler
+from dimos.utils.reactive import backpressure
 
 logger = setup_logger()
 
@@ -77,24 +77,24 @@ class RelocalizationModule(Module):
         self._premap.frame_id = FRAME_MAP
 
         self.register_disposable(
-            self.global_map.observable()  # type: ignore[no-untyped-call]
-            .pipe(
-                ops.throttle_first(RELOC_INTERVAL),
-                ops.do_action(self._maybe_log_skip),
-                ops.filter(self._has_enough_points),
-                ops.observe_on(get_scheduler()),
-                ops.map(self._try_relocalize),
+            backpressure(
+                self.global_map.observable().pipe(  # type: ignore[no-untyped-call]
+                    ops.throttle_first(RELOC_INTERVAL),
+                    ops.do_action(self._maybe_log_skip),
+                    ops.filter(self._has_enough_points),
+                )
             )
+            .pipe(ops.map(self._try_relocalize))
             .subscribe(self._publish_tf)
         )
 
         self.register_disposable(
-            combine_latest(
-                self.global_map.observable(),  # type: ignore[no-untyped-call]
-                self.world_to_map.observable().pipe(ops.start_with(None)),  # type: ignore[no-untyped-call,arg-type]
-            )
-            .pipe(ops.observe_on(get_scheduler()))
-            .subscribe(self._on_merge_input)
+            backpressure(
+                combine_latest(
+                    self.global_map.observable(),  # type: ignore[no-untyped-call]
+                    self.world_to_map.observable().pipe(ops.start_with(None)),  # type: ignore[no-untyped-call,arg-type]
+                )
+            ).subscribe(self._on_merge_input)
         )
 
         self.register_disposable(
