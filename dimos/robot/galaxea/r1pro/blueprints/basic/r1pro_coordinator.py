@@ -192,11 +192,15 @@ _r1pro_base = (
 # "rerun-connect" all light up. Without the flag, no bridge is attached and
 # nothing changes from the headless coordinator path.
 if global_config.viewer.startswith("rerun"):
-    from dimos.visualization.rerun.bridge import RerunBridgeModule, _resolve_viewer_mode
+    from dimos.visualization.rerun.bridge import RerunBridgeModule
 
     r1pro_coordinator = autoconnect(
         _r1pro_base,
-        RerunBridgeModule.blueprint(viewer_mode=_resolve_viewer_mode(), **_rerun_config),
+        RerunBridgeModule.blueprint(
+            rerun_open=global_config.rerun_open,
+            rerun_web=global_config.rerun_web,
+            **_rerun_config,
+        ),
     )
 else:
     r1pro_coordinator = _r1pro_base
