@@ -34,8 +34,6 @@ async def init_db() -> None:
 def _apply_additive_columns(sync_conn) -> None:
     insp = inspect(sync_conn)
     for table, column, sql_type in _ADDITIVE_COLUMNS:
-        if table not in insp.get_table_names():
-            continue  # create_all just made it with the column already.
         existing = {c["name"] for c in insp.get_columns(table)}
         if column in existing:
             continue
