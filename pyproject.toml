@@ -281,7 +281,7 @@ cuda = [
     # Upper bound: onnxruntime-gpu 1.24+ dropped cp310 wheels. Lift when ROS 2
     # Humble (Python 3.10) is no longer supported. Lower bound covers both cuda11 and cuda12.
     "onnxruntime-gpu>=1.17.1,<1.24; platform_machine == 'x86_64'",
-    "ctransformers[cuda]==0.2.27"; sys_platform != 'darwin'",
+    "ctransformers[cuda]==0.2.27; sys_platform != 'darwin'",
     "xformers>=0.0.20; platform_machine == 'x86_64'",
 ]
 
