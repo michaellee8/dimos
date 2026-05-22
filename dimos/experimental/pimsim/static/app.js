@@ -167,6 +167,18 @@ const posePositionEpsilon = 1e-5;
 const poseQuaternionEpsilon = 1e-5;
 const queuedStateFrames = [];
 const lastAppliedRobotPoses = [];
+let latestRobotPosePayload = null;
+let robotRootBodyIndex = -1;
+const robotPoseComposeScale = BABYLON.Vector3.One();
+const robotPoseDecomposeScale = BABYLON.Vector3.One();
+const robotPosePositionScratch = BABYLON.Vector3.Zero();
+const robotPoseQuaternionScratch = BABYLON.Quaternion.Identity();
+const robotPoseMatrixScratch = BABYLON.Matrix.Identity();
+const robotPoseRootMatrixScratch = BABYLON.Matrix.Identity();
+const robotPoseRootInverseMatrixScratch = BABYLON.Matrix.Identity();
+const robotPoseBrowserRootMatrixScratch = BABYLON.Matrix.Identity();
+const robotPoseRebaseMatrixScratch = BABYLON.Matrix.Identity();
+const robotPoseRebasedMatrixScratch = BABYLON.Matrix.Identity();
 const stateTiming = {
   previousSourceMs: null,
   lastIdealJsMs: null,
@@ -916,9 +928,14 @@ async function loadRobot() {
   bodyNodeList.length = 0;
   bodyNameList.length = 0;
   lastAppliedRobotPoses.length = 0;
+  latestRobotPosePayload = null;
+  robotRootBodyIndex = -1;
   for (const bodyName of payload.bodyNames) {
     bodyNameList.push(bodyName);
     bodyNodeList.push(ensureBodyNode(bodyName));
+    if (robotRootBodyIndex < 0 && robotRootBodyNames.has(bodyName)) {
+      robotRootBodyIndex = bodyNodeList.length - 1;
+    }
   }
   if (!useRobotMesh) return;
 
@@ -1114,6 +1131,26 @@ function rememberAppliedPose(bodyIndex, poses, offset) {
   previous[6] = poses[offset + 6];
 }
 
+function packedPoseToMatrixToRef(poses, offset, result) {
+  robotPosePositionScratch.copyFromFloats(
+    poses[offset],
+    poses[offset + 1],
+    poses[offset + 2],
+  );
+  robotPoseQuaternionScratch.copyFromFloats(
+    poses[offset + 4],
+    poses[offset + 5],
+    poses[offset + 6],
+    poses[offset + 3],
+  );
+  BABYLON.Matrix.ComposeToRef(
+    robotPoseComposeScale,
+    robotPoseQuaternionScratch,
+    robotPosePositionScratch,
+    result,
+  );
+}
+
 function copyPackedPoseToNode(node, poses, offset) {
   node.position.copyFromFloats(poses[offset], poses[offset + 1], poses[offset + 2]);
   if (!node.rotationQuaternion) {
@@ -1124,6 +1161,29 @@ function copyPackedPoseToNode(node, poses, offset) {
     poses[offset + 5],
     poses[offset + 6],
     poses[offset + 3],
+  );
+}
+
+function copyMatrixPoseToNode(node, matrix) {
+  if (!node.rotationQuaternion) {
+    node.rotationQuaternion = BABYLON.Quaternion.Identity();
+  }
+  matrix.decompose(robotPoseDecomposeScale, node.rotationQuaternion, node.position);
+}
+
+function browserPhysicsRootMatrixToRef(result) {
+  robotPosePositionScratch.copyFromFloats(
+    browserPhysicsPose.x,
+    browserPhysicsPose.y,
+    browserPhysicsPose.z,
+  );
+  const q = yawQuaternion(browserPhysicsPose.yaw);
+  robotPoseQuaternionScratch.copyFromFloats(q.x, q.y, q.z, q.w);
+  BABYLON.Matrix.ComposeToRef(
+    robotPoseComposeScale,
+    robotPoseQuaternionScratch,
+    robotPosePositionScratch,
+    result,
   );
 }
 
@@ -1154,13 +1214,39 @@ function updatePath(path, pathVersion) {
 
 function applyRobotPose(payload) {
   const count = Math.min(payload.count, bodyNodeList.length);
+  const rebaseToBrowserPhysics =
+    browserPhysicsEnabled &&
+    robotRootBodyIndex >= 0 &&
+    robotRootBodyIndex < count;
+
+  if (rebaseToBrowserPhysics) {
+    const rootOffset = robotRootBodyIndex * 7;
+    packedPoseToMatrixToRef(payload.poses, rootOffset, robotPoseRootMatrixScratch);
+    robotPoseRootMatrixScratch.invertToRef(robotPoseRootInverseMatrixScratch);
+    browserPhysicsRootMatrixToRef(robotPoseBrowserRootMatrixScratch);
+    robotPoseRootInverseMatrixScratch.multiplyToRef(
+      robotPoseBrowserRootMatrixScratch,
+      robotPoseRebaseMatrixScratch,
+    );
+  }
+
   let updated = 0;
   let skipped = 0;
   for (let bodyIndex = 0; bodyIndex < count; bodyIndex += 1) {
     const node = bodyNodeList[bodyIndex];
     const bodyName = bodyNameList[bodyIndex];
     const offset = bodyIndex * 7;
-    if (poseChanged(payload.poses, offset, lastAppliedRobotPoses[bodyIndex])) {
+
+    if (rebaseToBrowserPhysics) {
+      packedPoseToMatrixToRef(payload.poses, offset, robotPoseMatrixScratch);
+      robotPoseMatrixScratch.multiplyToRef(
+        robotPoseRebaseMatrixScratch,
+        robotPoseRebasedMatrixScratch,
+      );
+      copyMatrixPoseToNode(node, robotPoseRebasedMatrixScratch);
+      rememberAppliedPose(bodyIndex, payload.poses, offset);
+      updated += 1;
+    } else if (poseChanged(payload.poses, offset, lastAppliedRobotPoses[bodyIndex])) {
       copyPackedPoseToNode(node, payload.poses, offset);
       rememberAppliedPose(bodyIndex, payload.poses, offset);
       updated += 1;
@@ -1178,6 +1264,11 @@ function applyRobotPose(payload) {
   perfCounters.poseFrames += 1;
   perfCounters.poseBodiesUpdated += updated;
   perfCounters.poseBodiesSkipped += skipped;
+}
+
+function applyLatestRobotPose() {
+  if (!browserPhysicsEnabled || !latestRobotPosePayload) return;
+  applyRobotPose(latestRobotPosePayload);
 }
 
 function applyStateMetadata(payload) {
@@ -1229,7 +1320,9 @@ function applyQueuedState() {
   while (queuedStateFrames.length > 0 && queuedStateFrames[0].targetMs <= nowMs) {
     frame = queuedStateFrames.shift();
   }
-  if (frame) applyRobotPose(frame.payload);
+  if (!frame) return;
+  latestRobotPosePayload = frame.payload;
+  if (!browserPhysicsEnabled) applyRobotPose(frame.payload);
 }
 
 function createLidarMaterial() {
@@ -2031,6 +2124,7 @@ window.addEventListener("blur", () => {
 function renderFrame() {
   stepBrowserPhysics();
   applyQueuedState();
+  applyLatestRobotPose();
   updateKeyboardCamera();
   sendDriveCommand(false);
   scene.render();
