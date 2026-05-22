@@ -213,6 +213,7 @@ class BabylonSceneViewerModule(Module):
         # rebuild the world) and (b) `list_entities` queries.
         self._entity_lock = threading.Lock()
         self._entities: dict[str, EntityDescriptor] = {}
+        self._test_entity_counter = 0
 
     @rpc
     def start(self) -> None:
@@ -504,6 +505,12 @@ class BabylonSceneViewerModule(Module):
             return
         if message_type == "entity_states":
             self._publish_entity_states(message.get("states") or [])
+            return
+        if message_type == "entity_test_add":
+            self._handle_entity_test_add(message.get("point") or [0.0, 0.0, 2.0])
+            return
+        if message_type == "entity_clear":
+            self._handle_entity_clear()
             return
         if message_type not in {"clicked_point", "point_goal"}:
             return
@@ -884,6 +891,35 @@ class BabylonSceneViewerModule(Module):
     def list_entities(self) -> list[str]:
         with self._entity_lock:
             return sorted(self._entities.keys())
+
+    def _handle_entity_test_add(self, point: list[float]) -> None:
+        """HUD-driven smoke spawn: drops a 40cm dynamic cube at ``point``.
+
+        Stays in the WS handler path (not a public RPC) since it only
+        exists to drive the Add button — production callers should
+        construct their own EntityDescriptor + Pose and use spawn_entity.
+        """
+        try:
+            x, y, z = (float(point[i]) for i in range(3))
+        except (IndexError, TypeError, ValueError):
+            logger.warning("BabylonViewer: entity_test_add ignored: bad point %r", point)
+            return
+        self._test_entity_counter += 1
+        descriptor = EntityDescriptor(
+            entity_id=f"box_{self._test_entity_counter}",
+            kind="dynamic",
+            shape_hint="box",
+            extents=(0.4, 0.4, 0.4),
+            mass=2.0,
+        )
+        pose = Pose(x, y, z)
+        self.spawn_entity(descriptor, pose)
+
+    def _handle_entity_clear(self) -> None:
+        with self._entity_lock:
+            ids = list(self._entities.keys())
+        for entity_id in ids:
+            self.despawn_entity(entity_id)
 
     def _publish_entity_states(self, states_wire: list[dict[str, Any]]) -> None:
         """Browser → python entity state batch. Republish on the Out port."""

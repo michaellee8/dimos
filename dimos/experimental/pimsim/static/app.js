@@ -1363,6 +1363,21 @@ document.getElementById("loadScene").onclick = () => {
   })();
 };
 
+document.getElementById("entityAdd").onclick = () => {
+  // Drop the box 2 m above the camera target so Havok gravity catches it
+  // on the way down — proves both the scene collision aggregate and the
+  // entity body are wired correctly.
+  const t = camera.getTarget();
+  sendSocketPayload({
+    type: "entity_test_add",
+    point: [t.x, t.y, t.z + 2.0],
+  });
+};
+
+document.getElementById("entityClear").onclick = () => {
+  sendSocketPayload({ type: "entity_clear" });
+};
+
 // --- Policy arm / dry-run toggles ---
 // Initial dataset.active reflects the coordinator's defaults for the
 // typical real-hardware blueprint (unarmed, dry-run on). If the
