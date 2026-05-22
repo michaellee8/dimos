@@ -91,9 +91,9 @@ class CameraVideoTrack(VideoStreamTrack):
         super().__init__()
         self._lock = threading.Lock()
         self._latest: Image | None = None
-        self._frame_seq = 0           # bumped on each set_latest
-        self._consumed_seq = 0        # last seq recv() returned
-        self._armed = False           # gate: ignore everything until arm()
+        self._frame_seq = 0  # bumped on each set_latest
+        self._consumed_seq = 0  # last seq recv() returned
+        self._armed = False  # gate: ignore everything until arm()
         self._first_wall: float | None = None
 
     def arm(self) -> None:
@@ -132,9 +132,7 @@ class CameraVideoTrack(VideoStreamTrack):
             self._first_wall = now
         pts = int((now - self._first_wall) * VIDEO_CLOCK_RATE)
 
-        frame = av.VideoFrame.from_ndarray(
-            img.data, format=_AV_FORMAT_MAP.get(img.format, "bgr24")
-        )
+        frame = av.VideoFrame.from_ndarray(img.data, format=_AV_FORMAT_MAP.get(img.format, "bgr24"))
         frame.pts = pts
         frame.time_base = VIDEO_TIME_BASE
         return frame
