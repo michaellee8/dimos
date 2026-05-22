@@ -131,10 +131,22 @@ def _load_blueprints(python_file: str) -> list[tuple[str, Blueprint]]:
     if pkg_root and pkg_root not in sys.path:
         sys.path.insert(0, pkg_root)
 
-    spec = importlib.util.spec_from_file_location("_render_target", filepath)
+    # Derive the real dotted module name from the path so relative imports inside
+    # the blueprint file (e.g. `from . import x`) resolve through the parent package.
+    if pkg_root:
+        rel = os.path.relpath(filepath, pkg_root)
+        rel_no_ext = rel[:-3] if rel.endswith(".py") else rel
+        module_name = rel_no_ext.replace(os.sep, ".")
+        if module_name.endswith(".__init__"):
+            module_name = module_name[: -len(".__init__")]
+    else:
+        module_name = "_render_target"
+
+    spec = importlib.util.spec_from_file_location(module_name, filepath)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load {filepath}")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
 
     blueprints: list[tuple[str, Blueprint]] = []
