@@ -31,7 +31,7 @@
   comment_id: 3254780663
   author: greptile-apps
   file: dimos/msgs/nav_msgs/DynamicCloud.py
-  line: 182
+  line: 144
   problem: |
     P2 — `timestamp_nanos = int(self.ts * 1_000_000_000) if self.ts else 0` treats `ts=0.0`
     as "no timestamp" via Python truthiness. `lcm_decode` has the matching asymmetry. This
