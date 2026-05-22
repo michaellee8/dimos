@@ -22,6 +22,7 @@ import numpy as np
 
 from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
+from dimos.mapping.relocalization.module import RelocalizationModule
 from dimos.navigation.nav_stack.modules.apply_closure.apply_closure import ApplyClosure
 from dimos.navigation.nav_stack.modules.far_planner.far_planner import FarPlanner
 from dimos.navigation.nav_stack.modules.local_planner.local_planner import LocalPlanner
@@ -43,6 +44,7 @@ def create_nav_stack(
     use_terrain_map_ext: bool = True,
     use_ray_tracing: bool = True,
     use_apply_closure: bool = True,
+    use_relocalization: bool = False,
     planner: str = "far",
     vehicle_height: float | None = None,
     max_speed: float | None = None,
@@ -65,6 +67,7 @@ def create_nav_stack(
     nav_record: dict[str, Any] | None = None,
     ray_tracing: dict[str, Any] | None = None,
     apply_closure: dict[str, Any] | None = None,
+    relocalization: dict[str, Any] | None = None,
 ) -> Blueprint:
     """Compose a nav stack Blueprint.
 
@@ -227,6 +230,16 @@ def create_nav_stack(
         )
     if use_apply_closure:
         modules.append(ApplyClosure.blueprint(**(apply_closure or {})))
+    if use_relocalization:
+        modules.append(
+            RelocalizationModule.blueprint(**(relocalization or {})).remappings(
+                [
+                    # Consume the PGO loop-closed global map; nav stack already
+                    # remaps PGO's `global_map` output to `_pgo_global_map` above.
+                    (RelocalizationModule, "global_map", "_pgo_global_map"),
+                ]
+            )
+        )
     if record:
         # Lazy: breaks on G1 onboard (linux-aarch64 TLS allocation failure)
         from dimos.navigation.nav_stack.modules.nav_record.nav_record import NavRecord
