@@ -30,7 +30,6 @@ import logging
 import os
 from pathlib import Path
 import shutil
-import sys
 from typing import Any
 
 from dimos_lcm.std_msgs import Bool
@@ -373,7 +372,7 @@ def _sim_support_blueprints() -> tuple[Blueprint, ...]:
             ),
         )
 
-    if lidar_disabled or scene_package is None or sys.platform == "darwin":
+    if lidar_disabled or scene_package is None:
         mapping_stack: tuple[Blueprint, ...] = (StaticCostmapModule.blueprint(),)
     elif map_backend in {"voxel", "python"}:
         mapping_stack = (
