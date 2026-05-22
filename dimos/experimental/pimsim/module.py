@@ -170,6 +170,9 @@ class BabylonSceneViewerModule(Module):
         sim_rate: float = 100.0,
         vehicle_height: float = 0.75,
         step_offset: float = 0.22,
+        support_floor: bool = True,
+        support_floor_z: float | None = None,
+        support_floor_size: float = 0.0,
         init_x: float = 0.0,
         init_y: float = 0.0,
         init_z: float = 0.0,
@@ -234,6 +237,11 @@ class BabylonSceneViewerModule(Module):
         self._browser_sim_rate = float(sim_rate)
         self._browser_vehicle_height = float(vehicle_height)
         self._browser_step_offset = float(step_offset)
+        self._browser_support_floor = bool(support_floor)
+        self._browser_support_floor_z = float(
+            init_z if support_floor_z is None else support_floor_z
+        )
+        self._browser_support_floor_size = float(support_floor_size)
         self._browser_initial_pose = {
             "x": float(init_x),
             "y": float(init_y),
@@ -382,6 +390,9 @@ class BabylonSceneViewerModule(Module):
                 "browserPhysicsInitialPose": self._browser_initial_pose,
                 "vehicleHeight": self._browser_vehicle_height,
                 "stepOffset": self._browser_step_offset,
+                "supportFloor": self._browser_support_floor,
+                "supportFloorZ": self._browser_support_floor_z,
+                "supportFloorSize": self._browser_support_floor_size,
             },
             headers=_NO_CACHE_HEADERS,
         )

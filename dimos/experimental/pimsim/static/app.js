@@ -58,7 +58,9 @@ const bodyNodes = new Map();
 const bodyNodeList = [];
 const bodyNameList = [];
 const sceneMeshes = [];
+const sceneMeshSet = new Set();
 const collisionMeshes = [];
+const collisionMeshSet = new Set();
 const robotMeshes = [];
 const maxAutoSceneBytes = 2 * 1024 * 1024 * 1024;
 
@@ -86,8 +88,11 @@ const physicsReady = (async () => {
 // Entity world. Browser is authoritative for state; Python pushes
 // spawn/despawn/teleport via WS, browser reports per-tick state back.
 const entities = new Map();              // entity_id -> {mesh, aggregate, descriptor}
-let entityBroadcastIntervalMs = 1000 / 30;   // ~30 Hz default
+let entityBroadcastIntervalMs = 1000 / 15;   // state changes only; 15 Hz is enough for sensors
 let lastEntityBroadcast = 0;
+let lastEntityBroadcastSignature = "";
+let lastEntityBroadcastKeepalive = 0;
+const entityBroadcastKeepaliveMs = 2000;
 
 // Kinematic robot collider. Parented to the root body node so the odom-
 // driven transform drags it through the world; entities collide with it.
@@ -139,11 +144,17 @@ let browserPhysicsLastStepMs = null;
 let browserPhysicsLastOdomMs = 0;
 let browserVehicleHeight = 0.75;
 let browserStepOffset = 0.22;
+let supportFloorEnabled = false;
+let supportFloorZ = 0.0;
+let supportFloorSize = 0.0;
+let supportFloorMesh = null;
+let supportFloorAggregate = null;
 const browserMaxStepDown = 0.5;
 const browserGroundProbeExtra = 1.0;
 const browserPhysicsOdomPeriodMs = 1000 / 50;
 const browserCharacterRadius = ROBOT_COLLIDER_RADIUS;
 const browserCollisionProbeHeights = [0.25, 0.75, 1.2];
+const supportFloorThickness = 0.08;
 const pointcloudHeaderBytes = 8;
 const robotPoseHeaderBytes = 16;
 const stateQueueMaxLength = 8;
@@ -177,6 +188,27 @@ const perfCounters = {
 const vec3 = (values) => new BABYLON.Vector3(values[0], values[1], values[2]);
 const quatWxyz = (values) =>
   new BABYLON.Quaternion(values[1], values[2], values[3], values[0]);
+
+function finiteNumber(value, fallback) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : fallback;
+}
+
+function registerSceneMesh(mesh) {
+  sceneMeshes.push(mesh);
+  sceneMeshSet.add(mesh);
+}
+
+function registerCollisionMesh(mesh) {
+  collisionMeshes.push(mesh);
+  collisionMeshSet.add(mesh);
+}
+
+function unregisterCollisionMesh(mesh) {
+  const index = collisionMeshes.indexOf(mesh);
+  if (index >= 0) collisionMeshes.splice(index, 1);
+  collisionMeshSet.delete(mesh);
+}
 
 function setStatus(message) {
   statusEl.textContent = message;
@@ -478,7 +510,7 @@ function horizontalCollisionDistance(origin, direction, maxDistance) {
     const ray = new BABYLON.Ray(rayOrigin, direction, maxDistance + browserCharacterRadius);
     const pick = scene.pickWithRay(
       ray,
-      (mesh) => collisionMeshes.includes(mesh),
+      (mesh) => collisionMeshSet.has(mesh),
     );
     if (pick && pick.hit && Number.isFinite(pick.distance)) {
       allowed = Math.min(allowed, Math.max(0, pick.distance - browserCharacterRadius));
@@ -497,7 +529,7 @@ function groundHeightAt(x, y, referenceBaseZ) {
   const length =
     browserVehicleHeight + browserStepOffset + browserMaxStepDown + browserGroundProbeExtra;
   const ray = new BABYLON.Ray(origin, new BABYLON.Vector3(0, 0, -1), length);
-  const pick = scene.pickWithRay(ray, (mesh) => collisionMeshes.includes(mesh));
+  const pick = scene.pickWithRay(ray, (mesh) => collisionMeshSet.has(mesh));
   if (pick && pick.hit && pick.pickedPoint) return pick.pickedPoint.z;
   return null;
 }
@@ -598,6 +630,9 @@ function configureBrowserPhysics(config) {
   if (!browserPhysicsEnabled) return;
   browserVehicleHeight = Number(config.vehicleHeight) || browserVehicleHeight;
   browserStepOffset = Number(config.stepOffset) || browserStepOffset;
+  supportFloorEnabled = Boolean(config.supportFloor);
+  supportFloorZ = finiteNumber(config.supportFloorZ, supportFloorZ);
+  supportFloorSize = Math.max(0, finiteNumber(config.supportFloorSize, supportFloorSize));
   setBrowserPhysicsPose(config.browserPhysicsInitialPose || {}, false);
   setStatus("browser physics ready");
 }
@@ -655,7 +690,7 @@ function setForceVisible(enabled) {
   setButtonActive("forceVisible", enabled);
 }
 
-function fitCameraToMeshes(meshes) {
+function computeMeshBounds(meshes) {
   const min = new BABYLON.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
   const max = new BABYLON.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
   let count = 0;
@@ -672,12 +707,75 @@ function fitCameraToMeshes(meshes) {
     max.z = Math.max(max.z, box.maximumWorld.z);
     count += 1;
   }
-  if (count === 0) return;
+  if (count === 0) return null;
   const center = min.add(max).scale(0.5);
   const extent = max.subtract(min);
+  return { min, max, center, extent, count };
+}
+
+function fitCameraToMeshes(meshes) {
+  const bounds = computeMeshBounds(meshes);
+  if (!bounds) return;
+  const { center, extent, count } = bounds;
   camera.setTarget(center);
   camera.radius = Math.max(2, extent.length() * 0.55);
   setStatus(`scene ${count} meshes`);
+}
+
+function disposeSupportFloor() {
+  if (supportFloorAggregate) {
+    try {
+      supportFloorAggregate.dispose();
+    } catch (_) {
+      // best-effort cleanup
+    }
+    supportFloorAggregate = null;
+  }
+  if (supportFloorMesh) {
+    unregisterCollisionMesh(supportFloorMesh);
+    try {
+      supportFloorMesh.dispose();
+    } catch (_) {
+      // best-effort cleanup
+    }
+    supportFloorMesh = null;
+  }
+}
+
+async function ensureSupportFloor(config) {
+  supportFloorEnabled = Boolean(config.supportFloor);
+  supportFloorZ = finiteNumber(config.supportFloorZ, supportFloorZ);
+  supportFloorSize = Math.max(0, finiteNumber(config.supportFloorSize, supportFloorSize));
+  if (!browserPhysicsEnabled || !supportFloorEnabled) return;
+  if (!(await physicsReady)) return;
+
+  disposeSupportFloor();
+  const bounds = computeMeshBounds(collisionMeshes.length > 0 ? collisionMeshes : sceneMeshes);
+  const center = bounds
+    ? new BABYLON.Vector3(bounds.center.x, bounds.center.y, supportFloorZ - supportFloorThickness * 0.5)
+    : new BABYLON.Vector3(browserPhysicsPose.x, browserPhysicsPose.y, supportFloorZ - supportFloorThickness * 0.5);
+  const derivedSize = bounds
+    ? Math.max(bounds.extent.x, bounds.extent.y) + 8.0
+    : 20.0;
+  const size = Math.max(20.0, supportFloorSize > 0 ? supportFloorSize : derivedSize);
+
+  supportFloorMesh = BABYLON.MeshBuilder.CreateBox(
+    "supportFloor",
+    { width: size, height: size, depth: supportFloorThickness },
+    scene,
+  );
+  supportFloorMesh.position = center;
+  supportFloorMesh.material = createCollisionMaterial();
+  supportFloorMesh.visibility = collisionVisible ? 1 : 0;
+  supportFloorMesh.isPickable = true;
+  supportFloorMesh.metadata = { dimosCollisionMesh: true, dimosSupportFloor: true };
+  registerCollisionMesh(supportFloorMesh);
+  supportFloorAggregate = new BABYLON.PhysicsAggregate(
+    supportFloorMesh,
+    BABYLON.PhysicsShapeType.BOX,
+    { mass: 0 },
+    scene,
+  );
 }
 
 function focusRobot() {
@@ -723,7 +821,7 @@ async function loadSceneAsset(config) {
     if (mesh.parent === null) mesh.parent = root;
     mesh.isPickable = true;
     mesh.metadata = { dimosSceneMesh: true };
-    if (mesh.getTotalVertices && mesh.getTotalVertices() > 0) sceneMeshes.push(mesh);
+    if (mesh.getTotalVertices && mesh.getTotalVertices() > 0) registerSceneMesh(mesh);
     if (mesh.material) configureStaticSceneMaterial(mesh.material);
     if (mesh.getTotalVertices && mesh.getTotalVertices() > 0) {
       mesh.computeWorldMatrix(true);
@@ -737,6 +835,7 @@ async function loadSceneAsset(config) {
   setSceneWireframe(sceneWireEnabled);
   setForceVisible(forceVisibleEnabled);
   fitCameraToMeshes(sceneMeshes);
+  await ensureSupportFloor(config);
 }
 
 async function loadCollisionAsset(config) {
@@ -769,7 +868,7 @@ async function loadCollisionAsset(config) {
     // Don't setEnabled(false) — Havok needs the mesh active to collide.
     // setCollisionVisibility() toggles only the visibility for display.
     mesh.metadata = { dimosCollisionMesh: true };
-    collisionMeshes.push(mesh);
+    registerCollisionMesh(mesh);
   }
   if (sceneMeshes.length === 0) fitCameraToMeshes(collisionMeshes);
 
@@ -786,6 +885,7 @@ async function loadCollisionAsset(config) {
     }
   }
 
+  await ensureSupportFloor(config);
   snapBrowserPhysicsToGround(true);
   setStatus("live");
 }
@@ -797,8 +897,11 @@ function pickScenePoint() {
     BABYLON.Matrix.Identity(),
     camera,
   );
-  const meshes = collisionMeshes.length > 0 ? collisionMeshes : sceneMeshes;
-  const pick = scene.pickWithRay(ray, (mesh) => meshes.includes(mesh));
+  const useCollision = collisionMeshes.length > 0;
+  const pick = scene.pickWithRay(
+    ray,
+    (mesh) => (useCollision ? collisionMeshSet.has(mesh) : sceneMeshSet.has(mesh)),
+  );
   if (pick && pick.hit && pick.pickedPoint) return pick.pickedPoint;
   if (Math.abs(ray.direction.z) < 1e-6) return null;
   const distance = -ray.origin.z / ray.direction.z;
@@ -1406,11 +1509,27 @@ function handleEntityApplyVelocity(payload) {
   }
 }
 
+function roundedStateValue(value, scale) {
+  return Math.round(finiteNumber(value, 0) * scale);
+}
+
+function entityStateSignature(states) {
+  return JSON.stringify(states.map((state) => [
+    state.entity_id,
+    roundedStateValue(state.pose.x, 100),
+    roundedStateValue(state.pose.y, 100),
+    roundedStateValue(state.pose.z, 100),
+    roundedStateValue(state.pose.qw, 1000),
+    roundedStateValue(state.pose.qx, 1000),
+    roundedStateValue(state.pose.qy, 1000),
+    roundedStateValue(state.pose.qz, 1000),
+  ]));
+}
+
 function broadcastEntityStates(force = false) {
   if (entities.size === 0 && !force) return;
   const now = performance.now();
   if (!force && now - lastEntityBroadcast < entityBroadcastIntervalMs) return;
-  lastEntityBroadcast = now;
   const ts = Date.now() / 1000.0;
   const states = [];
   for (const [id, entry] of entities) {
@@ -1423,11 +1542,23 @@ function broadcastEntityStates(force = false) {
       pose: { x: p.x, y: p.y, z: p.z, qw: q.w, qx: q.x, qy: q.y, qz: q.z },
     });
   }
+  const signature = entityStateSignature(states);
+  if (
+    !force
+    && signature === lastEntityBroadcastSignature
+    && now - lastEntityBroadcastKeepalive < entityBroadcastKeepaliveMs
+  ) {
+    lastEntityBroadcast = now;
+    return;
+  }
+  lastEntityBroadcast = now;
+  lastEntityBroadcastSignature = signature;
+  lastEntityBroadcastKeepalive = now;
   sendSocketPayload({ type: "entity_states", states });
 }
 
 physicsReady.then((ok) => {
-  if (ok) scene.onAfterPhysicsObservable.add(broadcastEntityStates);
+  if (ok) scene.onAfterPhysicsObservable.add(() => broadcastEntityStates(false));
 });
 
 function connectStreamWorker() {
@@ -1846,6 +1977,7 @@ function _updateSlidersFromState(joints) {
     configureBrowserPhysics(config);
     await loadRobot();
     setupRobotCollider();   // fire-and-forget; awaits physicsReady internally
+    await ensureSupportFloor(config);
     connectStreamWorker();
     installClickPublisher();
     setStatus("live");

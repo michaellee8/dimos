@@ -36,6 +36,12 @@ struct Config {
     sensor_z: f32,
     yaw_offset_deg: f32,
     output_voxel_size: f32,
+    #[serde(default)]
+    support_floor: bool,
+    #[serde(default)]
+    support_floor_z: f32,
+    #[serde(default)]
+    support_floor_size: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -333,6 +339,12 @@ impl SceneLidar {
                 let world_direction = (orientation * yaw_offset * *direction).normalize();
                 let mut best = self.scene.raycast(origin, world_direction, max_range);
                 let mut best_dist = best.map(|(_, d)| d).unwrap_or(max_range);
+                if let Some((hit, dist)) =
+                    raycast_support_floor(&self.config, origin, world_direction, best_dist)
+                {
+                    best_dist = dist;
+                    best = Some((hit, dist));
+                }
                 for entity in entities {
                     if let Some((hit, dist)) =
                         raycast_entity(entity, origin, world_direction, best_dist)
@@ -396,6 +408,41 @@ fn validate_config(config: &Config) {
             config.output_voxel_size
         );
     }
+    if !config.support_floor_z.is_finite() {
+        panic!(
+            "scene_lidar: support_floor_z must be finite, got {}",
+            config.support_floor_z
+        );
+    }
+    if config.support_floor_size < 0.0 || !config.support_floor_size.is_finite() {
+        panic!(
+            "scene_lidar: support_floor_size must be finite and >= 0, got {}",
+            config.support_floor_size
+        );
+    }
+}
+
+fn raycast_support_floor(
+    config: &Config,
+    origin: Vec3,
+    direction: Vec3,
+    max_range: f32,
+) -> Option<(Vec3, f32)> {
+    if !config.support_floor || direction.z >= -RAY_EPSILON {
+        return None;
+    }
+    let distance = (config.support_floor_z - origin.z) / direction.z;
+    if distance <= RAY_EPSILON || distance >= max_range {
+        return None;
+    }
+    let hit = origin + direction * distance;
+    if config.support_floor_size > 0.0 {
+        let half = config.support_floor_size * 0.5;
+        if hit.x.abs() > half || hit.y.abs() > half {
+            return None;
+        }
+    }
+    Some((hit, distance))
 }
 
 fn resolve_collision_path(config: &Config, meta: &SceneMeta, metadata_path: &Path) -> PathBuf {
@@ -655,4 +702,57 @@ async fn main() {
     run::<SceneLidar, _>(transport)
         .await
         .expect("scene_lidar run failed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> Config {
+        Config {
+            scene_metadata_path: "scene.meta.json".into(),
+            collision_path: None,
+            hz: 10.0,
+            horizontal_samples: 1,
+            vertical_samples: 1,
+            elevation_min_deg: 0.0,
+            elevation_max_deg: 0.0,
+            max_range: 10.0,
+            sensor_x: 0.0,
+            sensor_y: 0.0,
+            sensor_z: 0.0,
+            yaw_offset_deg: 0.0,
+            output_voxel_size: 0.0,
+            support_floor: true,
+            support_floor_z: 0.0,
+            support_floor_size: 0.0,
+        }
+    }
+
+    #[test]
+    fn support_floor_hits_downward_ray() {
+        let config = test_config();
+        let hit = raycast_support_floor(
+            &config,
+            Vec3::new(1.0, 2.0, 2.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            10.0,
+        )
+        .expect("floor should intersect");
+        assert_eq!(hit.0, Vec3::new(1.0, 2.0, 0.0));
+        assert_eq!(hit.1, 2.0);
+    }
+
+    #[test]
+    fn support_floor_respects_bounds() {
+        let mut config = test_config();
+        config.support_floor_size = 2.0;
+        assert!(raycast_support_floor(
+            &config,
+            Vec3::new(2.0, 0.0, 1.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            10.0,
+        )
+        .is_none());
+    }
 }

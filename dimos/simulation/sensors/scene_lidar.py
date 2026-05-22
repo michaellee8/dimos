@@ -42,6 +42,9 @@ class SceneLidarConfig(NativeModuleConfig):
     sensor_z: float = 1.0
     yaw_offset_deg: float = 0.0
     output_voxel_size: float = 0.03
+    support_floor: bool = False
+    support_floor_z: float = 0.0
+    support_floor_size: float = 0.0
 
 
 class SceneLidarModule(NativeModule):

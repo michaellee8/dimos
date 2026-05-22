@@ -358,6 +358,12 @@ def _sim_support_blueprints() -> tuple[Blueprint, ...]:
                 sensor_z=_env_float("DIMOS_SCENE_LIDAR_SENSOR_Z", 1.0),
                 yaw_offset_deg=_env_float("DIMOS_SCENE_LIDAR_YAW_OFFSET_DEG", 0.0),
                 output_voxel_size=_env_float("DIMOS_SCENE_LIDAR_OUTPUT_VOXEL_SIZE", 0.03),
+                support_floor=_env_bool(
+                    "DIMOS_SCENE_LIDAR_SUPPORT_FLOOR",
+                    global_config.simulation == "babylon",
+                ),
+                support_floor_z=_env_float("DIMOS_SCENE_SUPPORT_FLOOR_Z", 0.0),
+                support_floor_size=_env_float("DIMOS_SCENE_SUPPORT_FLOOR_SIZE", 0.0),
             ).transports(
                 {
                     ("pose", PoseStamped): LCMTransport("/odom", PoseStamped),
@@ -475,6 +481,9 @@ def _babylon_blueprint(viewer_mjcf_path: str | Path, cmd_vel_topic: str) -> Blue
             sim_rate=_env_float("DIMOS_BABYLON_SIM_RATE_HZ", 100.0),
             vehicle_height=_env_float("DIMOS_BABYLON_VEHICLE_HEIGHT", 0.75),
             step_offset=_env_float("DIMOS_BABYLON_STEP_OFFSET", 0.22),
+            support_floor=_env_bool("DIMOS_BABYLON_SUPPORT_FLOOR", True),
+            support_floor_z=_env_float("DIMOS_SCENE_SUPPORT_FLOOR_Z", 0.0),
+            support_floor_size=_env_float("DIMOS_SCENE_SUPPORT_FLOOR_SIZE", 0.0),
             lock_z=True,
         )
 
