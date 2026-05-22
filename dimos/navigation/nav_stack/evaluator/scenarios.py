@@ -92,16 +92,21 @@ def _map_with_walls(*walls: np.ndarray) -> PointCloud2:
     return _cloud(np.vstack([_floor(), *walls]))
 
 
-def _mesh_scene(name: str, mesh_path: str, expect_path: bool = True) -> PlannerScenario:
-    points = load_voxelized_mesh(mesh_path)
-    return PlannerScenario(
-        name=name,
-        global_map=_cloud(points),
-        start_pose=_odom(-5.0, 0.0),
-        goal_pose=_odom(5.0, 0.0),
-        expect_path=expect_path,
-    )
-
-
 def default_scenarios() -> list[PlannerScenario]:
-    return [_mesh_scene("loaded_mesh", MESH_PATH)]
+    cloud = _cloud(load_voxelized_mesh(MESH_PATH))
+    return [
+        PlannerScenario(
+            name="outside",
+            global_map=cloud,
+            start_pose=_odom(-20.45, -19.85, 1.75),
+            goal_pose=_odom(21.95, -4.25, 1.75),
+            expect_path=True,
+        ),
+        PlannerScenario(
+            name="up the stairs",
+            global_map=cloud,
+            start_pose=_odom(7.15, -3.55, 2.05),
+            goal_pose=_odom(5.55, -2.05, 5.65),
+            expect_path=True,
+        ),
+    ]

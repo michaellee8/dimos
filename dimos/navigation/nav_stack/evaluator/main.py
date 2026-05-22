@@ -22,18 +22,47 @@ streams to rerun. Run with::
 
 from __future__ import annotations
 
+from typing import Any
+
 from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.navigation.nav_stack.evaluator.evaluator import Evaluator
 from dimos.navigation.nav_stack.evaluator.straight_line_planner import StraightLinePlanner
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 
+_POSE_MARKER_RADIUS = 0.4
+
+
+def _render_start_pose(msg: Any) -> Any:
+    import rerun as rr
+
+    return rr.Points3D(
+        positions=[[msg.x, msg.y, msg.z]],
+        colors=[[0, 255, 0]],  # green
+        radii=[_POSE_MARKER_RADIUS],
+    )
+
+
+def _render_goal_pose(msg: Any) -> Any:
+    import rerun as rr
+
+    return rr.Points3D(
+        positions=[[msg.x, msg.y, msg.z]],
+        colors=[[255, 0, 0]],  # red
+        radii=[_POSE_MARKER_RADIUS],
+    )
+
 
 def create_evaluator_blueprint() -> Blueprint:
     return autoconnect(
         Evaluator.blueprint(),
         StraightLinePlanner.blueprint(),
-        RerunBridgeModule.blueprint(),
+        RerunBridgeModule.blueprint(
+            visual_override={
+                "world/start_pose": _render_start_pose,
+                "world/goal_pose": _render_goal_pose,
+            }
+        ),
     )
 
 
