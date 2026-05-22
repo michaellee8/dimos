@@ -69,6 +69,10 @@ class BridgeDatachannelResponse(BaseModel):
     # robot published no video or the pull failed (video degrades, datachannels
     # still work). Operator answers it via /renegotiate-answer.
     video_offer: str | None = None
+    # Debug breadcrumb: why video_offer is null. "ok" | "no_published_track" |
+    # "pull_no_renegotiation" | "pull_error: ...". Surfaced to the browser so
+    # the failure reason is visible without EC2 access.
+    video_status: str = "ok"
 
 
 class RenegotiateAnswerRequest(BaseModel):
@@ -418,7 +422,11 @@ async def bridge_datachannel(
     # failure must NOT 502 the bridge (commands + clock-sync already work, so
     # degrade to no-video rather than tearing down a working session).
     video_offer: str | None = None
-    if session.published_video_track_name:
+    video_status = "ok"
+    if not session.published_video_track_name:
+        video_status = "no_published_track"
+        log.warning("bridge: no published_video_track_name session=%s", session.id)
+    else:
         try:
             pull = await cf_client.add_tracks(
                 session.operator_cf_session_id,
@@ -433,17 +441,22 @@ async def bridge_datachannel(
             sd = pull.get("sessionDescription") or {}
             if pull.get("requiresImmediateRenegotiation") and sd.get("sdp"):
                 video_offer = sd["sdp"]
+            else:
+                video_status = "pull_no_renegotiation"
+                log.warning(
+                    "bridge: video pull no renegotiation session=%s track=%s resp=%r",
+                    session.id, session.published_video_track_name, pull,
+                )
         except Exception as e:
-            log.error(
-                "Video pull failed for session=%s: %r — video disabled",
-                session.id, e,
-            )
+            video_status = f"pull_error: {e}"
+            log.error("Video pull failed session=%s: %r", session.id, e)
 
     return BridgeDatachannelResponse(
         cmd_channel_id=op_pub_ids[CMD_CHANNEL_NAME],
         state_channel_id=op_pub_ids[STATE_CHANNEL_NAME],
         state_back_channel_id=op_sub_ids[STATE_BACK_CHANNEL_NAME],
         video_offer=video_offer,
+        video_status=video_status,
     )
 
 
