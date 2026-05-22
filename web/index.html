@@ -747,7 +747,7 @@ angular.z = 0</pre>
                     console.warn('[video] renegotiation failed (commands unaffected):', err);
                 }
             } else {
-                console.info('[video] no video_offer (no published video, or older broker)');
+                console.info('[video] no video_offer — broker video_status:', bridge.video_status || '(none)');
             }
         }
 
