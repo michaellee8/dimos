@@ -467,7 +467,18 @@ def _babylon_blueprint(viewer_mjcf_path: str | Path, cmd_vel_topic: str) -> Blue
             pointcloud_max_points=_env_int("DIMOS_BABYLON_POINTCLOUD_MAX_POINTS", 70000),
         )
 
-    return BabylonSceneViewerModule.blueprint(**kwargs).transports(
+    # Babylon-as-physics mode: integrate cmd_vel locally, publish sim_odom,
+    # let the rust scene_lidar consume it.  No MuJoCo at runtime.
+    babylon_is_physics = global_config.simulation == "babylon"
+    if babylon_is_physics:
+        kwargs.update(
+            enable_sim=True,
+            sim_rate=_env_float("DIMOS_BABYLON_SIM_RATE_HZ", 100.0),
+            vehicle_height=_env_float("DIMOS_BABYLON_VEHICLE_HEIGHT", 0.75),
+            lock_z=True,
+        )
+
+    bp = BabylonSceneViewerModule.blueprint(**kwargs).transports(
         {
             ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
             ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
@@ -484,6 +495,13 @@ def _babylon_blueprint(viewer_mjcf_path: str | Path, cmd_vel_topic: str) -> Blue
             ),
         }
     )
+
+    if babylon_is_physics:
+        # In physics mode, sim_odom IS the canonical /odom — every
+        # downstream consumer (scene_lidar pose, mapping, planner)
+        # reads from it.
+        bp = bp.transports({("sim_odom", PoseStamped): LCMTransport("/odom", PoseStamped)})
+    return bp
 
 
 def _arm_teleop_blueprint() -> Blueprint | None:
@@ -583,37 +601,71 @@ def _quest_teleop_blueprint(cmd_vel_topic: str) -> Blueprint | None:
     )
 
 
-_backend_selection = _select_backend()
-_coordinator, _cmd_vel_topic = _coordinator_blueprint(_backend_selection)
-_babylon = _babylon_blueprint(_MJCF_PATH, _cmd_vel_topic)
-_teleop = _arm_teleop_blueprint()
-_quest = _quest_teleop_blueprint(_cmd_vel_topic)
-_camera_bridge = _camera_bridge_blueprint()
-_workspace_camera = _workspace_camera_bridge_blueprint()
-_optional = tuple(
-    bp for bp in (_babylon, _teleop, _quest, _camera_bridge, _workspace_camera) if bp is not None
-)
+if global_config.simulation == "babylon":
+    # Browser-physics nav stack. Babylon owns the robot's kinematic base
+    # (cmd_vel → sim_odom) and the Havok entity world; the rust scene
+    # lidar consumes both. No MuJoCo, no coordinator, no GR00T policy
+    # (joint-level control needs a real physics sim).
+    _cmd_vel_topic = "/cmd_vel"
+    _babylon = _babylon_blueprint(_MJCF_PATH, _cmd_vel_topic)
+    if _babylon is None:
+        raise RuntimeError(
+            "--simulation babylon requested but Babylon viewer is disabled "
+            "(DIMOS_ENABLE_BABYLON=0?)"
+        )
+    g1_groot_wbc = autoconnect(
+        _babylon,
+        _websocket_blueprint(_cmd_vel_topic),
+        *_sim_support_blueprints(),
+    ).transports(
+        {
+            ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
+            ("cmd_vel", Twist): LCMTransport(_cmd_vel_topic, Twist),
+            ("nav_cmd_vel", Twist): LCMTransport(_cmd_vel_topic, Twist),
+            ("pointcloud", PointCloud2): LCMTransport("/lidar", PointCloud2),
+            ("global_map", PointCloud2): LCMTransport("/global_map", PointCloud2),
+            ("global_costmap", OccupancyGrid): LCMTransport("/global_costmap", OccupancyGrid),
+            ("path", PathMsg): LCMTransport("/nav_path", PathMsg),
+            ("clicked_point", PointStamped): LCMTransport("/clicked_point", PointStamped),
+            ("point_goal", PointStamped): LCMTransport("/point_goal", PointStamped),
+            ("goal_request", PoseStamped): LCMTransport("/goal_request", PoseStamped),
+            ("stop_movement", Bool): LCMTransport("/stop_movement", Bool),
+        }
+    )
+else:
+    _backend_selection = _select_backend()
+    _coordinator, _cmd_vel_topic = _coordinator_blueprint(_backend_selection)
+    _babylon = _babylon_blueprint(_MJCF_PATH, _cmd_vel_topic)
+    _teleop = _arm_teleop_blueprint()
+    _quest = _quest_teleop_blueprint(_cmd_vel_topic)
+    _camera_bridge = _camera_bridge_blueprint()
+    _workspace_camera = _workspace_camera_bridge_blueprint()
+    _optional = tuple(
+        bp
+        for bp in (_babylon, _teleop, _quest, _camera_bridge, _workspace_camera)
+        if bp is not None
+    )
 
-g1_groot_wbc = autoconnect(
-    _backend_selection.blueprint,
-    _coordinator,
-    _websocket_blueprint(_cmd_vel_topic),
-    *_sim_support_blueprints(),
-    *_optional,
-).transports(
-    {
-        ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
-        ("cmd_vel", Twist): LCMTransport(_cmd_vel_topic, Twist),
-        ("nav_cmd_vel", Twist): LCMTransport(_cmd_vel_topic, Twist),
-        ("pointcloud", PointCloud2): LCMTransport("/lidar", PointCloud2),
-        ("global_map", PointCloud2): LCMTransport("/global_map", PointCloud2),
-        ("global_costmap", OccupancyGrid): LCMTransport("/global_costmap", OccupancyGrid),
-        ("path", PathMsg): LCMTransport("/nav_path", PathMsg),
-        ("clicked_point", PointStamped): LCMTransport("/clicked_point", PointStamped),
-        ("point_goal", PointStamped): LCMTransport("/point_goal", PointStamped),
-        ("goal_request", PoseStamped): LCMTransport("/goal_request", PoseStamped),
-        ("stop_movement", Bool): LCMTransport("/stop_movement", Bool),
-    }
-)
+    g1_groot_wbc = autoconnect(
+        _backend_selection.blueprint,
+        _coordinator,
+        _websocket_blueprint(_cmd_vel_topic),
+        *_sim_support_blueprints(),
+        *_optional,
+    ).transports(
+        {
+            ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
+            ("cmd_vel", Twist): LCMTransport(_cmd_vel_topic, Twist),
+            ("nav_cmd_vel", Twist): LCMTransport(_cmd_vel_topic, Twist),
+            ("pointcloud", PointCloud2): LCMTransport("/lidar", PointCloud2),
+            ("global_map", PointCloud2): LCMTransport("/global_map", PointCloud2),
+            ("global_costmap", OccupancyGrid): LCMTransport("/global_costmap", OccupancyGrid),
+            ("path", PathMsg): LCMTransport("/nav_path", PathMsg),
+            ("clicked_point", PointStamped): LCMTransport("/clicked_point", PointStamped),
+            ("point_goal", PointStamped): LCMTransport("/point_goal", PointStamped),
+            ("goal_request", PoseStamped): LCMTransport("/goal_request", PoseStamped),
+            ("stop_movement", Bool): LCMTransport("/stop_movement", Bool),
+        }
+    )
 
 __all__ = ["g1_groot_wbc"]

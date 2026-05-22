@@ -54,7 +54,7 @@ main = typer.Typer(
 
 load_dotenv()
 
-SIMULATORS = ("mujoco", "dimsim")
+SIMULATORS = ("mujoco", "dimsim", "babylon")
 
 
 def _normalize_simulation_argv(argv: list[str]) -> list[str]:
