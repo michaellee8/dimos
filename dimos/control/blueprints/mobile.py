@@ -140,15 +140,25 @@ coordinator_flowbase_keyboard_teleop = autoconnect(
     ControlCoordinator.blueprint(
         hardware=[_flowbase_twist_base()],
         tasks=[
+            # task go inactive so control hands back to the path follower.
             TaskConfig(
                 name="vel_base",
                 type="velocity",
+                joint_names=_base_joints,
+                priority=20,
+                velocity_zero_on_timeout=False,
+            ),
+            # Closed-loop path follower used by the benchmark tool. Inactive
+            # until the tool RPCs configure(...) + start_path(...).
+            TaskConfig(
+                name="baseline_follower",
+                type="baseline_path_follower",
                 joint_names=_base_joints,
                 priority=10,
             ),
         ],
     ),
-    KeyboardTeleop.blueprint(),
+    KeyboardTeleop.blueprint(publish_only_when_active=True),
 ).transports(
     {
         ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
