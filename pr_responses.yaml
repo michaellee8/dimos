@@ -1,0 +1,69 @@
+- pr: 2112
+  comment_id: 3252754981
+  author: greptile-apps
+  file: dimos/navigation/nav_stack/modules/local_planner/local_planner.py
+  line: 42
+  problem: |
+    P1 — Build command pins to an unstable feature branch (`feat/configurable-body-frame`).
+    The branch is a mutable git ref that can be force-pushed or deleted, making builds
+    non-reproducible. The previous tag was `v0.6.0`; greptile wants a tagged release.
+  solution: |
+    skipped — fix requires knowing which upstream tag is the right pin (the branch was
+    created precisely because no stable tag yet contains `configurable-body-frame`). Picking
+    the wrong tag silently reverts that feature. Needs a release decision Jeff has to make;
+    not an automatable fix.
+  commit: null
+
+- pr: 2112
+  comment_id: 3252754991
+  author: greptile-apps
+  file: dimos/navigation/nav_stack/main.py
+  line: null
+  problem: |
+    P1 — User-supplied `max_hz` entries for entities outside `visual_override` are silently
+    discarded. The new comprehension builds `max_hz` exclusively from `visual_override`
+    keys, so callers that pass custom `max_hz` rates for channels not in `visual_override`
+    will see uncapped publishing instead of their requested rate. The previous guard
+    `if vis_throttle != 1.0 and "max_hz" in resolved` preserved all user-set rates.
+  solution: |
+    skipped — preserving the old behavior would require re-merging the two `max_hz` sources
+    (user_config and visual_override) with a documented precedence. That is a semantic
+    decision (does visual_override clamp the user value, override it, or only apply when no
+    user value is set?), not a mechanical fix. Greptile names the bug correctly but does
+    not specify the intended precedence; sending it back to Jeff.
+  commit: null
+
+- pr: 2112
+  comment_id: 3252755025
+  author: greptile-apps
+  file: dimos/core/module.py
+  line: 270
+  problem: |
+    P2 — `_tf_lock` is a class-level attribute, so all `ModuleBase` instances share the same
+    `threading.Lock` object. Modules contend on a global lock even though their `_tf` fields
+    are independent. Moving the lock to `__init__` would give each instance its own.
+  solution: |
+    skipped — `ModuleBase` is the root of every module in the codebase. Moving the lock to
+    `__init__` is a one-liner in isolation but a behavior change for any subclass that
+    overrides `__init__` without calling `super().__init__()` (and there are many in the
+    nav_stack). Risk of latent breakage outweighs the contention concern, which only
+    matters at startup. Worth doing as a dedicated PR with a careful subclass audit.
+  commit: null
+
+- pr: 2112
+  comment_id: 3252755042
+  author: greptile-apps
+  file: dimos/navigation/nav_stack/modules/pgo/cpp/main.cpp
+  line: null
+  problem: |
+    P2 — Traversability encoding on `end_pose` differs from the Python `LineSegments3D`
+    convention. `append_segment` sets `orientation.w = traversability` on both poses, but
+    the comment says traversability is encoded only on the first pose. Python's
+    `LineSegments3D.lcm_encode` encodes pairs as `(p1, trav), (p2, 0.0)`.
+  solution: |
+    skipped — fix is one line (set `end_pose.pose.orientation.w = 0.0` in `append_segment`),
+    but the C++ side has no LineSegments3D test fixture in this repo and the consumer-side
+    Python decoder hasn't been audited for whether it reads pose 2's `w`. Risk of cosmetic
+    rendering change vs. risk of breaking a downstream that already learned to read the
+    duplicated value. Leaving for Jeff to confirm the intended contract.
+  commit: null
