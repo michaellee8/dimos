@@ -53,6 +53,14 @@ def _render_goal_pose(msg: Any) -> Any:
     )
 
 
+def _render_global_map(msg: Any) -> Any:
+    return msg.to_rerun(voxel_size=0.03)
+
+
+def _render_surface_map(msg: Any) -> Any:
+    return msg.to_rerun(mode="boxes", size=0.1)
+
+
 def create_evaluator_blueprint() -> Blueprint:
     return autoconnect(
         Evaluator.blueprint(),
@@ -61,6 +69,8 @@ def create_evaluator_blueprint() -> Blueprint:
             visual_override={
                 "world/start_pose": _render_start_pose,
                 "world/goal_pose": _render_goal_pose,
+                "world/global_map": _render_global_map,
+                "world/surface_map": _render_surface_map,
             }
         ),
     )
