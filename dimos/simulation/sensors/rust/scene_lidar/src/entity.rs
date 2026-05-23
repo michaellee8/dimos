@@ -7,9 +7,14 @@
 // message per browser physics tick. We mirror the wire format here so a
 // custom `decode` slots into the dimos-module input macro without needing
 // a new lcm_msgs type. Each entity carries its descriptor (kind/shape/
-// extents) inline alongside the pose, so the lidar can build the right
-// analytical intersection without a separate metadata round-trip.
+// extents/mesh_ref) inline alongside the pose, so the lidar can build the
+// right intersection without a separate metadata round-trip.
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use crate::accel::{Bvh, Triangle, RAY_EPSILON};
 use glam::{Mat4, Quat, Vec3};
 use serde::Deserialize;
 
@@ -32,6 +37,8 @@ struct EntityWire {
     id: String,
     #[serde(default)]
     kind: String,
+    #[serde(default)]
+    mesh_ref: String,
     shape: String,
     #[serde(default)]
     extents: Vec<f32>,
@@ -48,13 +55,24 @@ struct BatchPayload {
     entities: Vec<EntityWire>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum EntityShape {
-    Box { half_extents: Vec3 },
-    Sphere { radius: f32 },
+    Box {
+        half_extents: Vec3,
+    },
+    Sphere {
+        radius: f32,
+    },
     // Cylinder is the local Z axis (matches Babylon's CreateCylinder default
     // after our Z-up rotation in app.js).
-    Cylinder { radius: f32, half_height: f32 },
+    Cylinder {
+        radius: f32,
+        half_height: f32,
+    },
+    Mesh {
+        mesh_ref: String,
+        mesh: Option<Arc<MeshAccel>>,
+    },
 }
 
 pub struct Entity {
@@ -104,7 +122,7 @@ impl EntityStateBatch {
             .entities
             .into_iter()
             .filter_map(|e| {
-                let shape = parse_shape(&e.shape, &e.extents)?;
+                let shape = parse_shape(&e.shape, &e.extents, &e.mesh_ref)?;
                 let translation = Vec3::new(e.pose.x, e.pose.y, e.pose.z);
                 let rotation = Quat::from_xyzw(e.pose.qx, e.pose.qy, e.pose.qz, e.pose.qw);
                 let world_from_local = Mat4::from_rotation_translation(rotation, translation);
@@ -121,7 +139,7 @@ impl EntityStateBatch {
     }
 }
 
-fn parse_shape(name: &str, extents: &[f32]) -> Option<EntityShape> {
+fn parse_shape(name: &str, extents: &[f32], mesh_ref: &str) -> Option<EntityShape> {
     match name {
         "box" => {
             // (w, h, d) full extents → half extents.
@@ -144,12 +162,170 @@ fn parse_shape(name: &str, extents: &[f32]) -> Option<EntityShape> {
                 half_height: h * 0.5,
             })
         }
-        "mesh" => None, // GLB-backed entities not supported in MVP — silently skipped.
+        "mesh" => {
+            if mesh_ref.is_empty() {
+                eprintln!("scene_lidar: mesh entity missing mesh_ref");
+                None
+            } else {
+                Some(EntityShape::Mesh {
+                    mesh_ref: mesh_ref.to_string(),
+                    mesh: None,
+                })
+            }
+        }
         other => {
             eprintln!("scene_lidar: unknown entity shape {other:?}");
             None
         }
     }
+}
+
+#[derive(Debug, Default)]
+pub struct MeshAccel {
+    triangles: Vec<Triangle>,
+    bvh: Bvh,
+}
+
+impl MeshAccel {
+    fn load(path: &Path) -> std::io::Result<Self> {
+        let (document, buffers, _) = gltf::import(path).map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("failed to import {}: {error}", path.display()),
+            )
+        })?;
+        let mut triangles = Vec::new();
+        for scene in document.scenes() {
+            for node in scene.nodes() {
+                collect_node_triangles(node, Mat4::IDENTITY, &buffers, &mut triangles);
+            }
+        }
+        if triangles.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("entity mesh has no triangles: {}", path.display()),
+            ));
+        }
+        let bvh = Bvh::build(&triangles);
+        Ok(Self { triangles, bvh })
+    }
+
+    fn raycast(&self, origin: Vec3, direction: Vec3, max_range: f32) -> Option<(Vec3, f32)> {
+        self.bvh
+            .raycast(origin, direction, max_range, &self.triangles)
+    }
+
+    fn triangle_count(&self) -> usize {
+        self.triangles.len()
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct MeshCache {
+    asset_root: PathBuf,
+    meshes: HashMap<String, Option<Arc<MeshAccel>>>,
+}
+
+impl MeshCache {
+    pub fn new(asset_root: impl Into<PathBuf>) -> Self {
+        Self {
+            asset_root: asset_root.into(),
+            meshes: HashMap::new(),
+        }
+    }
+
+    pub fn resolve_entities(&mut self, entities: &mut [Entity]) {
+        for entity in entities {
+            let EntityShape::Mesh { mesh_ref, mesh } = &mut entity.shape else {
+                continue;
+            };
+            *mesh = self.mesh_for(mesh_ref);
+        }
+    }
+
+    fn mesh_for(&mut self, mesh_ref: &str) -> Option<Arc<MeshAccel>> {
+        if let Some(cached) = self.meshes.get(mesh_ref) {
+            return cached.clone();
+        }
+        let path = resolve_asset_path(&self.asset_root, mesh_ref);
+        let loaded = match MeshAccel::load(&path) {
+            Ok(mesh) => {
+                eprintln!(
+                    "scene_lidar: loaded entity mesh {} ({} triangles) from {}",
+                    mesh_ref,
+                    mesh.triangle_count(),
+                    path.display()
+                );
+                Some(Arc::new(mesh))
+            }
+            Err(error) => {
+                eprintln!(
+                    "scene_lidar: failed to load entity mesh {} from {}: {}",
+                    mesh_ref,
+                    path.display(),
+                    error
+                );
+                None
+            }
+        };
+        self.meshes.insert(mesh_ref.to_string(), loaded.clone());
+        loaded
+    }
+}
+
+fn resolve_asset_path(asset_root: &Path, mesh_ref: &str) -> PathBuf {
+    let path = PathBuf::from(mesh_ref);
+    if path.is_absolute() {
+        path
+    } else {
+        asset_root.join(path)
+    }
+}
+
+fn collect_node_triangles(
+    node: gltf::Node<'_>,
+    parent_transform: Mat4,
+    buffers: &[gltf::buffer::Data],
+    out: &mut Vec<Triangle>,
+) {
+    let local_transform = node_transform(&node);
+    let node_transform = parent_transform * local_transform;
+    if let Some(mesh) = node.mesh() {
+        for primitive in mesh.primitives() {
+            let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()].0));
+            let Some(positions_iter) = reader.read_positions() else {
+                continue;
+            };
+            let positions: Vec<Vec3> = positions_iter.map(Vec3::from_array).collect();
+            if positions.len() < 3 {
+                continue;
+            }
+            let indices: Vec<usize> = match reader.read_indices() {
+                Some(iter) => iter.into_u32().map(|i| i as usize).collect(),
+                None => (0..positions.len()).collect(),
+            };
+            for tri in indices.chunks_exact(3) {
+                let a = node_transform.transform_point3(positions[tri[0]]);
+                let b = node_transform.transform_point3(positions[tri[1]]);
+                let c = node_transform.transform_point3(positions[tri[2]]);
+                if (b - a).cross(c - a).length_squared() > RAY_EPSILON {
+                    out.push(Triangle::new(a, b, c));
+                }
+            }
+        }
+    }
+    for child in node.children() {
+        collect_node_triangles(child, node_transform, buffers, out);
+    }
+}
+
+fn node_transform(node: &gltf::Node<'_>) -> Mat4 {
+    let (translation, rotation, scale) = node.transform().decomposed();
+    Mat4::from_scale_rotation_translation(
+        Vec3::from_array(scale),
+        Quat::from_xyzw(rotation[0], rotation[1], rotation[2], rotation[3]),
+        Vec3::from_array(translation),
+    )
 }
 
 /// Cast `direction` from `origin` against a single entity. Direction must
@@ -166,15 +342,27 @@ pub fn raycast(
 ) -> Option<(Vec3, f32)> {
     let local_origin = entity.local_from_world.transform_point3(origin);
     let local_dir = entity.local_from_world.transform_vector3(direction);
-    let dist = match entity.shape {
+    let dist = match &entity.shape {
         EntityShape::Box { half_extents } => {
-            ray_box(local_origin, local_dir, half_extents, max_range)
+            ray_box(local_origin, local_dir, *half_extents, max_range)
         }
-        EntityShape::Sphere { radius } => ray_sphere(local_origin, local_dir, radius, max_range),
+        EntityShape::Sphere { radius } => ray_sphere(local_origin, local_dir, *radius, max_range),
         EntityShape::Cylinder {
             radius,
             half_height,
-        } => ray_cylinder_z(local_origin, local_dir, radius, half_height, max_range),
+        } => ray_cylinder_z(local_origin, local_dir, *radius, *half_height, max_range),
+        EntityShape::Mesh {
+            mesh: Some(mesh), ..
+        } => {
+            let (local_hit, _) = mesh.raycast(local_origin, local_dir, max_range)?;
+            let hit_world = entity.world_from_local.transform_point3(local_hit);
+            let dist = hit_world.distance(origin);
+            if dist <= max_range {
+                return Some((hit_world, dist));
+            }
+            return None;
+        }
+        EntityShape::Mesh { mesh: None, .. } => return None,
     }?;
     let hit_world = origin + direction * dist;
     Some((hit_world, dist))
@@ -322,5 +510,22 @@ mod tests {
         let bytes = encode_payload(r#"{"ts":1.0,"entities":[]}"#);
         let batch = EntityStateBatch::decode(&bytes).unwrap();
         assert!(batch.entries.is_empty());
+    }
+
+    #[test]
+    fn decodes_mesh_entities_for_lidar_mesh_resolution() {
+        let bytes = encode_payload(
+            r#"{"ts":1.0,"entities":[{"id":"chair_1","kind":"dynamic","mesh_ref":"entities/chair_1/visual.glb","shape":"mesh","extents":[],"mass":8.0,"pose":{"x":2.0,"y":0.0,"z":0.6,"qw":1.0,"qx":0.0,"qy":0.0,"qz":0.0}}]}"#,
+        );
+
+        let batch = EntityStateBatch::decode(&bytes).unwrap();
+        assert_eq!(batch.entries.len(), 1);
+        match &batch.entries[0].shape {
+            EntityShape::Mesh { mesh_ref, mesh } => {
+                assert_eq!(mesh_ref, "entities/chair_1/visual.glb");
+                assert!(mesh.is_none());
+            }
+            _ => panic!("expected mesh entity"),
+        }
     }
 }

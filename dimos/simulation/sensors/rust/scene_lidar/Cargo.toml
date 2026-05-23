@@ -15,7 +15,7 @@ lcm-msgs = { git = "https://github.com/dimensionalOS/dimos-lcm.git", branch = "r
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-gltf = "1"
+gltf = { version = "1", features = ["KHR_texture_transform"] }
 glam = "0.29"
 rayon = "1"
 

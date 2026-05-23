@@ -1458,6 +1458,17 @@ function physicsShapeFromHint(hint) {
   }
 }
 
+function physicsShapeForEntity(descriptor, mass) {
+  if (descriptor.shape_hint === "mesh" && descriptor.kind === "dynamic" && mass > 0) {
+    // Havok/Babylon can use triangle meshes reliably for static scene
+    // collision, but dynamic triangle-mesh rigid bodies are unstable for
+    // authored furniture. Keep the exact mesh for rendering + lidar; use a
+    // convex hull only for the live rigid-body solver.
+    return BABYLON.PhysicsShapeType.CONVEX_HULL ?? BABYLON.PhysicsShapeType.MESH;
+  }
+  return physicsShapeFromHint(descriptor.shape_hint);
+}
+
 function buildPrimitiveMesh(descriptor) {
   const ext = descriptor.extents || [];
   switch (descriptor.shape_hint) {
@@ -1636,6 +1647,8 @@ async function handleEntitySpawn(payload) {
   }
   const mesh = built.mesh;
   applyPoseWire(mesh, payload.pose || {});
+  mesh.computeWorldMatrix(true);
+  mesh.refreshBoundingInfo(true);
 
   // mass=0 → kinematic (program-driven via set_entity_pose). Matches the
   // semantics in entity.py: dynamic with mass>0 actually gets simulated.
@@ -1645,7 +1658,7 @@ async function handleEntitySpawn(payload) {
   try {
     aggregate = new BABYLON.PhysicsAggregate(
       mesh,
-      physicsShapeFromHint(desc.shape_hint),
+      physicsShapeForEntity(desc, mass),
       { mass },
       scene,
     );

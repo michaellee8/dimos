@@ -212,6 +212,7 @@ class EntityStateBatch(Timestamped):
                 {
                     "id": d.entity_id,
                     "kind": d.kind,
+                    "mesh_ref": d.mesh_ref,
                     "shape": d.shape_hint,
                     "extents": list(d.extents),
                     "mass": float(d.mass),
@@ -238,7 +239,7 @@ class EntityStateBatch(Timestamped):
             desc = EntityDescriptor(
                 entity_id=str(entry["id"]),
                 kind=entry.get("kind", "kinematic"),
-                mesh_ref="",  # not transported — lidar doesn't need GLB path
+                mesh_ref=str(entry.get("mesh_ref", "")),
                 shape_hint=entry.get("shape", "mesh"),
                 extents=tuple(float(x) for x in entry.get("extents", [])),
                 mass=float(entry.get("mass", 0.0)),
