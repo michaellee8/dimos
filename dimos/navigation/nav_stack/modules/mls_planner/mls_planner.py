@@ -22,16 +22,28 @@ piecewise.
 
 from __future__ import annotations
 
+import heapq
+import math
 import time
 from typing import Any
 
+from dimos_lcm.geometry_msgs import (
+    Point as LCMPoint,
+    Pose as LCMPose,
+    PoseStamped as LCMPoseStamped,
+    Quaternion as LCMQuaternion,
+)
+from dimos_lcm.nav_msgs import Path as LCMPath
+from dimos_lcm.std_msgs import Header as LCMHeader, Time as LCMTime
+import networkx as nx
 import numpy as np
 from scipy import ndimage
 
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
+from dimos.msgs.nav_msgs.LineSegments3D import LineSegments3D
 from dimos.msgs.nav_msgs.Odometry import Odometry
-from dimos.msgs.nav_msgs.Path import Path
+from dimos.msgs.nav_msgs.Path import Path, sec_nsec
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.logging_config import setup_logger
 
@@ -40,11 +52,17 @@ logger = setup_logger()
 SURFACE_DILATION_PASSES = 3
 SURFACE_EROSION_PASSES = 3
 
+WAYPOINT_SPACING_M = 2.0
+WAYPOINT_Z_TOLERANCE_M = 1.0
+WAYPOINT_STEP_THRESHOLD_M = 0.25
+WAYPOINT_MAX_EDGE_COST_M = 3.0
+WAYPOINT_SUB_SAMPLE_STRIDE = 20
+
 
 class MLSPlannerConfig(ModuleConfig):
     world_frame: str = "map"
     voxel_size: float = 0.1
-    robot_height: float = 1.0
+    robot_height: float = 1.5
 
 
 def _extract_surfaces(points: np.ndarray, voxel_size: float, robot_height: float) -> np.ndarray:
@@ -132,6 +150,276 @@ def _close_surface_holes(
     )
 
 
+class _GridHash:
+    """Sparse 2D bucket index over integer cell coordinates."""
+
+    def __init__(self, bucket_size_cells: int) -> None:
+        self._bucket_size = max(1, bucket_size_cells)
+        self._buckets: dict[tuple[int, int], list[int]] = {}
+
+    def _key(self, ix: int, iy: int) -> tuple[int, int]:
+        return (ix // self._bucket_size, iy // self._bucket_size)
+
+    def add(self, waypoint_id: int, ix: int, iy: int) -> None:
+        self._buckets.setdefault(self._key(ix, iy), []).append(waypoint_id)
+
+    def nearby(self, ix: int, iy: int, radius_cells: int) -> list[int]:
+        bucket_radius = radius_cells // self._bucket_size + 1
+        bx, by = self._key(ix, iy)
+        result: list[int] = []
+        for dbx in range(-bucket_radius, bucket_radius + 1):
+            for dby in range(-bucket_radius, bucket_radius + 1):
+                ids = self._buckets.get((bx + dbx, by + dby))
+                if ids:
+                    result.extend(ids)
+        return result
+
+
+def _build_surface_lookup(
+    sx: np.ndarray, sy: np.ndarray, sz: np.ndarray
+) -> dict[tuple[int, int], np.ndarray]:
+    """Group surface cells by XY column for fast neighbor lookup in inner A*."""
+    by_column: dict[tuple[int, int], list[int]] = {}
+    for ix_, iy_, iz_ in zip(sx.tolist(), sy.tolist(), sz.tolist(), strict=True):
+        by_column.setdefault((ix_, iy_), []).append(iz_)
+    return {key: np.array(sorted(vs), dtype=np.int64) for key, vs in by_column.items()}
+
+
+def _surface_dijkstra(
+    surface_lookup: dict[tuple[int, int], np.ndarray],
+    start: tuple[int, int, int],
+    voxel_size: float,
+    step_threshold_cells: int,
+    max_cost: float,
+    targets: set[tuple[int, int, int]],
+) -> tuple[dict[tuple[int, int, int], float], dict[tuple[int, int, int], tuple[int, int, int]]]:
+    """Single-source Dijkstra over surface cells with per-step delta-z cap.
+
+    Explores until every cell in ``targets`` has been reached, the heap
+    drains, or every popped cell has g > ``max_cost``. Returns ``(g_score,
+    came_from)`` so callers can recover both costs and paths for any target
+    that's in ``g_score``.
+    """
+    heap: list[tuple[float, int, tuple[int, int, int]]] = [(0.0, 0, start)]
+    g_score: dict[tuple[int, int, int], float] = {start: 0.0}
+    came_from: dict[tuple[int, int, int], tuple[int, int, int]] = {}
+    remaining_targets = set(targets)
+    remaining_targets.discard(start)
+    counter = 0
+
+    while heap:
+        cur_g, _, current = heapq.heappop(heap)
+        if cur_g > g_score[current]:
+            continue
+        remaining_targets.discard(current)
+        if not remaining_targets:
+            break
+        cx, cy, cz = current
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                if dx == 0 and dy == 0:
+                    continue
+                nx_, ny_ = cx + dx, cy + dy
+                surfaces_here = surface_lookup.get((nx_, ny_))
+                if surfaces_here is None:
+                    continue
+                for nz_arr in surfaces_here:
+                    nz = int(nz_arr)
+                    dz = nz - cz
+                    if abs(dz) > step_threshold_cells:
+                        continue
+                    step_cost = math.sqrt(dx * dx + dy * dy + dz * dz) * voxel_size
+                    new_g = cur_g + step_cost
+                    if new_g > max_cost:
+                        continue
+                    neighbor = (nx_, ny_, nz)
+                    if new_g < g_score.get(neighbor, float("inf")):
+                        came_from[neighbor] = current
+                        g_score[neighbor] = new_g
+                        counter += 1
+                        heapq.heappush(heap, (new_g, counter, neighbor))
+
+    return g_score, came_from
+
+
+def _reconstruct_path(
+    came_from: dict[tuple[int, int, int], tuple[int, int, int]],
+    end: tuple[int, int, int],
+) -> np.ndarray:
+    path = [end]
+    while end in came_from:
+        end = came_from[end]
+        path.append(end)
+    path.reverse()
+    return np.array(path, dtype=np.int64)
+
+
+def build_waypoint_graph(
+    surface_points: np.ndarray,
+    voxel_size: float,
+    *,
+    waypoint_spacing: float,
+    waypoint_z_tolerance: float,
+    step_threshold: float,
+    max_edge_cost: float,
+    sub_sample_stride: int,
+) -> nx.Graph:
+    """Build a sparse waypoint graph over the surface map.
+
+    Iterates surface cells in deterministic lexicographic order, sub-sampled
+    by ``sub_sample_stride``. A waypoint is added when no existing waypoint
+    sits within a cylinder of XY radius ``waypoint_spacing`` and half-height
+    ``waypoint_z_tolerance``. Each new waypoint is connected to any existing
+    waypoint that the modified A* can reach within ``max_edge_cost`` subject
+    to the per-step delta-z cap.
+    """
+    graph = nx.Graph()
+    if len(surface_points) == 0:
+        return graph
+
+    sx = np.floor(surface_points[:, 0] / voxel_size).astype(np.int64)
+    sy = np.floor(surface_points[:, 1] / voxel_size).astype(np.int64)
+    sz = np.floor(surface_points[:, 2] / voxel_size).astype(np.int64)
+
+    surface_lookup = _build_surface_lookup(sx, sy, sz)
+
+    spacing_cells = max(1, int(waypoint_spacing / voxel_size))
+    z_tol_cells = max(0, int(waypoint_z_tolerance / voxel_size))
+    step_cells = max(0, int(step_threshold / voxel_size))
+    edge_radius_cells = max(1, int(max_edge_cost / voxel_size))
+
+    grid = _GridHash(spacing_cells)
+    wp_ix: list[int] = []
+    wp_iy: list[int] = []
+    wp_iz: list[int] = []
+
+    order = np.lexsort((sz, sy, sx))
+    spacing_sq = spacing_cells * spacing_cells
+    stride = max(1, sub_sample_stride)
+
+    for idx in order[::stride]:
+        cix, ciy, ciz = int(sx[idx]), int(sy[idx]), int(sz[idx])
+
+        in_cylinder = False
+        for wid in grid.nearby(cix, ciy, spacing_cells):
+            dx = wp_ix[wid] - cix
+            dy = wp_iy[wid] - ciy
+            dz = wp_iz[wid] - ciz
+            if dx * dx + dy * dy < spacing_sq and abs(dz) < z_tol_cells:
+                in_cylinder = True
+                break
+        if in_cylinder:
+            continue
+
+        new_id = len(wp_ix)
+        wp_ix.append(cix)
+        wp_iy.append(ciy)
+        wp_iz.append(ciz)
+        grid.add(new_id, cix, ciy)
+        graph.add_node(
+            new_id,
+            pos=(
+                (cix + 0.5) * voxel_size,
+                (ciy + 0.5) * voxel_size,
+                ciz * voxel_size,
+            ),
+            cell=(cix, ciy, ciz),
+        )
+
+        candidate_ids = [c for c in grid.nearby(cix, ciy, edge_radius_cells) if c != new_id]
+        candidate_cells: dict[tuple[int, int, int], int] = {}
+        for c in candidate_ids:
+            ox, oy, oz = wp_ix[c], wp_iy[c], wp_iz[c]
+            dx, dy, dz = ox - cix, oy - ciy, oz - ciz
+            if math.sqrt(dx * dx + dy * dy + dz * dz) * voxel_size > max_edge_cost:
+                continue
+            candidate_cells[(ox, oy, oz)] = c
+        if not candidate_cells:
+            continue
+
+        g_score, came_from = _surface_dijkstra(
+            surface_lookup,
+            start=(cix, ciy, ciz),
+            voxel_size=voxel_size,
+            step_threshold_cells=step_cells,
+            max_cost=max_edge_cost,
+            targets=set(candidate_cells),
+        )
+        for cell, other_id in candidate_cells.items():
+            if cell in g_score:
+                graph.add_edge(
+                    new_id,
+                    other_id,
+                    weight=float(g_score[cell]),
+                    path=_reconstruct_path(came_from, cell),
+                )
+
+    return graph
+
+
+class _PublishableLineSegments3D(LineSegments3D):
+    """LineSegments3D with a Python lcm_encode that matches the C++ wire format.
+
+    Upstream only implements decode (encode raises NotImplementedError); this
+    subclass produces the same nav_msgs/Path wire layout, where consecutive
+    pose pairs are interpreted as segments and pose.orientation.w carries
+    traversability.
+    """
+
+    def lcm_encode(self) -> bytes:
+        lcm_msg = LCMPath()
+        sec, nsec = sec_nsec(self.ts)
+        lcm_poses = []
+        for (p1, p2), trav in zip(self._segments, self._traversability, strict=False):
+            for pt in (p1, p2):
+                lp = LCMPoseStamped()
+                lp.pose = LCMPose()
+                lp.pose.position = LCMPoint()
+                lp.pose.orientation = LCMQuaternion()
+                lp.pose.position.x = pt[0]
+                lp.pose.position.y = pt[1]
+                lp.pose.position.z = pt[2]
+                lp.pose.orientation.w = trav
+                lp.header = LCMHeader()
+                lp.header.stamp = LCMTime()
+                lp.header.stamp.sec = sec
+                lp.header.stamp.nsec = nsec
+                lp.header.frame_id = self.frame_id
+                lcm_poses.append(lp)
+        lcm_msg.poses_length = len(lcm_poses)
+        lcm_msg.poses = lcm_poses
+        lcm_msg.header.stamp.sec = sec
+        lcm_msg.header.stamp.nsec = nsec
+        lcm_msg.header.frame_id = self.frame_id
+        return lcm_msg.lcm_encode()  # type: ignore[no-any-return]
+
+
+def _waypoints_to_cloud(graph: nx.Graph) -> np.ndarray:
+    if graph.number_of_nodes() == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    return np.array([graph.nodes[n]["pos"] for n in graph.nodes()], dtype=np.float32)
+
+
+def _edges_to_segments(
+    graph: nx.Graph, voxel_size: float
+) -> list[tuple[tuple[float, float, float], tuple[float, float, float]]]:
+    """Walk each edge's cached A* path and emit consecutive cell pairs as segments."""
+    segments: list[tuple[tuple[float, float, float], tuple[float, float, float]]] = []
+    for _, _, data in graph.edges(data=True):
+        path_cells: np.ndarray = data["path"]
+        for i in range(len(path_cells) - 1):
+            a = path_cells[i]
+            b = path_cells[i + 1]
+            ax = (float(a[0]) + 0.5) * voxel_size
+            ay = (float(a[1]) + 0.5) * voxel_size
+            az = float(a[2]) * voxel_size
+            bx = (float(b[0]) + 0.5) * voxel_size
+            by = (float(b[1]) + 0.5) * voxel_size
+            bz = float(b[2]) * voxel_size
+            segments.append(((ax, ay, az), (bx, by, bz)))
+    return segments
+
+
 class MLSPlanner(Module):
     config: MLSPlannerConfig
 
@@ -140,22 +428,69 @@ class MLSPlanner(Module):
     goal_pose: In[Odometry]
     path: Out[Path]
     surface_map: Out[PointCloud2]
+    waypoints: Out[PointCloud2]
+    waypoint_edges: Out[LineSegments3D]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._latest_start: Odometry | None = None
+        self._graph: nx.Graph | None = None
 
     async def handle_global_map(self, msg: PointCloud2) -> None:
         points, _ = msg.as_numpy()
         if points is None or len(points) == 0:
             return
+
+        t0 = time.perf_counter()
         surface_points = _extract_surfaces(points, self.config.voxel_size, self.config.robot_height)
-        logger.info("Surfaces extracted", count=len(surface_points))
+        surfaces_ms = (time.perf_counter() - t0) * 1000
         self.surface_map.publish(
             PointCloud2.from_numpy(
-                surface_points,
+                surface_points, frame_id=self.config.world_frame, timestamp=time.time()
+            )
+        )
+        logger.info(
+            "Surfaces ready",
+            surfaces=len(surface_points),
+            surface_ms=round(surfaces_ms, 1),
+        )
+
+        logger.info(
+            "Building waypoint graph",
+            spacing_m=WAYPOINT_SPACING_M,
+            max_edge_cost_m=WAYPOINT_MAX_EDGE_COST_M,
+            stride=WAYPOINT_SUB_SAMPLE_STRIDE,
+        )
+        t1 = time.perf_counter()
+        graph = build_waypoint_graph(
+            surface_points,
+            self.config.voxel_size,
+            waypoint_spacing=WAYPOINT_SPACING_M,
+            waypoint_z_tolerance=WAYPOINT_Z_TOLERANCE_M,
+            step_threshold=WAYPOINT_STEP_THRESHOLD_M,
+            max_edge_cost=WAYPOINT_MAX_EDGE_COST_M,
+            sub_sample_stride=WAYPOINT_SUB_SAMPLE_STRIDE,
+        )
+        graph_ms = (time.perf_counter() - t1) * 1000
+        self._graph = graph
+        self.waypoints.publish(
+            PointCloud2.from_numpy(
+                _waypoints_to_cloud(graph),
                 frame_id=self.config.world_frame,
                 timestamp=time.time(),
+            )
+        )
+        logger.info(
+            "Waypoint graph done",
+            waypoints=graph.number_of_nodes(),
+            edges=graph.number_of_edges(),
+            graph_ms=round(graph_ms, 1),
+        )
+        self.waypoint_edges.publish(
+            _PublishableLineSegments3D(
+                ts=time.time(),
+                frame_id=self.config.world_frame,
+                segments=_edges_to_segments(graph, self.config.voxel_size),
             )
         )
 

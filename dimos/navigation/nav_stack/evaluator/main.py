@@ -58,7 +58,26 @@ def _render_global_map(msg: Any) -> Any:
 
 
 def _render_surface_map(msg: Any) -> Any:
-    return msg.to_rerun(mode="boxes", size=0.1, colors=[128, 0, 128])  # purple
+    return msg.to_rerun(mode="spheres", voxel_size=0.05, colors=[128, 0, 128])  # purple
+
+
+# raise the path and way points out of the surface
+_GRAPH_Z_LIFT = 0.1
+
+
+def _render_waypoints(msg: Any) -> Any:
+    import rerun as rr
+
+    pts, _ = msg.as_numpy()
+    if pts is None or len(pts) == 0:
+        return rr.Points3D([])
+    pts = pts.copy()
+    pts[:, 2] += _GRAPH_Z_LIFT
+    return rr.Points3D(positions=pts, colors=[[75, 156, 211]], radii=[0.15])  # Carolina Blue
+
+
+def _render_waypoint_edges(msg: Any) -> Any:
+    return msg.to_rerun(z_offset=_GRAPH_Z_LIFT, radii=0.04)
 
 
 def create_evaluator_blueprint() -> Blueprint:
@@ -71,6 +90,8 @@ def create_evaluator_blueprint() -> Blueprint:
                 "world/goal_pose": _render_goal_pose,
                 "world/global_map": _render_global_map,
                 "world/surface_map": _render_surface_map,
+                "world/waypoints": _render_waypoints,
+                "world/waypoint_edges": _render_waypoint_edges,
             }
         ),
     )

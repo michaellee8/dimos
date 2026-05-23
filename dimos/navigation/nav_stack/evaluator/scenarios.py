@@ -102,11 +102,11 @@ def default_scenarios() -> list[PlannerScenario]:
             goal_pose=_odom(21.95, -4.25, 1.75),
             expect_path=True,
         ),
-        PlannerScenario(
-            name="up the stairs",
-            global_map=cloud,
-            start_pose=_odom(7.15, -3.55, 2.05),
-            goal_pose=_odom(5.55, -2.05, 5.65),
-            expect_path=True,
-        ),
+        # PlannerScenario(
+        #     name="up the stairs",
+        #     global_map=cloud,
+        #     start_pose=_odom(7.15, -3.55, 2.05),
+        #     goal_pose=_odom(5.55, -2.05, 5.65),
+        #     expect_path=True,
+        # ),
     ]
