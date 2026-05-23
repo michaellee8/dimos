@@ -33,8 +33,7 @@ from dimos.navigation.replanning_a_star.min_cost_astar import min_cost_astar
 
 def test_module_class_exists() -> None:
     """Module class is importable and has the expected nav_stack ports."""
-    assert hasattr(ReplanningAStarPlanner, "terrain_map_ext")
-    assert hasattr(ReplanningAStarPlanner, "terrain_map")
+    assert hasattr(ReplanningAStarPlanner, "global_map")
     assert hasattr(ReplanningAStarPlanner, "goal")
     assert hasattr(ReplanningAStarPlanner, "stop_movement")
     assert hasattr(ReplanningAStarPlanner, "way_point")

@@ -155,8 +155,7 @@ class ReplanningAStarPlanner(Module):
 
     config: ReplanningAStarPlannerConfig
 
-    terrain_map_ext: In[PointCloud2]
-    terrain_map: In[PointCloud2]
+    global_map: In[PointCloud2]
     goal: In[PointStamped]
     stop_movement: In[Bool]
     way_point: Out[PointStamped]
@@ -211,8 +210,7 @@ class ReplanningAStarPlanner(Module):
         super().start()
         self.register_disposable(Disposable(self.goal.subscribe(self._on_goal)))
         self.register_disposable(Disposable(self.stop_movement.subscribe(self._on_stop_movement)))
-        self.register_disposable(Disposable(self.terrain_map_ext.subscribe(self._on_terrain_ext)))
-        self.register_disposable(Disposable(self.terrain_map.subscribe(self._on_terrain)))
+        self.register_disposable(Disposable(self.global_map.subscribe(self._on_global_map)))
         self._running = True
         self._monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self._monitor_thread.start()
@@ -268,8 +266,11 @@ class ReplanningAStarPlanner(Module):
 
     # ---------------- Inputs ----------------
 
-    def _on_terrain_ext(self, msg: PointCloud2) -> None:
-        """Persistent world view — reset costmap to avoid stale obstacles."""
+    def _on_global_map(self, msg: PointCloud2) -> None:
+        """Whole-world map snapshot — reset costmap and re-ingest so stale
+        obstacles don't accumulate. Caller is expected to remap whatever
+        PointCloud2 topic represents the world view (e.g. terrain_map_ext)
+        onto this input."""
         points, _ = msg.as_numpy()
         if points is None or len(points) == 0:
             return
@@ -283,17 +284,6 @@ class ReplanningAStarPlanner(Module):
         new_costmap.ingest(points, ground_z)
         with self._costmap_lock:
             self._costmap = new_costmap
-
-    def _on_terrain(self, msg: PointCloud2) -> None:
-        """Fast local terrain — layer onto existing costmap."""
-        points, _ = msg.as_numpy()
-        if points is None or len(points) == 0:
-            return
-        with self._lock:
-            rz = self._robot_z if self._has_odom else 0.0
-        ground_z = rz - self.config.ground_offset_below_robot
-        with self._costmap_lock:
-            self._costmap.ingest(points, ground_z)
 
     def _on_goal(self, msg: PointStamped) -> None:
         if not all(math.isfinite(v) for v in (msg.x, msg.y, msg.z)):

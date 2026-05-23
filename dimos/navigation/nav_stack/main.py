@@ -198,6 +198,10 @@ def create_nav_stack(
     ]
     if planner == "far":
         remappings.append((FarPlanner, "odometry", "corrected_odometry"))
+    if planner == "replanning_a_star":
+        # Module declares a generic `global_map` input; feed it the
+        # persistent terrain map (same source SimplePlanner used).
+        remappings.append((ReplanningAStarPlanner, "global_map", "terrain_map_ext"))
 
     return autoconnect(*modules).remappings(remappings)
 
