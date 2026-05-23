@@ -23,15 +23,31 @@ use entity::{raycast as raycast_entity, Entity, EntityStateBatch, MeshCache};
 struct Config {
     scene_metadata_path: String,
     collision_path: Option<String>,
+    #[serde(default = "default_scan_model")]
+    scan_model: String,
+    #[serde(default = "default_frame_id")]
+    frame_id: String,
+    #[serde(default)]
+    publish_sensor_frame: bool,
     hz: f32,
+    #[serde(default = "default_point_rate")]
+    point_rate: usize,
     horizontal_samples: usize,
     vertical_samples: usize,
     elevation_min_deg: f32,
     elevation_max_deg: f32,
+    #[serde(default)]
+    min_range: f32,
     max_range: f32,
     sensor_x: f32,
     sensor_y: f32,
     sensor_z: f32,
+    #[serde(default)]
+    sensor_roll_deg: f32,
+    #[serde(default)]
+    sensor_pitch_deg: f32,
+    #[serde(default)]
+    sensor_yaw_deg: f32,
     yaw_offset_deg: f32,
     output_voxel_size: f32,
     #[serde(default)]
@@ -131,6 +147,18 @@ struct SceneLidar {
     last_entity_count: usize,
 }
 
+fn default_scan_model() -> String {
+    "uniform".into()
+}
+
+fn default_frame_id() -> String {
+    "lidar_link".into()
+}
+
+fn default_point_rate() -> usize {
+    200_000
+}
+
 impl SceneLidar {
     async fn setup(&mut self) {
         validate_config(&self.config);
@@ -139,9 +167,15 @@ impl SceneLidar {
             MeshCache::new(entity_asset_root(&self.config.scene_metadata_path));
         self.directions = lidar_directions(&self.config);
         eprintln!(
-            "scene_lidar: configured {} rays at {:.1} Hz, max_range {:.2} m",
+            "scene_lidar: configured {} {} rays at {:.1} Hz, frame {}, max_range {:.2} m",
             self.directions.len(),
+            self.config.scan_model,
             self.config.hz,
+            if self.config.publish_sensor_frame {
+                self.config.frame_id.as_str()
+            } else {
+                "pose"
+            },
             self.config.max_range
         );
     }
@@ -157,7 +191,8 @@ impl SceneLidar {
         }
         self.last_scan = Some(now);
 
-        let orientation = pose_quat(&msg);
+        let base_orientation = pose_quat(&msg);
+        let sensor_orientation = base_orientation * sensor_mount_rotation(&self.config);
         let sensor_offset = Vec3::new(
             self.config.sensor_x,
             self.config.sensor_y,
@@ -167,16 +202,16 @@ impl SceneLidar {
             msg.pose.position.x as f32,
             msg.pose.position.y as f32,
             msg.pose.position.z as f32,
-        ) + orientation * sensor_offset;
+        ) + base_orientation * sensor_offset;
 
-        let yaw_offset = Quat::from_rotation_z(self.config.yaw_offset_deg.to_radians());
         let max_range = self.config.max_range;
+        let min_range = self.config.min_range;
         let entities: &[Entity] = &self.entities;
         let hits: Vec<(Vec3, f32)> = self
             .directions
             .par_iter()
             .filter_map(|direction| {
-                let world_direction = (orientation * yaw_offset * *direction).normalize();
+                let world_direction = (sensor_orientation * *direction).normalize();
                 let mut best = self.scene.raycast(origin, world_direction, max_range);
                 let mut best_dist = best.map(|(_, d)| d).unwrap_or(max_range);
                 if let Some((hit, dist)) =
@@ -195,13 +230,27 @@ impl SceneLidar {
                         }
                     }
                 }
-                best
+                let (world_point, distance) = best?;
+                if distance < min_range {
+                    return None;
+                }
+                let point = if self.config.publish_sensor_frame {
+                    *direction * distance
+                } else {
+                    world_point
+                };
+                Some((point, intensity_for_distance(distance, max_range)))
             })
             .collect();
 
+        let frame_id = if self.config.publish_sensor_frame {
+            self.config.frame_id.as_str()
+        } else {
+            msg.header.frame_id.as_str()
+        };
         let cloud = build_pointcloud(
             hits,
-            &msg.header.frame_id,
+            frame_id,
             msg.header.stamp,
             self.config.output_voxel_size,
         );
@@ -239,6 +288,18 @@ fn validate_config(config: &Config) {
     if config.hz <= 0.0 || !config.hz.is_finite() {
         panic!("scene_lidar: hz must be > 0, got {}", config.hz);
     }
+    if !matches!(config.scan_model.as_str(), "uniform" | "mid360") {
+        panic!(
+            "scene_lidar: scan_model must be 'uniform' or 'mid360', got {}",
+            config.scan_model
+        );
+    }
+    if config.publish_sensor_frame && config.frame_id.trim().is_empty() {
+        panic!("scene_lidar: frame_id must be non-empty when publish_sensor_frame is true");
+    }
+    if config.scan_model == "mid360" && config.point_rate == 0 {
+        panic!("scene_lidar: point_rate must be > 0 for mid360 scan_model");
+    }
     if config.horizontal_samples == 0 {
         panic!("scene_lidar: horizontal_samples must be > 0");
     }
@@ -250,6 +311,28 @@ fn validate_config(config: &Config) {
             "scene_lidar: max_range must be finite and > 0, got {}",
             config.max_range
         );
+    }
+    if config.min_range < 0.0 || !config.min_range.is_finite() {
+        panic!(
+            "scene_lidar: min_range must be finite and >= 0, got {}",
+            config.min_range
+        );
+    }
+    if config.min_range >= config.max_range {
+        panic!(
+            "scene_lidar: min_range ({}) must be < max_range ({})",
+            config.min_range, config.max_range
+        );
+    }
+    for (name, angle) in [
+        ("sensor_roll_deg", config.sensor_roll_deg),
+        ("sensor_pitch_deg", config.sensor_pitch_deg),
+        ("sensor_yaw_deg", config.sensor_yaw_deg),
+        ("yaw_offset_deg", config.yaw_offset_deg),
+    ] {
+        if !angle.is_finite() {
+            panic!("scene_lidar: {name} must be finite, got {angle}");
+        }
     }
     if config.output_voxel_size < 0.0 || !config.output_voxel_size.is_finite() {
         panic!(
@@ -396,7 +479,24 @@ fn transform_vertex(vertex: Vec3, node_transform: Mat4, alignment_transform: Mat
     alignment_transform.transform_point3(node_transform.transform_point3(vertex))
 }
 
+fn sensor_mount_rotation(config: &Config) -> Quat {
+    Quat::from_rotation_z((config.sensor_yaw_deg + config.yaw_offset_deg).to_radians())
+        * Quat::from_rotation_y(config.sensor_pitch_deg.to_radians())
+        * Quat::from_rotation_x(config.sensor_roll_deg.to_radians())
+}
+
+fn intensity_for_distance(distance: f32, max_range: f32) -> f32 {
+    (1.0 - distance / max_range).clamp(0.0, 1.0)
+}
+
 fn lidar_directions(config: &Config) -> Vec<Vec3> {
+    match config.scan_model.as_str() {
+        "mid360" => mid360_directions(config),
+        _ => uniform_directions(config),
+    }
+}
+
+fn uniform_directions(config: &Config) -> Vec<Vec3> {
     let mut directions = Vec::with_capacity(config.horizontal_samples * config.vertical_samples);
     let min_elev = config.elevation_min_deg.to_radians();
     let max_elev = config.elevation_max_deg.to_radians();
@@ -407,17 +507,38 @@ fn lidar_directions(config: &Config) -> Vec<Vec3> {
             elev_index as f32 / (config.vertical_samples - 1) as f32
         };
         let elev = min_elev + (max_elev - min_elev) * elev_t;
-        let cos_elev = elev.cos();
         for az_index in 0..config.horizontal_samples {
             let az = std::f32::consts::TAU * az_index as f32 / config.horizontal_samples as f32;
-            directions.push(Vec3::new(
-                cos_elev * az.cos(),
-                cos_elev * az.sin(),
-                elev.sin(),
-            ));
+            directions.push(direction_from_az_elev(az, elev));
         }
     }
     directions
+}
+
+fn mid360_directions(config: &Config) -> Vec<Vec3> {
+    let rays_per_scan = ((config.point_rate as f32 / config.hz).round() as usize).max(1);
+    let min_elev = config.elevation_min_deg.to_radians();
+    let max_elev = config.elevation_max_deg.to_radians();
+    let mut directions = Vec::with_capacity(rays_per_scan);
+
+    // Livox Mid-360 uses a non-repetitive pattern, not ring channels. This
+    // low-discrepancy pattern gives the mapper the same practical behavior:
+    // dense 360-degree coverage without horizontal/vertical scan bands.
+    const GOLDEN_RATIO_CONJUGATE: f32 = 0.618_034;
+    const SQRT2_MINUS_ONE: f32 = 0.414_213_57;
+    for i in 0..rays_per_scan {
+        let t = i as f32;
+        let az = std::f32::consts::TAU * (t * GOLDEN_RATIO_CONJUGATE).fract();
+        let elev_t = (0.5 + t * SQRT2_MINUS_ONE).fract();
+        let elev = min_elev + (max_elev - min_elev) * elev_t;
+        directions.push(direction_from_az_elev(az, elev));
+    }
+    directions
+}
+
+fn direction_from_az_elev(az: f32, elev: f32) -> Vec3 {
+    let cos_elev = elev.cos();
+    Vec3::new(cos_elev * az.cos(), cos_elev * az.sin(), elev.sin()).normalize()
 }
 
 fn pose_quat(msg: &PoseStamped) -> Quat {
@@ -509,15 +630,23 @@ mod tests {
         Config {
             scene_metadata_path: "scene.meta.json".into(),
             collision_path: None,
+            scan_model: "uniform".into(),
+            frame_id: "lidar_link".into(),
+            publish_sensor_frame: false,
             hz: 10.0,
+            point_rate: 200_000,
             horizontal_samples: 1,
             vertical_samples: 1,
             elevation_min_deg: 0.0,
             elevation_max_deg: 0.0,
+            min_range: 0.0,
             max_range: 10.0,
             sensor_x: 0.0,
             sensor_y: 0.0,
             sensor_z: 0.0,
+            sensor_roll_deg: 0.0,
+            sensor_pitch_deg: 0.0,
+            sensor_yaw_deg: 0.0,
             yaw_offset_deg: 0.0,
             output_voxel_size: 0.0,
             support_floor: true,

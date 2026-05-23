@@ -31,15 +31,23 @@ class SceneLidarConfig(NativeModuleConfig):
 
     scene_metadata_path: str
     collision_path: str | None = None
+    scan_model: str = "uniform"
+    frame_id: str = "lidar_link"
+    publish_sensor_frame: bool = False
     hz: float = 10.0
+    point_rate: int = 200_000
     horizontal_samples: int = 720
     vertical_samples: int = 16
     elevation_min_deg: float = -22.5
     elevation_max_deg: float = 22.5
+    min_range: float = 0.0
     max_range: float = 10.0
     sensor_x: float = 0.0
     sensor_y: float = 0.0
     sensor_z: float = 1.0
+    sensor_roll_deg: float = 0.0
+    sensor_pitch_deg: float = 0.0
+    sensor_yaw_deg: float = 0.0
     yaw_offset_deg: float = 0.0
     output_voxel_size: float = 0.03
     support_floor: bool = False

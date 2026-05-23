@@ -86,6 +86,18 @@ _DEFAULT_LIDAR_CAMERA_WIDTH = 640
 _DEFAULT_LIDAR_CAMERA_HEIGHT = 360
 _DEFAULT_GLOBAL_MAP_VOXEL_SIZE_M = 0.05
 _DEFAULT_G1_SPAWN_Z_M = 0.793
+_MID360_FRAME_ID = "lidar_link"
+_MID360_POINT_RATE = 200_000
+_MID360_MIN_RANGE_M = 0.1
+_MID360_MAX_RANGE_M = 40.0
+_MID360_ELEVATION_MIN_DEG = -7.0
+_MID360_ELEVATION_MAX_DEG = 52.0
+_MID360_SENSOR_X_M = 0.0002835
+_MID360_SENSOR_Y_M = 0.00003
+_MID360_SENSOR_Z_M = 0.41618
+_MID360_SENSOR_ROLL_DEG = 180.0
+_MID360_SENSOR_PITCH_DEG = 2.300348633011322
+_MID360_SENSOR_YAW_DEG = 0.0
 _RAYTRACE_EXECUTABLE_PATH = (
     _REPO_ROOT / "dimos/mapping/ray_tracing/rust/target/release/voxel_ray_tracing"
 )
@@ -336,6 +348,23 @@ def _sim_support_blueprints() -> tuple[Blueprint, ...]:
         "DIMOS_GLOBAL_MAP_VOXEL_SIZE", _DEFAULT_GLOBAL_MAP_VOXEL_SIZE_M
     )
     map_backend = os.environ.get("DIMOS_GLOBAL_MAP_BACKEND", "raytrace").lower()
+    raytrace_mapper_available = _raytrace_mapper_available()
+    scene_lidar_publish_sensor_frame = _env_bool(
+        "DIMOS_SCENE_LIDAR_SENSOR_FRAME",
+        map_backend == "raytrace" and raytrace_mapper_available,
+    )
+    scene_lidar_scan_model = os.environ.get("DIMOS_SCENE_LIDAR_SCAN_MODEL", "mid360")
+    scene_lidar_frame_id = os.environ.get("DIMOS_SCENE_LIDAR_FRAME_ID", _MID360_FRAME_ID)
+    scene_lidar_sensor_x = _env_float("DIMOS_SCENE_LIDAR_SENSOR_X", _MID360_SENSOR_X_M)
+    scene_lidar_sensor_y = _env_float("DIMOS_SCENE_LIDAR_SENSOR_Y", _MID360_SENSOR_Y_M)
+    scene_lidar_sensor_z = _env_float("DIMOS_SCENE_LIDAR_SENSOR_Z", _MID360_SENSOR_Z_M)
+    scene_lidar_sensor_roll = _env_float(
+        "DIMOS_SCENE_LIDAR_SENSOR_ROLL_DEG", _MID360_SENSOR_ROLL_DEG
+    )
+    scene_lidar_sensor_pitch = _env_float(
+        "DIMOS_SCENE_LIDAR_SENSOR_PITCH_DEG", _MID360_SENSOR_PITCH_DEG
+    )
+    scene_lidar_sensor_yaw = _env_float("DIMOS_SCENE_LIDAR_SENSOR_YAW_DEG", _MID360_SENSOR_YAW_DEG)
 
     lidar_stack: tuple[Blueprint, ...] = ()
     if native_scene_lidar_enabled:
@@ -347,15 +376,27 @@ def _sim_support_blueprints() -> tuple[Blueprint, ...]:
                 build_command=_native_scene_lidar_build_command(),
                 scene_metadata_path=str(scene_package.metadata_path),
                 collision_path=str(scene_package.browser_collision_path),
+                scan_model=scene_lidar_scan_model,
+                frame_id=scene_lidar_frame_id,
+                publish_sensor_frame=scene_lidar_publish_sensor_frame,
                 hz=_env_float("DIMOS_SCENE_LIDAR_HZ", 10.0),
+                point_rate=_env_int("DIMOS_SCENE_LIDAR_POINT_RATE", _MID360_POINT_RATE),
                 horizontal_samples=_env_int("DIMOS_SCENE_LIDAR_HORIZONTAL_SAMPLES", 720),
                 vertical_samples=_env_int("DIMOS_SCENE_LIDAR_VERTICAL_SAMPLES", 16),
-                elevation_min_deg=_env_float("DIMOS_SCENE_LIDAR_ELEVATION_MIN_DEG", -22.5),
-                elevation_max_deg=_env_float("DIMOS_SCENE_LIDAR_ELEVATION_MAX_DEG", 22.5),
-                max_range=_env_float("DIMOS_SCENE_LIDAR_MAX_RANGE", 10.0),
-                sensor_x=_env_float("DIMOS_SCENE_LIDAR_SENSOR_X", 0.0),
-                sensor_y=_env_float("DIMOS_SCENE_LIDAR_SENSOR_Y", 0.0),
-                sensor_z=_env_float("DIMOS_SCENE_LIDAR_SENSOR_Z", 1.0),
+                elevation_min_deg=_env_float(
+                    "DIMOS_SCENE_LIDAR_ELEVATION_MIN_DEG", _MID360_ELEVATION_MIN_DEG
+                ),
+                elevation_max_deg=_env_float(
+                    "DIMOS_SCENE_LIDAR_ELEVATION_MAX_DEG", _MID360_ELEVATION_MAX_DEG
+                ),
+                min_range=_env_float("DIMOS_SCENE_LIDAR_MIN_RANGE", _MID360_MIN_RANGE_M),
+                max_range=_env_float("DIMOS_SCENE_LIDAR_MAX_RANGE", _MID360_MAX_RANGE_M),
+                sensor_x=scene_lidar_sensor_x,
+                sensor_y=scene_lidar_sensor_y,
+                sensor_z=scene_lidar_sensor_z,
+                sensor_roll_deg=scene_lidar_sensor_roll,
+                sensor_pitch_deg=scene_lidar_sensor_pitch,
+                sensor_yaw_deg=scene_lidar_sensor_yaw,
                 yaw_offset_deg=_env_float("DIMOS_SCENE_LIDAR_YAW_OFFSET_DEG", 0.0),
                 output_voxel_size=_env_float("DIMOS_SCENE_LIDAR_OUTPUT_VOXEL_SIZE", 0.03),
                 support_floor=_env_bool(
@@ -387,7 +428,7 @@ def _sim_support_blueprints() -> tuple[Blueprint, ...]:
             ),
             CostMapper.blueprint(),
         )
-    elif not _raytrace_mapper_available():
+    elif not raytrace_mapper_available:
         logger.warning(
             "Rust ray-tracing mapper unavailable; falling back to Python VoxelGridMapper. "
             "Install cargo or build %s to enable it.",
@@ -415,6 +456,16 @@ def _sim_support_blueprints() -> tuple[Blueprint, ...]:
                 grace_depth=_env_float("DIMOS_RAYTRACE_GRACE_DEPTH", 0.2),
                 min_health=_env_int("DIMOS_RAYTRACE_MIN_HEALTH", -2),
                 max_health=_env_int("DIMOS_RAYTRACE_MAX_HEALTH", 1),
+                transform_sensor_frame=_env_bool(
+                    "DIMOS_RAYTRACE_TRANSFORM_SENSOR_FRAME",
+                    native_scene_lidar_enabled and scene_lidar_publish_sensor_frame,
+                ),
+                sensor_x=scene_lidar_sensor_x,
+                sensor_y=scene_lidar_sensor_y,
+                sensor_z=scene_lidar_sensor_z,
+                sensor_roll_deg=scene_lidar_sensor_roll,
+                sensor_pitch_deg=scene_lidar_sensor_pitch,
+                sensor_yaw_deg=scene_lidar_sensor_yaw,
             ).transports(
                 {
                     ("lidar", PointCloud2): LCMTransport("/lidar", PointCloud2),

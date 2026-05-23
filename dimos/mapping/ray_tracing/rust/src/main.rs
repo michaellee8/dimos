@@ -3,6 +3,7 @@
 
 use ahash::{AHashMap, AHashSet};
 use dimos_module::{run, Input, LcmTransport, Module, Output};
+use glam::{Quat, Vec3};
 use lcm_msgs::nav_msgs::Odometry;
 use lcm_msgs::sensor_msgs::{PointCloud2, PointField};
 use lcm_msgs::std_msgs::{Header, Time};
@@ -21,12 +22,33 @@ struct Config {
     grace_depth: f32,
     min_health: i32,
     max_health: i32,
+    #[serde(default)]
+    transform_sensor_frame: bool,
+    #[serde(default)]
+    sensor_x: f32,
+    #[serde(default)]
+    sensor_y: f32,
+    #[serde(default)]
+    sensor_z: f32,
+    #[serde(default)]
+    sensor_roll_deg: f32,
+    #[serde(default)]
+    sensor_pitch_deg: f32,
+    #[serde(default)]
+    sensor_yaw_deg: f32,
 }
 
 #[derive(Default)]
 struct VoxelMap {
     // Save health of each voxel
     voxels: AHashMap<VoxelKey, i32>,
+}
+
+#[derive(Clone)]
+struct RobotPose {
+    position: Vec3,
+    orientation: Quat,
+    frame_id: String,
 }
 
 #[derive(Module)]
@@ -45,7 +67,7 @@ struct RayTracingVoxelMap {
     config: Config,
 
     map: VoxelMap,
-    last_origin: Option<(f32, f32, f32)>,
+    last_pose: Option<RobotPose>,
 }
 
 impl RayTracingVoxelMap {
@@ -91,18 +113,31 @@ impl RayTracingVoxelMap {
                 cfg.min_health, cfg.max_health
             );
         }
+        for (name, angle) in [
+            ("sensor_roll_deg", cfg.sensor_roll_deg),
+            ("sensor_pitch_deg", cfg.sensor_pitch_deg),
+            ("sensor_yaw_deg", cfg.sensor_yaw_deg),
+        ] {
+            if !angle.is_finite() {
+                panic!("voxel_ray_tracing: {name} must be finite, got {angle}");
+            }
+        }
     }
 
     async fn on_odometry(&mut self, msg: Odometry) {
-        self.last_origin = Some((
-            msg.pose.pose.position.x as f32,
-            msg.pose.pose.position.y as f32,
-            msg.pose.pose.position.z as f32,
-        ));
+        self.last_pose = Some(RobotPose {
+            position: Vec3::new(
+                msg.pose.pose.position.x as f32,
+                msg.pose.pose.position.y as f32,
+                msg.pose.pose.position.z as f32,
+            ),
+            orientation: pose_quat(&msg),
+            frame_id: msg.header.frame_id.clone(),
+        });
     }
 
     async fn on_lidar(&mut self, msg: PointCloud2) {
-        let Some(origin) = self.last_origin else {
+        let Some(pose) = self.last_pose.clone() else {
             // Need at least one odometry sample before we can raycast.
             return;
         };
@@ -120,27 +155,77 @@ impl RayTracingVoxelMap {
             return;
         }
 
+        let (origin, points) = if self.config.transform_sensor_frame {
+            transform_sensor_cloud(&points, &pose, &self.config)
+        } else {
+            (pose.position, points)
+        };
+
         let inv = 1.0_f32 / voxel_size;
         let mut live: AHashSet<VoxelKey> = AHashSet::with_capacity(points.len());
         for &(x, y, z) in &points {
             live.insert(world_to_voxel(x, y, z, inv));
         }
 
-        update_map(&mut self.map, origin, &points, &self.config);
+        let origin_tuple = (origin.x, origin.y, origin.z);
+        update_map(&mut self.map, origin_tuple, &points, &self.config);
 
-        // Echo the input cloud's frame; the global map lives in the same
-        // world frame as the upstream lidar/odometry.
+        // Global maps are always published in the odometry/world frame. If
+        // the input cloud was sensor-frame, it has already been transformed.
         let cloud = build_pointcloud(
             &self.map,
             &live,
             voxel_size,
-            &msg.header.frame_id,
+            &pose.frame_id,
             msg.header.stamp,
         );
         if let Err(e) = self.global_map.publish(&cloud).await {
             eprintln!("voxel_ray_tracing: publish failed: {e}");
         }
     }
+}
+
+fn pose_quat(msg: &Odometry) -> Quat {
+    let q = Quat::from_xyzw(
+        msg.pose.pose.orientation.x as f32,
+        msg.pose.pose.orientation.y as f32,
+        msg.pose.pose.orientation.z as f32,
+        msg.pose.pose.orientation.w as f32,
+    );
+    if q.length_squared() > 0.0 {
+        q.normalize()
+    } else {
+        Quat::IDENTITY
+    }
+}
+
+fn sensor_mount_rotation(config: &Config) -> Quat {
+    Quat::from_rotation_z(config.sensor_yaw_deg.to_radians())
+        * Quat::from_rotation_y(config.sensor_pitch_deg.to_radians())
+        * Quat::from_rotation_x(config.sensor_roll_deg.to_radians())
+}
+
+fn sensor_origin_and_orientation(pose: &RobotPose, config: &Config) -> (Vec3, Quat) {
+    let sensor_offset = Vec3::new(config.sensor_x, config.sensor_y, config.sensor_z);
+    let origin = pose.position + pose.orientation * sensor_offset;
+    let orientation = pose.orientation * sensor_mount_rotation(config);
+    (origin, orientation)
+}
+
+fn transform_sensor_cloud(
+    points: &[(f32, f32, f32)],
+    pose: &RobotPose,
+    config: &Config,
+) -> (Vec3, Vec<(f32, f32, f32)>) {
+    let (origin, orientation) = sensor_origin_and_orientation(pose, config);
+    let world_points = points
+        .iter()
+        .map(|&(x, y, z)| {
+            let p = origin + orientation * Vec3::new(x, y, z);
+            (p.x, p.y, p.z)
+        })
+        .collect();
+    (origin, world_points)
 }
 
 fn update_map(
@@ -504,6 +589,13 @@ mod tests {
             grace_depth: 0.0,
             min_health: 0,
             max_health: 1,
+            transform_sensor_frame: false,
+            sensor_x: 0.0,
+            sensor_y: 0.0,
+            sensor_z: 0.0,
+            sensor_roll_deg: 0.0,
+            sensor_pitch_deg: 0.0,
+            sensor_yaw_deg: 0.0,
         }
     }
 

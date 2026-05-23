@@ -48,6 +48,13 @@ class RayTracingVoxelMapConfig(NativeModuleConfig):
     # Bounds for the health of voxels. Positive health means voxel is occupied.
     min_health: int = -2
     max_health: int = 1
+    transform_sensor_frame: bool = False
+    sensor_x: float = 0.0
+    sensor_y: float = 0.0
+    sensor_z: float = 0.0
+    sensor_roll_deg: float = 0.0
+    sensor_pitch_deg: float = 0.0
+    sensor_yaw_deg: float = 0.0
 
 
 class RayTracingVoxelMap(NativeModule, mapping.GlobalPointcloud):
