@@ -106,3 +106,31 @@
     "move a CLI utility into a different package." If Jeff wants the mermaid path moved
     under `dimos/core/introspection/`, that's a follow-up refactor on his next push.
   commit: null
+
+- pr: 2213
+  comment_id: 3292493576
+  author: mustafab0
+  file: dimos/utils/cli/graph.py
+  line: 350
+  problem: |
+    "This whole f string should just be a graph.html file" — comment anchored at line 350
+    but pointing at the 242-line embedded HTML/CSS/JS template that `_build_html` returns
+    via `f"""..."""` (lines 369–611). Suggestion is to move the template into a sibling
+    `graph.html` resource and substitute the four Python-interpolated values at load time.
+  solution: |
+    skipped — needs Jeff's architectural call on the templating mechanism. The f-string
+    currently uses `{{`/`}}` escaping for the ~250 literal CSS/JS braces and four real
+    interpolations (`{tab_bar_html}`, `{"".join(tab_panels)}`, `{all_label_colors_json}`,
+    `{all_disconnected_json}`). Moving to a separate file means picking one of:
+      a) `str.format` — requires re-escaping every literal CSS/JS brace as `{{`/`}}` in
+         the .html file (same noise, just relocated; defeats the readability win).
+      b) `string.Template` `$var` syntax — collides with JS template-literal `${...}` in
+         the script block (now escaped as `${{...}}`); each `$` would need to become `$$`.
+      c) Marker-style `<!--TAB_BAR-->` placeholders with `.replace()` — clean for CSS/JS
+         but a non-standard convention to introduce.
+      d) Jinja2 — adds a new runtime dependency for one file.
+    Each is reasonable; the autofix monitor doesn't pick conventions. Also: there are no
+    unit tests covering `_build_html`, so a silent regression in rendering wouldn't be
+    caught by CI. Leaving the call to Jeff. Symptom is purely maintainability — runtime
+    behavior is unaffected by current layout.
+  commit: null
