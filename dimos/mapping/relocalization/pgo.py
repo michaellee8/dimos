@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -375,6 +376,9 @@ def pgo_then_voxels(
     voxel_size: float = 0.05,
     block_count: int = 2_000_000,
     device: str = "CUDA:0",
+    corrected_path_out: list[tuple[float, float, float]] | None = None,
+    pass1_on_frame: Callable[[Any], None] | None = None,
+    pass2_on_frame: Callable[[Any], None] | None = None,
     **pgo_cfg: Any,
 ) -> PointCloud2:
     """Two-pass PGO mapping (eliminates duplicate-wall artifacts).
@@ -401,9 +405,16 @@ def pgo_then_voxels(
 
     n_frames = 0
     for obs in stream:
+        if pass1_on_frame is not None:
+            pass1_on_frame(obs)
         if obs.pose is None:
             continue
         x, y, z, qx, qy, qz, qw = obs.pose
+        # Skip placeholder poses: zero translation, or invalid (zero-norm) quaternion.
+        if x == 0 and y == 0 and z == 0:
+            continue
+        if qx == 0 and qy == 0 and qz == 0 and qw == 0:
+            continue
         r = Rotation.from_quat([qx, qy, qz, qw]).as_matrix()
         t = np.array([x, y, z])
         points, _ = obs.data.as_numpy()
@@ -420,24 +431,35 @@ def pgo_then_voxels(
     n_kf = pgo.num_key_poses
     print(f"  Pass 1: {n_frames} frames, {n_kf} keyframes")
 
+    if corrected_path_out is not None:
+        corrected_path_out.extend(
+            (float(kp.t_global[0]), float(kp.t_global[1]), float(kp.t_global[2]))
+            for kp in pgo._key_poses
+        )
+
     grid = VoxelGrid(voxel_size=voxel_size, block_count=block_count, device=device)
     try:
         if n_kf < 2:
             for obs in stream:
+                if pass2_on_frame is not None:
+                    pass2_on_frame(obs)
                 grid.add_frame(obs.data)
             return grid.get_global_pointcloud2()
 
-        kf_ts = np.array([kp.timestamp for kp in pgo._key_poses])
+        # Sort + dedupe by timestamp: Slerp requires strictly increasing ts.
+        kps = sorted(pgo._key_poses, key=lambda kp: kp.timestamp)
+        kps = [kp for i, kp in enumerate(kps) if i == 0 or kp.timestamp > kps[i - 1].timestamp]
+        kf_ts = np.array([kp.timestamp for kp in kps])
         # Per-keyframe rigid drift correction: T_corr = T_global @ T_local.inv()
-        R_corr_list = [kp.r_global @ kp.r_local.T for kp in pgo._key_poses]
-        t_corr_list = [
-            kp.t_global - (kp.r_global @ kp.r_local.T) @ kp.t_local for kp in pgo._key_poses
-        ]
+        R_corr_list = [kp.r_global @ kp.r_local.T for kp in kps]
+        t_corr_list = [kp.t_global - (kp.r_global @ kp.r_local.T) @ kp.t_local for kp in kps]
         t_corrs = np.stack(t_corr_list)
         rot_slerp = Slerp(kf_ts, Rotation.from_matrix(np.stack(R_corr_list)))
 
         n_inserted = 0
         for obs in stream:
+            if pass2_on_frame is not None:
+                pass2_on_frame(obs)
             if obs.pose is None:
                 continue
             ts = float(np.clip(obs.ts, kf_ts[0], kf_ts[-1]))
