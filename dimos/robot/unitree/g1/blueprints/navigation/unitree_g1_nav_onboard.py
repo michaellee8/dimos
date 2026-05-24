@@ -20,8 +20,12 @@ import os
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
 from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_stack.main import create_nav_stack, nav_stack_rerun_config
+from dimos.robot.custom_static_transforms import CustomStaticTransforms
 from dimos.robot.unitree.g1.config import G1, G1_LOCAL_PLANNER_PRECOMPUTED_PATHS
 from dimos.robot.unitree.g1.effectors.high_level.dds_sdk import G1HighLevelDdsSdk
 from dimos.robot.unitree.g1.g1_rerun import (
@@ -30,14 +34,33 @@ from dimos.robot.unitree.g1.g1_rerun import (
 )
 from dimos.visualization.vis_module import vis_module
 
+_mid360_mount = G1.internal_odom_offsets["mid360_link"]
+
 unitree_g1_nav_onboard = (
     autoconnect(
         FastLio2.blueprint(
             host_ip=os.getenv("LIDAR_HOST_IP", "192.168.123.164"),
             lidar_ip=os.getenv("LIDAR_IP", "192.168.123.120"),
-            mount=G1.internal_odom_offsets["mid360_link"],
             map_freq=1.0,
             config="default.yaml",
+        ),
+        CustomStaticTransforms.blueprint(
+            # Mount: base_link -> mid360_link. FastLio2 publishes odom -> base_link
+            # (the LIO node owns the floor-aligned pose); this static hangs the
+            # sensor off the body so TF queries for `mid360_link` resolve.
+            static_transforms={
+                "mid360_link": Transform(
+                    translation=Vector3(_mid360_mount.x, _mid360_mount.y, _mid360_mount.z),
+                    rotation=Quaternion(
+                        _mid360_mount.orientation.x,
+                        _mid360_mount.orientation.y,
+                        _mid360_mount.orientation.z,
+                        _mid360_mount.orientation.w,
+                    ),
+                    frame_id="base_link",
+                    child_frame_id="mid360_link",
+                ),
+            },
         ),
         create_nav_stack(
             planner="simple",
