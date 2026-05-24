@@ -65,7 +65,12 @@ def main(
         "CUDA:0", "--device", help="Open3D compute device (e.g. CUDA:0, CPU:0)"
     ),
     pgo: bool = typer.Option(
-        False, "--pgo", help="Run pose graph optimization before rebuilding (twopass)"
+        False,
+        "--pgo",
+        help="Run pose graph optimization and rebuild from spatially-deduped frames",
+    ),
+    pgo_tol: float = typer.Option(
+        0.3, "--pgo-tol", help="Spatial dedup tolerance for --pgo (meters)"
     ),
     block_count: int = typer.Option(
         2_000_000, "--block-count", help="VoxelBlockGrid capacity (--pgo only)"
@@ -73,12 +78,17 @@ def main(
     export: bool = typer.Option(
         False,
         "--export",
-        help="Export PGO twopass map to ./<dataset>.pc2.lcm in cwd (implies --pgo)",
+        help="Export PGO map to ./<dataset>.pc2.lcm in cwd (implies --pgo)",
+    ),
+    full_pgo: bool = typer.Option(
+        False,
+        "--full-pgo",
+        help="Also build a full-replay PGO map (every frame) for comparison (implies --pgo)",
     ),
     no_gui: bool = typer.Option(False, "--no-gui", help="Skip rerun visualization"),
 ) -> None:
     db_path = resolve_named_path(dataset, ".db")
-    if export:
+    if export or full_pgo:
         pgo = True
 
     store = SqliteStore(path=db_path)
@@ -99,9 +109,6 @@ def main(
     pgo_map = None
     pgo_path: list[tuple[float, float, float]] = []
     if pgo:
-        import numpy as np
-        from scipy.spatial.transform import Rotation
-
         from dimos.mapping.relocalization.pgo import (
             LoopClosure,
             keyframes_to_corrections,
@@ -109,7 +116,6 @@ def main(
             pgo_keyframes,
         )
         from dimos.mapping.voxels import VoxelGrid
-        from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
         total = lidar.count()
         print("running PGO twopass map...")
@@ -126,26 +132,52 @@ def main(
             kf_t = kf_obs.data.optimized.translation
             pgo_path.append((kf_t.x, kf_t.y, kf_t.z))
 
-        pass2_pb = progress(total, "pgo pass 2 (rebuilding)")
+        # Canonical PGO rebuild: bucket frames by spatial cell using the raw
+        # odom pose, keep the latest per cell, transform with the interpolated
+        # correction. obs.data is not touched in the dedup loop so it stays
+        # cheap (no pointcloud loading).
+        seen: dict[tuple[int, int, int], Any] = {}
+        for obs in lidar:
+            if obs.pose is None:
+                continue
+            if obs.pose[0] == 0 and obs.pose[1] == 0 and obs.pose[2] == 0:
+                continue
+            cell = (
+                int(obs.pose[0] / pgo_tol),
+                int(obs.pose[1] / pgo_tol),
+                int(obs.pose[2] / pgo_tol),
+            )
+            seen[cell] = obs
+
+        n_kept = len(seen)
+        pct = 100 * n_kept / total if total else 0
+        print(f"pgo rebuild: kept [{n_kept}/{total}] frames ({pct:.1f}%) at tol={pgo_tol}m")
+
+        pass2_pb = progress(n_kept, "pgo pass 2 (rebuilding)")
         grid = VoxelGrid(voxel_size=voxel, block_count=block_count, device=device)
         try:
-            for obs in lidar:
+            for obs in seen.values():
                 pass2_pb(obs)
-                if obs.pose is None:
+                if len(obs.data) == 0:
                     continue
-                pts, _ = obs.data.as_numpy()
-                if len(pts) == 0:
-                    continue
-                tf = interp(obs.ts)
-                R = Rotation.from_quat(
-                    [tf.rotation.x, tf.rotation.y, tf.rotation.z, tf.rotation.w]
-                ).as_matrix()
-                t = np.array([tf.translation.x, tf.translation.y, tf.translation.z])
-                corrected = (R @ pts[:, :3].T).T + t
-                grid.add_frame(PointCloud2.from_numpy(corrected.astype(np.float32)))
+                grid.add_frame(obs.data.transform(interp(obs.ts)))
             pgo_map = grid.get_global_pointcloud2()
         finally:
             grid.dispose()
+
+    full_pgo_map = None
+    if full_pgo:
+        full_pb = progress(total, "full pgo (rebuilding)")
+        full_grid = VoxelGrid(voxel_size=voxel, block_count=block_count, device=device)
+        try:
+            for obs in lidar:
+                full_pb(obs)
+                if obs.pose is None or len(obs.data) == 0:
+                    continue
+                full_grid.add_frame(obs.data.transform(interp(obs.ts)))
+            full_pgo_map = full_grid.get_global_pointcloud2()
+        finally:
+            full_grid.dispose()
 
     global_map = (
         lidar.tap(collect_path)
@@ -167,6 +199,12 @@ def main(
             )
         if pgo_map is not None:
             rr.log("world/pgo_map/pointcloud", pgo_map.to_rerun(size=voxel), static=True)
+        if full_pgo_map is not None:
+            rr.log(
+                "world/full_pgo_map/pointcloud",
+                full_pgo_map.to_rerun(size=voxel),
+                static=True,
+            )
         STEM_HEIGHT = 2.0  # lift pose-graph viz above the map for legibility
         if pgo_path:
             rr.log(

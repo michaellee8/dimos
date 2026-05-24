@@ -693,7 +693,12 @@ def map_cmd(
         "CUDA:0", "--device", help="Open3D compute device (e.g. CUDA:0, CPU:0)"
     ),
     pgo: bool = typer.Option(
-        False, "--pgo", help="Run pose graph optimization before rebuilding (twopass)"
+        False,
+        "--pgo",
+        help="Run pose graph optimization and rebuild from spatially-deduped frames",
+    ),
+    pgo_tol: float = typer.Option(
+        0.3, "--pgo-tol", help="Spatial dedup tolerance for --pgo (meters)"
     ),
     block_count: int = typer.Option(
         2_000_000, "--block-count", help="VoxelBlockGrid capacity (--pgo only)"
@@ -701,7 +706,12 @@ def map_cmd(
     export: bool = typer.Option(
         False,
         "--export",
-        help="Export PGO twopass map to ./<dataset>.pc2.lcm in cwd (implies --pgo)",
+        help="Export PGO map to ./<dataset>.pc2.lcm in cwd (implies --pgo)",
+    ),
+    full_pgo: bool = typer.Option(
+        False,
+        "--full-pgo",
+        help="Also build a full-replay PGO map (every frame) for comparison (implies --pgo)",
     ),
     no_gui: bool = typer.Option(False, "--no-gui", help="Skip rerun visualization"),
 ) -> None:
@@ -713,8 +723,10 @@ def map_cmd(
         voxel=voxel,
         device=device,
         pgo=pgo,
+        pgo_tol=pgo_tol,
         block_count=block_count,
         export=export,
+        full_pgo=full_pgo,
         no_gui=no_gui,
     )
 
