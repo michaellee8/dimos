@@ -27,7 +27,11 @@ from dimos.memory2.codecs.base import codec_id
 from dimos.memory2.observationstore.sqlite import SqliteObservationStore
 from dimos.memory2.registry import RegistryStore, deserialize_component, qual
 from dimos.memory2.store.base import Store, StoreConfig
-from dimos.memory2.utils.sqlite import open_disposable_sqlite_connection
+from dimos.memory2.utils.sqlite import (
+    close_sqlite_connection,
+    conn_lock,
+    open_disposable_sqlite_connection,
+)
 from dimos.memory2.utils.validation import validate_identifier
 from dimos.memory2.vectorstore.base import VectorStore
 from dimos.memory2.vectorstore.sqlite import SqliteVectorStore
@@ -208,12 +212,14 @@ class SqliteStore(Store):
 
     def delete_stream(self, name: str) -> None:
         super().delete_stream(name)
-        self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}"')
-        self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_blob"')
-        self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_vec"')
-        self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_rtree"')
+        with conn_lock(self._registry_conn):
+            self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}"')
+            self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_blob"')
+            self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_vec"')
+            self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_rtree"')
         self._registry.delete(name)
 
     def stop(self) -> None:
         super().stop()
-        self._registry_conn.close()
+        with conn_lock(self._registry_conn):
+            close_sqlite_connection(self._registry_conn)
