@@ -20,33 +20,28 @@ from typing import Any
 
 
 def g1_static_robot(rr: Any) -> list[Any]:
-    """Static G1 humanoid wireframe box attached to the sensor TF frame.
+    """Static G1 humanoid wireframe box attached to base_link.
 
-    Half-sizes are ~50x40x120 cm (the G1 humanoid), and the box is
-    centered 0.6m below the sensor (lidar mounted at head height).
+    Half-sizes are ~50x40x120 cm; base_link sits on the floor, so the box
+    center is +0.6 m so it spans z=0 (floor) to z=1.2 (head).
     """
     return [
         rr.Boxes3D(
             half_sizes=[0.25, 0.20, 0.6],
-            centers=[[0, 0, -0.6]],
+            centers=[[0, 0, 0.6]],
             colors=[(0, 255, 127)],
             fill_mode="MajorWireframe",
         ),
-        rr.Transform3D(parent_frame="tf#/sensor"),
+        rr.Transform3D(parent_frame="tf#/base_link"),
     ]
 
 
 def g1_odometry_tf_override(odom: Any) -> Any:
-    """Publish odometry as a TF frame so sensor_scan/path/robot can reference it.
-
-    The z is zeroed because point clouds already have the full init_pose
-    transform applied (ground at z≈0). Using the raw odom.z (= mount height)
-    would double-count the vertical offset.
-    """
+    """Publish odometry as a TF frame in the rerun viz tree (map -> base_link)."""
     import rerun as rr
 
     tf = rr.Transform3D(
-        translation=[odom.x, odom.y, 0.0],
+        translation=[odom.x, odom.y, odom.z],
         rotation=rr.Quaternion(
             xyzw=[
                 odom.orientation.x,
@@ -56,8 +51,8 @@ def g1_odometry_tf_override(odom: Any) -> Any:
             ]
         ),
         parent_frame="tf#/map",
-        child_frame="tf#/sensor",
+        child_frame="tf#/base_link",
     )
     return [
-        ("tf#/sensor", tf),
+        ("tf#/base_link", tf),
     ]
