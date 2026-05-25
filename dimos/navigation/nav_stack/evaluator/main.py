@@ -65,7 +65,7 @@ def _render_surface_map(msg: Any) -> Any:
 _GRAPH_Z_LIFT = 0.1
 
 
-def _render_waypoints(msg: Any) -> Any:
+def _render_nodes(msg: Any) -> Any:
     import rerun as rr
 
     pts, _ = msg.as_numpy()
@@ -76,7 +76,7 @@ def _render_waypoints(msg: Any) -> Any:
     return rr.Points3D(positions=pts, colors=[[75, 156, 211]], radii=[0.15])  # Carolina Blue
 
 
-def _render_waypoint_edges(msg: Any) -> Any:
+def _render_node_edges(msg: Any) -> Any:
     return msg.to_rerun(z_offset=_GRAPH_Z_LIFT, radii=0.04)
 
 
@@ -90,8 +90,8 @@ def create_evaluator_blueprint() -> Blueprint:
                 "world/goal_pose": _render_goal_pose,
                 "world/global_map": _render_global_map,
                 "world/surface_map": _render_surface_map,
-                "world/waypoints": _render_waypoints,
-                "world/waypoint_edges": _render_waypoint_edges,
+                "world/nodes": _render_nodes,
+                "world/node_edges": _render_node_edges,
             }
         ),
     )

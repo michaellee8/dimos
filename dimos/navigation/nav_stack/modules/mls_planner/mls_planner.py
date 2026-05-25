@@ -15,7 +15,7 @@
 """Multi-Level Surface (MLS) path planner.
 
 Extracts walkable surfaces from a voxelized global map, builds a sparse
-waypoint graph over those surfaces, and plans paths via local A* plus
+node graph over those surfaces, and plans paths via local A* plus
 shortest-path search on the graph. Skeleton — algorithm is filled in
 piecewise.
 """
@@ -52,11 +52,11 @@ logger = setup_logger()
 SURFACE_DILATION_PASSES = 3
 SURFACE_EROSION_PASSES = 3
 
-WAYPOINT_SPACING_M = 2.0
-WAYPOINT_Z_TOLERANCE_M = 1.0
-WAYPOINT_STEP_THRESHOLD_M = 0.25
-WAYPOINT_MAX_EDGE_COST_M = 3.0
-WAYPOINT_SUB_SAMPLE_STRIDE = 20
+NODE_SPACING_M = 2.0
+NODE_Z_TOLERANCE_M = 1.0
+NODE_STEP_THRESHOLD_M = 0.25
+NODE_MAX_EDGE_COST_M = 3.0
+NODE_SUB_SAMPLE_STRIDE = 20
 
 
 class MLSPlannerConfig(ModuleConfig):
@@ -160,8 +160,8 @@ class _GridHash:
     def _key(self, ix: int, iy: int) -> tuple[int, int]:
         return (ix // self._bucket_size, iy // self._bucket_size)
 
-    def add(self, waypoint_id: int, ix: int, iy: int) -> None:
-        self._buckets.setdefault(self._key(ix, iy), []).append(waypoint_id)
+    def add(self, node_id: int, ix: int, iy: int) -> None:
+        self._buckets.setdefault(self._key(ix, iy), []).append(node_id)
 
     def nearby(self, ix: int, iy: int, radius_cells: int) -> list[int]:
         bucket_radius = radius_cells // self._bucket_size + 1
@@ -254,23 +254,23 @@ def _reconstruct_path(
     return np.array(path, dtype=np.int64)
 
 
-def build_waypoint_graph(
+def build_node_graph(
     surface_points: np.ndarray,
     voxel_size: float,
     *,
-    waypoint_spacing: float,
-    waypoint_z_tolerance: float,
+    node_spacing: float,
+    node_z_tolerance: float,
     step_threshold: float,
     max_edge_cost: float,
     sub_sample_stride: int,
 ) -> nx.Graph:
-    """Build a sparse waypoint graph over the surface map.
+    """Build a sparse node graph over the surface map.
 
     Iterates surface cells in deterministic lexicographic order, sub-sampled
-    by ``sub_sample_stride``. A waypoint is added when no existing waypoint
-    sits within a cylinder of XY radius ``waypoint_spacing`` and half-height
-    ``waypoint_z_tolerance``. Each new waypoint is connected to any existing
-    waypoint that the modified A* can reach within ``max_edge_cost`` subject
+    by ``sub_sample_stride``. A node is added when no existing node
+    sits within a cylinder of XY radius ``node_spacing`` and half-height
+    ``node_z_tolerance``. Each new node is connected to any existing
+    node that the modified A* can reach within ``max_edge_cost`` subject
     to the per-step delta-z cap.
     """
     graph = nx.Graph()
@@ -283,15 +283,15 @@ def build_waypoint_graph(
 
     surface_lookup = _build_surface_lookup(sx, sy, sz)
 
-    spacing_cells = max(1, int(waypoint_spacing / voxel_size))
-    z_tol_cells = max(0, int(waypoint_z_tolerance / voxel_size))
+    spacing_cells = max(1, int(node_spacing / voxel_size))
+    z_tol_cells = max(0, int(node_z_tolerance / voxel_size))
     step_cells = max(0, int(step_threshold / voxel_size))
     edge_radius_cells = max(1, int(max_edge_cost / voxel_size))
 
     grid = _GridHash(spacing_cells)
-    wp_ix: list[int] = []
-    wp_iy: list[int] = []
-    wp_iz: list[int] = []
+    node_ix: list[int] = []
+    node_iy: list[int] = []
+    node_iz: list[int] = []
 
     order = np.lexsort((sz, sy, sx))
     spacing_sq = spacing_cells * spacing_cells
@@ -301,20 +301,20 @@ def build_waypoint_graph(
         cix, ciy, ciz = int(sx[idx]), int(sy[idx]), int(sz[idx])
 
         in_cylinder = False
-        for wid in grid.nearby(cix, ciy, spacing_cells):
-            dx = wp_ix[wid] - cix
-            dy = wp_iy[wid] - ciy
-            dz = wp_iz[wid] - ciz
+        for nid in grid.nearby(cix, ciy, spacing_cells):
+            dx = node_ix[nid] - cix
+            dy = node_iy[nid] - ciy
+            dz = node_iz[nid] - ciz
             if dx * dx + dy * dy < spacing_sq and abs(dz) < z_tol_cells:
                 in_cylinder = True
                 break
         if in_cylinder:
             continue
 
-        new_id = len(wp_ix)
-        wp_ix.append(cix)
-        wp_iy.append(ciy)
-        wp_iz.append(ciz)
+        new_id = len(node_ix)
+        node_ix.append(cix)
+        node_iy.append(ciy)
+        node_iz.append(ciz)
         grid.add(new_id, cix, ciy)
         graph.add_node(
             new_id,
@@ -329,7 +329,7 @@ def build_waypoint_graph(
         candidate_ids = [c for c in grid.nearby(cix, ciy, edge_radius_cells) if c != new_id]
         candidate_cells: dict[tuple[int, int, int], int] = {}
         for c in candidate_ids:
-            ox, oy, oz = wp_ix[c], wp_iy[c], wp_iz[c]
+            ox, oy, oz = node_ix[c], node_iy[c], node_iz[c]
             dx, dy, dz = ox - cix, oy - ciy, oz - ciz
             if math.sqrt(dx * dx + dy * dy + dz * dz) * voxel_size > max_edge_cost:
                 continue
@@ -394,7 +394,7 @@ class _PublishableLineSegments3D(LineSegments3D):
         return lcm_msg.lcm_encode()  # type: ignore[no-any-return]
 
 
-def _waypoints_to_cloud(graph: nx.Graph) -> np.ndarray:
+def _nodes_to_cloud(graph: nx.Graph) -> np.ndarray:
     if graph.number_of_nodes() == 0:
         return np.zeros((0, 3), dtype=np.float32)
     return np.array([graph.nodes[n]["pos"] for n in graph.nodes()], dtype=np.float32)
@@ -428,8 +428,8 @@ class MLSPlanner(Module):
     goal_pose: In[Odometry]
     path: Out[Path]
     surface_map: Out[PointCloud2]
-    waypoints: Out[PointCloud2]
-    waypoint_edges: Out[LineSegments3D]
+    nodes: Out[PointCloud2]
+    node_edges: Out[LineSegments3D]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -456,37 +456,37 @@ class MLSPlanner(Module):
         )
 
         logger.info(
-            "Building waypoint graph",
-            spacing_m=WAYPOINT_SPACING_M,
-            max_edge_cost_m=WAYPOINT_MAX_EDGE_COST_M,
-            stride=WAYPOINT_SUB_SAMPLE_STRIDE,
+            "Building node graph",
+            spacing_m=NODE_SPACING_M,
+            max_edge_cost_m=NODE_MAX_EDGE_COST_M,
+            stride=NODE_SUB_SAMPLE_STRIDE,
         )
         t1 = time.perf_counter()
-        graph = build_waypoint_graph(
+        graph = build_node_graph(
             surface_points,
             self.config.voxel_size,
-            waypoint_spacing=WAYPOINT_SPACING_M,
-            waypoint_z_tolerance=WAYPOINT_Z_TOLERANCE_M,
-            step_threshold=WAYPOINT_STEP_THRESHOLD_M,
-            max_edge_cost=WAYPOINT_MAX_EDGE_COST_M,
-            sub_sample_stride=WAYPOINT_SUB_SAMPLE_STRIDE,
+            node_spacing=NODE_SPACING_M,
+            node_z_tolerance=NODE_Z_TOLERANCE_M,
+            step_threshold=NODE_STEP_THRESHOLD_M,
+            max_edge_cost=NODE_MAX_EDGE_COST_M,
+            sub_sample_stride=NODE_SUB_SAMPLE_STRIDE,
         )
         graph_ms = (time.perf_counter() - t1) * 1000
         self._graph = graph
-        self.waypoints.publish(
+        self.nodes.publish(
             PointCloud2.from_numpy(
-                _waypoints_to_cloud(graph),
+                _nodes_to_cloud(graph),
                 frame_id=self.config.world_frame,
                 timestamp=time.time(),
             )
         )
         logger.info(
-            "Waypoint graph done",
-            waypoints=graph.number_of_nodes(),
+            "Node graph done",
+            nodes=graph.number_of_nodes(),
             edges=graph.number_of_edges(),
             graph_ms=round(graph_ms, 1),
         )
-        self.waypoint_edges.publish(
+        self.node_edges.publish(
             _PublishableLineSegments3D(
                 ts=time.time(),
                 frame_id=self.config.world_frame,
