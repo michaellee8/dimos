@@ -390,7 +390,7 @@ class _PGO:
         # poses gives us another chance to anchor those segments.
         self._last_loop_ts = None
         for i in range(len(self._key_poses)):
-            self._search_for_loops(cur_idx=i, enforce_time_gate=False, no_fallback=True, submap_half_range=38)
+            self._search_for_loops(cur_idx=i, enforce_time_gate=False, no_fallback=True, submap_half_range=38, time_thresh_override=10.0)
         if self._pending_loops:
             self._smooth_and_update()
         kps = sorted(self._key_poses, key=lambda kp: kp.timestamp)
@@ -519,6 +519,11 @@ class _PGO:
         force_fallback: bool = False,
         no_fallback: bool = False,
         submap_half_range: int | None = None,
+        icp_max_dist: float | None = None,
+        source_half_range: int = 0,
+        candidates_per_iter: int | None = None,
+        force_multi: bool = False,
+        time_thresh_override: float | None = None,
     ) -> None:
         if len(self._key_poses) < self._cfg.min_keyframes_for_loop_search:
             return
@@ -568,7 +573,8 @@ class _PGO:
         # search with a stricter time gap.
         opt_radius_val = opt_radius if opt_radius is not None else self._cfg.loop_search_radius
         opt_idxs = set(KDTree(opt_positions).query_ball_point(cur_opt_t, opt_radius_val))
-        candidates = _collect(opt_idxs, self._cfg.loop_time_thresh)
+        time_thresh = time_thresh_override if time_thresh_override is not None else self._cfg.loop_time_thresh
+        candidates = _collect(opt_idxs, time_thresh)
         drift = float(np.linalg.norm(cur_opt_t - cur_loc_t))
         relocalizing = False
         if not no_fallback and (force_fallback or (not candidates and drift > self._cfg.loop_fallback_drift_thresh)):
@@ -591,26 +597,28 @@ class _PGO:
         # only the best one — the trajectory there is well-constrained
         # already and extra loops add noise. Early-exit on a very tight
         # match to save redundant ICP runs in the common case.
-        source = self._get_submap(cur_idx, 0)
+        source = self._get_submap(cur_idx, source_half_range)
         accepted: list[tuple[int, Transform, float]] = []
-        for _, loop_idx in candidates[: self._cfg.loop_candidates_per_iter]:
+        k = candidates_per_iter if candidates_per_iter is not None else self._cfg.loop_candidates_per_iter
+        for _, loop_idx in candidates[:k]:
             target_hr = submap_half_range if submap_half_range is not None else self._cfg.loop_submap_half_range
             target = self._get_submap(loop_idx, target_hr)
+            max_dist = icp_max_dist if icp_max_dist is not None else self._cfg.max_icp_correspondence_dist
             icp_tf, fitness = _icp(
                 source,
                 target,
                 max_iter=self._cfg.max_icp_iterations,
-                max_dist=self._cfg.max_icp_correspondence_dist,
+                max_dist=max_dist,
                 min_inliers=self._cfg.min_icp_inliers,
             )
             if fitness <= self._cfg.loop_score_thresh:
                 accepted.append((loop_idx, icp_tf, fitness))
-                if not relocalizing and fitness <= self._cfg.loop_score_thresh_tight:
+                if not relocalizing and not force_multi and fitness <= self._cfg.loop_score_thresh_tight:
                     break
         if not accepted:
             return
         accepted.sort(key=lambda x: x[2])
-        keep = accepted if relocalizing else [accepted[0]]
+        keep = accepted if (relocalizing or force_multi) else [accepted[0]]
 
         for loop_idx, icp_tf, fitness in keep:
             # icp_tf takes cur_kp.optimized -> refined pose (correcting the drift).
