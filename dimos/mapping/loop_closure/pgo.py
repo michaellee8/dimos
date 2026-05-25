@@ -533,9 +533,11 @@ class _PGO:
         opt_idxs = set(KDTree(opt_positions).query_ball_point(cur_opt_t, self._cfg.loop_search_radius))
         candidates = _collect(opt_idxs, self._cfg.loop_time_thresh)
         drift = float(np.linalg.norm(cur_opt_t - cur_loc_t))
+        relocalizing = False
         if not candidates and drift > self._cfg.loop_fallback_drift_thresh:
             loc_idxs = set(KDTree(loc_positions).query_ball_point(cur_loc_t, self._cfg.loop_search_radius_local))
             candidates = _collect(loc_idxs - opt_idxs, self._cfg.loop_time_thresh_local)
+            relocalizing = True
             logger.info(
                 "loop fallback fired",
                 cur_idx=cur_idx,
@@ -545,13 +547,15 @@ class _PGO:
         if not candidates:
             return
 
-        # Try top-K candidates; keep the best (lowest-score) one that
-        # passes the threshold. Early-exit when ICP is very tight (the
-        # common case for easy datasets — saves K-1 redundant ICP runs).
-        # The multi-candidate fallback only fires when the closest match
-        # is weak, i.e. exactly the relocalization-after-disturbance case.
+        # Try top-K candidates; keep all that pass the threshold (for
+        # relocalization fallback, multiple loops to different points in
+        # the past give the optimizer more constraint to anchor the
+        # disturbed segment). For the regular non-fallback path keep
+        # only the best one — the trajectory there is well-constrained
+        # already and extra loops add noise. Early-exit on a very tight
+        # match to save redundant ICP runs in the common case.
         source = self._get_submap(cur_idx, 0)
-        best: tuple[int, Transform, float] | None = None
+        accepted: list[tuple[int, Transform, float]] = []
         for _, loop_idx in candidates[: self._cfg.loop_candidates_per_iter]:
             target = self._get_submap(loop_idx, self._cfg.loop_submap_half_range)
             icp_tf, fitness = _icp(
@@ -561,35 +565,38 @@ class _PGO:
                 max_dist=self._cfg.max_icp_correspondence_dist,
                 min_inliers=self._cfg.min_icp_inliers,
             )
-            if fitness <= self._cfg.loop_score_thresh and (best is None or fitness < best[2]):
-                best = (loop_idx, icp_tf, fitness)
-                if fitness <= self._cfg.loop_score_thresh_tight:
+            if fitness <= self._cfg.loop_score_thresh:
+                accepted.append((loop_idx, icp_tf, fitness))
+                if not relocalizing and fitness <= self._cfg.loop_score_thresh_tight:
                     break
-        if best is None:
+        if not accepted:
             return
-        loop_idx, icp_tf, fitness = best
+        accepted.sort(key=lambda x: x[2])
+        keep = accepted if relocalizing else [accepted[0]]
 
-        # icp_tf takes cur_kp.optimized -> refined pose (correcting the drift).
-        # offset = loop_kp.optimized^-1 * refined = relative pose from loop to cur.
-        icp_pose = _transform_to_pose3(icp_tf)
-        refined = icp_pose.compose(cur_kp.optimized)
-        offset = self._key_poses[loop_idx].optimized.between(refined)
+        for loop_idx, icp_tf, fitness in keep:
+            # icp_tf takes cur_kp.optimized -> refined pose (correcting the drift).
+            # offset = loop_kp.optimized^-1 * refined = relative pose from loop to cur.
+            icp_pose = _transform_to_pose3(icp_tf)
+            refined = icp_pose.compose(cur_kp.optimized)
+            offset = self._key_poses[loop_idx].optimized.between(refined)
 
-        self._pending_loops.append(
-            _LoopPair(
+            self._pending_loops.append(
+                _LoopPair(
+                    source=cur_idx,
+                    target=loop_idx,
+                    offset=offset,
+                    score=fitness,
+                )
+            )
+            logger.info(
+                "Loop closure detected",
                 source=cur_idx,
                 target=loop_idx,
-                offset=offset,
-                score=fitness,
+                score=round(fitness, 4),
+                reloc=relocalizing,
             )
-        )
         self._last_loop_ts = cur_ts
-        logger.info(
-            "Loop closure detected",
-            source=cur_idx,
-            target=loop_idx,
-            score=round(fitness, 4),
-        )
 
     def _smooth_and_update(self) -> None:
         gtsam = self._gtsam
