@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, Unpack
 import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
 import open3d.core as o3c  # type: ignore[import-untyped]
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Rotation
 
 from dimos.memory2.store.memory import MemoryStore
 from dimos.memory2.stream import Stream
@@ -232,8 +232,8 @@ def make_interpolator(corrections: Stream[Transform]) -> Callable[[float], Trans
     if not ts_list:
         raise ValueError("empty corrections stream")
 
-    # Slerp needs ≥2 keyframes. Pad len==1 with a duplicate so the
-    # general path handles it; clip-to-endpoints behavior is unchanged.
+    # Pad len==1 with a duplicate so the general path handles it;
+    # clip-to-endpoints behavior is unchanged.
     if len(ts_list) == 1:
         ts_list.append(ts_list[0] + 1e-6)
         R_list.append(R_list[0])
@@ -242,7 +242,6 @@ def make_interpolator(corrections: Stream[Transform]) -> Callable[[float], Trans
     ts_arr = np.array(ts_list)
     R_stack = np.stack(R_list)
     t_stack = np.stack(t_list)
-    slerp = Slerp(ts_arr, Rotation.from_matrix(R_stack))
 
     def interp(ts: float) -> Transform:
         ts_clip = float(np.clip(ts, ts_arr[0], ts_arr[-1]))
