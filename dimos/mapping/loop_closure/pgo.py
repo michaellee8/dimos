@@ -106,7 +106,7 @@ class PGOConfig(BaseConfig):
 
     # ICP
     max_icp_iterations: int = 50
-    max_icp_correspondence_dist: float = 1.0
+    max_icp_correspondence_dist: float = 0.5
 
 
 class PGOKwargs(TypedDict, total=False):
