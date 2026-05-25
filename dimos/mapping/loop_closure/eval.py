@@ -28,6 +28,17 @@ Usage:
 
 from __future__ import annotations
 
+# Pin numerical libs to single-threaded BEFORE any dimos/gtsam/open3d/cv2
+# import. With threading on, parallel FP reductions inside GTSAM / Open3D
+# ICP / OpenBLAS produce slightly different sums each run (~1% spread on
+# the eval), and threading actually makes the eval *slower* here because
+# coordination overhead exceeds parallel benefit at this graph size.
+# Override with `OMP_NUM_THREADS=N uv run ...` if you really want it.
+import os
+
+for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
+
 import logging
 import signal
 import sys
