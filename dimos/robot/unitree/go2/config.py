@@ -36,7 +36,6 @@ from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.robot.config import RobotConfig
-from dimos.robot.unitree.go2.config import Go2Config, camera_info_static
 
 _FRONT_CAMERA_720_YAML = resources.files("dimos.robot.unitree.go2").joinpath(
     "front_camera_720.yaml"
@@ -46,6 +45,12 @@ _FRONT_CAMERA_720_YAML = resources.files("dimos.robot.unitree.go2").joinpath(
 def camera_info_static() -> CameraInfo:
     with resources.as_file(_FRONT_CAMERA_720_YAML) as yaml_path:
         return CameraInfo.from_yaml(str(yaml_path))
+
+
+Go2Config = RobotConfig(
+    name="unitree_go2",
+    model_path=Path(__file__).parent / "go2.urdf",
+)
 
 
 def odom_to_tf(cls: Odometry) -> list[Transform]:
@@ -72,9 +77,3 @@ def odom_to_tf(cls: Odometry) -> list[Transform]:
         )
     ]
     return [base_link, *statics]
-
-
-Go2Config = RobotConfig(
-    name="unitree_go2",
-    model_path=Path(__file__).parent / "go2.urdf",
-)
