@@ -53,13 +53,16 @@ def main(
     out: Path = typer.Option(..., "--out", help="Output .rrd path"),
     marker_size: float = typer.Option(0.1, "--marker-size", help="Marker edge length (m)"),
     marker_max_speed: float = typer.Option(
-        0.15, "--marker-max-speed", help="Detection speed gate (m/s); 0 disables"
+        0.5, "--marker-max-speed", help="Detection speed gate (m/s); 0 disables"
     ),
     marker_max_rot_rate: float = typer.Option(
-        30.0, "--marker-max-rot-rate", help="Detection rot gate (deg/s); 0 disables"
+        50.0, "--marker-max-rot-rate", help="Detection rot gate (deg/s); 0 disables"
     ),
     quality_window: float = typer.Option(
-        0.25, "--quality-window", help="Sharpest-frame window for detection (s)"
+        0.1, "--quality-window", help="Sharpest-frame window for detection (s)"
+    ),
+    smoothing_window: float = typer.Option(
+        5.0, "--smoothing-window", help="Buffer window for averaged-track pass (s); 0 disables"
     ),
 ) -> None:
     db_path = resolve_named_path(dataset, ".db")
@@ -172,12 +175,55 @@ def main(
             )
         print(f"detections: {n_det}")
 
-    print(f"wrote {out}")
-    print(f"open with: rerun {out}")
-
-
-if __name__ == "__main__":
-    typer.run(main)
+        # ---- pass 4: averaged tracks (smoothing_window > 0 → per-track ids) ----
+        # Re-runs the same filtered pipeline through a smoothing detector;
+        # each track yields one entity that updates as the windowed average
+        # refines. Color stable per track_id for visual identity.
+        if smoothing_window > 0:
+            xf_tracked = DetectMarkers(
+                camera_info=cam_info,
+                marker_length_m=marker_size,
+                smoothing_window=smoothing_window,
+            )
+            pipeline_tracked: Stream[Any] = color_image.transform(
+                QualityWindow(lambda img: img.sharpness, window=quality_window)
+            )
+            if marker_max_speed > 0:
+                pipeline_tracked = pipeline_tracked.transform(
+                    SpeedLimit(
+                        max_mps=marker_max_speed,
+                        max_dps=marker_max_rot_rate if marker_max_rot_rate > 0 else None,
+                    )
+                )
+            seen_tracks: set[int] = set()
+            n_updates = 0
+            for det_obs in pipeline_tracked.transform(xf_tracked):
+                d = det_obs.data
+                rr.set_time(TIMELINE, timestamp=det_obs.ts)
+                color = Color.from_cmap("tab10", (d.track_id % 10) / 10.0).rgb_u8()
+                rr.log(
+                    f"world/tracks/track_{d.track_id:04d}",
+                    rr.Boxes3D(
+                        centers=[(d.center.x, d.center.y, d.center.z)],
+                        half_sizes=[(marker_size / 2, marker_size / 2, 0.005)],
+                        quaternions=[
+                            rr.Quaternion(
+                                xyzw=[
+                                    d.orientation.x,
+                                    d.orientation.y,
+                                    d.orientation.z,
+                                    d.orientation.w,
+                                ]
+                            )
+                        ],
+                        colors=[color],
+                        fill_mode=rr.components.FillMode.Solid,
+                        labels=[f"track={d.track_id} id={d.marker_id}"],
+                    ),
+                )
+                seen_tracks.add(d.track_id)
+                n_updates += 1
+            print(f"tracks: {len(seen_tracks)} unique, {n_updates} updates")
 
     print(f"wrote {out}")
     print(f"open with: rerun {out}")
