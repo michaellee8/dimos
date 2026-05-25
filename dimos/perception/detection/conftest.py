@@ -35,37 +35,9 @@ from dimos.perception.detection.type.detection2d.imageDetections2D import ImageD
 from dimos.perception.detection.type.detection3d.imageDetections3DPC import ImageDetections3DPC
 from dimos.perception.detection.type.detection3d.pointcloud import Detection3DPC
 from dimos.protocol.tf.tf import TF
-from dimos.robot.unitree.go2.config import Go2Config, camera_info_static
+from dimos.robot.unitree.go2.config import camera_info_static, odom_to_tf
 from dimos.robot.unitree.type.odometry import Odometry
 from dimos.utils.data import get_data
-
-
-def _odom_to_tf(odom: Odometry) -> list[Transform]:
-    """Build [world→base_link, base_link→camera_link, camera_link→camera_optical] for tests.
-
-    Replaces the removed GO2Connection._odom_to_tf using Go2Config.static_transforms.
-    """
-    base_link = Transform(
-        translation=odom.position,
-        rotation=odom.orientation,
-        frame_id=odom.frame_id or "world",
-        child_frame_id="base_link",
-        ts=odom.ts,
-    )
-    statics = [
-        Transform(
-            translation=t.translation,
-            rotation=t.rotation,
-            frame_id=t.frame_id,
-            child_frame_id=t.child_frame_id,
-            ts=odom.ts,
-        )
-        for t in (
-            Go2Config.static_transforms["camera_link"],
-            Go2Config.static_transforms["camera_optical"],
-        )
-    ]
-    return [base_link, *statics]
 
 
 class Moment(TypedDict, total=False):
@@ -125,7 +97,7 @@ def get_moment(tf):
         if odom_frame is None:
             raise ValueError("No odom frame found")
 
-        transforms = _odom_to_tf(odom_frame)
+        transforms = odom_to_tf(odom_frame)
 
         tf.receive_transform(*transforms)
 

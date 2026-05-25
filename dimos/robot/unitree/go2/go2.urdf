@@ -35,4 +35,10 @@
     <child link="camera_optical"/>
     <origin xyz="0.0 0.0 0.0" rpy="-1.5707963267948966 0 -1.5707963267948966"/>
   </joint>
+  <link name="lidar_link"/>
+  <joint name="base_link_to_lidar_link" type="fixed">
+    <parent link="base_link"/>
+    <child link="lidar_link"/>
+    <origin xyz="0.0 0.0 0.0" rpy="0 0 0"/>
+  </joint>
 </robot>

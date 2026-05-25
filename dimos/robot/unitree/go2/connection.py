@@ -260,31 +260,6 @@ class GO2Connection(Module, Camera, Pointcloud):
 
         super().stop()
 
-    @classmethod
-    def _odom_to_tf(cls: Odometry) -> list[Transform]:
-        """[world→base_link, base_link→camera_link, camera_link→camera_optical] for tests."""
-        base_link = Transform(
-            translation=cls.position,
-            rotation=cls.orientation,
-            frame_id=cls.frame_id or DEFAULT_WORLD_FRAME,
-            child_frame_id=DEFAULT_ROBOT_FRAME,
-            ts=cls.ts,
-        )
-        statics = [
-            Transform(
-                translation=t.translation,
-                rotation=t.rotation,
-                frame_id=t.frame_id,
-                child_frame_id=t.child_frame_id,
-                ts=cls.ts,
-            )
-            for t in (
-                Go2Config.static_transforms["camera_link"],
-                Go2Config.static_transforms["camera_optical"],
-            )
-        ]
-        return [base_link, *statics]
-
     def _publish_tf(self, msg: PoseStamped) -> None:
         self.tf.publish(
             Transform(
