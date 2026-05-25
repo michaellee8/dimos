@@ -246,17 +246,20 @@ def make_interpolator(corrections: Stream[Transform]) -> Callable[[float], Trans
 
     def interp(ts: float) -> Transform:
         ts_clip = float(np.clip(ts, ts_arr[0], ts_arr[-1]))
-        R = slerp([ts_clip])[0].as_matrix()
         idx = int(np.searchsorted(ts_arr, ts_clip))
         if idx == 0:
             t = t_stack[0]
+            R = R_stack[0]
         elif idx >= len(ts_arr):
             t = t_stack[-1]
+            R = R_stack[-1]
         else:
             t_lo, t_hi = ts_arr[idx - 1], ts_arr[idx]
             # Nearest-neighbor in time: avoids blending two adjacent
             # corrections that may straddle a loop-closure update.
-            t = t_stack[idx - 1] if (ts_clip - t_lo) < (t_hi - ts_clip) else t_stack[idx]
+            near_lo = (ts_clip - t_lo) < (t_hi - ts_clip)
+            t = t_stack[idx - 1] if near_lo else t_stack[idx]
+            R = R_stack[idx - 1] if near_lo else R_stack[idx]
         return _transform_from_r_t(R, t, ts=float(ts))
 
     return interp
