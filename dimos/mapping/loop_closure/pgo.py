@@ -612,7 +612,7 @@ class _PGO:
             # *translation* variance and a generous fixed rotation variance
             # — loops shouldn't be trusted to fix rotation tightly without
             # normals + p2plane.
-            trans_var = max(0.01, float(pair.score))  # >= sigma_trans = 10 cm
+            trans_var = max(0.005, float(pair.score))  # >= sigma_trans ~7 cm
             rot_var = 0.003  # sigma_rot ~ 3.1 deg (large submap p2plane ICP, tight rotation)
             noise = gtsam.noiseModel.Diagonal.Variances(
                 np.array([rot_var, rot_var, rot_var, trans_var, trans_var, trans_var])
