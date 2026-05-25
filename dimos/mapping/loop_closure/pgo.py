@@ -92,9 +92,12 @@ class PGOConfig(BaseConfig):
 
     # Loop closure
     loop_search_radius: float = 2.0
+    loop_search_radius_local: float = 5.0
     loop_time_thresh: float = 20.0
     loop_score_thresh: float = 0.3
+    loop_score_thresh_tight: float = 0.05  # early-exit threshold: ICP rmse ~22cm
     loop_submap_half_range: int = 10
+    loop_candidates_per_iter: int = 5
     min_icp_inliers: int = 10
     min_keyframes_for_loop_search: int = 10
     loop_closure_extra_iterations: int = 4
@@ -112,9 +115,12 @@ class PGOKwargs(TypedDict, total=False):
     key_pose_delta_trans: float
     key_pose_delta_deg: float
     loop_search_radius: float
+    loop_search_radius_local: float
     loop_time_thresh: float
     loop_score_thresh: float
+    loop_score_thresh_tight: float
     loop_submap_half_range: int
+    loop_candidates_per_iter: int
     min_icp_inliers: int
     min_keyframes_for_loop_search: int
     loop_closure_extra_iterations: int
@@ -490,47 +496,64 @@ class _PGO:
 
         cur_idx = len(self._key_poses) - 1
         cur_kp = self._key_poses[-1]
-        cur_t = np.asarray(cur_kp.optimized.translation())
+        cur_opt_t = np.asarray(cur_kp.optimized.translation())
+        cur_loc_t = np.asarray(cur_kp.local.translation())
 
         from scipy.spatial import KDTree
 
-        positions = np.array(
+        # Search both optimized and local (odom) frames and union. After
+        # the robot is disturbed, optimized drift can exceed the search
+        # radius; the local frame is drift-free over short horizons so
+        # revisits still appear in range there.
+        opt_positions = np.array(
             [np.asarray(kp.optimized.translation()) for kp in self._key_poses[:-1]]
         )
-        tree = KDTree(positions)
-        idxs = tree.query_ball_point(cur_t, self._cfg.loop_search_radius)
+        loc_positions = np.array(
+            [np.asarray(kp.local.translation()) for kp in self._key_poses[:-1]]
+        )
+        # Tight radius in optimized frame (precise revisits); wider radius in
+        # local frame to catch relocalizations after big drift events.
+        opt_idxs = KDTree(opt_positions).query_ball_point(cur_opt_t, self._cfg.loop_search_radius)
+        loc_idxs = KDTree(loc_positions).query_ball_point(cur_loc_t, self._cfg.loop_search_radius_local)
+        idxs = set(opt_idxs) | set(loc_idxs)
         if not idxs:
             return
 
-        # query_ball_point doesn't sort by distance — do it ourselves and
-        # filter by min time gap to avoid closing loops to recent keyframes.
-        candidates = [
-            (
-                float(
-                    np.linalg.norm(np.asarray(self._key_poses[i].optimized.translation()) - cur_t)
-                ),
-                i,
-            )
-            for i in idxs
-            if abs(cur_ts - self._key_poses[i].timestamp) > self._cfg.loop_time_thresh
-        ]
+        # Sort by min(opt_dist, loc_dist) and filter out recent keyframes.
+        candidates = []
+        for i in idxs:
+            if abs(cur_ts - self._key_poses[i].timestamp) <= self._cfg.loop_time_thresh:
+                continue
+            d_opt = float(np.linalg.norm(np.asarray(self._key_poses[i].optimized.translation()) - cur_opt_t))
+            d_loc = float(np.linalg.norm(np.asarray(self._key_poses[i].local.translation()) - cur_loc_t))
+            candidates.append((min(d_opt, d_loc), i))
         if not candidates:
             return
         candidates.sort()
-        loop_idx = candidates[0][1]
 
-        target = self._get_submap(loop_idx, self._cfg.loop_submap_half_range)
+        # Try top-K candidates; keep the best (lowest-score) one that
+        # passes the threshold. Early-exit when ICP is very tight (the
+        # common case for easy datasets — saves K-1 redundant ICP runs).
+        # The multi-candidate fallback only fires when the closest match
+        # is weak, i.e. exactly the relocalization-after-disturbance case.
         source = self._get_submap(cur_idx, 0)
-
-        icp_tf, fitness = _icp(
-            source,
-            target,
-            max_iter=self._cfg.max_icp_iterations,
-            max_dist=self._cfg.max_icp_correspondence_dist,
-            min_inliers=self._cfg.min_icp_inliers,
-        )
-        if fitness > self._cfg.loop_score_thresh:
+        best: tuple[int, Transform, float] | None = None
+        for _, loop_idx in candidates[: self._cfg.loop_candidates_per_iter]:
+            target = self._get_submap(loop_idx, self._cfg.loop_submap_half_range)
+            icp_tf, fitness = _icp(
+                source,
+                target,
+                max_iter=self._cfg.max_icp_iterations,
+                max_dist=self._cfg.max_icp_correspondence_dist,
+                min_inliers=self._cfg.min_icp_inliers,
+            )
+            if fitness <= self._cfg.loop_score_thresh and (best is None or fitness < best[2]):
+                best = (loop_idx, icp_tf, fitness)
+                if fitness <= self._cfg.loop_score_thresh_tight:
+                    break
+        if best is None:
             return
+        loop_idx, icp_tf, fitness = best
 
         # icp_tf takes cur_kp.optimized -> refined pose (correcting the drift).
         # offset = loop_kp.optimized^-1 * refined = relative pose from loop to cur.
