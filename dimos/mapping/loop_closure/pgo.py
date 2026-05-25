@@ -383,6 +383,21 @@ class _PGO:
 
     def finalize(self) -> list[Keyframe]:
         """Return keyframes sorted by ts, with duplicate-ts entries dropped."""
+        # Second-pass loop rescan over the converged optimized poses:
+        # keyframes that ended up in heavily drifted regions may have
+        # missed loops during incremental processing (their optimized
+        # pose at the moment was misleading). Re-search with the final
+        # poses gives us another chance to anchor those segments.
+        self._last_loop_ts = None
+        for i in range(len(self._key_poses)):
+            kp = self._key_poses[i]
+            drift = float(np.linalg.norm(
+                np.asarray(kp.optimized.translation()) - np.asarray(kp.local.translation())
+            ))
+            if drift > self._cfg.loop_fallback_drift_thresh:
+                self._search_for_loops(cur_idx=i, enforce_time_gate=False)
+        if self._pending_loops:
+            self._smooth_and_update()
         kps = sorted(self._key_poses, key=lambda kp: kp.timestamp)
         out: list[Keyframe] = []
         for i, kp in enumerate(kps):
@@ -500,42 +515,46 @@ class _PGO:
             )
         return cloud.voxel_downsample(self._cfg.submap_resolution)
 
-    def _search_for_loops(self) -> None:
+    def _search_for_loops(self, cur_idx: int | None = None, *, enforce_time_gate: bool = True) -> None:
         if len(self._key_poses) < self._cfg.min_keyframes_for_loop_search:
             return
+        if cur_idx is None:
+            cur_idx = len(self._key_poses) - 1
 
-        cur_ts = self._key_poses[-1].timestamp
-        if (
+        cur_kp = self._key_poses[cur_idx]
+        cur_ts = cur_kp.timestamp
+        if enforce_time_gate and (
             self._last_loop_ts is not None
             and cur_ts - self._last_loop_ts < self._cfg.min_loop_detect_duration
         ):
             return
 
-        cur_idx = len(self._key_poses) - 1
-        cur_kp = self._key_poses[-1]
         cur_opt_t = np.asarray(cur_kp.optimized.translation())
         cur_loc_t = np.asarray(cur_kp.local.translation())
 
         from scipy.spatial import KDTree
 
-        # Search both optimized and local (odom) frames and union. After
-        # the robot is disturbed, optimized drift can exceed the search
-        # radius; the local frame is drift-free over short horizons so
-        # revisits still appear in range there.
+        # Search both optimized and local (odom) frames; exclude cur_idx
+        # from the candidate pool (and time-adjacent neighbors via the
+        # time gate filter inside _collect).
+        other_kps = [kp for j, kp in enumerate(self._key_poses) if j != cur_idx]
+        other_idx_map = [j for j in range(len(self._key_poses)) if j != cur_idx]
         opt_positions = np.array(
-            [np.asarray(kp.optimized.translation()) for kp in self._key_poses[:-1]]
+            [np.asarray(kp.optimized.translation()) for kp in other_kps]
         )
         loc_positions = np.array(
-            [np.asarray(kp.local.translation()) for kp in self._key_poses[:-1]]
+            [np.asarray(kp.local.translation()) for kp in other_kps]
         )
-        def _collect(idxs: set[int], time_thresh: float) -> list[tuple[float, int]]:
+        def _collect(local_idxs: set[int], time_thresh: float) -> list[tuple[float, int]]:
+            # local_idxs index into other_kps; map back to global keyframe index.
             cands = []
-            for i in idxs:
-                if abs(cur_ts - self._key_poses[i].timestamp) <= time_thresh:
+            for li in local_idxs:
+                gi = other_idx_map[li]
+                if abs(cur_ts - self._key_poses[gi].timestamp) <= time_thresh:
                     continue
-                d_opt = float(np.linalg.norm(np.asarray(self._key_poses[i].optimized.translation()) - cur_opt_t))
-                d_loc = float(np.linalg.norm(np.asarray(self._key_poses[i].local.translation()) - cur_loc_t))
-                cands.append((min(d_opt, d_loc), i))
+                d_opt = float(np.linalg.norm(np.asarray(self._key_poses[gi].optimized.translation()) - cur_opt_t))
+                d_loc = float(np.linalg.norm(np.asarray(self._key_poses[gi].local.translation()) - cur_loc_t))
+                cands.append((min(d_opt, d_loc), gi))
             cands.sort()
             return cands
 
