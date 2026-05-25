@@ -511,11 +511,16 @@ class _PGO:
         loc_positions = np.array(
             [np.asarray(kp.local.translation()) for kp in self._key_poses[:-1]]
         )
-        # Tight radius in optimized frame (precise revisits); wider radius in
-        # local frame to catch relocalizations after big drift events.
+        # Tight radius in optimized frame (precise revisits). Only fall
+        # back to wider local-frame search when the optimized-frame search
+        # returns nothing — drift has pushed neighbors out of range and
+        # we need relocalization. For easy datasets, this keeps the
+        # candidate set tight (no extra noise from far neighbors).
         opt_idxs = KDTree(opt_positions).query_ball_point(cur_opt_t, self._cfg.loop_search_radius)
-        loc_idxs = KDTree(loc_positions).query_ball_point(cur_loc_t, self._cfg.loop_search_radius_local)
-        idxs = set(opt_idxs) | set(loc_idxs)
+        if opt_idxs:
+            idxs = set(opt_idxs)
+        else:
+            idxs = set(KDTree(loc_positions).query_ball_point(cur_loc_t, self._cfg.loop_search_radius_local))
         if not idxs:
             return
 
