@@ -390,7 +390,7 @@ class _PGO:
         # poses gives us another chance to anchor those segments.
         self._last_loop_ts = None
         for i in range(len(self._key_poses)):
-            self._search_for_loops(cur_idx=i, enforce_time_gate=False, no_fallback=True)
+            self._search_for_loops(cur_idx=i, enforce_time_gate=False, no_fallback=True, submap_half_range=35)
         if self._pending_loops:
             self._smooth_and_update()
         kps = sorted(self._key_poses, key=lambda kp: kp.timestamp)
@@ -518,6 +518,7 @@ class _PGO:
         opt_radius: float | None = None,
         force_fallback: bool = False,
         no_fallback: bool = False,
+        submap_half_range: int | None = None,
     ) -> None:
         if len(self._key_poses) < self._cfg.min_keyframes_for_loop_search:
             return
@@ -593,7 +594,8 @@ class _PGO:
         source = self._get_submap(cur_idx, 0)
         accepted: list[tuple[int, Transform, float]] = []
         for _, loop_idx in candidates[: self._cfg.loop_candidates_per_iter]:
-            target = self._get_submap(loop_idx, self._cfg.loop_submap_half_range)
+            target_hr = submap_half_range if submap_half_range is not None else self._cfg.loop_submap_half_range
+            target = self._get_submap(loop_idx, target_hr)
             icp_tf, fitness = _icp(
                 source,
                 target,
