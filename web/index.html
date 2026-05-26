@@ -25,6 +25,10 @@
             border-radius: 8px; font-family: monospace; font-weight: 600;
             color: #d1d5db;
             user-select: none;
+            /* Tappable on touch: no scroll/zoom hijack, no tap-highlight flash. */
+            cursor: pointer;
+            touch-action: none;
+            -webkit-tap-highlight-color: transparent;
         }
         .kb-key.wide { width: 96px; font-size: 0.85rem; }
         .kb-key.pressed {
@@ -527,6 +531,28 @@ angular.z = 0</pre>
             kbKeys.delete(k);
         }
 
+        // Touch/click the on-screen keys (phone or mouse) — drives the SAME
+        // kbKeys set the physical keyboard does, so buildTwist() is unchanged.
+        // press-and-hold to move; release/leave to stop.
+        const TOUCH_KEYS = {
+            'key-w': 'w', 'key-a': 'a', 'key-s': 's', 'key-d': 'd',
+            'key-shift': 'Shift', 'key-ctrl': 'Control',
+        };
+        function bindTouchKeys() {
+            for (const [id, key] of Object.entries(TOUCH_KEYS)) {
+                const el = document.getElementById(id);
+                if (!el) continue;
+                const down = (e) => { e.preventDefault(); kbKeys.add(key); };
+                const up = (e) => { e.preventDefault(); kbKeys.delete(key); };
+                el.addEventListener('touchstart', down, { passive: false });
+                el.addEventListener('touchend', up);
+                el.addEventListener('touchcancel', up);
+                el.addEventListener('mousedown', down);
+                el.addEventListener('mouseup', up);
+                el.addEventListener('mouseleave', up);  // drag-off = release
+            }
+        }
+
         function buildTwist() {
             // Shift = 2×, Ctrl + W/S = ½×, Ctrl + A/D = strafe; both held = neither.
             const shift = kbKeys.has('Shift') && !kbKeys.has('Control');
@@ -547,6 +573,7 @@ angular.z = 0</pre>
         function startKeyboardLoop() {
             window.addEventListener('keydown', onKeyDown);
             window.addEventListener('keyup', onKeyUp);
+            bindTouchKeys();  // on-screen keys → same kbKeys set (phone/mouse)
             let twistSeq = 0;
             kbInterval = setInterval(() => {
                 // Always update key visuals; only send/readout when channel is up.
