@@ -36,7 +36,6 @@ from typing import Any
 from reactivex.disposable import Disposable
 
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.utils.logging_config import setup_logger
 from dimos.core.stream import In
 from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
 from dimos.memory2.module import Recorder, RecorderConfig
@@ -47,6 +46,7 @@ from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic import unitree_go2_basic
 from dimos.robot.unitree.go2.connection import GO2Connection
+from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
@@ -91,7 +91,9 @@ class Go2Mid360Memory(Recorder):
             )
             if frame_id == "world":
                 frame_id = default_frame_id
-            transform = self.tf.get("world", frame_id, time_point=msg_ts, time_tolerance=tf_tolerance)
+            transform = self.tf.get(
+                "world", frame_id, time_point=msg_ts, time_tolerance=tf_tolerance
+            )
             pose = transform.to_pose() if transform is not None else None
             if not pose:
                 logger.warning(
