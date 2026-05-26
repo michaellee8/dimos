@@ -170,14 +170,14 @@ def _close_surface_holes(
 def build_surface_lookup(
     ix: np.ndarray, iy: np.ndarray, iz: np.ndarray
 ) -> dict[tuple[int, int], np.ndarray]:
-    """Group surface cells by XY column.
+    """Group surface cells by XY column, deduping z values per column.
 
     Public so downstream code can recompute the same lookup the planner uses.
     """
     by_column: dict[tuple[int, int], list[int]] = {}
     for ix_, iy_, iz_ in zip(ix.tolist(), iy.tolist(), iz.tolist(), strict=True):
         by_column.setdefault((ix_, iy_), []).append(iz_)
-    return {key: np.array(sorted(vs), dtype=np.int64) for key, vs in by_column.items()}
+    return {key: np.unique(np.array(vs, dtype=np.int64)) for key, vs in by_column.items()}
 
 
 def build_surface_adjacency(
@@ -272,6 +272,35 @@ def _walk_predecessors(
     return cells
 
 
+def _wall_safe_adjacency(
+    adj: csr_matrix,
+    dist_to_wall: np.ndarray,
+    missing_neighbors: np.ndarray,
+    buffer_m: float,
+    voxel_size: float,
+) -> csr_matrix:
+    """Scale adjacency edge costs up for cells near walls or with high edge exposure.
+
+    Two multiplicative penalties combine per cell:
+    - Distance penalty (buffer_m / dist)^4 clamped to >= 1, with a small dist
+      floor so cells exactly on an edge stay distinguishable from cells one
+      voxel in.
+    - Exposure penalty 1 + missing/2 from the count of missing same-z neighbors,
+      so the corner of a stair step (more sides exposed to cliffs) costs more
+      than the middle of the same step's edge.
+
+    Per-edge cost averages the two endpoints' penalties.
+    """
+    safe_dist = np.maximum(dist_to_wall, voxel_size / 10.0)
+    dist_penalty = np.maximum(1.0, (buffer_m / safe_dist) ** 4)
+    exposure_penalty = 1.0 + missing_neighbors / 2.0
+    penalty = dist_penalty * exposure_penalty
+    src = np.repeat(np.arange(adj.shape[0]), np.diff(adj.indptr))
+    dst = adj.indices
+    scaled = adj.data * (penalty[src] + penalty[dst]) / 2.0
+    return csr_matrix((scaled, adj.indices.copy(), adj.indptr.copy()), shape=adj.shape)
+
+
 def place_nodes(
     surface_points: np.ndarray,
     voxel_size: float,
@@ -283,7 +312,9 @@ def place_nodes(
     """Place nodes by greedy NMS on the dist-to-wall field from one Dijkstra.
 
     Run multisource Dijkstra with the surface edges as sources to find distance from wall.
-    Then place nodes spaced throughout based on that distance.
+    Then place nodes spaced throughout based on that distance. The returned adjacency
+    is wall-safe: edge costs scale up within wall_buffer of any wall so add_node_edges
+    routes through corridor centers.
     """
     graph = nx.Graph()
     if len(surface_points) == 0:
@@ -313,13 +344,16 @@ def place_nodes(
             surface_lookup=surface_lookup,
         )
 
-    # Cells with fewer than 8 surface neighbors sit on a wall or hole edge.
-    surface_neighbor_count = np.diff(adj.indptr)
-    wall_adjacent_indices = np.where(surface_neighbor_count < 8)[0]
+    # Detect walls and cliffs using a same-z-only adjacency. The 3D adj would miss
+    # cliff edges by counting cross-z neighbors, letting a landing corner that
+    # overlooks a stair below appear "interior".
+    adj_xy, _, _ = build_surface_adjacency(surface_lookup, voxel_size, 0)
+    xy_neighbor_count = np.diff(adj_xy.indptr)
+    wall_adjacent_indices = np.where(xy_neighbor_count < 8)[0]
     if len(wall_adjacent_indices) == 0:
         wall_adjacent_indices = np.array([0], dtype=np.int64)
 
-    dist = dijkstra(adj, indices=wall_adjacent_indices, min_only=True)
+    dist = dijkstra(adj_xy, indices=wall_adjacent_indices, min_only=True)
 
     cells_arr = np.array(idx_to_cell, dtype=np.float64)
     cell_positions = surface_points_xyz(cells_arr, voxel_size)
@@ -353,9 +387,11 @@ def place_nodes(
         nearby = tree.query_ball_point(positions[i], r=node_spacing)
         killed[np.asarray(nearby, dtype=np.int64)] = True
 
+    missing_neighbors = 8 - xy_neighbor_count
+    adj_safe = _wall_safe_adjacency(adj, dist, missing_neighbors, wall_buffer, voxel_size)
     return SurfaceGraph(
         graph=graph,
-        adj=adj,
+        adj=adj_safe,
         cell_to_idx=cell_to_idx,
         idx_to_cell=idx_to_cell,
         surface_lookup=surface_lookup,
