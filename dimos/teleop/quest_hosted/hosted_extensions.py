@@ -24,10 +24,12 @@ hosted module — small overrides on top of ``HostedTeleopModule``:
     linear/angular speeds (keyboard mode, mobile-base robots like Go2).
 """
 
+import time
 from typing import Any
 
 from pydantic import Field
 
+from dimos.core.stream import Out
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
@@ -108,21 +110,49 @@ class HostedTwistTeleopConfig(HostedTeleopConfig):
 class HostedTwistTeleopModule(HostedTeleopModule):
     """Hosted teleop variant for mobile-base robots (Go2, wheeled, etc.).
 
-    Same as ``HostedTeleopModule`` but scales incoming Twist commands by
-    the configured ``linear_speed`` / ``angular_speed`` before publishing.
+    Drives the base from two input modalities, whichever the operator client
+    sends — both normalized to [-1, 1] and scaled by ``linear_speed`` /
+    ``angular_speed``:
+
+      - Keyboard ``TwistStamped`` (desktop WASD) → ``_on_twist_bytes``.
+      - VR controller thumbsticks (in the per-hand ``Joy``) → ``_on_joy_bytes``:
+        right stick Y = forward/back, left stick X = strafe. The browser sends
+        raw Joy; the velocity interpretation lives here.
     """
 
     config: HostedTwistTeleopConfig
 
-    def _on_twist_bytes(self, data: bytes) -> None:
-        msg = TwistStamped.lcm_decode(data)
+    cmd_vel: Out[Twist]
+
+    def _publish_twist(
+        self, lx: float, ly: float, az: float, ts: float, frame_id: str, seq: int
+    ) -> None:
+        """Scale a normalized command and publish on cmd_vel (+ stamped)."""
         ls = self.config.linear_speed
         as_ = self.config.angular_speed
-        linear = Vector3(msg.linear.x * ls, msg.linear.y * ls, msg.linear.z * ls)
-        angular = Vector3(msg.angular.x * as_, msg.angular.y * as_, msg.angular.z * as_)
+        linear = Vector3(lx * ls, ly * ls, 0.0)
+        angular = Vector3(0.0, 0.0, az * as_)
         self.cmd_vel.publish(Twist(linear=linear, angular=angular))
         self.cmd_vel_stamped.publish(
-            TwistStamped(
-                ts=msg.ts, frame_id=msg.frame_id, seq=msg.seq, linear=linear, angular=angular
-            )
+            TwistStamped(ts=ts, frame_id=frame_id, seq=seq, linear=linear, angular=angular)
         )
+
+    def _on_twist_bytes(self, data: bytes) -> None:
+        msg = TwistStamped.lcm_decode(data)
+        self._publish_twist(
+            msg.linear.x, msg.linear.y, msg.angular.z, msg.ts, msg.frame_id, msg.seq
+        )
+
+    def _on_joy_bytes(self, data: bytes) -> None:
+        # Derive base velocity from the VR thumbsticks (base class parses +
+        # stores the controllers). Left stick: Y → forward/back, X → strafe.
+        # Right stick: X → yaw. Stick-up is +y, stick-left is −x; negate so
+        # up=forward, left=+strafe, left=+yaw (ROS CCW). Right stick Y unused.
+        super()._on_joy_bytes(data)
+        with self._lock:
+            right = self._controllers.get(Hand.RIGHT)
+            left = self._controllers.get(Hand.LEFT)
+        fwd = -left.thumbstick.y if left is not None else 0.0
+        strafe = -left.thumbstick.x if left is not None else 0.0
+        yaw = -right.thumbstick.x if right is not None else 0.0
+        self._publish_twist(fwd, strafe, yaw, time.time(), "vr", 0)

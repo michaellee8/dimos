@@ -49,7 +49,6 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.Joy import Joy
@@ -201,7 +200,9 @@ class HostedTeleopModule(Module):
     left_controller_output: Out[PoseStamped]
     right_controller_output: Out[PoseStamped]
     buttons: Out[Buttons]
-    cmd_vel: Out[Twist]
+    # Stamped twist is the generic observability stream (recorders / latency
+    # analyzers). The plain-Twist actuation port (cmd_vel) lives only on the
+    # mobile-base subclass HostedTwistTeleopModule — the arm/VR path has no base.
     cmd_vel_stamped: Out[TwistStamped]
     color_image: In[Image]
 
@@ -677,11 +678,10 @@ class HostedTeleopModule(Module):
             self._controllers[hand] = controller
 
     def _on_twist_bytes(self, data: bytes) -> None:
-        # Keyboard mode — no engagement gating. Wire format is TwistStamped;
-        # publish on both cmd_vel (plain, for GO2 / standard consumers) and
-        # cmd_vel_stamped (with header, for recorders / latency analyzers).
+        # Keyboard mode — no engagement gating. Publishes the stamped twist
+        # (observability). The mobile-base subclass overrides this to also emit
+        # the scaled plain-Twist actuation command on cmd_vel.
         msg = TwistStamped.lcm_decode(data)
-        self.cmd_vel.publish(Twist(linear=msg.linear, angular=msg.angular))
         self.cmd_vel_stamped.publish(msg)
 
     @staticmethod
