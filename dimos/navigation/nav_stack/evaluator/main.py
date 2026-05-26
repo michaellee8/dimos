@@ -92,6 +92,7 @@ def _render_surface_map(voxel_size: float, msg: Any) -> Any:
     pts, _ = msg.as_numpy()
     if pts is None or len(pts) == 0:
         return rr.Points3D([])
+    pts = pts.astype(np.float32)
     indices = np.floor(pts / voxel_size).astype(np.int64)
     ix, iy, iz = indices[:, 0], indices[:, 1], indices[:, 2]
     surface_lookup = build_surface_lookup(ix, iy, iz)
