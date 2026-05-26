@@ -59,7 +59,7 @@ _FASTLIO_PORTS = frozenset({"lidar", "odometry"})
 
 class Go2Mid360MemoryConfig(RecorderConfig):
     db_path: str | Path = "recording_go2_mid360.db"
-    default_frame_id: str = "base_link"
+    default_frame_id: str = "body"
 
 
 class Go2Mid360Memory(Recorder):
@@ -91,9 +91,7 @@ class Go2Mid360Memory(Recorder):
             )
             if frame_id == "world":
                 frame_id = default_frame_id
-            transform = self.tf.get(
-                "world", frame_id, time_point=msg_ts, time_tolerance=tf_tolerance
-            )
+            transform = self.tf.get("world", frame_id, time_point=ts, time_tolerance=tf_tolerance)
             pose = transform.to_pose() if transform is not None else None
             if not pose:
                 logger.warning(
