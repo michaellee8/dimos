@@ -61,7 +61,7 @@ from typing import TYPE_CHECKING, Any, TypedDict, TypeVar, Unpack
 import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
 import open3d.core as o3c  # type: ignore[import-untyped]
-from scipy.spatial.transform import Rotation, Slerp
+from scipy.spatial.transform import Rotation
 
 from dimos.memory2.store.memory import MemoryStore
 from dimos.memory2.stream import Stream
@@ -92,18 +92,23 @@ class PGOConfig(BaseConfig):
 
     # Loop closure
     loop_search_radius: float = 2.0
+    loop_search_radius_local: float = 15.0
+    loop_fallback_drift_thresh: float = 0.5  # min drift to trigger local fallback
     loop_time_thresh: float = 20.0
+    loop_time_thresh_local: float = 40.0  # stricter time gap for local fallback
     loop_score_thresh: float = 0.3
-    loop_submap_half_range: int = 10
+    loop_score_thresh_tight: float = 0.05  # early-exit threshold: ICP rmse ~22cm
+    loop_submap_half_range: int = 40
+    loop_candidates_per_iter: int = 7
     min_icp_inliers: int = 10
     min_keyframes_for_loop_search: int = 10
-    loop_closure_extra_iterations: int = 4
+    loop_closure_extra_iterations: int = 2
     submap_resolution: float = 0.2
-    min_loop_detect_duration: float = 5.0
+    min_loop_detect_duration: float = 3.0
 
     # ICP
     max_icp_iterations: int = 50
-    max_icp_correspondence_dist: float = 1.0
+    max_icp_correspondence_dist: float = 0.5
 
 
 class PGOKwargs(TypedDict, total=False):
@@ -112,9 +117,14 @@ class PGOKwargs(TypedDict, total=False):
     key_pose_delta_trans: float
     key_pose_delta_deg: float
     loop_search_radius: float
+    loop_search_radius_local: float
+    loop_fallback_drift_thresh: float
     loop_time_thresh: float
+    loop_time_thresh_local: float
     loop_score_thresh: float
+    loop_score_thresh_tight: float
     loop_submap_half_range: int
+    loop_candidates_per_iter: int
     min_icp_inliers: int
     min_keyframes_for_loop_search: int
     loop_closure_extra_iterations: int
@@ -222,8 +232,8 @@ def make_interpolator(corrections: Stream[Transform]) -> Callable[[float], Trans
     if not ts_list:
         raise ValueError("empty corrections stream")
 
-    # Slerp needs ≥2 keyframes. Pad len==1 with a duplicate so the
-    # general path handles it; clip-to-endpoints behavior is unchanged.
+    # Pad len==1 with a duplicate so the general path handles it;
+    # clip-to-endpoints behavior is unchanged.
     if len(ts_list) == 1:
         ts_list.append(ts_list[0] + 1e-6)
         R_list.append(R_list[0])
@@ -232,20 +242,23 @@ def make_interpolator(corrections: Stream[Transform]) -> Callable[[float], Trans
     ts_arr = np.array(ts_list)
     R_stack = np.stack(R_list)
     t_stack = np.stack(t_list)
-    slerp = Slerp(ts_arr, Rotation.from_matrix(R_stack))
 
     def interp(ts: float) -> Transform:
         ts_clip = float(np.clip(ts, ts_arr[0], ts_arr[-1]))
-        R = slerp([ts_clip])[0].as_matrix()
         idx = int(np.searchsorted(ts_arr, ts_clip))
         if idx == 0:
             t = t_stack[0]
+            R = R_stack[0]
         elif idx >= len(ts_arr):
             t = t_stack[-1]
+            R = R_stack[-1]
         else:
             t_lo, t_hi = ts_arr[idx - 1], ts_arr[idx]
-            alpha = (ts_clip - t_lo) / (t_hi - t_lo) if t_hi > t_lo else 0.0
-            t = (1 - alpha) * t_stack[idx - 1] + alpha * t_stack[idx]
+            # Nearest-neighbor in time: avoids blending two adjacent
+            # corrections that may straddle a loop-closure update.
+            near_lo = (ts_clip - t_lo) < (t_hi - ts_clip)
+            t = t_stack[idx - 1] if near_lo else t_stack[idx]
+            R = R_stack[idx - 1] if near_lo else R_stack[idx]
         return _transform_from_r_t(R, t, ts=float(ts))
 
     return interp
@@ -320,6 +333,7 @@ class _LoopPair:
     target: int
     offset: gtsam.Pose3  # source pose in target's frame
     score: float
+    relocalizing: bool = False  # True if this loop was found via local-frame fallback
 
 
 class _PGO:
@@ -343,6 +357,7 @@ class _PGO:
         params = gtsam.ISAM2Params()
         params.setRelinearizeThreshold(0.01)
         params.relinearizeSkip = 1
+        params.setOptimizationParams(gtsam.ISAM2DoglegParams())
         self._isam2 = gtsam.ISAM2(params)
         self._graph = gtsam.NonlinearFactorGraph()
         self._values = gtsam.Values()
@@ -368,6 +383,22 @@ class _PGO:
 
     def finalize(self) -> list[Keyframe]:
         """Return keyframes sorted by ts, with duplicate-ts entries dropped."""
+        # Second-pass loop rescan over the converged optimized poses:
+        # keyframes that ended up in heavily drifted regions may have
+        # missed loops during incremental processing (their optimized
+        # pose at the moment was misleading). Re-search with the final
+        # poses gives us another chance to anchor those segments.
+        self._last_loop_ts = None
+        for i in range(len(self._key_poses)):
+            self._search_for_loops(
+                cur_idx=i,
+                enforce_time_gate=False,
+                no_fallback=True,
+                submap_half_range=38,
+                time_thresh_override=13.0,
+            )
+        if self._pending_loops:
+            self._smooth_and_update()
         kps = sorted(self._key_poses, key=lambda kp: kp.timestamp)
         out: list[Keyframe] = []
         for i, kp in enumerate(kps):
@@ -448,8 +479,18 @@ class _PGO:
         else:
             last_local = self._key_poses[-1].local
             between = last_local.inverse().compose(local_pose)
+            # When the prior keyframe is already in a drifted region,
+            # loosen the chain variance for this step so loop closures
+            # can pull harder across the disturbance.
+            prev = self._key_poses[-1]
+            prev_drift = float(
+                np.linalg.norm(
+                    np.asarray(prev.optimized.translation()) - np.asarray(prev.local.translation())
+                )
+            )
+            trans_var = 8e-4 if prev_drift > 1.3 else 1e-4
             noise = gtsam.noiseModel.Diagonal.Variances(
-                np.array([1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-6])
+                np.array([1e-6, 1e-6, 1e-6, trans_var, trans_var, 1e-6])
             )
             self._graph.add(gtsam.BetweenFactorPose3(idx - 1, idx, between, noise))
 
@@ -477,82 +518,165 @@ class _PGO:
             )
         return cloud.voxel_downsample(self._cfg.submap_resolution)
 
-    def _search_for_loops(self) -> None:
+    def _search_for_loops(
+        self,
+        cur_idx: int | None = None,
+        *,
+        enforce_time_gate: bool = True,
+        opt_radius: float | None = None,
+        force_fallback: bool = False,
+        no_fallback: bool = False,
+        submap_half_range: int | None = None,
+        icp_max_dist: float | None = None,
+        source_half_range: int = 0,
+        candidates_per_iter: int | None = None,
+        force_multi: bool = False,
+        time_thresh_override: float | None = None,
+    ) -> None:
         if len(self._key_poses) < self._cfg.min_keyframes_for_loop_search:
             return
+        if cur_idx is None:
+            cur_idx = len(self._key_poses) - 1
 
-        cur_ts = self._key_poses[-1].timestamp
-        if (
+        cur_kp = self._key_poses[cur_idx]
+        cur_ts = cur_kp.timestamp
+        if enforce_time_gate and (
             self._last_loop_ts is not None
             and cur_ts - self._last_loop_ts < self._cfg.min_loop_detect_duration
         ):
             return
 
-        cur_idx = len(self._key_poses) - 1
-        cur_kp = self._key_poses[-1]
-        cur_t = np.asarray(cur_kp.optimized.translation())
+        cur_opt_t = np.asarray(cur_kp.optimized.translation())
+        cur_loc_t = np.asarray(cur_kp.local.translation())
 
         from scipy.spatial import KDTree
 
-        positions = np.array(
-            [np.asarray(kp.optimized.translation()) for kp in self._key_poses[:-1]]
-        )
-        tree = KDTree(positions)
-        idxs = tree.query_ball_point(cur_t, self._cfg.loop_search_radius)
-        if not idxs:
-            return
+        # Search both optimized and local (odom) frames; exclude cur_idx
+        # from the candidate pool (and time-adjacent neighbors via the
+        # time gate filter inside _collect).
+        other_kps = [kp for j, kp in enumerate(self._key_poses) if j != cur_idx]
+        other_idx_map = [j for j in range(len(self._key_poses)) if j != cur_idx]
+        opt_positions = np.array([np.asarray(kp.optimized.translation()) for kp in other_kps])
+        loc_positions = np.array([np.asarray(kp.local.translation()) for kp in other_kps])
 
-        # query_ball_point doesn't sort by distance — do it ourselves and
-        # filter by min time gap to avoid closing loops to recent keyframes.
-        candidates = [
-            (
-                float(
-                    np.linalg.norm(np.asarray(self._key_poses[i].optimized.translation()) - cur_t)
-                ),
-                i,
+        def _collect(local_idxs: set[int], time_thresh: float) -> list[tuple[float, int]]:
+            # local_idxs index into other_kps; map back to global keyframe index.
+            cands = []
+            for li in local_idxs:
+                gi = other_idx_map[li]
+                if abs(cur_ts - self._key_poses[gi].timestamp) <= time_thresh:
+                    continue
+                d_opt = float(
+                    np.linalg.norm(
+                        np.asarray(self._key_poses[gi].optimized.translation()) - cur_opt_t
+                    )
+                )
+                d_loc = float(
+                    np.linalg.norm(np.asarray(self._key_poses[gi].local.translation()) - cur_loc_t)
+                )
+                cands.append((min(d_opt, d_loc), gi))
+            cands.sort()
+            return cands
+
+        # Tight optimized-frame search first; if none survive the
+        # time-gap filter AND accumulated drift is large enough that we
+        # likely need a relocalization, fall back to wider local-frame
+        # search with a stricter time gap.
+        opt_radius_val = opt_radius if opt_radius is not None else self._cfg.loop_search_radius
+        opt_idxs = set(KDTree(opt_positions).query_ball_point(cur_opt_t, opt_radius_val))
+        time_thresh = (
+            time_thresh_override if time_thresh_override is not None else self._cfg.loop_time_thresh
+        )
+        candidates = _collect(opt_idxs, time_thresh)
+        drift = float(np.linalg.norm(cur_opt_t - cur_loc_t))
+        relocalizing = False
+        if not no_fallback and (
+            force_fallback or (not candidates and drift > self._cfg.loop_fallback_drift_thresh)
+        ):
+            loc_idxs = set(
+                KDTree(loc_positions).query_ball_point(
+                    cur_loc_t, self._cfg.loop_search_radius_local
+                )
             )
-            for i in idxs
-            if abs(cur_ts - self._key_poses[i].timestamp) > self._cfg.loop_time_thresh
-        ]
+            candidates = _collect(loc_idxs - opt_idxs, self._cfg.loop_time_thresh_local)
+            relocalizing = True
+            logger.info(
+                "loop fallback fired",
+                cur_idx=cur_idx,
+                drift=round(drift, 2),
+                n_candidates=len(candidates),
+            )
         if not candidates:
             return
-        candidates.sort()
-        loop_idx = candidates[0][1]
 
-        target = self._get_submap(loop_idx, self._cfg.loop_submap_half_range)
-        source = self._get_submap(cur_idx, 0)
-
-        icp_tf, fitness = _icp(
-            source,
-            target,
-            max_iter=self._cfg.max_icp_iterations,
-            max_dist=self._cfg.max_icp_correspondence_dist,
-            min_inliers=self._cfg.min_icp_inliers,
+        # Try top-K candidates; keep all that pass the threshold (for
+        # relocalization fallback, multiple loops to different points in
+        # the past give the optimizer more constraint to anchor the
+        # disturbed segment). For the regular non-fallback path keep
+        # only the best one — the trajectory there is well-constrained
+        # already and extra loops add noise. Early-exit on a very tight
+        # match to save redundant ICP runs in the common case.
+        source = self._get_submap(cur_idx, source_half_range)
+        accepted: list[tuple[int, Transform, float]] = []
+        k = (
+            candidates_per_iter
+            if candidates_per_iter is not None
+            else self._cfg.loop_candidates_per_iter
         )
-        if fitness > self._cfg.loop_score_thresh:
+        for _, loop_idx in candidates[:k]:
+            target_hr = (
+                submap_half_range
+                if submap_half_range is not None
+                else self._cfg.loop_submap_half_range
+            )
+            target = self._get_submap(loop_idx, target_hr)
+            max_dist = (
+                icp_max_dist if icp_max_dist is not None else self._cfg.max_icp_correspondence_dist
+            )
+            icp_tf, fitness = _icp(
+                source,
+                target,
+                max_iter=self._cfg.max_icp_iterations,
+                max_dist=max_dist,
+                min_inliers=self._cfg.min_icp_inliers,
+            )
+            if fitness <= self._cfg.loop_score_thresh:
+                accepted.append((loop_idx, icp_tf, fitness))
+                if (
+                    not relocalizing
+                    and not force_multi
+                    and fitness <= self._cfg.loop_score_thresh_tight
+                ):
+                    break
+        if not accepted:
             return
+        accepted.sort(key=lambda x: x[2])
+        keep = accepted if (relocalizing or force_multi) else [accepted[0]]
 
-        # icp_tf takes cur_kp.optimized -> refined pose (correcting the drift).
-        # offset = loop_kp.optimized^-1 * refined = relative pose from loop to cur.
-        icp_pose = _transform_to_pose3(icp_tf)
-        refined = icp_pose.compose(cur_kp.optimized)
-        offset = self._key_poses[loop_idx].optimized.between(refined)
+        for loop_idx, icp_tf, fitness in keep:
+            # icp_tf takes cur_kp.optimized -> refined pose (correcting the drift).
+            # offset = loop_kp.optimized^-1 * refined = relative pose from loop to cur.
+            icp_pose = _transform_to_pose3(icp_tf)
+            refined = icp_pose.compose(cur_kp.optimized)
+            offset = self._key_poses[loop_idx].optimized.between(refined)
 
-        self._pending_loops.append(
-            _LoopPair(
+            self._pending_loops.append(
+                _LoopPair(
+                    source=cur_idx,
+                    target=loop_idx,
+                    offset=offset,
+                    score=fitness,
+                    relocalizing=relocalizing,
+                )
+            )
+            logger.info(
+                "Loop closure detected",
                 source=cur_idx,
                 target=loop_idx,
-                offset=offset,
-                score=fitness,
+                score=round(fitness, 4),
+                reloc=relocalizing,
             )
-        )
         self._last_loop_ts = cur_ts
-        logger.info(
-            "Loop closure detected",
-            source=cur_idx,
-            target=loop_idx,
-            score=round(fitness, 4),
-        )
 
     def _smooth_and_update(self) -> None:
         gtsam = self._gtsam
@@ -565,8 +689,8 @@ class _PGO:
             # *translation* variance and a generous fixed rotation variance
             # — loops shouldn't be trusted to fix rotation tightly without
             # normals + p2plane.
-            trans_var = max(0.01, float(pair.score))  # >= sigma_trans = 10 cm
-            rot_var = 0.05  # sigma_rot ~ 13 deg
+            trans_var = max(0.005, float(pair.score))  # >= sigma_trans ~7 cm
+            rot_var = 0.003  # sigma_rot ~ 3.1 deg (large submap p2plane ICP, tight rotation)
             noise = gtsam.noiseModel.Diagonal.Variances(
                 np.array([rot_var, rot_var, rot_var, trans_var, trans_var, trans_var])
             )
@@ -652,19 +776,23 @@ def _icp(
 
     # Silence Open3D's "0 correspondence" warning — we deliberately use a
     # tight max_correspondence_distance and reject loops with poor fitness.
-    with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error):
-        result = o3d.t.pipelines.registration.icp(
-            source=src_pcd,
-            target=tgt_pcd,
-            max_correspondence_distance=max_dist,
-            init_source_to_target=init_T,
-            estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPlane(),
-            criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(
-                relative_fitness=tol,
-                relative_rmse=tol,
-                max_iteration=max_iter,
-            ),
-        )
+    # Treat singular-system failures as rejection rather than aborting.
+    try:
+        with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Error):
+            result = o3d.t.pipelines.registration.icp(
+                source=src_pcd,
+                target=tgt_pcd,
+                max_correspondence_distance=max_dist,
+                init_source_to_target=init_T,
+                estimation_method=o3d.t.pipelines.registration.TransformationEstimationPointToPlane(),
+                criteria=o3d.t.pipelines.registration.ICPConvergenceCriteria(
+                    relative_fitness=tol,
+                    relative_rmse=tol,
+                    max_iteration=max_iter,
+                ),
+            )
+    except RuntimeError:
+        return Transform.identity(), float("inf")
 
     if float(result.fitness) == 0.0:
         return Transform.identity(), float("inf")
