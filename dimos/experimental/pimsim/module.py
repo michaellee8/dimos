@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+import math
 from pathlib import Path
 import struct
 import threading
@@ -599,6 +600,9 @@ class BabylonSceneViewerModule(Module):
         if message_type == "entity_test_add":
             self._handle_entity_test_add(message.get("point") or [0.0, 0.0, 2.0])
             return
+        if message_type == "entity_add_wall":
+            self._handle_entity_add_wall(message)
+            return
         if message_type == "entity_clear":
             self._handle_entity_clear()
             return
@@ -1053,6 +1057,42 @@ class BabylonSceneViewerModule(Module):
             mass=8.0,
         )
         pose = Pose(x, y, z)
+        self.spawn_entity(descriptor, pose)
+
+    def _handle_entity_add_wall(self, message: dict[str, Any]) -> None:
+        """Spawn an axis-aligned static box wall between (x1, y1) and (x2, y2).
+
+        Test-control entry — keeps PimSimClient's surface symmetric with
+        DimSim's SceneClient.add_wall without exposing a one-off RPC.
+        """
+        try:
+            x1 = float(message["x1"])
+            y1 = float(message["y1"])
+            x2 = float(message["x2"])
+            y2 = float(message["y2"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning("BabylonViewer: entity_add_wall ignored: bad endpoints %r", message)
+            return
+        height = float(message.get("height", 1.5))
+        thickness = float(message.get("thickness", 0.1))
+        dx = x2 - x1
+        dy = y2 - y1
+        length = math.hypot(dx, dy)
+        if length <= 0.0:
+            return
+        yaw = math.atan2(dy, dx)
+        half_yaw = yaw * 0.5
+        qw = math.cos(half_yaw)
+        qz = math.sin(half_yaw)
+        self._test_entity_counter += 1
+        descriptor = EntityDescriptor(
+            entity_id=f"wall_{self._test_entity_counter}",
+            kind="static",
+            shape_hint="box",
+            extents=(length, thickness, height),
+            mass=0.0,
+        )
+        pose = Pose((x1 + x2) * 0.5, (y1 + y2) * 0.5, height * 0.5, 0.0, 0.0, qz, qw)
         self.spawn_entity(descriptor, pose)
 
     def _handle_entity_clear(self) -> None:
