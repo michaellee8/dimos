@@ -53,14 +53,14 @@ Go2Config = RobotConfig(
 )
 
 
-def odom_to_tf(cls: Odometry) -> list[Transform]:
+def odom_to_tf(odom: Odometry) -> list[Transform]:
     """[world→base_link, base_link→camera_link, camera_link→camera_optical] for tests."""
     base_link = Transform(
-        translation=cls.position,
-        rotation=cls.orientation,
-        frame_id=cls.frame_id or DEFAULT_WORLD_FRAME,
+        translation=odom.position,
+        rotation=odom.orientation,
+        frame_id=odom.frame_id or DEFAULT_WORLD_FRAME,
         child_frame_id=DEFAULT_ROBOT_FRAME,
-        ts=cls.ts,
+        ts=odom.ts,
     )
     statics = [
         Transform(
@@ -68,7 +68,7 @@ def odom_to_tf(cls: Odometry) -> list[Transform]:
             rotation=t.rotation,
             frame_id=t.frame_id,
             child_frame_id=t.child_frame_id,
-            ts=cls.ts,
+            ts=odom.ts,
         )
         for t in (
             Go2Config.static_transforms["camera_link"],

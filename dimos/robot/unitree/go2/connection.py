@@ -211,9 +211,10 @@ class GO2Connection(Module, Camera, Pointcloud):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self.connection = make_connection(self.config.ip, self.config.g)
+        self._camera_info_static = camera_info_static()
 
         if hasattr(self.connection, "camera_info_static"):
-            self.camera_info_static = self.connection.camera_info_static
+            self._camera_info_static = self.connection.camera_info_static
 
     @rpc
     def start(self) -> None:
@@ -255,8 +256,8 @@ class GO2Connection(Module, Camera, Pointcloud):
         super().stop()
 
     def _on_static_publish(self) -> None:
-        self.camera_info_static.frame_id = self.frame_mapping["camera_optical"]
-        self.camera_info.publish(self.camera_info_static)
+        self._camera_info_static.frame_id = self.frame_mapping["camera_optical"]
+        self.camera_info.publish(self._camera_info_static)
 
     def _publish_tf(self, msg: PoseStamped) -> None:
         self.tf.publish(
