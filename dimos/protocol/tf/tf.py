@@ -306,12 +306,15 @@ class MultiTBuffer:
 
     @property
     def tree_str(self) -> str:
-        if not self.buffers:
+        with self._cv:
+            keys = list(self.buffers.keys())
+
+        if not keys:
             return "(empty)"
 
         children: dict[str, list[str]] = {}
         all_children: set[str] = set()
-        for parent, child in self.buffers:
+        for parent, child in keys:
             children.setdefault(parent, []).append(child)
             all_children.add(child)
 
