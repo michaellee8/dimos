@@ -424,6 +424,14 @@ async def bridge_datachannel(
             detail=f"Datachannel bridge failed ({type(e).__name__}): {e}",
         )
 
+    # TEMP DEBUG (reconnect bug): log CF's raw add_datachannels responses so we
+    # can see what it returns on a 2nd connect (robot CF session persists, so
+    # re-adding the same channel names may omit `id` or error). Remove once fixed.
+    log.warning(
+        "bridge resp: op_pub=%r robot_sub=%r robot_pub=%r op_sub=%r",
+        op_pub, robot_sub, robot_pub, op_sub,
+    )
+
     # Index by dataChannelName from the response, not by request position —
     # don't assume CF preserves order across the array.
     try:

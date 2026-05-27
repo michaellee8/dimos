@@ -1166,12 +1166,15 @@ angular.z = 0</pre>
 
         // ─── Disconnect ─────────────────────────────────────────────────────
         async function disconnect() {
-            try {
-                if (activeRobot && token) {
-                    api('POST', `/sessions/${activeRobot.session_id}/leave`, { reason: 'user_initiated' })
-                        .catch(() => {});
-                }
-            } catch (_) {}
+            // Await leave so the broker clears operator_id before any re-connect
+            // — fire-and-forget raced the next join into a 409 "already has
+            // operator". Best-effort: still tear down locally if it fails.
+            if (activeRobot && token) {
+                try {
+                    await api('POST', `/sessions/${activeRobot.session_id}/leave`,
+                        { reason: 'user_initiated' });
+                } catch (_) {}
+            }
 
             stopKeyboardLoop();
             stopClockSync();
