@@ -123,11 +123,17 @@ def make_connection(ip: str | None, cfg: GlobalConfig) -> Go2ConnectionProtocol:
         from dimos.robot.unitree.dimsim_connection import DimSimConnection
 
         return DimSimConnection(cfg)
+    elif connection_type in ("pimsim", "babylon"):
+        from dimos.robot.unitree.pimsim_connection import PimSimConnection
+
+        return PimSimConnection(cfg)
     elif connection_type == "webrtc":
         assert ip is not None, "IP address must be provided"
         return UnitreeWebRTCConnection(ip)
     else:
-        raise ValueError(f"Unknown simulator {cfg.simulation!r}. Choose from: mujoco, dimsim")
+        raise ValueError(
+            f"Unknown simulator {cfg.simulation!r}. Choose from: mujoco, dimsim, pimsim"
+        )
 
 
 class ReplayConnection(UnitreeWebRTCConnection):
