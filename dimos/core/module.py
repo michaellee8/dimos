@@ -274,6 +274,8 @@ class ModuleBase(Configurable, CompositeResource):
             self._static_publish()
 
     def _static_publish(self) -> None:
+        if not self.static_transforms:
+            return
         now = time.time()
         self.tf.publish_static(
             *(
