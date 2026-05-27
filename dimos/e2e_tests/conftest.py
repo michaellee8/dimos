@@ -15,6 +15,7 @@
 from collections.abc import Callable, Generator, Iterator
 import threading
 import time
+from typing import Protocol
 
 import pytest
 
@@ -23,12 +24,23 @@ from dimos.e2e_tests.conf_types import StartPersonTrack
 from dimos.e2e_tests.dim_sim_client import DimSimClient
 from dimos.e2e_tests.dimos_cli_call import DimosCliCall
 from dimos.e2e_tests.lcm_spy import LcmSpy
+from dimos.experimental.pimsim.client import PimSimClient
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import make_vector3
 from dimos.msgs.std_msgs.Bool import Bool
 from dimos.simulation.mujoco.direct_cmd_vel_explorer import DirectCmdVelExplorer
 from dimos.simulation.mujoco.person_on_track import PersonTrackPublisher
+
+
+class SimClient(Protocol):
+    """Backend-agnostic scene-control client for e2e tests."""
+
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def set_agent_position(self, x: float, y: float, z: float = ...) -> None: ...
+    def add_wall(self, x1: float, y1: float, x2: float, y2: float) -> None: ...
+    def publish_goal(self, x: float, y: float) -> None: ...
 
 
 def _pose(x: float, y: float, theta: float) -> PoseStamped:
@@ -167,6 +179,36 @@ def dim_sim():
     client.start()
     yield client
     client.stop()
+
+
+@pytest.fixture
+def pim_sim() -> Iterator[PimSimClient]:
+    client = PimSimClient()
+    client.start()
+    yield client
+    client.stop()
+
+
+@pytest.fixture
+def sim_client(request: pytest.FixtureRequest) -> Iterator[SimClient]:
+    """Parametrized scene-control client; pick via indirect parametrize.
+
+    Tests parametrize ``("dimsim", "pimsim")`` and receive the matching
+    client without caring about backend internals.
+    """
+    backend = getattr(request, "param", "dimsim")
+    client: SimClient
+    if backend == "dimsim":
+        client = DimSimClient()
+    elif backend == "pimsim":
+        client = PimSimClient()
+    else:
+        raise ValueError(f"Unknown sim_client backend: {backend!r}")
+    client.start()
+    try:
+        yield client
+    finally:
+        client.stop()
 
 
 @pytest.fixture

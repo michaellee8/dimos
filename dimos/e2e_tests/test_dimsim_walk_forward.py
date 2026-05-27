@@ -15,8 +15,33 @@
 import pytest
 
 
-@pytest.mark.dimsim
-def test_walk_forward(lcm_spy, start_blueprint, human_input, dim_sim) -> None:
+@pytest.mark.parametrize(
+    "sim_client",
+    [
+        pytest.param("dimsim", marks=pytest.mark.dimsim),
+        pytest.param(
+            "pimsim",
+            marks=[
+                pytest.mark.pimsim,
+                pytest.mark.skip(
+                    reason=(
+                        "needs BabylonSceneViewerModule wired into "
+                        "unitree-go2-agentic for --simulation=pimsim"
+                    )
+                ),
+            ],
+        ),
+    ],
+    indirect=True,
+)
+def test_walk_forward(
+    lcm_spy,
+    start_blueprint,
+    human_input,
+    sim_client,
+    request,
+) -> None:
+    simulator = request.node.callspec.params["sim_client"]
     start_blueprint(
         "run",
         "--disable",
@@ -24,13 +49,13 @@ def test_walk_forward(lcm_spy, start_blueprint, human_input, dim_sim) -> None:
         "--disable",
         "security-module",
         "unitree-go2-agentic",
-        simulator="dimsim",
+        simulator=simulator,
     )
     lcm_spy.save_topic("/rpc/McpClient/on_system_modules/res")
     lcm_spy.wait_for_saved_topic("/rpc/McpClient/on_system_modules/res", timeout=1200.0)
 
     origin_x, origin_y = 1, 2
-    dim_sim.set_agent_position(origin_x, origin_y)
+    sim_client.set_agent_position(origin_x, origin_y)
 
     human_input("move forward 3 meter")
 
