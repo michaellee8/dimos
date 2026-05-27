@@ -218,7 +218,8 @@ class ModuleBase(Configurable, CompositeResource):
         #         body="base_link",
         #         parent="world",
         #     ))
-        # the "body" is what I call a common_name with "base_link" being the remapped name (the REAL frame id that other modules can query/use)
+        # the "body" is what I call a common_name
+        # "base_link" is the REAL frame id that other modules can query/use
 
         # step1 (for static_transforms only) translate urdf_name=>common_name
         reverse_mapping = {value: key for key, value in existing_frames.items()}
