@@ -14,7 +14,6 @@
 
 from enum import Enum
 import sys
-from threading import Thread
 import time
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -26,8 +25,6 @@ import rerun.blueprint as rrb
 from dimos.agents.annotation import skill
 from dimos.constants import (
     DEFAULT_CAPACITY_COLOR_IMAGE,
-    DEFAULT_ROBOT_FRAME,
-    DEFAULT_THREAD_JOIN_TIMEOUT,
     DEFAULT_WORLD_FRAME,
 )
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
@@ -70,14 +67,16 @@ class Go2Mode(str, Enum):
 class ConnectionConfig(ModuleConfig):
     ip: str = Field(default_factory=lambda m: m["g"].robot_ip)
     mode: Go2Mode = Go2Mode.DEFAULT
-    frame_id: str = DEFAULT_ROBOT_FRAME
-    parent_frame_id: str = DEFAULT_WORLD_FRAME
-    static_publish_rate: float = 1.0
+    frame_mapping: dict[str, str] = Field(
+        default_factory=lambda: dict(
+            body=Go2Config.body_frame,
+            parent=DEFAULT_WORLD_FRAME,
+            camera_link="camera_link",
+            camera_optical="camera_optical",
+        )
+    )
     static_transforms: dict[str, Transform] = Field(
         default_factory=lambda: dict(Go2Config.static_transforms)
-    )
-    frame_mapping: dict[str, str] = Field(
-        default_factory=lambda: {each: each for each in Go2Config.all_frame_ids}
     )
 
 
@@ -197,7 +196,6 @@ class GO2Connection(Module, Camera, Pointcloud):
 
     connection: Go2ConnectionProtocol
     camera_info_static: CameraInfo = camera_info_static()
-    _static_publish_thread: Thread | None = None
     _latest_video_frame: Image | None = None
 
     @classmethod
@@ -224,20 +222,19 @@ class GO2Connection(Module, Camera, Pointcloud):
             return
         self.connection.start()
 
-        def onimage(image: Image) -> None:
+        def on_image(image: Image) -> None:
+            image.frame_id = self.frame_mapping["camera_optical"]
             self.color_image.publish(image)
             self._latest_video_frame = image
 
-        self.register_disposable(self.connection.lidar_stream().subscribe(self.lidar.publish))
-        self.register_disposable(self.connection.odom_stream().subscribe(self._publish_tf))
-        self.register_disposable(self.connection.video_stream().subscribe(onimage))
-        self.register_disposable(Disposable(self.cmd_vel.subscribe(self.move)))
+        def on_lidar(pointcloud: PointCloud2) -> None:
+            pointcloud.frame_id = self.frame_mapping["body"]
+            self.lidar.publish(pointcloud)
 
-        self._static_publish_thread = Thread(
-            target=self._static_publish,
-            daemon=True,
-        )
-        self._static_publish_thread.start()
+        self.register_disposable(self.connection.lidar_stream().subscribe(on_lidar))
+        self.register_disposable(self.connection.odom_stream().subscribe(self._publish_tf))
+        self.register_disposable(self.connection.video_stream().subscribe(on_image))
+        self.register_disposable(Disposable(self.cmd_vel.subscribe(self.move)))
 
         self.standup()
         time.sleep(3)
@@ -255,55 +252,25 @@ class GO2Connection(Module, Camera, Pointcloud):
         if self.connection:
             self.connection.stop()
 
-        if self._static_publish_thread and self._static_publish_thread.is_alive():
-            self._static_publish_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
-
         super().stop()
+
+    def _on_static_publish(self) -> None:
+        self.camera_info_static.frame_id = self.frame_mapping["camera_optical"]
+        self.camera_info.publish(self.camera_info_static)
 
     def _publish_tf(self, msg: PoseStamped) -> None:
         self.tf.publish(
             Transform(
                 translation=msg.position,
                 rotation=msg.orientation,
-                frame_id=self.config.parent_frame_id,
-                child_frame_id=self.frame_id,
+                frame_id=self.frame_mapping["parent"],
+                child_frame_id=self.frame_mapping["body"],
                 ts=msg.ts,
             )
         )
         if self.odom.transport:
+            msg.frame_id = self.frame_mapping["parent"]
             self.odom.publish(msg)
-
-    def _static_publish(self) -> None:
-        remap = {Go2Config.body_frame: self.frame_id, **self.config.frame_mapping}
-        stamped_statics = [
-            Transform(
-                translation=transform.translation,
-                rotation=transform.rotation,
-                frame_id=remap.get(transform.frame_id, transform.frame_id),
-                child_frame_id=remap.get(transform.child_frame_id, transform.child_frame_id),
-            )
-            for transform in self.config.static_transforms.values()
-        ]
-
-        if self.config.static_publish_rate > 0:
-            period = 1.0 / self.config.static_publish_rate
-            while True:
-                now = time.time()
-                # reconstructed each iteration to refresh the timestamp
-                self.tf.publish(
-                    *(
-                        Transform(
-                            translation=transform.translation,
-                            rotation=transform.rotation,
-                            frame_id=transform.frame_id,
-                            child_frame_id=transform.child_frame_id,
-                            ts=now,
-                        )
-                        for transform in stamped_statics
-                    )
-                )
-                self.camera_info.publish(self.camera_info_static)
-                time.sleep(period)
 
     @rpc
     def move(self, twist: Twist, duration: float = 0.0) -> bool:
