@@ -34,6 +34,9 @@ from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
 from dimos.utils.logging_config import setup_logger
 
 # dimos --no-obstacle-avoidance --robot-ip 192.168.124.177 run unitree-go2-record
+# python -m dimos.mapping.loop_closure.utils.map_rrd recording_go2_mid360 --out map.rrd --camera-hz 0 && rerun map.rrd
+# uv run python -m dimos.mapping.loop_closure.utils.summary recording_go2_mid360_short_upstairs
+# uv run python -m dimos.mapping.loop_closure.utils.map_rrd recording_go2_mid360_short_upstairs --out map.rrd --camera-hz 0
 logger = setup_logger()
 
 # FastLIO ports stamped by the C++ binary with hardware clock; must be
@@ -125,11 +128,6 @@ class Go2Mid360Memory(Recorder):
 unitree_go2_record = autoconnect(
     GO2Connection.blueprint(),
     KeyboardTeleop.blueprint(),
-    # unitree_go2_basic.remappings(
-    #     [
-    #         # (GO2Connection, "lidar", "go2_lidar"),
-    #     ]
-    # ),
     MovementManager.blueprint(),
     FastLio2.blueprint(
         # host_ip=os.getenv("LIDAR_HOST_IP", "192.168.123.164"),
