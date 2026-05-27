@@ -24,9 +24,8 @@ const scene = new BABYLON.Scene(engine);
 scene.useRightHandedSystem = true;
 scene.clearColor = new BABYLON.Color4(0.055, 0.063, 0.078, 1);
 scene.skipPointerMovePicking = true;
-if (BABYLON.ScenePerformancePriority) {
-  scene.performancePriority = BABYLON.ScenePerformancePriority.Aggressive;
-}
+scene.autoClear = true;
+scene.autoClearDepthAndStencil = true;
 
 const camera = new BABYLON.ArcRotateCamera(
   "camera",
@@ -294,10 +293,21 @@ function setAllEntityVisualsVisible(visible) {
   }
 }
 
+function applyCollisionVisibility() {
+  const visible = sceneVisible && collisionVisible;
+  for (const mesh of collisionMeshes) {
+    // Only toggle visibility — setEnabled(false) would also stop the
+    // PhysicsAggregate from colliding, which defeats the point of
+    // running Havok against the cooked collision scene.
+    mesh.visibility = visible ? 1 : 0;
+  }
+}
+
 function setSceneVisibility(visible) {
   sceneVisible = visible;
   for (const mesh of sceneMeshes) setRenderableVisible(mesh, visible);
   setAllEntityVisualsVisible(visible);
+  applyCollisionVisibility();
   setButtonActive("toggleScene", visible);
 }
 
@@ -328,12 +338,7 @@ function createCollisionMaterial() {
 
 function setCollisionVisibility(visible) {
   collisionVisible = visible;
-  for (const mesh of collisionMeshes) {
-    // Only toggle visibility — setEnabled(false) would also stop the
-    // PhysicsAggregate from colliding, which defeats the point of
-    // running Havok against the cooked collision scene.
-    mesh.visibility = visible ? 1 : 0;
-  }
+  applyCollisionVisibility();
   setButtonActive("toggleCollision", visible);
 }
 
@@ -818,7 +823,7 @@ async function ensureSupportFloor(config) {
   );
   supportFloorMesh.position = center;
   supportFloorMesh.material = createCollisionMaterial();
-  supportFloorMesh.visibility = collisionVisible ? 1 : 0;
+  supportFloorMesh.visibility = sceneVisible && collisionVisible ? 1 : 0;
   supportFloorMesh.isPickable = true;
   supportFloorMesh.metadata = { dimosCollisionMesh: true, dimosSupportFloor: true };
   registerCollisionMesh(supportFloorMesh);
@@ -916,7 +921,7 @@ async function loadCollisionAsset(config) {
     if (!mesh.getTotalVertices || mesh.getTotalVertices() === 0) continue;
     mesh.isPickable = true;
     mesh.material = createCollisionMaterial();
-    mesh.visibility = collisionVisible ? 1 : 0;
+    mesh.visibility = sceneVisible && collisionVisible ? 1 : 0;
     // Don't setEnabled(false) — Havok needs the mesh active to collide.
     // setCollisionVisibility() toggles only the visibility for display.
     mesh.metadata = { dimosCollisionMesh: true };
