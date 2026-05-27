@@ -112,6 +112,7 @@ class ModuleConfig(BaseConfig):
     static_transforms: dict[str, Transform] = Field(default_factory=dict)
     # TODO: in the future we should make self.tf.publish error if it tried to publish a transform that references a frame that is not mentioned in this dict (same with self.tf.get)
     # TODO: later expose frame remappings, somehow, at the blueprint level
+    # frame mapping is how others can remap frame names, in the future we should have a way to do this remapping at the blueprint level too
     frame_mapping: dict[str, str] = Field(default_factory=dict)
     static_publish_interval: float = 1.0
     g: GlobalConfig = global_config
@@ -208,7 +209,7 @@ class ModuleBase(Configurable, CompositeResource):
             frame_mapping_field.default_factory
         ):
             raise ValueError(
-                f"""In the {self.name!r} module config definition, the frame_remapping needs to be a pydantic field, not a dict"""
+                f"""In the {self.name!r} module config definition, the frame_mapping needs to be a pydantic field, not a dict"""
             )
         existing_frames: dict[str, str] = frame_mapping_field.default_factory()  # type: ignore[call-arg]
 
@@ -295,7 +296,7 @@ class ModuleBase(Configurable, CompositeResource):
     def _on_static_publish(self) -> None:
         """
         This is a callback for modules to publish other data (ex: camera info) in the static loop
-        This should rarely used, but exists for the few cases where it is needed
+        This should be rarely used, but exists for the few cases where it is needed
         """
 
     def _close_module(self) -> None:
