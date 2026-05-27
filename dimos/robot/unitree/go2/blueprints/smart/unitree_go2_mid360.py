@@ -60,6 +60,9 @@ logger = setup_logger()
 
 _voxel_size = 0.05
 
+# FastLIO ports are handled explicitly in start() to control timestamps and TF.
+_FASTLIO_PORTS = frozenset({"lidar", "odometry"})
+
 
 class Go2Mid360MemoryConfig(RecorderConfig):
     db_path: str | Path = "recording_go2_mid360.db"
@@ -76,35 +79,34 @@ class Go2Mid360Memory(Recorder):
     odom: In[PoseStamped]
     config: Go2Mid360MemoryConfig
 
-    def _port_to_stream(self, name: str, input_topic: In[Any], stream: Stream[Any]) -> None:
-        # Force time.time() so all timestamps align with color_image (also time.time()).
-        default_frame_id = self.config.default_frame_id
-        tf_tolerance = self.config.tf_tolerance
+    def start(self) -> None:
+        super().start()
 
-        def on_msg(msg: Any) -> None:
-            ts = time.time()
-            msg_ts = getattr(msg, "ts", None) or ts
-            frame_id = (
-                getattr(msg, "child_frame_id", None)
-                or getattr(msg, "frame_id", None)
-                or default_frame_id
-            )
-            if frame_id == "world":
-                frame_id = default_frame_id
-            transform = self.tf.get("world", frame_id, time_point=ts, time_tolerance=tf_tolerance)
+        odom_store: Stream[Odometry] = self.store.stream("odometry", Odometry)
+
+        def on_odom(msg: Odometry) -> None:
+            msg.ts = time.time()
+            self.tf.publish(Transform.from_odometry(msg))
+            odom_store.append(msg)
+
+        self.register_disposable(Disposable(self.odometry.subscribe(on_odom)))
+
+        lidar_store: Stream[PointCloud2] = self.store.stream("lidar", PointCloud2)
+
+        def on_lidar(msg: PointCloud2) -> None:
+            msg.ts = time.time()
+            transform = self.tf.get("world", msg.frame_id or self.config.default_frame_id)
             pose = transform.to_pose() if transform is not None else None
             if not pose:
-                logger.warning(
-                    "[%s] No tf available for frame '%s' at time %s (msg ts: %s), storing without pose",
-                    name,
-                    frame_id,
-                    msg_ts,
-                    getattr(msg, "ts", None),
-                )
-                logger.warn("\n" + self.tf.tree_str())
-            stream.append(msg, ts=ts, pose=pose)
+                logger.warning("[lidar] No tf for frame '%s', storing without pose", msg.frame_id)
+            lidar_store.append(msg, pose=pose)
 
-        self.register_disposable(Disposable(input_topic.subscribe(on_msg)))
+        self.register_disposable(Disposable(self.lidar.subscribe(on_lidar)))
+
+    def _port_to_stream(self, name: str, input_topic: In[Any], stream: Stream[Any]) -> None:
+        if name in _FASTLIO_PORTS:
+            return  # handled explicitly in start()
+        super()._port_to_stream(name, input_topic, stream)
 
 
 unitree_go2_mid360_memory = (
