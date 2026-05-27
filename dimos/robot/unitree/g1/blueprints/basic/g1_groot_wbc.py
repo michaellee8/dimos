@@ -401,7 +401,7 @@ def _sim_support_blueprints() -> tuple[Blueprint, ...]:
                 output_voxel_size=_env_float("DIMOS_SCENE_LIDAR_OUTPUT_VOXEL_SIZE", 0.03),
                 support_floor=_env_bool(
                     "DIMOS_SCENE_LIDAR_SUPPORT_FLOOR",
-                    global_config.simulation == "babylon",
+                    global_config.simulation in ("babylon", "pimsim"),
                 ),
                 support_floor_z=_env_float("DIMOS_SCENE_SUPPORT_FLOOR_Z", 0.0),
                 support_floor_size=_env_float("DIMOS_SCENE_SUPPORT_FLOOR_SIZE", 0.0),
@@ -526,7 +526,8 @@ def _babylon_blueprint(viewer_mjcf_path: str | Path, cmd_vel_topic: str) -> Blue
 
     # Babylon-as-physics mode: integrate cmd_vel locally, publish sim_odom,
     # let the rust scene_lidar consume it.  No MuJoCo at runtime.
-    babylon_is_physics = global_config.simulation == "babylon"
+    # "pimsim" is the preferred alias going forward; "babylon" stays accepted.
+    babylon_is_physics = global_config.simulation in ("babylon", "pimsim")
     if babylon_is_physics:
         kwargs.update(
             enable_sim=True,
@@ -662,7 +663,7 @@ def _quest_teleop_blueprint(cmd_vel_topic: str) -> Blueprint | None:
     )
 
 
-if global_config.simulation == "babylon":
+if global_config.simulation in ("babylon", "pimsim"):
     # Browser-physics nav stack. Babylon owns the robot's kinematic base
     # (cmd_vel → sim_odom) and the Havok entity world; the rust scene
     # lidar consumes both. No MuJoCo, no coordinator, no GR00T policy
@@ -671,8 +672,8 @@ if global_config.simulation == "babylon":
     _babylon = _babylon_blueprint(_MJCF_PATH, _cmd_vel_topic)
     if _babylon is None:
         raise RuntimeError(
-            "--simulation babylon requested but Babylon viewer is disabled "
-            "(DIMOS_ENABLE_BABYLON=0?)"
+            f"--simulation {global_config.simulation} requested but Babylon viewer "
+            "is disabled (DIMOS_ENABLE_BABYLON=0?)"
         )
     g1_groot_wbc = autoconnect(
         _babylon,
