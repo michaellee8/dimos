@@ -181,9 +181,11 @@ class BabylonSceneViewerModule(Module):
         init_yaw: float = 0.0,
         lock_z: bool = True,
         initial_entities: list[dict[str, Any]] | None = None,
+        static_initial_entities: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
+        self._static_initial_entities = static_initial_entities
         self._mjcf_path = Path(mjcf_path)
         self._assets = assets
         self._port = port
@@ -1114,6 +1116,22 @@ class BabylonSceneViewerModule(Module):
             except (KeyError, TypeError, ValueError) as exc:
                 logger.warning("BabylonViewer: dropping bad packaged entity: %s", exc)
                 continue
+            if self._static_initial_entities and descriptor.kind == "dynamic":
+                # Cooked scenes mark furniture as "dynamic" because that's how
+                # they were authored in USD. For nav / lidar use the chairs
+                # should be obstacles, not free rigid bodies — leaving them
+                # dynamic lets Havok eject them through walls on spawn (some
+                # chairs end up at z=-650 km, invisible to the lidar). Pin
+                # them as kinematic at install; the browser treats mass=0
+                # as kinematic regardless of "kind".
+                descriptor = EntityDescriptor(
+                    entity_id=descriptor.entity_id,
+                    kind="static",
+                    mesh_ref=descriptor.mesh_ref,
+                    shape_hint=descriptor.shape_hint,
+                    extents=descriptor.extents,
+                    mass=0.0,
+                )
             self.spawn_entity(descriptor, pose)
 
     @staticmethod
