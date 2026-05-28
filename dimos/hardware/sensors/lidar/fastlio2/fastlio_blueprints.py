@@ -27,6 +27,20 @@ mid360_fastlio = autoconnect(
     vis_module("rerun"),
 ).global_config(n_workers=2, robot_model="mid360_fastlio2")
 
+# Live + Rerun + raw-pcap capture. Writes a pcap of every Mid-360 UDP
+# packet to fastlio2_pcap/mid360_<timestamp>.pcap (relative to CWD)
+# alongside the normal SLAM pipeline. Needs tcpdump capture capability;
+# the module prints the one-time `sudo setcap` if missing.
+mid360_fastlio_record = autoconnect(
+    FastLio2.blueprint(
+        voxel_size=voxel_size,
+        map_voxel_size=voxel_size,
+        map_freq=-1,
+        record_pcap=True,
+    ),
+    vis_module("rerun"),
+).global_config(n_workers=2, robot_model="mid360_fastlio2_record")
+
 mid360_fastlio_voxels = autoconnect(
     FastLio2.blueprint(),
     VoxelGridMapper.blueprint(voxel_size=voxel_size, carve_columns=False),
