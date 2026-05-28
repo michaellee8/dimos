@@ -72,6 +72,8 @@ from dimos.utils.generic import get_local_ips
 from dimos.utils.logging_config import setup_logger
 
 _CONFIG_DIR = Path(__file__).parent / "config"
+# tcpdump fails fast (EPERM, bad iface) within a few ms; pause briefly so poll() catches that.
+_TCPDUMP_STARTUP_PROBE_SEC = 0.3
 _logger = setup_logger()
 
 
@@ -135,6 +137,11 @@ class FastLio2Config(NativeModuleConfig):
     # Resolved in __post_init__, passed as --config_path to the binary
     config_path: str | None = None
 
+    # Offline replay. When set, the C++ binary skips SDK init and feeds
+    # packets from this pcap into the same callbacks the SDK would, with
+    # publish timestamps driven by the pcap clock.
+    replay_pcap: Path | None = None
+
     # Raw UDP pcap recording (diagnostic). When enabled, the module spawns
     # tcpdump alongside the SDK to capture wire-level Mid-360 traffic, so a
     # fastlio anomaly can be checked against ground-truth network bytes.
@@ -193,9 +200,10 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry, mapping.Glob
 
     @rpc
     def start(self) -> None:
-        self._validate_network()
-        if self.config.record_pcap:
-            self._start_pcap()
+        if self.config.replay_pcap is None:
+            self._validate_network()
+            if self.config.record_pcap:
+                self._start_pcap()
         super().start()
         self.register_disposable(
             Disposable(self.odometry.transport.subscribe(self._on_odom_for_tf, self.odometry))
@@ -232,21 +240,16 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry, mapping.Glob
         path = Path(str(cfg.record_pcap_path).format(ts=ts)).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
 
-        port_lo = min(
+        host_ports = [
             cfg.host_cmd_data_port,
             cfg.host_push_msg_port,
             cfg.host_point_data_port,
             cfg.host_imu_data_port,
             cfg.host_log_data_port,
+        ]
+        bpf = (
+            f"src host {cfg.lidar_ip} and udp and dst portrange {min(host_ports)}-{max(host_ports)}"
         )
-        port_hi = max(
-            cfg.host_cmd_data_port,
-            cfg.host_push_msg_port,
-            cfg.host_point_data_port,
-            cfg.host_imu_data_port,
-            cfg.host_log_data_port,
-        )
-        bpf = f"src host {cfg.lidar_ip} and udp and dst portrange {port_lo}-{port_hi}"
         tcpdump = shutil.which("tcpdump") or "tcpdump"
         cmd = [
             tcpdump,
@@ -267,10 +270,8 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry, mapping.Glob
             stderr=subprocess.PIPE,
             start_new_session=True,
         )
-        # Capture starts immediately; if it fails (typically EPERM) tcpdump
-        # exits within a few ms. Give it a brief moment to fall over before
-        # declaring success.
-        time.sleep(0.3)
+        # tcpdump exits within a few ms on EPERM; wait briefly so we can detect that.
+        time.sleep(_TCPDUMP_STARTUP_PROBE_SEC)
         if proc.poll() is not None:
             stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
             self._pcap_proc = None
@@ -309,14 +310,14 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry, mapping.Glob
         # packet counts and flushes the pcap header.
         proc.send_signal(signal.SIGINT)
         try:
-            proc.wait(timeout=3.0)
+            proc.wait(timeout=self.config.shutdown_timeout)
         except subprocess.TimeoutExpired:
             try:
                 os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
             except ProcessLookupError:
                 pass
             try:
-                proc.wait(timeout=2.0)
+                proc.wait(timeout=self.config.shutdown_timeout)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait()
