@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 import time
 from typing import Any
 
@@ -20,7 +20,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 import typer
 
-from dimos.mapping.voxels import VoxelGrid
+from dimos.mapping.voxels import VoxelMapTransformer
 from dimos.memory2.store.sqlite import SqliteStore
 from dimos.memory2.stream import Stream
 from dimos.memory2.transform import QualityWindow, SpeedLimit
@@ -28,12 +28,51 @@ from dimos.memory2.type.observation import Observation
 from dimos.memory2.vis.color import Color
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.perception.fiducial.marker_transformer import DetectMarkers
 from dimos.robot.unitree.go2.connection import _camera_info_static
 from dimos.utils.data import resolve_named_path
 from dimos.visualization.rerun.init import rerun_init
 
 PATH_THICKNESS = 0.01
+
+
+def _accumulate(
+    obs_iter: Iterable[Observation[PointCloud2]],
+    *,
+    voxel: float,
+    block_count: int,
+    device: str,
+    interp: Callable[[float], Transform] | None = None,
+    progress_cb: Callable[[Observation[Any]], None] | None = None,
+) -> PointCloud2 | None:
+    """Accumulate a voxel map from `obs_iter`, optionally PGO-correcting each frame.
+
+    Returns the final ``PointCloud2`` (or ``None`` if the input was empty).
+    Disposal of the underlying ``VoxelGrid`` is handled by ``VoxelMapTransformer``.
+    """
+
+    def prepared() -> Iterable[Observation[PointCloud2]]:
+        for obs in obs_iter:
+            if progress_cb is not None:
+                progress_cb(obs)
+            if len(obs.data) == 0:
+                continue
+            if interp is not None:
+                if obs.pose_tuple is None:
+                    continue
+                yield obs.derive(data=obs.data.transform(interp(obs.ts)))
+            else:
+                yield obs
+
+    vmt = VoxelMapTransformer(
+        emit_every=0,  # batch mode: emit once on exhaustion
+        voxel_size=voxel,
+        block_count=block_count,
+        device=device,
+    )
+    result = next(iter(vmt(iter(prepared()))), None)
+    return result.data if result is not None else None
 
 
 def progress(total: int, label: str = "") -> Callable[[Observation[Any]], None]:
@@ -186,45 +225,35 @@ def main(
             kf_t = kf_obs.data.optimized.translation
             pgo_path.append((kf_t.x, kf_t.y, kf_t.z))
 
-        pass2_pb = progress(n_kept, "pgo pass 2 (rebuilding)")
-        grid = VoxelGrid(voxel_size=voxel, block_count=block_count, device=device)
-        try:
-            for obs in seen.values():
-                pass2_pb(obs)
-                if len(obs.data) == 0:
-                    continue
-                grid.add_frame(obs.data.transform(interp(obs.ts)))
-            pgo_map = grid.get_global_pointcloud2()
-        finally:
-            grid.dispose()
+        pgo_map = _accumulate(
+            seen.values(),
+            voxel=voxel,
+            block_count=block_count,
+            device=device,
+            interp=interp,
+            progress_cb=progress(n_kept, "pgo pass 2 (rebuilding)"),
+        )
 
     full_pgo_map = None
     if full_pgo:
         assert interp is not None
-        full_pb = progress(total, "full pgo (rebuilding)")
-        full_grid = VoxelGrid(voxel_size=voxel, block_count=block_count, device=device)
-        try:
-            for obs in lidar:
-                full_pb(obs)
-                if obs.pose_tuple is None or len(obs.data) == 0:
-                    continue
-                full_grid.add_frame(obs.data.transform(interp(obs.ts)))
-            full_pgo_map = full_grid.get_global_pointcloud2()
-        finally:
-            full_grid.dispose()
+        full_pgo_map = _accumulate(
+            lidar,
+            voxel=voxel,
+            block_count=block_count,
+            device=device,
+            interp=interp,
+            progress_cb=progress(total, "full pgo (rebuilding)"),
+        )
 
     # Raw map: same dedup'd frames, no PGO correction.
-    raw_pb = progress(n_kept, "reconstructing global map")
-    raw_grid = VoxelGrid(voxel_size=voxel, block_count=block_count, device=device)
-    try:
-        for obs in seen.values():
-            raw_pb(obs)
-            if len(obs.data) == 0:
-                continue
-            raw_grid.add_frame(obs.data)
-        global_map = raw_grid.get_global_pointcloud2()
-    finally:
-        raw_grid.dispose()
+    global_map = _accumulate(
+        seen.values(),
+        voxel=voxel,
+        block_count=block_count,
+        device=device,
+        progress_cb=progress(n_kept, "reconstructing global map"),
+    )
 
     marker_dets: list[Observation[Any]] = []
     if markers:
@@ -270,7 +299,10 @@ def main(
     if not no_gui:
         rerun_init("dimos map tool", spawn=True)
         rr.send_blueprint(rrb.Blueprint(rrb.Spatial3DView(origin="world")))
-        rr.log("world/raw_map/pointcloud", global_map.to_rerun(voxel_size=voxel / 2), static=True)
+        if global_map is not None:
+            rr.log(
+                "world/raw_map/pointcloud", global_map.to_rerun(voxel_size=voxel / 2), static=True
+            )
         if path:
             rr.log(
                 "world/raw_map/path",
