@@ -87,14 +87,13 @@ class TestTransformHelpers:
             ts=1.0,
         )
         obs: Observation[int] = Observation(id=0, ts=1.0, pose=tf, _data=0)
-        assert isinstance(obs.pose, tuple)
-        assert obs.pose[0] == pytest.approx(1.5)
-        assert obs.pose[6] == pytest.approx(0.927)
+        assert obs.pose_tuple is not None
+        assert obs.pose_tuple[0] == pytest.approx(1.5)
+        assert obs.pose_tuple[6] == pytest.approx(0.927)
 
-        # derive() also runs the normalization via __post_init__.
+        # derive() also re-runs the normalization.
         derived = obs.derive(data=0, pose=tf)
-        assert isinstance(derived.pose, tuple)
-        assert derived.pose == obs.pose
+        assert derived.pose_tuple == obs.pose_tuple
 
     def test_observation_normalizes_posestamped(self) -> None:
         from dimos.memory2.type.observation import Observation
@@ -102,8 +101,7 @@ class TestTransformHelpers:
 
         ps = PoseStamped(ts=1.0, position=(1.0, 2.0, 3.0), orientation=(0.0, 0.0, 0.0, 1.0))
         obs: Observation[int] = Observation(id=0, ts=1.0, pose=ps, _data=0)
-        assert isinstance(obs.pose, tuple)
-        assert obs.pose == (1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0)
+        assert obs.pose_tuple == (1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0)
 
     def test_obs_to_pose3_roundtrip(self) -> None:
         from dimos.memory2.type.observation import Observation
@@ -191,8 +189,8 @@ class TestPipelineEndToEnd:
         kfs = pgo_keyframes(lidar)
         corr = keyframes_to_corrections(kfs)
         corrected = apply_corrections(lidar, corr)
-        in_poses = [o.pose for o in lidar if o.pose is not None]
-        out_poses = [o.pose for o in corrected if o.pose is not None]
+        in_poses = [o.pose_tuple for o in lidar if o.pose_tuple is not None]
+        out_poses = [o.pose_tuple for o in corrected if o.pose_tuple is not None]
         assert len(in_poses) == len(out_poses)
         for p_in, p_out in zip(in_poses, out_poses, strict=True):
             for a, b in zip(p_in, p_out, strict=True):
@@ -268,10 +266,11 @@ class TestApplyCorrections:
 
         corrected = apply_corrections(lidar, corr)
         for obs in corrected:
-            assert obs.pose is not None
-            assert obs.pose[0] == pytest.approx(5.0, abs=1e-9)
-            assert obs.pose[1] == pytest.approx(0.0, abs=1e-9)
-            assert obs.pose[2] == pytest.approx(0.0, abs=1e-9)
+            p = obs.pose_tuple
+            assert p is not None
+            assert p[0] == pytest.approx(5.0, abs=1e-9)
+            assert p[1] == pytest.approx(0.0, abs=1e-9)
+            assert p[2] == pytest.approx(0.0, abs=1e-9)
 
     def test_passes_through_pose_none(self) -> None:
         mem = MemoryStore()

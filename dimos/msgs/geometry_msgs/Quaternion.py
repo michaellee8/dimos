@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from io import BytesIO
+import math
 import struct
 from typing import TYPE_CHECKING, BinaryIO, TypeAlias
 
@@ -220,6 +221,18 @@ class Quaternion(LCMQuaternion):  # type: ignore[misc]
         z = self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w
 
         return Quaternion(x, y, z, w)
+
+    def dot(self, other: Quaternion) -> float:
+        """4D inner product. ``|q.dot(q')| == 1`` iff same orientation (up to sign)."""
+        return float(self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w)
+
+    def angle_to(self, other: Quaternion) -> float:
+        """Smallest rotation angle (radians) between two unit quaternions.
+
+        ``abs(self.dot(other))`` collapses the double-cover sign ambiguity;
+        the ``min(1.0, ...)`` clamps against numerical drift past 1.
+        """
+        return 2.0 * math.acos(min(1.0, abs(self.dot(other))))
 
     def conjugate(self) -> Quaternion:
         """Return the conjugate of the quaternion.

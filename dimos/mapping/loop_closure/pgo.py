@@ -170,17 +170,15 @@ def pgo_keyframes(
     for obs in stream:
         if on_frame is not None:
             on_frame(obs)
-        if obs.pose is None:
+        p = obs.pose_tuple
+        if p is None:
             continue
-        # Skip placeholder poses (origin position OR zero quaternion).
-        if obs.pose[0] == 0 and obs.pose[1] == 0 and obs.pose[2] == 0:
+        # Skip placeholder poses written before odom converges:
+        # all-zero translation OR all-zero (uninitialized) quaternion.
+        # An identity quaternion (qw=1) is valid and must not be filtered.
+        if p[0] == 0 and p[1] == 0 and p[2] == 0:
             continue
-        if (
-            obs.pose[3] == 0
-            and obs.pose[4] == 0
-            and obs.pose[5] == 0
-            and (obs.pose[6] == 0 or obs.pose[6] == 1)
-        ):
+        if p[3] == 0 and p[4] == 0 and p[5] == 0 and p[6] == 0:
             continue
         local_pose = _obs_to_pose3(obs)
         pgo.process(local_pose, obs.ts, obs.data)
@@ -264,10 +262,11 @@ def apply_corrections(
 
     def xf(upstream: Iterator[Observation[T]]) -> Iterator[Observation[T]]:
         for obs in upstream:
-            if obs.pose is None:
+            ps = obs.pose_stamped
+            if ps is None:
                 yield obs
                 continue
-            raw_tf = Transform.from_pose(FRAME_BODY, obs.pose_stamped)
+            raw_tf = Transform.from_pose(FRAME_BODY, ps)
             # Transform.__add__ composes: (T_corr + T_raw) applies T_corr after T_raw.
             # Observation normalizes Transform back to 7-tuple via __post_init__.
             corrected = interp(obs.ts) + raw_tf
@@ -297,9 +296,10 @@ def _obs_to_pose3(obs: Observation[Any]) -> gtsam.Pose3:
     """Convert an observation's stored pose tuple directly to a `gtsam.Pose3`."""
     import gtsam  # type: ignore[import-not-found,import-untyped]
 
-    if obs.pose is None:
+    p = obs.pose_tuple
+    if p is None:
         raise LookupError("No pose set on this observation")
-    x, y, z, qx, qy, qz, qw = obs.pose
+    x, y, z, qx, qy, qz, qw = p
     return gtsam.Pose3(
         gtsam.Rot3.Quaternion(float(qw), float(qx), float(qy), float(qz)),
         gtsam.Point3(float(x), float(y), float(z)),

@@ -179,12 +179,11 @@ def speed() -> FnIterTransformer[Any, float]:
     def _speed(upstream: Iterator[Observation[Any]]) -> Iterator[Observation[float]]:
         prev: Observation[Any] | None = None
         for obs in upstream:
-            if prev is not None and obs.pose is not None and prev.pose is not None:
-                dx = obs.pose[0] - prev.pose[0]
-                dy = obs.pose[1] - prev.pose[1]
-                dz = obs.pose[2] - prev.pose[2]
+            p = obs.pose
+            pp = prev.pose if prev is not None else None
+            if prev is not None and p is not None and pp is not None:
                 dt = obs.ts - prev.ts
-                v = math.sqrt(dx * dx + dy * dy + dz * dz) / dt if dt > 0 else 0.0
+                v = (p.position - pp.position).length() / dt if dt > 0 else 0.0
                 yield obs.derive(data=v)
             prev = obs
 
@@ -225,28 +224,17 @@ class SpeedLimit(Transformer[T, T]):
         max_dps = self.max_dps
         max_rps = math.radians(max_dps) if max_dps is not None else None
         for obs in upstream:
-            if obs.pose is None:
+            p = obs.pose
+            if p is None:
                 continue
-            if prev is not None and prev.pose is not None:
+            pp = prev.pose if prev is not None else None
+            if prev is not None and pp is not None:
                 dt = obs.ts - prev.ts
                 if dt > 0:
-                    dx = obs.pose[0] - prev.pose[0]
-                    dy = obs.pose[1] - prev.pose[1]
-                    dz = obs.pose[2] - prev.pose[2]
-                    v = math.sqrt(dx * dx + dy * dy + dz * dz) / dt
+                    v = (p.position - pp.position).length() / dt
                     ok = v <= max_mps
                     if ok and max_rps is not None:
-                        # rotation angle between two unit quaternions.
-                        # |q · q'| collapses the double-cover sign ambiguity;
-                        # clamp guards against numerical drift past 1.
-                        dot = (
-                            obs.pose[3] * prev.pose[3]
-                            + obs.pose[4] * prev.pose[4]
-                            + obs.pose[5] * prev.pose[5]
-                            + obs.pose[6] * prev.pose[6]
-                        )
-                        angle = 2.0 * math.acos(min(1.0, abs(dot)))
-                        ok = (angle / dt) <= max_rps
+                        ok = (p.orientation.angle_to(pp.orientation) / dt) <= max_rps
                     if ok:
                         yield obs
             prev = obs

@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, fields
 import sys
 import threading
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
@@ -28,10 +28,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from dimos.models.embedding.base import Embedding
+    from dimos.msgs.geometry_msgs.Pose import Pose
     from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
 T = TypeVar("T")
 R = TypeVar("R")
+
+PoseTuple = tuple[float, float, float, float, float, float, float]
 
 
 class _Unloaded:
@@ -46,18 +49,33 @@ class _Unloaded:
 _UNLOADED = _Unloaded()
 
 
-def _normalize_pose(p: Any) -> tuple[float, float, float, float, float, float, float] | None:
+def _to_tuple(p: Any) -> PoseTuple | None:
     """Coerce common pose shapes to the storage 7-tuple `(x, y, z, qx, qy, qz, qw)`.
 
-    Accepts: `None`, an already-normalized tuple, or any object with
+    Accepts: `None`, a 3- or 7-tuple, or any object with
     `translation`+`rotation` (Transform) or `position`+`orientation`
-    (Pose / PoseStamped) attributes. Duck-typed to avoid importing
-    `dimos.msgs.geometry_msgs` at module load.
+    (Pose / PoseStamped) attributes. 3-tuples are padded with the identity
+    quaternion. Duck-typed to avoid importing `dimos.msgs.geometry_msgs`
+    at module load.
     """
-    if p is None or isinstance(p, tuple):
-        return p
-    trans = getattr(p, "translation", None) or getattr(p, "position", None)
-    rot = getattr(p, "rotation", None) or getattr(p, "orientation", None)
+    if p is None:
+        return None
+    if isinstance(p, tuple):
+        if len(p) == 7:
+            return cast("PoseTuple", tuple(float(v) for v in p))
+        if len(p) == 3:
+            x, y, z = p
+            return (float(x), float(y), float(z), 0.0, 0.0, 0.0, 1.0)
+        raise TypeError(f"Pose tuple must have length 3 or 7, got {len(p)}")
+    # Use ``is not None`` rather than ``or`` — a Vector3 at the origin is
+    # falsy but valid, and falling through to ``position`` on a Transform
+    # would crash.
+    trans = getattr(p, "translation", None)
+    if trans is None:
+        trans = getattr(p, "position", None)
+    rot = getattr(p, "rotation", None)
+    if rot is None:
+        rot = getattr(p, "orientation", None)
     if trans is None or rot is None:
         raise TypeError(
             f"Cannot coerce {type(p).__name__} to a pose tuple — expected "
@@ -74,36 +92,70 @@ def _normalize_pose(p: Any) -> tuple[float, float, float, float, float, float, f
     )
 
 
-@dataclass
+@dataclass(init=False)
 class Observation(Generic[T]):
     """A single timestamped observation with optional spatial pose and metadata.
 
-    `pose` is stored as a 7-tuple `(x, y, z, qx, qy, qz, qw)`. Passing a
-    `Transform`, `Pose`, or `PoseStamped` to the constructor or to `derive`
-    is normalized to the 7-tuple form automatically.
+    Pose is stored internally as a 7-tuple ``(x, y, z, qx, qy, qz, qw)``.
+    Use :attr:`pose` for a typed :class:`Pose` object (lazy), or
+    :attr:`pose_tuple` for direct field access in hot loops.
     """
 
     id: int
     ts: float
-    data_type: type = object
-    pose: Any | None = None
-    tags: dict[str, Any] = field(default_factory=dict)
-    _data: T | _Unloaded = field(default=_UNLOADED, repr=False)
-    _loader: Callable[[], T] | None = field(default=None, repr=False)
-    _data_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    data_type: type
+    pose_tuple: PoseTuple | None
+    tags: dict[str, Any]
+    _data: T | _Unloaded
+    _loader: Callable[[], T] | None
+    _data_lock: threading.Lock
 
-    def __post_init__(self) -> None:
-        self.pose = _normalize_pose(self.pose)
+    def __init__(
+        self,
+        id: int = 0,
+        ts: float = 0.0,
+        *,
+        data_type: type = object,
+        pose: Any | None = None,
+        pose_tuple: PoseTuple | None = None,
+        tags: dict[str, Any] | None = None,
+        _data: T | _Unloaded = _UNLOADED,
+        _loader: Callable[[], T] | None = None,
+        _data_lock: threading.Lock | None = None,
+    ) -> None:
+        self.id = id
+        self.ts = ts
+        self.data_type = data_type
+        # `pose` wins if explicitly supplied: derive()/tag() always re-pass
+        # the current `pose_tuple` from fields(), so an override needs
+        # to take precedence over it.
+        self.pose_tuple = _to_tuple(pose) if pose is not None else pose_tuple
+        self.tags = tags if tags is not None else {}
+        self._data = _data
+        self._loader = _loader
+        self._data_lock = _data_lock if _data_lock is not None else threading.Lock()
 
     @property
-    def pose_stamped(self) -> PoseStamped:
+    def pose(self) -> Pose | None:
+        """Typed :class:`Pose` (or None). Allocates per access — read :attr:`pose_tuple` in hot loops."""
+        if self.pose_tuple is None:
+            return None
+        from dimos.msgs.geometry_msgs.Pose import Pose
+
+        return Pose(*self.pose_tuple)
+
+    @property
+    def pose_stamped(self) -> PoseStamped | None:
+        """Typed :class:`PoseStamped` (or None) carrying this observation's ts."""
+        if self.pose_tuple is None:
+            return None
         from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
-        if self.pose is None:
-            raise LookupError("No pose set on this observation")
-        x, y, z, qx, qy, qz, qw = self.pose
-        ps: PoseStamped = PoseStamped(ts=self.ts, position=(x, y, z), orientation=(qx, qy, qz, qw))
-        return ps
+        x, y, z, qx, qy, qz, qw = self.pose_tuple
+        return cast(
+            "PoseStamped",
+            PoseStamped(ts=self.ts, position=(x, y, z), orientation=(qx, qy, qz, qw)),
+        )
 
     @property
     def data(self) -> T:
@@ -150,9 +202,38 @@ class Observation(Generic[T]):
         return type(self)(**kwargs)
 
 
-@dataclass
+@dataclass(init=False)
 class EmbeddedObservation(Observation[T]):
     """Observation enriched with a vector embedding and optional similarity score."""
 
-    embedding: Embedding | None = None
-    similarity: float | None = None
+    embedding: Embedding | None
+    similarity: float | None
+
+    def __init__(
+        self,
+        id: int = 0,
+        ts: float = 0.0,
+        *,
+        data_type: type = object,
+        pose: Any | None = None,
+        pose_tuple: PoseTuple | None = None,
+        tags: dict[str, Any] | None = None,
+        embedding: Embedding | None = None,
+        similarity: float | None = None,
+        _data: T | _Unloaded = _UNLOADED,
+        _loader: Callable[[], T] | None = None,
+        _data_lock: threading.Lock | None = None,
+    ) -> None:
+        super().__init__(
+            id=id,
+            ts=ts,
+            data_type=data_type,
+            pose=pose,
+            pose_tuple=pose_tuple,
+            tags=tags,
+            _data=_data,
+            _loader=_loader,
+            _data_lock=_data_lock,
+        )
+        self.embedding = embedding
+        self.similarity = similarity

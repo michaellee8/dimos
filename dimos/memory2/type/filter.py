@@ -79,17 +79,15 @@ class NearFilter(Filter):
     radius: float = 0.0
 
     def matches(self, obs: Observation[Any]) -> bool:
-        if obs.pose is None or self.pose is None:
+        p2 = obs.pose_tuple
+        if p2 is None or self.pose is None:
             return False
         p1 = self.pose
-        p2 = obs.pose
-        # Support both raw (x,y,z) tuples and PoseStamped objects
+        # NearFilter.pose accepts raw (x,y,z) tuples or PoseStamped-like objects.
         if hasattr(p1, "position"):
             p1 = p1.position
-        if hasattr(p2, "position"):
-            p2 = p2.position
         x1, y1, z1 = _xyz(p1)
-        x2, y2, z2 = _xyz(p2)
+        x2, y2, z2 = p2[0], p2[1], p2[2]
         dist_sq = (x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2
         return dist_sq <= self.radius**2
 

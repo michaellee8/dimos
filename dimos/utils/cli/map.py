@@ -140,16 +140,13 @@ def main(
     # so it stays cheap (no pointcloud loading).
     seen: dict[tuple[int, int, int], Observation[Any]] = {}
     for obs in lidar:
-        if obs.pose is None:
+        p = obs.pose_tuple
+        if p is None:
             continue
         # Reject placeholder poses at the world origin.
-        if obs.pose[0] == 0 and obs.pose[1] == 0 and obs.pose[2] == 0:
+        if p[0] == 0 and p[1] == 0 and p[2] == 0:
             continue
-        cell = (
-            int(obs.pose[0] / pgo_tol),
-            int(obs.pose[1] / pgo_tol),
-            int(obs.pose[2] / pgo_tol),
-        )
+        cell = (int(p[0] / pgo_tol), int(p[1] / pgo_tol), int(p[2] / pgo_tol))
         seen[cell] = obs
 
     n_kept = len(seen)
@@ -159,7 +156,7 @@ def main(
     # Dict insertion order = lidar iteration order = chronological.
     # `seen` only contains entries with non-None poses (filtered above).
     path: list[tuple[float, float, float]] = [
-        (obs.pose[0], obs.pose[1], obs.pose[2]) for obs in seen.values() if obs.pose is not None
+        (p[0], p[1], p[2]) for obs in seen.values() if (p := obs.pose_tuple) is not None
     ]
 
     pgo_map = None
@@ -209,7 +206,7 @@ def main(
         try:
             for obs in lidar:
                 full_pb(obs)
-                if obs.pose is None or len(obs.data) == 0:
+                if obs.pose_tuple is None or len(obs.data) == 0:
                     continue
                 full_grid.add_frame(obs.data.transform(interp(obs.ts)))
             full_pgo_map = full_grid.get_global_pointcloud2()

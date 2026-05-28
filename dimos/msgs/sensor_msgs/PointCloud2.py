@@ -730,7 +730,7 @@ class PointCloud2(Timestamped):
 
         if mode == "points":
             return rr.Points3D(
-                positions=points, colors=point_colors, class_ids=class_ids, sizes=voxel_size
+                positions=points, colors=point_colors, class_ids=class_ids, radii=voxel_size / 2
             )
         elif mode == "boxes":
             half = voxel_size / 2
