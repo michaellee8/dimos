@@ -88,7 +88,8 @@ from dimos.utils.path_utils import get_project_root
 # inside the operator coord (see TaskConfig type="path_follower"
 # wired into each robot's coord blueprint).
 _JOINT_STATE_TOPIC = "/coordinator/joint_state"
-_PATH_FOLLOWER_TASK_NAME = "path_follower"  # task name in operator coord blueprint
+_PATH_FOLLOWER_TASK_NAME = "path_follower"  # bare/ff/profile arms
+_PRECISION_FOLLOWER_TASK_NAME = "precision_follower"  # rg arm
 
 _ARRIVED_STATES = frozenset({"arrived", "completed"})
 _FAILED_STATES = frozenset({"aborted"})
@@ -269,12 +270,13 @@ class _JointStateRecorder:
             self._t0 = None
 
 
-def _invoke(coord: RPCClient, method: str, **kwargs: object) -> object:
-    """RPC `task_invoke(_PATH_FOLLOWER_TASK_NAME, method, kwargs)` on the operator
+def _invoke(coord: RPCClient, task_name: str, method: str, **kwargs: object) -> object:
+    """RPC `task_invoke(task_name, method, kwargs)` on the operator
     coord. Centralises the .task_invoke wrapping so the run loop reads as
-    plain method calls on a remote object."""
+    plain method calls on a remote object. ``task_name`` selects between
+    the bare path_follower and the precision_follower (RG arm)."""
     return coord.task_invoke(
-        task_name=_PATH_FOLLOWER_TASK_NAME,
+        task_name=task_name,
         method=method,
         kwargs=dict(kwargs),
     )
@@ -291,15 +293,17 @@ def _run_baseline(
     profile_config: VelocityProfileConfig | None,
     timeout_s: float,
     label: str,
-    velocity_profile: list[float] | None = None,
+    task_name: str,
 ) -> tuple[ExecutedTrajectory, NavPath]:
-    """Send a path to the operator coord's ``path_follower`` task and
-    wait for it to terminate. The task is pre-added by the operator's
-    blueprint (priority 20, claims base/{vx,vy,wz}) so it preempts the
-    operator's teleop velocity task while a run is active. We only RPC
-    configure/start/cancel; the coord owns the tick-loop compute and the
-    adapter that drives the robot. ``ff_config``/``profile_config`` are
-    optional arms (``None`` = bare = the physical-limit measurement).
+    """Send a path to the operator coord's path-follower task (selected
+    by ``task_name`` — ``"path_follower"`` for the bare/ff/profile arms,
+    ``"precision_follower"`` for the RG arm) and wait for it to terminate.
+    The task is pre-added by the operator's blueprint (priority 20, claims
+    base/{vx,vy,wz}) so it preempts the operator's teleop velocity task
+    while a run is active. We only RPC configure/start/cancel; the coord
+    owns the tick-loop compute and the adapter that drives the robot.
+    ``ff_config``/``profile_config`` are optional arms (``None`` = bare =
+    the physical-limit measurement).
 
     Path is anchored to the robot's first observed pose so the operator
     only has to roughly aim the robot. Returns the executed trajectory
@@ -312,6 +316,7 @@ def _run_baseline(
 
     if not _invoke(
         coord,
+        task_name,
         "configure",
         speed=speed,
         k_angular=k_angular,
@@ -321,13 +326,7 @@ def _run_baseline(
         print(f"  [{label}] configure rejected — task still active from prior run?")
         return ExecutedTrajectory(ticks=recorder.snapshot(), arrived=False), path_w
 
-    start_kwargs: dict[str, Any] = {"path": path_w, "current_odom": pose0}
-    if velocity_profile is not None:
-        # Path was rigid-transformed by _shift_path_to_start_at_pose;
-        # waypoint count + local curvature are preserved, so the
-        # per-waypoint speeds computed on the original path remain valid.
-        start_kwargs["velocity_profile"] = velocity_profile
-    if not _invoke(coord, "start_path", **start_kwargs):
+    if not _invoke(coord, task_name, "start_path", path=path_w, current_odom=pose0):
         print(f"  [{label}] start_path rejected")
         return ExecutedTrajectory(ticks=recorder.snapshot(), arrived=False), path_w
 
@@ -337,7 +336,7 @@ def _run_baseline(
     terminated = False
     try:
         while time.perf_counter() < deadline:
-            st = _invoke(coord, "get_state")
+            st = _invoke(coord, task_name, "get_state")
             if st in _ARRIVED_STATES:
                 arrived = True
                 terminated = True
@@ -353,7 +352,7 @@ def _run_baseline(
     finally:
         # Best-effort cancel; safe to ignore if already terminal.
         try:
-            _invoke(coord, "cancel")
+            _invoke(coord, task_name, "cancel")
         except Exception:
             pass
     return ExecutedTrajectory(ticks=recorder.snapshot(), arrived=arrived), path_w
@@ -383,8 +382,6 @@ def _run_ladder(
     coord_rpc: RPCClient,
     recorder: _JointStateRecorder,
     use_rg: bool = False,
-    e_max: float = 0.05,
-    rg_min_speed: float | None = None,
     gate_input: Callable[[str], str] = input,
     gate_keys_label: str = "ENTER=run  s=skip  q=quit",
 ) -> tuple[list[OperatingPoint], list[dict]]:
@@ -393,52 +390,14 @@ def _run_ladder(
     ff = cfg.feedforward.to_runtime() if use_ff else None
     k_angular = float(cfg.recommended_controller.params.get("k_angular", 0.5))
 
-    # Build RG constraint set + plant once if --rg arm is enabled. We
-    # import the math directly from the reference_governor module
-    # (solve_profile + the constraint classes are public module-level
-    # exports); no RG Module composition needed.
-    rg_constraints = None
-    rg_plant = None
-    rg_vp = None
-    if use_rg:
-        from dimos.navigation.reference_governor.reference_governor import (
-            GeometricMVC,
-            LateralMVC,
-            PrecisionMVC,
-            SaturationMVC,
-            solve_profile,
-        )
-
-        rg_plant = cfg.plant
-        rg_vp = cfg.velocity_profile
-        # Closure over e_max so PrecisionMVC stays decoupled from a
-        # specific value — same callable contract RG itself uses.
-        rg_constraints = [
-            GeometricMVC(v_max=rg_vp.max_linear_speed),
-            SaturationMVC(omega_max=rg_vp.max_angular_speed),
-            LateralMVC(a_lat_max=rg_vp.max_centripetal_accel),
-            PrecisionMVC(e_max_provider=lambda: e_max),
-        ]
-        _solve_profile = solve_profile
+    # The RG arm runs against the precision_follower task — a path-follower
+    # subclass that owns its own solve_profile() recompute on e_max
+    # updates. Benchmarker just picks the task name; no RG math here.
+    task_name = _PRECISION_FOLLOWER_TASK_NAME if use_rg else _PATH_FOLLOWER_TASK_NAME
 
     points: list[OperatingPoint] = []
     runs: list[dict] = []  # for the XY trajectory overlay
     for name, path in _path_set().items():
-        # Precompute RG-derived per-waypoint speeds once per path (same
-        # for every speed cell — RG output is path-shape dependent, not
-        # commanded-speed dependent). Plain list[float] crosses the
-        # configure RPC cleanly.
-        rg_speeds: list[float] | None = None
-        if use_rg and rg_constraints is not None and rg_plant is not None and rg_vp is not None:
-            arr = _solve_profile(
-                path,
-                rg_plant,
-                rg_constraints,
-                accel_max=rg_vp.max_linear_accel,
-                decel_max=rg_vp.max_linear_decel,
-                min_speed=(rg_min_speed if rg_min_speed is not None else rg_vp.min_speed),
-            )
-            rg_speeds = [float(v) for v in arr]
         for speed in speeds:
             prof_cfg = (
                 cfg.velocity_profile.to_runtime(max_linear_speed=speed) if use_profile else None
@@ -467,7 +426,7 @@ def _run_ladder(
                 prof_cfg,
                 timeout_s,
                 f"{name}@{speed:.2f}",
-                velocity_profile=rg_speeds,
+                task_name=task_name,
             )
             # Score/plot against the executed-frame reference (anchored path).
             s = score_run(ref, traj)
@@ -634,18 +593,10 @@ class BenchmarkerConfig(ModuleConfig):
     timeout: float = 60.0
     ff: bool = False
     profile: bool = False
-    # OPT-IN: apply RG-derived per-waypoint speed profile (uses the
-    # artifact's plant + cfg.e_max for the precision constraint).
+    # OPT-IN: route runs through the precision_follower task (RG arm —
+    # the operator coord's precision_follower owns its own artifact +
+    # solve_profile() recompute reacting to KeyboardTeleop's e_max stream).
     rg: bool = False
-    e_max: float = 0.05
-    # RG OUTPUT FLOOR (m/s). Overrides artifact.velocity_profile.min_speed
-    # for the RG arm. Default 0.2 matches the Go2's practical min motion
-    # threshold — characterization typically writes ~0.05 into the
-    # artifact, which is below where the platform actually moves, so the
-    # RG output at SaturationMVC-binding corners falls below threshold
-    # and the robot stalls. Set explicitly (or None to defer to the
-    # artifact) for other platforms.
-    min_speed: float | None = 0.2
     # OPT-IN: output directory for plots + standalone-arm JSONs (the
     # input config artifact augmentation always lands at args.config).
     out_dir: str | None = None
@@ -766,8 +717,6 @@ class Benchmarker(Module):
                 coord_rpc=coord_rpc,
                 recorder=recorder,
                 use_rg=cfg.rg,
-                e_max=cfg.e_max,
-                rg_min_speed=cfg.min_speed,
                 gate_input=gate_input,
                 gate_keys_label=gate_keys_label,
             )
@@ -862,22 +811,9 @@ def main() -> None:
     ap.add_argument(
         "--rg",
         action="store_true",
-        help="OPT-IN arm: apply RG-derived per-waypoint speed profile "
-        "(uses the same artifact + --e-max corridor; default OFF)",
-    )
-    ap.add_argument(
-        "--e-max",
-        type=float,
-        default=0.05,
-        help="RG corridor half-width in m (only used when --rg is set)",
-    )
-    ap.add_argument(
-        "--min-speed",
-        type=float,
-        default=None,
-        help="override the RG arm's min_speed floor (default: artifact's "
-        "velocity_profile.min_speed). Useful when the robot's actual min "
-        "motion threshold is higher than what was characterized.",
+        help="OPT-IN arm: route runs through the precision_follower task "
+        "(the coord's precision-path-follower owns the RG profile + live "
+        "e_max from KeyboardTeleop's 0-9 keys; default OFF)",
     )
     ap.add_argument(
         "--out",
@@ -896,8 +832,6 @@ def main() -> None:
         ff=args.ff,
         profile=args.profile,
         rg=args.rg,
-        e_max=args.e_max,
-        min_speed=args.min_speed,
         out_dir=args.out,
     )
     instance.start()

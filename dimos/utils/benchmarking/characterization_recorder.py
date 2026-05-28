@@ -40,9 +40,13 @@ from __future__ import annotations
 
 from datetime import date
 from pathlib import Path
+import time
+from typing import Any
+
+from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
-from dimos.core.stream import In
+from dimos.core.stream import In, Stream
 from dimos.memory2.module import Recorder, RecorderConfig
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
@@ -100,6 +104,19 @@ class CharacterizationRecorder(Recorder):
             / f"{self.config.robot_id}_{self.config.tag}_{date.today().isoformat()}_{git_sha()}.db"
         )
         super().start()
+
+    def _port_to_stream(self, name: str, input_topic: In[Any], stream: Stream[Any]) -> None:
+        """Override the parent to skip the per-message TF lookup. These
+        blueprints don't publish a TF graph, so the parent's "No tf
+        available" warning fires once per message and floods the terminal.
+        Pose is stored as ``None``; rerun-time analysis tools either don't
+        need a pose anchor or pull it from the recorded ``odom`` stream."""
+
+        def on_msg(msg: Any) -> None:
+            ts = getattr(msg, "ts", None) or time.time()
+            stream.append(msg, ts=ts, pose=None)
+
+        self.register_disposable(Disposable(input_topic.subscribe(on_msg)))
 
 
 __all__ = ["CharacterizationRecorder", "CharacterizationRecorderConfig"]

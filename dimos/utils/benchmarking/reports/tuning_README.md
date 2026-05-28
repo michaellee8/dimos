@@ -49,8 +49,15 @@ Override defaults with `-o characterizer.<field>=<value>`, e.g.:
 
 ```
 dimos run unitree-go2-benchmark \
-  -o benchmarker.config=/path/to/go2_config_hw_*.json
+  -o benchmarker.config=/path/to/go2_config_hw_*.json     # bare baseline
+
+dimos run unitree-go2-benchmark-rg \
+  -o benchmarker.config=/path/to/go2_config_hw_*.json     # RG arm baked in (rg=true)
 ```
+
+Each comparison arm is its own blueprint variant; the `-o` overrides
+are reserved for runtime knobs only (the artifact path, e_max sweeps,
+etc.).
 
 Per (path, speed) × fixed path set (`straight_line`, `single_corner`, `square`, `circle`), the loop prompts you to aim the robot, then drives the baseline follower over the anchored path. CTE is scored from the real trajectory.
 

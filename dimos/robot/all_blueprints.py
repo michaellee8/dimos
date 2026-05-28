@@ -100,6 +100,7 @@ all_blueprints = {
     "unitree-go2-agentic-ollama": "dimos.robot.unitree.go2.blueprints.agentic.unitree_go2_agentic_ollama:unitree_go2_agentic_ollama",
     "unitree-go2-basic": "dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic:unitree_go2_basic",
     "unitree-go2-benchmark": "dimos.robot.unitree.go2.blueprints.basic.unitree_go2_benchmark:unitree_go2_benchmark",
+    "unitree-go2-benchmark-rg": "dimos.robot.unitree.go2.blueprints.basic.unitree_go2_benchmark_rg:unitree_go2_benchmark_rg",
     "unitree-go2-characterization": "dimos.robot.unitree.go2.blueprints.basic.unitree_go2_characterization:unitree_go2_characterization",
     "unitree-go2-coordinator": "dimos.robot.unitree.go2.blueprints.basic.unitree_go2_coordinator:unitree_go2_coordinator",
     "unitree-go2-detection": "dimos.robot.unitree.go2.blueprints.smart.unitree_go2_detection:unitree_go2_detection",
