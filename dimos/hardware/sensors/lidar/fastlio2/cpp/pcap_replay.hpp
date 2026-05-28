@@ -33,6 +33,7 @@ constexpr size_t LIVOX_ETH_HDR_LEN = 36;
 
 using PacketCb = std::function<void(LivoxLidarEthernetPacket*)>;
 using ClockCb = std::function<void(uint64_t pcap_ts_ns)>;
+using IterCb = std::function<void()>;
 
 struct Replayer {
     std::string path;
@@ -41,6 +42,12 @@ struct Replayer {
     PacketCb on_point;
     PacketCb on_imu;
     ClockCb on_clock;
+    // Called synchronously after every packet, once the payload has been
+    // appended and the virtual clock advanced. The replay path runs the
+    // main-loop body here so feeding + processing happen on a single
+    // thread — eliminates the feeder-vs-main-loop race on accumulator
+    // contents.
+    IterCb on_iter;
     std::atomic<bool>* running = nullptr;
     bool realtime = true;
 
@@ -150,6 +157,10 @@ struct Replayer {
             // accumulators. Reverse order would let the main-loop thread see
             // the clock advance and emit a scan that's missing this packet.
             if (on_clock) on_clock(pcap_ts_ns);
+
+            // Run one main-loop iteration synchronously so feeding and
+            // processing are strictly serialized in replay mode.
+            if (on_iter) on_iter();
         }
 
         printf("[replay] done: %zu pcap records (point=%zu imu=%zu other=%zu)\n",

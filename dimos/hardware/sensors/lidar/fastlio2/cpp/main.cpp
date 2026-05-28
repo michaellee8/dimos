@@ -528,56 +528,10 @@ int main(int argc, char** argv) {
     g_fastlio = &fast_lio;
     if (debug) printf("[fastlio2] FAST-LIO initialized.\n");
 
-    // Source of point/IMU packets:
-    //   live mode  -> Livox SDK opens UDP sockets + dispatches via callbacks
-    //   replay mode -> a feeder thread reads a pcap and calls the same
-    //                  callbacks. SDK is not initialized.
-    std::thread replay_thread;
-    if (g_replay_mode.load()) {
-        if (debug) printf("[fastlio2] REPLAY mode, pcap=%s\n", replay_pcap.c_str());
-        replay_thread = std::thread([&]() {
-            pcap_replay::Replayer rep;
-            rep.path = replay_pcap;
-            rep.host_point_port = static_cast<uint16_t>(ports.host_point_data);
-            rep.host_imu_port = static_cast<uint16_t>(ports.host_imu_data);
-            rep.on_point = [](LivoxLidarEthernetPacket* p) {
-                on_point_cloud(0, 0, p, nullptr);
-            };
-            rep.on_imu = [](LivoxLidarEthernetPacket* p) {
-                on_imu_data(0, 0, p, nullptr);
-            };
-            rep.on_clock = [](uint64_t pcap_ts_ns) {
-                g_virtual_clock_ns.store(pcap_ts_ns);
-            };
-            rep.running = &g_running;
-            rep.realtime = true;
-            rep.run();
-            // Allow FAST-LIO main loop to drain remaining state before exit.
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            g_running.store(false);
-        });
-    } else {
-        if (!livox_common::init_livox_sdk(host_ip, lidar_ip, ports, debug)) {
-            return 1;
-        }
-
-        SetLivoxLidarPointCloudCallBack(on_point_cloud, nullptr);
-        SetLivoxLidarImuDataCallback(on_imu_data, nullptr);
-        SetLivoxLidarInfoChangeCallback(on_info_change, nullptr);
-
-        if (!LivoxLidarSdkStart()) {
-            fprintf(stderr, "Error: LivoxLidarSdkStart failed\n");
-            LivoxLidarSdkUninit();
-            return 1;
-        }
-
-        if (debug) printf("[fastlio2] SDK started, waiting for device...\n");
-    }
-
-    // Main loop. Rate limiters use `virtual_now()` so replay mode keys scan
-    // boundaries off packet arrival, not wall clock — eliminates the
-    // thread-scheduling-jitter source of non-determinism. Live mode falls
-    // through to steady_clock::now().
+    // Main-loop state. The body lives in `run_main_iter` below so it can be
+    // invoked from either the wall-clock-paced main thread (live) or the
+    // pcap-paced feeder thread (replay), with no race on accumulator
+    // contents in the replay case.
     auto frame_interval = std::chrono::microseconds(
         static_cast<int64_t>(1e6 / g_frequency));
     std::optional<std::chrono::steady_clock::time_point> last_emit;
@@ -599,16 +553,7 @@ int main(int argc, char** argv) {
             static_cast<int64_t>(1e6 / map_freq));
     }
 
-    while (g_running.load()) {
-        auto loop_start = std::chrono::high_resolution_clock::now();
-
-        auto now_opt = virtual_now();
-        if (!now_opt.has_value()) {
-            // Replay: no packets yet. Idle until the feeder seeds the clock.
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        auto now = *now_opt;
+    auto run_main_iter = [&](std::chrono::steady_clock::time_point now) {
         if (!last_emit.has_value()) last_emit = now;
         if (!last_pc_publish.has_value()) last_pc_publish = now;
         if (!last_odom_publish.has_value()) last_odom_publish = now;
@@ -617,7 +562,6 @@ int main(int argc, char** argv) {
         if (now - *last_emit >= frame_interval) {
             std::vector<custom_messages::CustomPoint> points;
             uint64_t frame_start = 0;
-
             {
                 std::lock_guard<std::mutex> lock(g_pc_mutex);
                 if (!g_accumulated_points.empty()) {
@@ -626,9 +570,7 @@ int main(int argc, char** argv) {
                     g_frame_has_timestamp = false;
                 }
             }
-
             if (!points.empty()) {
-                // Build CustomMsg
                 auto lidar_msg = boost::make_shared<custom_messages::CustomMsg>();
                 lidar_msg->header.seq = 0;
                 lidar_msg->header.stamp = custom_messages::Time().fromSec(
@@ -636,14 +578,11 @@ int main(int argc, char** argv) {
                 lidar_msg->header.frame_id = "livox_frame";
                 lidar_msg->timebase = frame_start;
                 lidar_msg->lidar_id = 0;
-                for (int i = 0; i < 3; i++)
-                    lidar_msg->rsvd[i] = 0;
+                for (int i = 0; i < 3; i++) lidar_msg->rsvd[i] = 0;
                 lidar_msg->point_num = static_cast<uli>(points.size());
                 lidar_msg->points = std::move(points);
-
                 fast_lio.feed_lidar(lidar_msg);
             }
-
             last_emit = now;
         }
 
@@ -652,19 +591,15 @@ int main(int argc, char** argv) {
         auto pose = fast_lio.get_pose();
         if (!pose.empty() && (pose[0] != 0.0 || pose[1] != 0.0 || pose[2] != 0.0)) {
             double ts = get_publish_ts();
-
             auto world_cloud = fast_lio.get_world_cloud();
             if (world_cloud && !world_cloud->empty()) {
                 auto filtered = filter_cloud<PointType>(world_cloud, filter_cfg);
-
                 if (!g_lidar_topic.empty() && now - *last_pc_publish >= pc_interval) {
                     publish_lidar(filtered, ts);
                     last_pc_publish = now;
                 }
-
                 if (global_map) {
                     global_map->insert<PointType>(filtered);
-
                     if (now - *last_map_publish >= map_interval) {
                         global_map->prune(
                             static_cast<float>(pose[0]),
@@ -676,17 +611,81 @@ int main(int argc, char** argv) {
                     }
                 }
             }
-
-            if (!g_odometry_topic.empty() && (now - *last_odom_publish >= odom_interval)) {
+            if (!g_odometry_topic.empty() && now - *last_odom_publish >= odom_interval) {
                 publish_odometry(fast_lio.get_odometry(), ts);
                 last_odom_publish = now;
             }
         }
+    };
 
-        // Handle LCM messages
+    // Source of point/IMU packets:
+    //   live mode  -> Livox SDK opens UDP sockets + dispatches via callbacks
+    //                 and the main thread drives run_main_iter at main_freq.
+    //   replay mode -> the feeder thread reads the pcap, calls the same
+    //                  callbacks, and invokes run_main_iter inline after
+    //                  each packet. SDK is not initialized; main thread
+    //                  just keeps LCM alive while the feeder owns processing.
+    std::thread replay_thread;
+    if (g_replay_mode.load()) {
+        if (debug) printf("[fastlio2] REPLAY mode, pcap=%s\n", replay_pcap.c_str());
+        replay_thread = std::thread([&]() {
+            pcap_replay::Replayer rep;
+            rep.path = replay_pcap;
+            rep.host_point_port = static_cast<uint16_t>(ports.host_point_data);
+            rep.host_imu_port = static_cast<uint16_t>(ports.host_imu_data);
+            rep.on_point = [](LivoxLidarEthernetPacket* p) {
+                on_point_cloud(0, 0, p, nullptr);
+            };
+            rep.on_imu = [](LivoxLidarEthernetPacket* p) {
+                on_imu_data(0, 0, p, nullptr);
+            };
+            rep.on_clock = [](uint64_t pcap_ts_ns) {
+                g_virtual_clock_ns.store(pcap_ts_ns);
+            };
+            rep.on_iter = [&]() {
+                auto vn = virtual_now();
+                if (vn.has_value()) run_main_iter(*vn);
+            };
+            rep.running = &g_running;
+            // Serialized replay drives the main loop per packet, so wall
+            // pacing isn't needed for correctness — virtual_clock controls
+            // rate limits. Run as fast as the algorithm can keep up.
+            rep.realtime = false;
+            rep.run();
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            g_running.store(false);
+        });
+    } else {
+        if (!livox_common::init_livox_sdk(host_ip, lidar_ip, ports, debug)) {
+            return 1;
+        }
+        SetLivoxLidarPointCloudCallBack(on_point_cloud, nullptr);
+        SetLivoxLidarImuDataCallback(on_imu_data, nullptr);
+        SetLivoxLidarInfoChangeCallback(on_info_change, nullptr);
+        if (!LivoxLidarSdkStart()) {
+            fprintf(stderr, "Error: LivoxLidarSdkStart failed\n");
+            LivoxLidarSdkUninit();
+            return 1;
+        }
+        if (debug) printf("[fastlio2] SDK started, waiting for device...\n");
+    }
+
+    while (g_running.load()) {
+        if (g_replay_mode.load()) {
+            // Feeder thread owns run_main_iter. Just keep LCM alive and idle.
+            lcm.handleTimeout(20);
+            continue;
+        }
+
+        auto loop_start = std::chrono::high_resolution_clock::now();
+        auto now_opt = virtual_now();
+        if (!now_opt.has_value()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        run_main_iter(*now_opt);
         lcm.handleTimeout(0);
 
-        // Rate control (~5kHz processing)
         auto loop_end = std::chrono::high_resolution_clock::now();
         auto elapsed_ms = std::chrono::duration<double, std::milli>(loop_end - loop_start).count();
         if (elapsed_ms < process_period_ms) {
