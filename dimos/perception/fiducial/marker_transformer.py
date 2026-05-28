@@ -164,16 +164,16 @@ class DetectMarkers(Transformer[Image, Detection3DMarker]):
 
             for corner_set, mid_arr in zip(corners, ids, strict=True):
                 mid = int(mid_arr[0])
-                pose = estimate_marker_pose(
+                marker_pose = estimate_marker_pose(
                     corner_set,
                     self.marker_length_m,
                     self._cam_mtx,
                     self._dist,
                     distortion_model=info.distortion_model,
                 )
-                if pose is None:
+                if marker_pose is None:
                     continue
-                rvec, tvec = pose
+                rvec, tvec = marker_pose
                 t_optical_marker = rvec_tvec_to_transform(
                     rvec,
                     tvec,
