@@ -541,6 +541,7 @@ class BabylonSceneViewerModule(Module):
                 "BabylonViewer: respawn_at requested",
                 x=x,
                 y=y,
+                z=z,
                 has_mujoco_sim=self._mujoco_sim is not None,
             )
             if self._mujoco_sim is not None:

@@ -146,6 +146,13 @@ class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
             "imu_accel",
         ]
     )
+    imu_linvel_sensor_names: list[str] = Field(
+        default_factory=lambda: [
+            "body-linear-vel",
+            "imu-linear-velocity",
+            "imu_linvel",
+        ]
+    )
     engine_mode: Literal["thread", "subprocess"] = "thread"
 
 
@@ -191,6 +198,7 @@ class MujocoSimModule(
         self._shm_ready_signaled = False
         self._imu_gyro_slice: slice | None = None
         self._imu_accel_slice: slice | None = None
+        self._imu_linvel_slice: slice | None = None
         self._imu_base_qpos_slice: slice | None = None
 
     @property
@@ -364,6 +372,9 @@ class MujocoSimModule(
         )
         self._imu_accel_slice = _find_sensor_slice(
             self._engine.model, *self.config.imu_accel_sensor_names, dim=3
+        )
+        self._imu_linvel_slice = _find_sensor_slice(
+            self._engine.model, *self.config.imu_linvel_sensor_names, dim=3
         )
         if self._engine.model.njnt > 0 and int(self._engine.model.jnt_type[0]) == int(
             mujoco.mjtJoint.mjJNT_FREE
@@ -548,14 +559,29 @@ class MujocoSimModule(
             self._last_cmd_vel_time = 0.0
         if self._sim_hooks is not None:
             self._sim_hooks.clear_latched_commands()
+        ground_z = None
+        spawn_z = None if z is None else float(z)
+        if spawn_z is None:
+            ground_z = engine.ground_height_at(float(x), float(y))
+            if ground_z is not None and self.config.spawn_z is not None:
+                spawn_z = ground_z + float(self.config.spawn_z)
+            else:
+                spawn_z = self.config.spawn_z
         applied = engine.request_reset_to(
             spawn_xy=(float(x), float(y)),
-            spawn_z=None if z is None else float(z),
+            spawn_z=spawn_z,
             spawn_yaw=None if yaw is None else float(yaw),
             wait=True,
         )
         logger.info(
-            "MujocoSimModule: respawn_at requested", x=x, y=y, z=z, yaw=yaw, applied=applied
+            "MujocoSimModule: respawn_at requested",
+            x=x,
+            y=y,
+            z=z,
+            ground_z=ground_z,
+            spawn_z=spawn_z,
+            yaw=yaw,
+            applied=applied,
         )
         return applied
 
@@ -619,6 +645,7 @@ class MujocoSimModule(
         if (
             self._imu_gyro_slice is None
             and self._imu_accel_slice is None
+            and self._imu_linvel_slice is None
             and self._imu_base_qpos_slice is None
         ):
             return
@@ -639,8 +666,18 @@ class MujocoSimModule(
             accel = (float(a[0]), float(a[1]), float(a[2]))
         else:
             accel = (0.0, 0.0, 0.0)
+        if self._imu_linvel_slice is not None:
+            v = data.sensordata[self._imu_linvel_slice]
+            linvel = (float(v[0]), float(v[1]), float(v[2]))
+        else:
+            linvel = (0.0, 0.0, 0.0)
 
-        shm.write_imu(quaternion=quat, gyroscope=gyro, accelerometer=accel)
+        shm.write_imu(
+            quaternion=quat,
+            gyroscope=gyro,
+            accelerometer=accel,
+            linear_velocity=linvel,
+        )
         self.imu.publish(
             Imu(
                 ts=time.time(),

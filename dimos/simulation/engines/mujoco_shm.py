@@ -45,8 +45,8 @@ MAX_JOINTS = 64
 _FLOAT_BYTES = 8  # float64
 _INT32_BYTES = 4
 
-# IMU layout: quat (4) + gyro (3) + accel (3) = 10 floats.
-_IMU_FLOATS = 10
+# IMU layout: quat (4) + gyro (3) + accel (3) + linear velocity (3) = 13 floats.
+_IMU_FLOATS = 13
 
 _joint_array_size = MAX_JOINTS * _FLOAT_BYTES  # float64 array
 
@@ -65,7 +65,7 @@ _shm_sizes = {
     "vel_t": _joint_array_size,
     "grp": 2 * _FLOAT_BYTES,  # [gripper_position, gripper_target]
     # Whole-body additions (unused by manipulator path).
-    "imu": _IMU_FLOATS * _FLOAT_BYTES,  # [w,x,y,z, gx,gy,gz, ax,ay,az]
+    "imu": _IMU_FLOATS * _FLOAT_BYTES,  # [w,x,y,z, gx,gy,gz, ax,ay,az, vx,vy,vz]
     "kp_t": _joint_array_size,  # per-joint position-gain target
     "kd_t": _joint_array_size,  # per-joint velocity-gain target
     "tau_t": _joint_array_size,  # per-joint feedforward torque
@@ -266,12 +266,14 @@ class ManipShmWriter:
         quaternion: tuple[float, float, float, float],
         gyroscope: tuple[float, float, float],
         accelerometer: tuple[float, float, float],
+        linear_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> None:
         """Write IMU sample.  Quaternion is (w, x, y, z)."""
         arr = self._array(self.shm.imu, _IMU_FLOATS, np.float64)
         arr[0:4] = quaternion
         arr[4:7] = gyroscope
         arr[7:10] = accelerometer
+        arr[10:13] = linear_velocity
         self._increment_seq(SEQ_IMU)
 
     def read_kp_command(self, num_joints: int) -> NDArray[np.float64] | None:
@@ -404,6 +406,11 @@ class ManipShmReader:
             (float(arr[4]), float(arr[5]), float(arr[6])),
             (float(arr[7]), float(arr[8]), float(arr[9])),
         )
+
+    def read_linear_velocity(self) -> tuple[float, float, float]:
+        """Read the body-frame linear velocity stored with the IMU sample."""
+        arr = np.ndarray((_IMU_FLOATS,), dtype=np.float64, buffer=self.shm.imu.buf)
+        return (float(arr[10]), float(arr[11]), float(arr[12]))
 
     def write_kp_command(self, kp: list[float]) -> None:
         """Per-joint position-gain target.  Switches command mode to PD+τ."""

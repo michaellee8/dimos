@@ -713,6 +713,32 @@ class MujocoEngine(SimulationEngine):
             return True
         return done_event.wait(timeout)
 
+    def ground_height_at(
+        self,
+        x: float,
+        y: float,
+        *,
+        ray_start_z: float = 10.0,
+    ) -> float | None:
+        """Raycast the MuJoCo static scene to find ground height at ``x, y``."""
+        with self._lock:
+            origin = np.array([float(x), float(y), float(ray_start_z)], dtype=np.float64)
+            direction = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+            geom_id = np.array([-1], dtype=np.int32)
+            distance = mujoco.mj_ray(
+                self._model,
+                self._data,
+                origin,
+                direction,
+                None,
+                1,
+                -1,
+                geom_id,
+            )
+            if distance < 0.0:
+                return None
+            return float(ray_start_z - distance)
+
     def enforce_position_targets(self) -> None:
         """Pin modeled joints to their current position targets.
 
