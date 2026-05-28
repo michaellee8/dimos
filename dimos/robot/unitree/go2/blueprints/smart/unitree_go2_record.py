@@ -33,11 +33,6 @@ from dimos.robot.unitree.go2.connection import GO2Connection
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
 from dimos.utils.logging_config import setup_logger
 
-# dimos --no-obstacle-avoidance --robot-ip 192.168.124.177 run unitree-go2-record
-# python -m dimos.mapping.loop_closure.utils.map_rrd recording_go2_mid360 --out map.rrd --camera-hz 0 && rerun map.rrd
-# mv recording_go2_mid360.db NAME
-# uv run python -m dimos.mapping.loop_closure.utils.summary recording_go2_mid360_short_upstairs
-# uv run python -m dimos.mapping.loop_closure.utils.map_rrd recording_go2_mid360_short_upstairs --out map.rrd --camera-hz 0
 logger = setup_logger()
 
 
@@ -91,44 +86,11 @@ unitree_go2_record = autoconnect(
     GO2Connection.blueprint(),
     KeyboardTeleop.blueprint(),
     MovementManager.blueprint(),
-    FastLio2.blueprint(
-        # host_ip=os.getenv("LIDAR_HOST_IP", "192.168.123.164"),
-        # lidar_ip=os.getenv("LIDAR_IP", "192.168.123.120"),
-        # mount=G1.internal_odom_offsets["mid360_link"],
-        # map_freq=1.0,
-        # config="default.yaml",
-    ).remappings(
+    FastLio2.blueprint().remappings(
         [
-            # (FastLio2, "global_map", "global_map_fastlio"),
             (FastLio2, "lidar", "fastlio_lidar"),
             (FastLio2, "odometry", "fastlio_odometry"),
         ]
     ),
     Go2Mid360Memory.blueprint(),
 ).global_config(n_workers=10, robot_model="unitree_go2")
-
-# @ivan if "why not using _FASTLIO_PORTS", b/c there's a timestamp issue:
-# Error in LCM handling: UNIQUE constraint failed: odom.ts
-# Traceback (most recent call last):
-#   File "/Users/jeffhykin/repos/dimos/dimos/protocol/service/lcmservice.py", line 135, in _lcm_loop
-#     self.l.handle_timeout(_LCM_LOOP_TIMEOUT)
-#   File "/Users/jeffhykin/repos/dimos/dimos/protocol/pubsub/impl/lcmpubsub.py", line 122, in <lambda>
-#     lcm_subscription = self.l.subscribe(topic_str, lambda _, msg: callback(msg, topic))
-#                                                                   ^^^^^^^^^^^^^^^^^^^^
-#   File "/Users/jeffhykin/repos/dimos/dimos/protocol/pubsub/encoders.py", line 82, in wrapper_cb
-#     callback(decoded_message, topic)
-#   File "/Users/jeffhykin/repos/dimos/dimos/core/transport.py", line 141, in <lambda>
-#     return self.lcm.subscribe(self.topic, lambda msg, topic: callback(msg))  # type: ignore[arg-type]
-#                                                              ^^^^^^^^^^^^^
-#   File "/Users/jeffhykin/repos/dimos/dimos/memory2/module.py", line 320, in on_msg
-#     stream.append(msg, ts=ts, pose=pose)
-#   File "/Users/jeffhykin/repos/dimos/dimos/memory2/stream.py", line 525, in append
-#     return self._source.append(obs)
-#            ^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "/Users/jeffhykin/repos/dimos/dimos/memory2/backend.py", line 109, in append
-#     row_id = self.metadata_store.insert(obs)
-#              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "/Users/jeffhykin/repos/dimos/dimos/memory2/observationstore/sqlite.py", line 368, in insert
-#     cur = self._conn.execute(
-#           ^^^^^^^^^^^^^^^^^^^
-# sqlite3.IntegrityError: UNIQUE constraint failed: odom.ts
