@@ -105,7 +105,7 @@ dependencies = [
     "structlog>=25.5.0,<26",
     "colorlog==6.9.0",
     # Core Msgs
-    "opencv-python",
+    "opencv-contrib-python",
     "open3d-unofficial-arm>=0.19.0.post9; platform_system == 'Linux' and platform_machine == 'aarch64'",
     "open3d>=0.18.0; platform_system != 'Linux' or platform_machine != 'aarch64'",
     # CLI
@@ -343,7 +343,6 @@ base = [
 
 # All extras except dds and unitree-dds (which require special system setup).
 apriltag = [
-    "opencv-contrib-python==4.10.0.84",
     "reportlab>=4.5.0",
 ]
 
