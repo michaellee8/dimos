@@ -13,6 +13,8 @@
 # limitations under the License.
 
 
+import os
+
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
@@ -31,12 +33,18 @@ mid360_fastlio = autoconnect(
 # packet to fastlio2_pcap/mid360_<timestamp>.pcap (relative to CWD)
 # alongside the normal SLAM pipeline. Needs tcpdump capture capability;
 # the module prints the one-time `sudo setcap` if missing.
+# Override the lidar IP via `LIDAR_IP=192.168.1.157 dimos run ...`.
+# `deterministic_clock=True` makes scan boundaries + publish ts come from
+# packet sensor ts (instead of wall clock) so this recording can be
+# replayed bit-for-bit by demo_replay.
 mid360_fastlio_record = autoconnect(
     FastLio2.blueprint(
         voxel_size=voxel_size,
         map_voxel_size=voxel_size,
         map_freq=-1,
+        lidar_ip=os.getenv("LIDAR_IP", "192.168.1.155"),
         record_pcap=True,
+        deterministic_clock=True,
     ),
     vis_module("rerun"),
 ).global_config(n_workers=2, robot_model="mid360_fastlio2_record")
