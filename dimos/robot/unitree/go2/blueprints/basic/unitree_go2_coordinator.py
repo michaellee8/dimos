@@ -51,13 +51,13 @@ unitree_go2_coordinator = (
                     type="velocity",
                     joint_names=_go2_joints,
                     priority=20,
-                    velocity_zero_on_timeout=False,
+                    params={"zero_on_timeout": False},
                 ),
                 # Closed-loop path follower used by the benchmark tool.
                 # Inactive until the tool RPCs configure(...) + start_path(...).
                 TaskConfig(
-                    name="baseline_follower",
-                    type="baseline_path_follower",
+                    name="path_follower",
+                    type="path_follower",
                     joint_names=_go2_joints,
                     priority=10,
                 ),

@@ -85,10 +85,10 @@ from dimos.utils.path_utils import get_project_root
 # Positions carry [x,y,yaw] (ConnectedTwistBase populates them from
 # adapter.read_odometry). The tool subscribes to this for trajectory
 # recording; the baseline task — which actually drives the robot — lives
-# inside the operator coord (see TaskConfig type="baseline_path_follower"
+# inside the operator coord (see TaskConfig type="path_follower"
 # wired into each robot's coord blueprint).
 _JOINT_STATE_TOPIC = "/coordinator/joint_state"
-_BASELINE_TASK_NAME = "baseline_follower"  # task name in operator coord blueprint
+_PATH_FOLLOWER_TASK_NAME = "path_follower"  # task name in operator coord blueprint
 
 _ARRIVED_STATES = frozenset({"arrived", "completed"})
 _FAILED_STATES = frozenset({"aborted"})
@@ -270,11 +270,11 @@ class _JointStateRecorder:
 
 
 def _invoke(coord: RPCClient, method: str, **kwargs: object) -> object:
-    """RPC `task_invoke(_BASELINE_TASK_NAME, method, kwargs)` on the operator
+    """RPC `task_invoke(_PATH_FOLLOWER_TASK_NAME, method, kwargs)` on the operator
     coord. Centralises the .task_invoke wrapping so the run loop reads as
     plain method calls on a remote object."""
     return coord.task_invoke(
-        task_name=_BASELINE_TASK_NAME,
+        task_name=_PATH_FOLLOWER_TASK_NAME,
         method=method,
         kwargs=dict(kwargs),
     )
@@ -293,7 +293,7 @@ def _run_baseline(
     label: str,
     velocity_profile: list[float] | None = None,
 ) -> tuple[ExecutedTrajectory, NavPath]:
-    """Send a path to the operator coord's ``baseline_follower`` task and
+    """Send a path to the operator coord's ``path_follower`` task and
     wait for it to terminate. The task is pre-added by the operator's
     blueprint (priority 20, claims base/{vx,vy,wz}) so it preempts the
     operator's teleop velocity task while a run is active. We only RPC
@@ -607,7 +607,7 @@ def _prereq_banner(profile: RobotPlantProfile, mode: str) -> None:
         f"Prereqs:\n"
         f"  1. Another terminal: `dimos run {bp}`\n"
         f"     (its ControlCoordinator publishes {_JOINT_STATE_TOPIC} and\n"
-        f"     hosts the `{_BASELINE_TASK_NAME}` task at priority 20).\n"
+        f"     hosts the `{_PATH_FOLLOWER_TASK_NAME}` task at priority 20).\n"
         f"  2. This process: strip /nix/store from LD_LIBRARY_PATH (README).\n"
         f"Each (path,speed): reposition+aim, then ENTER. We RPC the operator\n"
         f"coord to configure + start_path; the task drives the robot from\n"

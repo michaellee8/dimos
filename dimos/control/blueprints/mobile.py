@@ -90,13 +90,13 @@ coordinator_mock_twist_base = ControlCoordinator.blueprint(
             type="velocity",
             joint_names=_base_joints,
             priority=10,
-            velocity_zero_on_timeout=False,
+            params={"zero_on_timeout": False},
         ),
         # Closed-loop path follower used by the benchmark tool.
         # Inactive until the tool RPCs configure(...) + start_path(...).
         TaskConfig(
-            name="baseline_follower",
-            type="baseline_path_follower",
+            name="path_follower",
+            type="path_follower",
             joint_names=_base_joints,
             priority=20,
         ),
@@ -117,13 +117,13 @@ coordinator_flowbase = ControlCoordinator.blueprint(
             type="velocity",
             joint_names=_base_joints,
             priority=10,
-            velocity_zero_on_timeout=False,
+            params={"zero_on_timeout": False},
         ),
         # Closed-loop path follower used by the benchmark tool.
         # Inactive until the tool RPCs configure(...) + start_path(...).
         TaskConfig(
-            name="baseline_follower",
-            type="baseline_path_follower",
+            name="path_follower",
+            type="path_follower",
             joint_names=_base_joints,
             priority=20,
         ),
@@ -146,13 +146,13 @@ coordinator_flowbase_keyboard_teleop = autoconnect(
                 type="velocity",
                 joint_names=_base_joints,
                 priority=20,
-                velocity_zero_on_timeout=False,
+                params={"zero_on_timeout": False},
             ),
             # Closed-loop path follower used by the benchmark tool. Inactive
             # until the tool RPCs configure(...) + start_path(...).
             TaskConfig(
-                name="baseline_follower",
-                type="baseline_path_follower",
+                name="path_follower",
+                type="path_follower",
                 joint_names=_base_joints,
                 priority=10,
             ),
@@ -260,13 +260,13 @@ coordinator_mobile_manip_mock = ControlCoordinator.blueprint(
             type="velocity",
             joint_names=_base_joints,
             priority=10,
-            velocity_zero_on_timeout=False,
+            params={"zero_on_timeout": False},
         ),
         # Closed-loop path follower used by the benchmark tool.
         # Inactive until the tool RPCs configure(...) + start_path(...).
         TaskConfig(
-            name="baseline_follower",
-            type="baseline_path_follower",
+            name="path_follower",
+            type="path_follower",
             joint_names=_base_joints,
             priority=20,
         ),
@@ -285,7 +285,7 @@ coordinator_mobile_manip_mock = ControlCoordinator.blueprint(
 # and /sim/odom (Out); the coord drives /sim/cmd_vel via its
 # transport_lcm adapter (hardware_id="sim"), reads pose back via the
 # same adapter's /sim/odom subscription, and publishes JointState +
-# hosts the baseline_follower task. Drop-in stand-in for a real robot.
+# hosts the path_follower task. Drop-in stand-in for a real robot.
 _sim_joints = make_twist_base_joints("sim")
 
 coordinator_sim_fopdt = (
@@ -306,11 +306,11 @@ coordinator_sim_fopdt = (
                     type="velocity",
                     joint_names=_sim_joints,
                     priority=10,
-                    velocity_zero_on_timeout=False,
+                    params={"zero_on_timeout": False},
                 ),
                 TaskConfig(
-                    name="baseline_follower",
-                    type="baseline_path_follower",
+                    name="path_follower",
+                    type="path_follower",
                     joint_names=_sim_joints,
                     priority=20,
                 ),

@@ -21,7 +21,10 @@ the operator runs a single command:
 
     dimos run unitree-go2-benchmark --module.benchmarker.config <artifact>
 
-instead of the two-terminal CLI flow. Operator UX matches B1
+instead of the two-terminal CLI flow. Defaults are the bare baseline
+arm (ff/profile/rg all OFF) — use a sibling blueprint
+(``unitree-go2-benchmark-rg``) to bake the RG arm in, rather than
+overriding ``--module.benchmarker.rg`` at every invocation. Operator UX matches B1
 (``unitree-go2-characterization``): WASD/QE in the pygame window to
 reposition/aim the robot between runs; ENTER to advance, K to skip,
 Backspace to quit.
@@ -39,7 +42,7 @@ because the per-cell math is one-shot (no live ``e_max`` stream to react
 to), and a Module wrapper would force a cross-process per-tick RPC on
 the controller's hot path. The Benchmarker computes the per-waypoint
 speeds once per path and ships them to the follower as a plain
-``list[float]`` via the new ``BaselinePathFollowerTask.start_path(
+``list[float]`` via the new ``PathFollowerTask.start_path(
 velocity_profile=...)`` kwarg.
 
 Recordings land at

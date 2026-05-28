@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Baseline path-follower ControlTask: production LocalPlanner algorithm,
+"""Path-follower ControlTask: production LocalPlanner algorithm,
 unwrapped from its daemon thread and rebuilt as a passive ControlTask.
 
 Algorithm is a faithful port of
@@ -27,7 +27,7 @@ benchmark battery is obstacle-free.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
@@ -51,6 +51,7 @@ from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.navigation.replanning_a_star.controllers import PController
 from dimos.navigation.replanning_a_star.path_distancer import PathDistancer
+from dimos.protocol.service.spec import BaseConfig
 from dimos.utils.benchmarking.velocity_profile import PathSpeedCap, VelocityProfileConfig
 from dimos.utils.logging_config import setup_logger
 from dimos.utils.trigonometry import angle_diff
@@ -62,7 +63,7 @@ if TYPE_CHECKING:
 
 logger = setup_logger()
 
-BaselineState = Literal[
+PathFollowerState = Literal[
     "idle", "initial_rotation", "path_following", "final_rotation", "arrived", "aborted"
 ]
 
@@ -72,7 +73,7 @@ _UNSET: object = object()
 
 
 @dataclass
-class BaselinePathFollowerTaskConfig:
+class PathFollowerTaskConfig:
     joint_names: list[str] = field(default_factory=lambda: ["base/vx", "base/vy", "base/wz"])
     priority: int = 20
     speed: float = 0.55
@@ -92,19 +93,19 @@ class BaselinePathFollowerTaskConfig:
     velocity_profile_config: VelocityProfileConfig | None = None
 
 
-class BaselinePathFollowerTask(BaseControlTask):
+class PathFollowerTask(BaseControlTask):
     """Production LocalPlanner algorithm as a passive ControlTask."""
 
     def __init__(
         self,
         name: str,
-        config: BaselinePathFollowerTaskConfig,
+        config: PathFollowerTaskConfig,
         global_config: GlobalConfig,
         external_profile_cap: PathSpeedCapProtocol | None = None,
     ) -> None:
         if len(config.joint_names) != 3:
             raise ValueError(
-                f"BaselinePathFollowerTask '{name}' needs 3 joints (vx, vy, wz), "
+                f"PathFollowerTask '{name}' needs 3 joints (vx, vy, wz), "
                 f"got {len(config.joint_names)}"
             )
 
@@ -134,7 +135,7 @@ class BaselinePathFollowerTask(BaseControlTask):
             else None
         )
 
-        self._state: BaselineState = "idle"
+        self._state: PathFollowerState = "idle"
         self._path: Path | None = None
         self._distancer: PathDistancer | None = None
         self._current_odom: PoseStamped | None = None
@@ -239,7 +240,7 @@ class BaselinePathFollowerTask(BaseControlTask):
 
     def on_preempted(self, by_task: str, joints: frozenset[str]) -> None:
         if joints & self._joint_names and self.is_active():
-            logger.warning(f"BaselinePathFollowerTask '{self._name}' preempted by {by_task}")
+            logger.warning(f"PathFollowerTask '{self._name}' preempted by {by_task}")
             self._state = "aborted"
 
     # ------------------------------------------------------------------
@@ -312,7 +313,7 @@ class BaselinePathFollowerTask(BaseControlTask):
 
         if abs(yaw_err) < self._config.orientation_tolerance:
             self._state = "arrived"
-            logger.info(f"BaselinePathFollowerTask '{self._name}' arrived")
+            logger.info(f"PathFollowerTask '{self._name}' arrived")
             return 0.0, 0.0, 0.0
 
         twist = self._controller.rotate(yaw_err)
@@ -342,9 +343,7 @@ class BaselinePathFollowerTask(BaseControlTask):
         as the per-tick cap source.
         """
         if self.is_active():
-            logger.warning(
-                f"BaselinePathFollowerTask '{self._name}': cannot configure while active"
-            )
+            logger.warning(f"PathFollowerTask '{self._name}': cannot configure while active")
             return False
         if speed is not None:
             self._config.speed = speed
@@ -377,7 +376,7 @@ class BaselinePathFollowerTask(BaseControlTask):
         velocity_profile: list[float] | None = None,
     ) -> bool:
         if path is None or len(path.poses) < 2:
-            logger.warning(f"BaselinePathFollowerTask '{self._name}': invalid path")
+            logger.warning(f"PathFollowerTask '{self._name}': invalid path")
             return False
         self._path = path
         self._distancer = PathDistancer(path)
@@ -400,7 +399,7 @@ class BaselinePathFollowerTask(BaseControlTask):
         else:
             if velocity_profile is not None:
                 logger.warning(
-                    f"BaselinePathFollowerTask '{self._name}': velocity_profile length "
+                    f"PathFollowerTask '{self._name}': velocity_profile length "
                     f"{len(velocity_profile)} != path.poses {len(path.poses)}; ignoring"
                 )
             self._velocity_profile = None
@@ -421,7 +420,7 @@ class BaselinePathFollowerTask(BaseControlTask):
             self._state = "initial_rotation"
 
         logger.info(
-            f"BaselinePathFollowerTask '{self._name}' started "
+            f"PathFollowerTask '{self._name}' started "
             f"({len(path.poses)} poses, initial state={self._state})"
         )
         return True
@@ -448,11 +447,38 @@ class BaselinePathFollowerTask(BaseControlTask):
         self._current_odom = None
         return True
 
-    def get_state(self) -> BaselineState:
+    def get_state(self) -> PathFollowerState:
         return self._state
 
 
 __all__ = [
-    "BaselinePathFollowerTask",
-    "BaselinePathFollowerTaskConfig",
+    "PathFollowerTask",
+    "PathFollowerTaskConfig",
 ]
+
+
+class PathFollowerTaskParams(BaseConfig):
+    speed: float = 0.55
+    control_frequency: float = 10.0
+    goal_tolerance: float = 0.2
+    orientation_tolerance: float = 0.35
+    k_angular: float = 0.5
+
+
+def create_task(cfg: Any, hardware: Any) -> PathFollowerTask:
+    from dimos.core.global_config import global_config as _gc
+
+    params = PathFollowerTaskParams.model_validate(cfg.params)
+    return PathFollowerTask(
+        cfg.name,
+        PathFollowerTaskConfig(
+            joint_names=cfg.joint_names,
+            priority=cfg.priority,
+            speed=params.speed,
+            control_frequency=params.control_frequency,
+            goal_tolerance=params.goal_tolerance,
+            orientation_tolerance=params.orientation_tolerance,
+            k_angular=params.k_angular,
+        ),
+        global_config=_gc,
+    )
