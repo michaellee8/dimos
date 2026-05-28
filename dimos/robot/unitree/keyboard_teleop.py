@@ -86,6 +86,7 @@ class KeyboardTeleop(Module):
         boost_multiplier: float = DEFAULT_BOOST_MULTIPLIER,
         slow_multiplier: float = DEFAULT_SLOW_MULTIPLIER,
         publish_only_when_active: bool = False,
+        disable_movement: bool = False,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -99,6 +100,11 @@ class KeyboardTeleop(Module):
         # Lets the teleop coexist with another /cmd_vel publisher
         # (e.g. the SI / benchmark tools) instead of flooding zeros.
         self.publish_only_when_active = publish_only_when_active
+        # When True, WASD/QE movement keys are no-ops and the window is a
+        # pure 0-9 e_max slider. Used by blueprints that drive cmd_vel
+        # from another source (e.g. nav-stack-driven precision controller)
+        # but still want the operator's live e_max input.
+        self.disable_movement = disable_movement
         self._was_active = False
 
     @rpc
@@ -172,23 +178,27 @@ class KeyboardTeleop(Module):
             twist.linear = Vector3(0, 0, 0)
             twist.angular = Vector3(0, 0, 0)
 
-            # Forward/backward (W/S)
-            if pygame.K_w in self._keys_held:
-                twist.linear.x = self.linear_speed
-            if pygame.K_s in self._keys_held:
-                twist.linear.x = -self.linear_speed
+            # Movement keys (WASD/QE) — guarded by disable_movement so the
+            # window can run as a pure e_max slider (0-9 keys stay live in
+            # the KEYDOWN handler above).
+            if not self.disable_movement:
+                # Forward/backward (W/S)
+                if pygame.K_w in self._keys_held:
+                    twist.linear.x = self.linear_speed
+                if pygame.K_s in self._keys_held:
+                    twist.linear.x = -self.linear_speed
 
-            # Strafe left/right (Q/E)
-            if pygame.K_q in self._keys_held:
-                twist.linear.y = self.linear_speed
-            if pygame.K_e in self._keys_held:
-                twist.linear.y = -self.linear_speed
+                # Strafe left/right (Q/E)
+                if pygame.K_q in self._keys_held:
+                    twist.linear.y = self.linear_speed
+                if pygame.K_e in self._keys_held:
+                    twist.linear.y = -self.linear_speed
 
-            # Turning (A/D)
-            if pygame.K_a in self._keys_held:
-                twist.angular.z = self.angular_speed
-            if pygame.K_d in self._keys_held:
-                twist.angular.z = -self.angular_speed
+                # Turning (A/D)
+                if pygame.K_a in self._keys_held:
+                    twist.angular.z = self.angular_speed
+                if pygame.K_d in self._keys_held:
+                    twist.angular.z = -self.angular_speed
 
             # Apply speed modifiers (Shift = boost, Ctrl = slow)
             speed_multiplier = 1.0
@@ -259,13 +269,21 @@ class KeyboardTeleop(Module):
             pygame.draw.circle(self._screen, (0, 255, 0), (450, 30), _INDICATOR_RADIUS)
 
         y_pos = 280
-        help_texts = [
-            "WS: Move | AD: Turn | QE: Strafe",
-            "Shift: Boost | Ctrl: Slow",
-            "Space: E-Stop | ESC: Quit",
-            "Enter: Advance | K: Skip | Backspace: Quit (tools)",
-            "0-9: e_max corridor (0.0-0.9 m, for RG)",
-        ]
+        if self.disable_movement:
+            help_texts = [
+                "Movement disabled (e_max slider mode)",
+                "Space: E-Stop | ESC: Quit",
+                "Enter: Advance | K: Skip | Backspace: Quit (tools)",
+                "0-9: e_max corridor (0.0-0.9 m, for RG)",
+            ]
+        else:
+            help_texts = [
+                "WS: Move | AD: Turn | QE: Strafe",
+                "Shift: Boost | Ctrl: Slow",
+                "Space: E-Stop | ESC: Quit",
+                "Enter: Advance | K: Skip | Backspace: Quit (tools)",
+                "0-9: e_max corridor (0.0-0.9 m, for RG)",
+            ]
         for text in help_texts:
             surf = self._font.render(text, True, _HELP_TEXT_COLOR)
             self._screen.blit(surf, (20, y_pos))
