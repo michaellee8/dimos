@@ -61,6 +61,12 @@ class TestPGOConfig:
             with pytest.raises(Exception):
                 PGOConfig(**{dead: True})
 
+    def test_kwargs_typed_dict_matches_config(self) -> None:
+        """`PGOKwargs` must mirror every `PGOConfig` field 1:1."""
+        from dimos.mapping.loop_closure.pgo import PGOKwargs
+
+        assert set(PGOConfig.model_fields.keys()) == set(PGOKwargs.__annotations__.keys())
+
 
 class TestTransformHelpers:
     def test_observation_normalizes_transform_pose(self) -> None:
@@ -108,7 +114,7 @@ class TestTransformHelpers:
         R = _random_R(rng)
         t = rng.uniform(-3, 3, size=3)
         p = gtsam.Pose3(gtsam.Rot3(R), gtsam.Point3(t))
-        tf = _pose3_to_transform(p, ts=7.89)
+        tf = _pose3_to_transform(p, ts=7.89, frame_id="world", child_frame_id="body")
         np.testing.assert_allclose(tf.rotation.to_rotation_matrix(), R, atol=1e-10)
         np.testing.assert_allclose(tf.translation.to_numpy(), t, atol=1e-10)
 

@@ -105,6 +105,17 @@ class PGOConfig(BaseConfig):
     max_icp_iterations: int = 50
     max_icp_correspondence_dist: float = 1.0
 
+    # Noise variances on the GTSAM between-factor (Pose3 is [rx, ry, rz, x, y, z]).
+    # Defaults are tuned for a Go2-class ground robot: tight z because the
+    # platform is planar; isotropic rotation. Loosen on aerial / 6-DoF arms.
+    odom_rot_var: float = 1e-6
+    odom_trans_var_xy: float = 1e-4
+    odom_trans_var_z: float = 1e-6
+
+    # Loop-closure rotation variance. Translation variance is supplied
+    # per-edge from ICP fitness, floored at 0.01 (sigma_trans ~ 10 cm).
+    loop_rot_var: float = 0.05
+
 
 class PGOKwargs(TypedDict, total=False):
     """Typed kwargs for `pgo_keyframes`; mirrors `PGOConfig` fields."""
@@ -122,6 +133,10 @@ class PGOKwargs(TypedDict, total=False):
     min_loop_detect_duration: float
     max_icp_iterations: int
     max_icp_correspondence_dist: float
+    odom_rot_var: float
+    odom_trans_var_xy: float
+    odom_trans_var_z: float
+    loop_rot_var: float
 
 
 @dataclass(frozen=True)
@@ -344,7 +359,12 @@ class _PGO:
         # Unregister: lift world-frame scan back into body frame using its
         # odom pose, so PGO can re-project it via the optimized pose later.
         body_cloud = world_cloud.transform(
-            _pose3_to_transform(local_pose.inverse(), ts=ts)
+            _pose3_to_transform(
+                local_pose.inverse(),
+                ts=ts,
+                frame_id=FRAME_BODY,
+                child_frame_id=FRAME_WORLD_RAW,
+            )
         ).voxel_downsample(self._cfg.submap_resolution)
         self._add_keyframe(local_pose, ts, body_cloud)
         self._search_for_loops()
@@ -432,8 +452,18 @@ class _PGO:
         else:
             last_local = self._key_poses[-1].local
             between = last_local.inverse().compose(local_pose)
+            cfg = self._cfg
             noise = gtsam.noiseModel.Diagonal.Variances(
-                np.array([1e-6, 1e-6, 1e-6, 1e-4, 1e-4, 1e-6])
+                np.array(
+                    [
+                        cfg.odom_rot_var,
+                        cfg.odom_rot_var,
+                        cfg.odom_rot_var,
+                        cfg.odom_trans_var_xy,
+                        cfg.odom_trans_var_xy,
+                        cfg.odom_trans_var_z,
+                    ]
+                )
             )
             self._graph.add(gtsam.BetweenFactorPose3(idx - 1, idx, between, noise))
 
@@ -452,12 +482,22 @@ class _PGO:
         if lo > hi:
             return PointCloud2()
         cloud = self._key_poses[lo].body_cloud.transform(
-            _pose3_to_transform(self._key_poses[lo].optimized, ts=self._key_poses[lo].timestamp)
+            _pose3_to_transform(
+                self._key_poses[lo].optimized,
+                ts=self._key_poses[lo].timestamp,
+                frame_id=FRAME_WORLD_CORRECTED,
+                child_frame_id=FRAME_BODY,
+            )
         )
         for i in range(lo + 1, hi + 1):
             kp = self._key_poses[i]
             cloud = cloud + kp.body_cloud.transform(
-                _pose3_to_transform(kp.optimized, ts=kp.timestamp)
+                _pose3_to_transform(
+                    kp.optimized,
+                    ts=kp.timestamp,
+                    frame_id=FRAME_WORLD_CORRECTED,
+                    child_frame_id=FRAME_BODY,
+                )
             )
         return cloud.voxel_downsample(self._cfg.submap_resolution)
 
@@ -550,7 +590,7 @@ class _PGO:
             # — loops shouldn't be trusted to fix rotation tightly without
             # normals + p2plane.
             trans_var = max(0.01, float(pair.score))  # >= sigma_trans = 10 cm
-            rot_var = 0.05  # sigma_rot ~ 13 deg
+            rot_var = self._cfg.loop_rot_var
             noise = gtsam.noiseModel.Diagonal.Variances(
                 np.array([rot_var, rot_var, rot_var, trans_var, trans_var, trans_var])
             )
@@ -578,8 +618,8 @@ def _pose3_to_transform(
     pose: gtsam.Pose3,
     *,
     ts: float,
-    frame_id: str = "",
-    child_frame_id: str = "",
+    frame_id: str,
+    child_frame_id: str,
 ) -> Transform:
     """PGO-internal: build a Transform from a Pose3."""
     t = np.asarray(pose.translation())
@@ -653,11 +693,7 @@ def _icp(
     if float(result.fitness) == 0.0:
         return Transform.identity(), float("inf")
 
-    tf = Transform.from_matrix(
-        result.transformation.numpy(),
-        ts=source.ts,
-        frame_id=FRAME_WORLD_CORRECTED,
-        child_frame_id=FRAME_WORLD_RAW,
-    )
+    # Frames intentionally unlabeled: caller only reads .to_matrix().
+    tf = Transform.from_matrix(result.transformation.numpy(), ts=source.ts)
     rmse = float(result.inlier_rmse)
     return tf, rmse * rmse
