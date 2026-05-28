@@ -86,7 +86,9 @@ unitree_go2_record = autoconnect(
     GO2Connection.blueprint(),
     KeyboardTeleop.blueprint(),
     MovementManager.blueprint(),
-    FastLio2.blueprint().remappings(
+    FastLio2.blueprint(
+        frame_id="world",
+    ).remappings(
         [
             (FastLio2, "lidar", "fastlio_lidar"),
             (FastLio2, "odometry", "fastlio_odometry"),
