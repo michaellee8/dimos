@@ -207,15 +207,15 @@ def keyframes_to_corrections(keyframes: Stream[Keyframe]) -> Stream[Transform]:
 def make_interpolator(corrections: Stream[Transform]) -> Callable[[float], Transform]:
     """Materialize corrections once; return a fast ts -> Transform lookup."""
     ts_list: list[float] = []
-    R_list: list[np.ndarray] = []
+    quat_list: list[np.ndarray] = []
     t_list: list[np.ndarray] = []
     for obs in corrections:
-        R, t = _r_t_from_transform(obs.data)
+        tf = obs.data
         # obs.ts is authoritative; obs.data.ts can be mutated by Transform's
         # ts=0.0 -> time.time() fallback in its constructor.
         ts_list.append(obs.ts)
-        R_list.append(R)
-        t_list.append(t)
+        quat_list.append(tf.rotation.to_numpy())
+        t_list.append(tf.translation.to_numpy())
 
     if not ts_list:
         raise ValueError("empty corrections stream")
@@ -224,13 +224,12 @@ def make_interpolator(corrections: Stream[Transform]) -> Callable[[float], Trans
     # general path handles it; clip-to-endpoints behavior is unchanged.
     if len(ts_list) == 1:
         ts_list.append(ts_list[0] + 1e-6)
-        R_list.append(R_list[0])
+        quat_list.append(quat_list[0])
         t_list.append(t_list[0])
 
     ts_arr = np.array(ts_list)
-    R_stack = np.stack(R_list)
     t_stack = np.stack(t_list)
-    slerp = Slerp(ts_arr, Rotation.from_matrix(R_stack))
+    slerp = Slerp(ts_arr, Rotation.from_quat(np.stack(quat_list)))
 
     def interp(ts: float) -> Transform:
         ts_clip = float(np.clip(ts, ts_arr[0], ts_arr[-1]))
@@ -244,7 +243,13 @@ def make_interpolator(corrections: Stream[Transform]) -> Callable[[float], Trans
             t_lo, t_hi = ts_arr[idx - 1], ts_arr[idx]
             alpha = (ts_clip - t_lo) / (t_hi - t_lo) if t_hi > t_lo else 0.0
             t = (1 - alpha) * t_stack[idx - 1] + alpha * t_stack[idx]
-        return _transform_from_r_t(R, t, ts=float(ts))
+        return Transform(
+            translation=Vector3(t),
+            rotation=Quaternion.from_rotation_matrix(R),
+            frame_id=FRAME_WORLD_CORRECTED,
+            child_frame_id=FRAME_WORLD_RAW,
+            ts=float(ts),
+        )
 
     return interp
 
@@ -268,28 +273,10 @@ def apply_corrections(
                 continue
             raw_tf = Transform.from_pose(FRAME_BODY, ps)
             # Transform.__add__ composes: (T_corr + T_raw) applies T_corr after T_raw.
-            # Observation normalizes Transform back to 7-tuple via __post_init__.
             corrected = interp(obs.ts) + raw_tf
             yield obs.derive(data=obs.data, pose=corrected)
 
     return stream.transform(xf)
-
-
-def _r_t_from_transform(tf: Transform) -> tuple[np.ndarray, np.ndarray]:
-    q = tf.rotation
-    R = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
-    t = np.array([tf.translation.x, tf.translation.y, tf.translation.z])
-    return R, t
-
-
-def _transform_from_r_t(R: np.ndarray, t: np.ndarray, *, ts: float) -> Transform:
-    return Transform(
-        translation=Vector3(float(t[0]), float(t[1]), float(t[2])),
-        rotation=Quaternion.from_rotation_matrix(R),
-        frame_id=FRAME_WORLD_CORRECTED,
-        child_frame_id=FRAME_WORLD_RAW,
-        ts=ts,
-    )
 
 
 def _obs_to_pose3(obs: Observation[Any]) -> gtsam.Pose3:
@@ -669,9 +656,11 @@ def _icp(
     if float(result.fitness) == 0.0:
         return Transform.identity(), float("inf")
 
-    T_mat = result.transformation.numpy()
+    tf = Transform.from_matrix(
+        result.transformation.numpy(),
+        ts=source.ts,
+        frame_id=FRAME_WORLD_CORRECTED,
+        child_frame_id=FRAME_WORLD_RAW,
+    )
     rmse = float(result.inlier_rmse)
-    return _transform_from_r_t(T_mat[:3, :3], T_mat[:3, 3], ts=source.ts), rmse * rmse
-    T_mat = result.transformation.numpy()
-    rmse = float(result.inlier_rmse)
-    return _transform_from_r_t(T_mat[:3, :3], T_mat[:3, 3], ts=source.ts), rmse * rmse
+    return tf, rmse * rmse

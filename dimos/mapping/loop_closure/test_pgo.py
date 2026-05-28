@@ -25,8 +25,6 @@ from dimos.mapping.loop_closure.pgo import (
     PGOConfig,
     _obs_to_pose3,
     _pose3_to_transform,
-    _r_t_from_transform,
-    _transform_from_r_t,
     apply_corrections,
     keyframes_to_corrections,
     make_interpolator,
@@ -67,16 +65,6 @@ class TestPGOConfig:
 
 
 class TestTransformHelpers:
-    def test_r_t_transform_roundtrip(self) -> None:
-        rng = np.random.default_rng(0)
-        R_in = _random_R(rng)
-        t_in = rng.uniform(-5, 5, size=3)
-        tf = _transform_from_r_t(R_in, t_in, ts=1.23)
-        R_out, t_out = _r_t_from_transform(tf)
-        np.testing.assert_allclose(R_out, R_in, atol=1e-10)
-        np.testing.assert_allclose(t_out, t_in, atol=1e-10)
-        assert tf.ts == 1.23
-
     def test_observation_normalizes_transform_pose(self) -> None:
         """Constructing/deriving with pose=Transform should coerce to 7-tuple."""
         from dimos.memory2.type.observation import Observation
@@ -109,7 +97,7 @@ class TestTransformHelpers:
         rng = np.random.default_rng(4)
         R = _random_R(rng)
         t = rng.uniform(-3, 3, size=3)
-        tf = _transform_from_r_t(R, t, ts=1.0)
+        tf = Transform(translation=Vector3(t), rotation=Quaternion.from_rotation_matrix(R), ts=1.0)
         obs: Observation[int] = Observation(id=0, ts=1.0, pose=tf, _data=0)
         p = _obs_to_pose3(obs)
         np.testing.assert_allclose(p.rotation().matrix(), R, atol=1e-9)
@@ -123,9 +111,8 @@ class TestTransformHelpers:
         t = rng.uniform(-3, 3, size=3)
         p = gtsam.Pose3(gtsam.Rot3(R), gtsam.Point3(t))
         tf = _pose3_to_transform(p, ts=7.89)
-        R_out, t_out = _r_t_from_transform(tf)
-        np.testing.assert_allclose(R_out, R, atol=1e-10)
-        np.testing.assert_allclose(t_out, t, atol=1e-10)
+        np.testing.assert_allclose(tf.rotation.to_rotation_matrix(), R, atol=1e-10)
+        np.testing.assert_allclose(tf.translation.to_numpy(), t, atol=1e-10)
 
     def test_pose3_to_transform_with_frames(self) -> None:
         import gtsam
@@ -137,9 +124,8 @@ class TestTransformHelpers:
         tf = _pose3_to_transform(p, ts=1.0, frame_id="world_corrected", child_frame_id="body")
         assert tf.frame_id == "world_corrected"
         assert tf.child_frame_id == "body"
-        R_out, t_out = _r_t_from_transform(tf)
-        np.testing.assert_allclose(R_out, R, atol=1e-10)
-        np.testing.assert_allclose(t_out, t, atol=1e-10)
+        np.testing.assert_allclose(tf.rotation.to_rotation_matrix(), R, atol=1e-10)
+        np.testing.assert_allclose(tf.translation.to_numpy(), t, atol=1e-10)
 
 
 def _make_lidar_stream(n_frames: int = 12, points_per_frame: int = 500) -> Stream[PointCloud2]:
@@ -213,8 +199,11 @@ class TestInterpolator:
 
     def test_single_keyframe_returns_constant(self) -> None:
         R = Rotation.from_euler("z", np.pi / 4).as_matrix()
-        t = np.array([1.0, 2.0, 3.0])
-        only = _transform_from_r_t(R, t, ts=10.0)
+        only = Transform(
+            translation=Vector3(1.0, 2.0, 3.0),
+            rotation=Quaternion.from_rotation_matrix(R),
+            ts=10.0,
+        )
         interp = make_interpolator(_make_corrections([only]))
         for query_ts in (0.0, 10.0, 100.0):
             out = interp(query_ts)
@@ -225,9 +214,8 @@ class TestInterpolator:
     def test_out_of_range_clips_to_endpoints(self) -> None:
         # Note: Transform's constructor maps ts=0.0 -> time.time(); use ts>0
         # so test timestamps are deterministic.
-        R = np.eye(3)
-        a = _transform_from_r_t(R, np.array([0.0, 0.0, 0.0]), ts=1.0)
-        b = _transform_from_r_t(R, np.array([10.0, 0.0, 0.0]), ts=11.0)
+        a = Transform(translation=Vector3(0.0, 0.0, 0.0), ts=1.0)
+        b = Transform(translation=Vector3(10.0, 0.0, 0.0), ts=11.0)
         # _make_corrections uses tf.ts; obs.ts ends up the same.
         mem = MemoryStore()
         stream: Stream[Transform] = mem.stream("corrections", Transform)
@@ -257,8 +245,8 @@ class TestApplyCorrections:
             )
 
         # Constant correction: translate by (5, 0, 0), identity rotation.
-        c_a = _transform_from_r_t(np.eye(3), np.array([5.0, 0.0, 0.0]), ts=1.0)
-        c_b = _transform_from_r_t(np.eye(3), np.array([5.0, 0.0, 0.0]), ts=3.0)
+        c_a = Transform(translation=Vector3(5.0, 0.0, 0.0), ts=1.0)
+        c_b = Transform(translation=Vector3(5.0, 0.0, 0.0), ts=3.0)
         mem2 = MemoryStore()
         corr: Stream[Transform] = mem2.stream("corrections", Transform)
         corr.append(c_a, ts=1.0)
@@ -280,8 +268,8 @@ class TestApplyCorrections:
             ts=1.0,
             pose=None,
         )
-        c_a = _transform_from_r_t(np.eye(3), np.array([5.0, 0.0, 0.0]), ts=1.0)
-        c_b = _transform_from_r_t(np.eye(3), np.array([5.0, 0.0, 0.0]), ts=2.0)
+        c_a = Transform(translation=Vector3(5.0, 0.0, 0.0), ts=1.0)
+        c_b = Transform(translation=Vector3(5.0, 0.0, 0.0), ts=2.0)
         mem2 = MemoryStore()
         corr: Stream[Transform] = mem2.stream("corrections", Transform)
         corr.append(c_a, ts=1.0)
