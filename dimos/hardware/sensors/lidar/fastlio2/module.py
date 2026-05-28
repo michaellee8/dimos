@@ -156,6 +156,11 @@ class FastLio2Config(NativeModuleConfig):
     # comfortable. Drop to 200 for header-only captures.
     record_pcap_snaplen: int = 2048
 
+    # Force single-threaded FAST-LIO via OMP_NUM_THREADS=1. Eliminates the
+    # OpenMP-reduction-order source of non-determinism for record + replay
+    # workflows; live use leaves this False to keep multi-thread perf.
+    single_threaded: bool = False
+
     # init_pose is computed from mount; config is resolved to config_path
     init_pose: list[float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     cli_exclude: frozenset[str] = frozenset(
@@ -166,6 +171,7 @@ class FastLio2Config(NativeModuleConfig):
             "record_pcap_path",
             "record_pcap_iface",
             "record_pcap_snaplen",
+            "single_threaded",
         }
     )
 
@@ -186,6 +192,8 @@ class FastLio2Config(NativeModuleConfig):
             m.orientation.z,
             m.orientation.w,
         ]
+        if self.single_threaded:
+            self.extra_env = {**self.extra_env, "OMP_NUM_THREADS": "1"}
 
 
 class FastLio2(NativeModule, perception.Lidar, perception.Odometry, mapping.GlobalPointcloud):

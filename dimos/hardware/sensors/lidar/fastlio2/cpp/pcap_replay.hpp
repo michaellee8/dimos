@@ -137,8 +137,6 @@ struct Replayer {
                 }
             }
 
-            if (on_clock) on_clock(pcap_ts_ns);
-
             if (dst_port == host_point_port) {
                 if (on_point) on_point(livox_pkt);
                 pts++;
@@ -148,6 +146,10 @@ struct Replayer {
             } else {
                 other++;
             }
+            // Advance the virtual clock AFTER the payload has been added to
+            // accumulators. Reverse order would let the main-loop thread see
+            // the clock advance and emit a scan that's missing this packet.
+            if (on_clock) on_clock(pcap_ts_ns);
         }
 
         printf("[replay] done: %zu pcap records (point=%zu imu=%zu other=%zu)\n",

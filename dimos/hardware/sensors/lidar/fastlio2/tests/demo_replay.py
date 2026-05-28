@@ -130,6 +130,7 @@ def main() -> int:
             map_voxel_size=_VOXEL_SIZE,
             map_freq=-1,
             replay_pcap=pcap,
+            single_threaded=True,
         ),
         FastLio2ReplayRecorder.blueprint(db_path=str(db_path)),
     ).global_config(n_workers=2, robot_model="mid360_fastlio2_replay")

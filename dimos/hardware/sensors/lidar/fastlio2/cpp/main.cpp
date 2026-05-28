@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -73,6 +74,20 @@ static double get_publish_ts() {
     }
     return std::chrono::duration<double>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+// Virtualized clock for the main loop's frame/publish rate limiters. In
+// replay mode this returns a time_point derived from g_virtual_clock_ns so
+// scan boundaries are determined by packet arrival, not by wall-clock thread
+// scheduling jitter. Returns nullopt if replay hasn't yet seen a packet
+// (caller should skip rate-limit checks in that case).
+static std::optional<std::chrono::steady_clock::time_point> virtual_now() {
+    if (g_replay_mode.load()) {
+        uint64_t ns = g_virtual_clock_ns.load();
+        if (ns == 0) return std::nullopt;
+        return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ns));
+    }
+    return std::chrono::steady_clock::now();
 }
 
 static std::string g_lidar_topic;
@@ -559,24 +574,25 @@ int main(int argc, char** argv) {
         if (debug) printf("[fastlio2] SDK started, waiting for device...\n");
     }
 
-    // Main loop
+    // Main loop. Rate limiters use `virtual_now()` so replay mode keys scan
+    // boundaries off packet arrival, not wall clock — eliminates the
+    // thread-scheduling-jitter source of non-determinism. Live mode falls
+    // through to steady_clock::now().
     auto frame_interval = std::chrono::microseconds(
         static_cast<int64_t>(1e6 / g_frequency));
-    auto last_emit = std::chrono::steady_clock::now();
+    std::optional<std::chrono::steady_clock::time_point> last_emit;
     const double process_period_ms = 1000.0 / main_freq;
 
-    // Rate limiters for output publishing
     auto pc_interval = std::chrono::microseconds(
         static_cast<int64_t>(1e6 / pointcloud_freq));
     auto odom_interval = std::chrono::microseconds(
         static_cast<int64_t>(1e6 / odom_freq));
-    auto last_pc_publish = std::chrono::steady_clock::now();
-    auto last_odom_publish = std::chrono::steady_clock::now();
+    std::optional<std::chrono::steady_clock::time_point> last_pc_publish;
+    std::optional<std::chrono::steady_clock::time_point> last_odom_publish;
 
-    // Global voxel map (only if map topic is configured AND map_freq > 0)
     std::unique_ptr<VoxelMap> global_map;
     std::chrono::microseconds map_interval{0};
-    auto last_map_publish = std::chrono::steady_clock::now();
+    std::optional<std::chrono::steady_clock::time_point> last_map_publish;
     if (!g_map_topic.empty() && map_freq > 0.0f) {
         global_map = std::make_unique<VoxelMap>(map_voxel_size, map_max_range);
         map_interval = std::chrono::microseconds(
@@ -586,9 +602,19 @@ int main(int argc, char** argv) {
     while (g_running.load()) {
         auto loop_start = std::chrono::high_resolution_clock::now();
 
-        // At frame rate: build CustomMsg from accumulated points and feed to FAST-LIO
-        auto now = std::chrono::steady_clock::now();
-        if (now - last_emit >= frame_interval) {
+        auto now_opt = virtual_now();
+        if (!now_opt.has_value()) {
+            // Replay: no packets yet. Idle until the feeder seeds the clock.
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
+        auto now = *now_opt;
+        if (!last_emit.has_value()) last_emit = now;
+        if (!last_pc_publish.has_value()) last_pc_publish = now;
+        if (!last_odom_publish.has_value()) last_odom_publish = now;
+        if (global_map && !last_map_publish.has_value()) last_map_publish = now;
+
+        if (now - *last_emit >= frame_interval) {
             std::vector<custom_messages::CustomPoint> points;
             uint64_t frame_start = 0;
 
@@ -621,10 +647,8 @@ int main(int argc, char** argv) {
             last_emit = now;
         }
 
-        // Run FAST-LIO processing step (high frequency)
         fast_lio.process();
 
-        // Check for new results and accumulate/publish (rate-limited)
         auto pose = fast_lio.get_pose();
         if (!pose.empty() && (pose[0] != 0.0 || pose[1] != 0.0 || pose[2] != 0.0)) {
             double ts = get_publish_ts();
@@ -633,17 +657,15 @@ int main(int argc, char** argv) {
             if (world_cloud && !world_cloud->empty()) {
                 auto filtered = filter_cloud<PointType>(world_cloud, filter_cfg);
 
-                // Per-scan publish at pointcloud_freq
-                if (!g_lidar_topic.empty() && now - last_pc_publish >= pc_interval) {
+                if (!g_lidar_topic.empty() && now - *last_pc_publish >= pc_interval) {
                     publish_lidar(filtered, ts);
                     last_pc_publish = now;
                 }
 
-                // Global map: insert, prune, and publish at map_freq
                 if (global_map) {
                     global_map->insert<PointType>(filtered);
 
-                    if (now - last_map_publish >= map_interval) {
+                    if (now - *last_map_publish >= map_interval) {
                         global_map->prune(
                             static_cast<float>(pose[0]),
                             static_cast<float>(pose[1]),
@@ -655,8 +677,7 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Publish odometry (rate-limited to odom_freq)
-            if (!g_odometry_topic.empty() && (now - last_odom_publish >= odom_interval)) {
+            if (!g_odometry_topic.empty() && (now - *last_odom_publish >= odom_interval)) {
                 publish_odometry(fast_lio.get_odometry(), ts);
                 last_odom_publish = now;
             }
