@@ -58,23 +58,6 @@ if TYPE_CHECKING:
 logger = setup_logger()
 
 
-def _pose_tuple_to_transform(
-    pose: tuple[float, float, float, float, float, float, float],
-    *,
-    frame_id: str,
-    child_frame_id: str,
-    ts: float,
-) -> Transform:
-    x, y, z, qx, qy, qz, qw = pose
-    return Transform(
-        translation=Vector3(x, y, z),
-        rotation=Quaternion(qx, qy, qz, qw),
-        frame_id=frame_id,
-        child_frame_id=child_frame_id,
-        ts=ts,
-    )
-
-
 def _average_marker_pose(
     buffer: TimestampedBufferCollection[Detection3DMarker],
 ) -> tuple[Vector3, Quaternion]:
@@ -146,7 +129,8 @@ class DetectMarkers(Transformer[Image, Detection3DMarker]):
         marker_size = Vector3(self.marker_length_m, self.marker_length_m, 0.0)
 
         for obs in upstream:
-            if obs.pose is None:
+            pose = obs.pose
+            if pose is None:
                 logger.debug("DetectMarkers: obs %s has no .pose; skipping", obs.id)
                 continue
 
@@ -170,8 +154,9 @@ class DetectMarkers(Transformer[Image, Detection3DMarker]):
             if ids is None or len(ids) == 0:
                 continue
 
-            t_world_optical = _pose_tuple_to_transform(
-                obs.pose,
+            t_world_optical = Transform(
+                translation=pose.position,
+                rotation=pose.orientation,
                 frame_id=self.world_frame,
                 child_frame_id="optical",
                 ts=obs.ts,
