@@ -159,7 +159,6 @@ class FastLio2Config(NativeModuleConfig):
             "record_pcap_path",
             "record_pcap_iface",
             "record_pcap_snaplen",
-            "single_threaded",
         }
     )
 
@@ -180,8 +179,6 @@ class FastLio2Config(NativeModuleConfig):
             m.orientation.z,
             m.orientation.w,
         ]
-        if self.single_threaded:
-            self.extra_env = {**self.extra_env, "OMP_NUM_THREADS": "1"}
 
 
 class FastLio2(NativeModule, perception.Lidar, perception.Odometry, mapping.GlobalPointcloud):
@@ -236,8 +233,6 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry, mapping.Glob
         path.parent.mkdir(parents=True, exist_ok=True)
         # Auto-pair the first-packet marker with the pcap so replay can
         # discover it. Skip if the caller already set it explicitly.
-        if cfg.first_packet_marker is None:
-            cfg.first_packet_marker = path.with_suffix(path.suffix + ".first.ns")
 
         host_ports = [
             cfg.host_cmd_data_port,
