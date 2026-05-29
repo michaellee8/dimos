@@ -331,7 +331,6 @@ class SqliteObservationStore(ObservationStore[T]):
                 self._tag_indexes.add(key)
 
     def insert(self, obs: Observation[T]) -> int:
-        # Observation already normalizes pose to the storage 7-tuple — skip _decompose_pose.
         pose = obs.pose_tuple
         tags_json = json.dumps(obs.tags) if obs.tags else "{}"
         value = obs._data if isinstance(obs._data, (int, float)) else None
