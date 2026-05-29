@@ -7,7 +7,7 @@
 
 use crate::adjacency::CsrAdjacency;
 use crate::dijkstra::dijkstra;
-use crate::edges::PlannerGraph;
+use crate::edges::{walk_preds_to_source, PlannerGraph};
 use crate::voxel::{surface_point_xyz, VoxelKey};
 
 /// Snap a query pose to the nearest node by 3D Euclidean distance, rejecting
@@ -130,16 +130,6 @@ fn assemble_waypoints(
     }
     waypoints.push(goal_pose);
     waypoints
-}
-
-fn walk_preds_to_source(plg: &PlannerGraph, start_cell: u32) -> Vec<VoxelKey> {
-    let mut cells = vec![plg.idx_to_cell[start_cell as usize]];
-    let mut cur = start_cell as i32;
-    while plg.cell_predecessors[cur as usize] >= 0 {
-        cur = plg.cell_predecessors[cur as usize];
-        cells.push(plg.idx_to_cell[cur as usize]);
-    }
-    cells
 }
 
 fn edge_between(plg: &PlannerGraph, a: u32, b: u32) -> Option<u32> {

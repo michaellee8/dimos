@@ -35,10 +35,12 @@ from dimos.navigation.nav_stack.modules.click_start_goal_router.click_start_goal
 )
 from dimos.navigation.nav_stack.modules.mls_planner.mls_planner import (
     NODE_STEP_THRESHOLD_M,
-    MLSPlanner,
-    MLSPlannerConfig,
     build_surface_adjacency,
     build_surface_lookup,
+)
+from dimos.navigation.nav_stack.modules.mls_planner.mls_planner_native import (
+    MLSPlannerNative,
+    MLSPlannerNativeConfig,
 )
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 from dimos.visualization.rerun.websocket_server import RerunWebSocketServer
@@ -148,11 +150,11 @@ def _render_node_edges(msg: Any) -> Any:
     return rr.LineStrips3D(strips, colors=colors, radii=[0.04] * len(strips))
 
 
-_planner_voxel = MLSPlannerConfig().voxel_size
+_planner_voxel = MLSPlannerNativeConfig().voxel_size
 
 path_planner_eval = autoconnect(
     Evaluator.blueprint(),
-    MLSPlanner.blueprint(),
+    MLSPlannerNative.blueprint(),
     ClickStartGoalRouter.blueprint(),
     RerunWebSocketServer.blueprint(),
     RerunBridgeModule.blueprint(

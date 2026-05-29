@@ -172,6 +172,7 @@ all_modules = {
     "mcp-server": "dimos.agents.mcp.mcp_server.McpServer",
     "memory-module": "dimos.memory2.module.MemoryModule",
     "mls-planner": "dimos.navigation.nav_stack.modules.mls_planner.mls_planner.MLSPlanner",
+    "mls-planner-native": "dimos.navigation.nav_stack.modules.mls_planner.mls_planner_native.MLSPlannerNative",
     "mock-b1-connection-module": "dimos.robot.unitree.b1.connection.MockB1ConnectionModule",
     "module-a": "dimos.robot.unitree.demo_error_on_name_conflicts.ModuleA",
     "module-b": "dimos.robot.unitree.demo_error_on_name_conflicts.ModuleB",

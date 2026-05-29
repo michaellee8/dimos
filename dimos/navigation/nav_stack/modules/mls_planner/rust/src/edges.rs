@@ -92,6 +92,36 @@ pub fn add_node_edges(sg: SurfaceGraph) -> PlannerGraph {
     }
 }
 
+/// Walk every node-graph edge and emit one segment per consecutive cell pair
+/// along the reconstructed cell path. Each segment carries the edge's total
+/// cost as its traversability so renderers can color the whole edge uniformly.
+pub fn edges_to_segments(plg: &PlannerGraph, _voxel_size: f32) -> Vec<(VoxelKey, VoxelKey, f32)> {
+    let mut segments = Vec::new();
+    for edge in &plg.node_edges {
+        let mut from_a = walk_preds_to_source(plg, edge.boundary_u);
+        from_a.reverse();
+        let to_b = walk_preds_to_source(plg, edge.boundary_v);
+        let mut path: Vec<VoxelKey> = from_a;
+        path.extend(to_b);
+        for pair in path.windows(2) {
+            segments.push((pair[0], pair[1], edge.cost));
+        }
+    }
+    segments
+}
+
+/// Walk the cell-predecessor array from `start_cell` back to its owning source.
+/// Returns cells in walk order (start_cell first, source cell last).
+pub fn walk_preds_to_source(plg: &PlannerGraph, start_cell: u32) -> Vec<VoxelKey> {
+    let mut cells = vec![plg.idx_to_cell[start_cell as usize]];
+    let mut cur = start_cell as i32;
+    while plg.cell_predecessors[cur as usize] >= 0 {
+        cur = plg.cell_predecessors[cur as usize];
+        cells.push(plg.idx_to_cell[cur as usize]);
+    }
+    cells
+}
+
 fn best_boundary_edges(adj: &CsrAdjacency, dist: &[f32], source: &[i32]) -> Vec<NodeEdge> {
     let mut best: AHashMap<(u32, u32), NodeEdge> = AHashMap::new();
 

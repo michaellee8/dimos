@@ -9,13 +9,21 @@ mod plan;
 mod surfaces;
 mod voxel;
 
-use dimos_module::{run, Input, LcmTransport, Module, Output};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use dimos_module::{error_throttled, run, warn_throttled, Input, LcmTransport, Module, Output};
+use lcm_msgs::geometry_msgs::{Point, Pose, PoseStamped, Quaternion};
 use lcm_msgs::nav_msgs::{Odometry, Path};
-use lcm_msgs::sensor_msgs::PointCloud2;
+use lcm_msgs::sensor_msgs::{PointCloud2, PointField};
+use lcm_msgs::std_msgs::{Header, Time};
 use serde::Deserialize;
 use tracing::info;
 
-#[allow(dead_code)] // fields populated incrementally as algorithm stages land
+use crate::edges::{add_node_edges, edges_to_segments, PlannerGraph};
+use crate::nodes::place_nodes;
+use crate::surfaces::extract_surfaces;
+use crate::voxel::surface_point_xyz;
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -29,7 +37,6 @@ struct Config {
     node_step_threshold_m: f32,
 }
 
-#[allow(dead_code)] // outputs wired up incrementally as algorithm stages land
 #[derive(Module)]
 #[module(setup = setup)]
 struct MlsPlanner {
@@ -59,6 +66,8 @@ struct MlsPlanner {
 
     height_cells: i32,
     step_cells: i32,
+    planner_graph: Option<PlannerGraph>,
+    latest_start: Option<(f32, f32, f32)>,
 }
 
 impl MlsPlanner {
@@ -109,29 +118,308 @@ impl MlsPlanner {
     }
 
     async fn on_global_map(&mut self, msg: PointCloud2) {
-        let n = (msg.width as usize) * (msg.height as usize);
-        info!(points = n, "global_map stub: not yet implemented");
+        let points = match extract_xyz(&msg) {
+            Ok(p) => p,
+            Err(e) => {
+                warn_throttled!(
+                    Duration::from_secs(1),
+                    error = %e,
+                    "Failed to extract lidar points, dropped a cloud.",
+                );
+                return;
+            }
+        };
+        if points.is_empty() {
+            return;
+        }
+
+        let cfg = &self.config;
+        let surface_cells = extract_surfaces(
+            &points,
+            cfg.voxel_size,
+            self.height_cells,
+            cfg.surface_dilation_passes,
+            cfg.surface_erosion_passes,
+        );
+        let sg = place_nodes(
+            &surface_cells,
+            cfg.voxel_size,
+            self.step_cells,
+            cfg.node_spacing_m,
+            cfg.node_wall_buffer_m,
+        );
+        let n_nodes = sg.nodes.len();
+        let plg = add_node_edges(sg);
+        let n_edges = plg.node_edges.len();
+        info!(
+            obstacle_points = points.len(),
+            surface_cells = surface_cells.len(),
+            nodes = n_nodes,
+            edges = n_edges,
+            "global_map processed",
+        );
+
+        let stamp = now();
+        let surface_points: Vec<(f32, f32, f32)> = surface_cells
+            .iter()
+            .map(|&(ix, iy, iz)| surface_point_xyz(ix, iy, iz, cfg.voxel_size))
+            .collect();
+        publish_cloud(
+            &self.surface_map,
+            &surface_points,
+            &cfg.world_frame,
+            stamp.clone(),
+        )
+        .await;
+
+        let node_points: Vec<(f32, f32, f32)> = plg.nodes.iter().map(|n| n.pos).collect();
+        publish_cloud(&self.nodes, &node_points, &cfg.world_frame, stamp.clone()).await;
+
+        let edges_path = build_segments_path(&plg, cfg.voxel_size, &cfg.world_frame, stamp.clone());
+        publish_path(&self.node_edges, &edges_path).await;
+
+        self.planner_graph = Some(plg);
     }
 
     async fn on_start_pose(&mut self, msg: Odometry) {
         let p = &msg.pose.pose.position;
-        info!(
-            x = p.x,
-            y = p.y,
-            z = p.z,
-            "start_pose stub: not yet implemented"
-        );
+        self.latest_start = Some((p.x as f32, p.y as f32, p.z as f32));
+        // Drop any previous plan so the visualizer doesn't show a stale path
+        // rooted at the old start.
+        publish_path(&self.path, &empty_path(&self.config.world_frame, now())).await;
     }
 
     async fn on_goal_pose(&mut self, msg: Odometry) {
+        let Some(start) = self.latest_start else {
+            tracing::warn!("MLSPlanner received goal before start; skipping");
+            return;
+        };
+        let Some(plg) = self.planner_graph.as_ref() else {
+            tracing::warn!("MLSPlanner received goal before graph was built; skipping");
+            return;
+        };
+
         let p = &msg.pose.pose.position;
-        info!(
-            x = p.x,
-            y = p.y,
-            z = p.z,
-            "goal_pose stub: not yet implemented"
+        let goal = (p.x as f32, p.y as f32, p.z as f32);
+
+        let waypoints = match plan::plan(
+            plg,
+            start,
+            goal,
+            self.config.voxel_size,
+            self.config.robot_height,
+        ) {
+            Some(wp) => wp,
+            None => {
+                tracing::warn!(?start, ?goal, "no path between start and goal");
+                publish_path(&self.path, &empty_path(&self.config.world_frame, now())).await;
+                return;
+            }
+        };
+
+        let stamp = now();
+        let path_msg = build_path_from_waypoints(&waypoints, &self.config.world_frame, stamp);
+        info!(waypoints = waypoints.len(), "path planned");
+        publish_path(&self.path, &path_msg).await;
+    }
+}
+
+async fn publish_cloud(
+    out: &Output<PointCloud2>,
+    points: &[(f32, f32, f32)],
+    frame_id: &str,
+    stamp: Time,
+) {
+    let cloud = build_pc2_xyz(points, frame_id, stamp);
+    if let Err(e) = out.publish(&cloud).await {
+        error_throttled!(
+            Duration::from_secs(1),
+            error = %e,
+            topic = %out.topic,
+            "Cloud failed to publish",
         );
     }
+}
+
+async fn publish_path(out: &Output<Path>, msg: &Path) {
+    if let Err(e) = out.publish(msg).await {
+        error_throttled!(
+            Duration::from_secs(1),
+            error = %e,
+            topic = %out.topic,
+            "Path failed to publish",
+        );
+    }
+}
+
+fn now() -> Time {
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    Time {
+        sec: dur.as_secs() as i32,
+        nsec: dur.subsec_nanos() as i32,
+    }
+}
+
+fn header(frame_id: &str, stamp: Time) -> Header {
+    Header {
+        seq: 0,
+        stamp,
+        frame_id: frame_id.into(),
+    }
+}
+
+fn pose_at(xyz: (f32, f32, f32), orient_w: f64) -> Pose {
+    Pose {
+        position: Point {
+            x: xyz.0 as f64,
+            y: xyz.1 as f64,
+            z: xyz.2 as f64,
+        },
+        orientation: Quaternion {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: orient_w,
+        },
+    }
+}
+
+fn pose_stamped(xyz: (f32, f32, f32), orient_w: f64, frame_id: &str, stamp: Time) -> PoseStamped {
+    PoseStamped {
+        header: header(frame_id, stamp),
+        pose: pose_at(xyz, orient_w),
+    }
+}
+
+fn empty_path(frame_id: &str, stamp: Time) -> Path {
+    Path {
+        header: header(frame_id, stamp),
+        poses: Vec::new(),
+    }
+}
+
+fn build_path_from_waypoints(waypoints: &[(f32, f32, f32)], frame_id: &str, stamp: Time) -> Path {
+    let poses: Vec<PoseStamped> = waypoints
+        .iter()
+        .map(|&w| pose_stamped(w, 1.0, frame_id, stamp.clone()))
+        .collect();
+    Path {
+        header: header(frame_id, stamp),
+        poses,
+    }
+}
+
+/// Emit edges as alternating PoseStamped pairs (p1, p2, p1', p2', ...) with
+/// orientation.w carrying the segment's per-edge cost. This is the
+/// nav_msgs/LineSegments3D wire hack the Python side already decodes.
+fn build_segments_path(plg: &PlannerGraph, voxel_size: f32, frame_id: &str, stamp: Time) -> Path {
+    let segments = edges_to_segments(plg, voxel_size);
+    let mut poses: Vec<PoseStamped> = Vec::with_capacity(segments.len() * 2);
+    for (a, b, cost) in segments {
+        let pa = surface_point_xyz(a.0, a.1, a.2, voxel_size);
+        let pb = surface_point_xyz(b.0, b.1, b.2, voxel_size);
+        poses.push(pose_stamped(pa, cost as f64, frame_id, stamp.clone()));
+        poses.push(pose_stamped(pb, cost as f64, frame_id, stamp.clone()));
+    }
+    Path {
+        header: header(frame_id, stamp),
+        poses,
+    }
+}
+
+fn build_pc2_xyz(points: &[(f32, f32, f32)], frame_id: &str, stamp: Time) -> PointCloud2 {
+    let n = points.len() as i32;
+    let mut data = Vec::with_capacity(points.len() * 12);
+    for &(x, y, z) in points {
+        data.extend_from_slice(&x.to_le_bytes());
+        data.extend_from_slice(&y.to_le_bytes());
+        data.extend_from_slice(&z.to_le_bytes());
+    }
+    let make_field = |name: &str, off: i32| PointField {
+        name: name.into(),
+        offset: off,
+        datatype: PointField::FLOAT32 as u8,
+        count: 1,
+    };
+    PointCloud2 {
+        header: header(frame_id, stamp),
+        height: 1,
+        width: n,
+        fields: vec![make_field("x", 0), make_field("y", 4), make_field("z", 8)],
+        is_bigendian: false,
+        point_step: 12,
+        row_step: 12 * n,
+        data,
+        is_dense: true,
+    }
+}
+
+struct ExtractError(&'static str);
+impl std::fmt::Display for ExtractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+fn extract_xyz(msg: &PointCloud2) -> Result<Vec<(f32, f32, f32)>, ExtractError> {
+    let mut x_off: Option<usize> = None;
+    let mut y_off: Option<usize> = None;
+    let mut z_off: Option<usize> = None;
+    for f in &msg.fields {
+        if f.datatype != PointField::FLOAT32 as u8 {
+            continue;
+        }
+        match f.name.as_str() {
+            "x" => x_off = Some(f.offset as usize),
+            "y" => y_off = Some(f.offset as usize),
+            "z" => z_off = Some(f.offset as usize),
+            _ => {}
+        }
+    }
+    let xo = x_off.ok_or(ExtractError("missing float32 x field"))?;
+    let yo = y_off.ok_or(ExtractError("missing float32 y field"))?;
+    let zo = z_off.ok_or(ExtractError("missing float32 z field"))?;
+
+    let n = (msg.width as usize) * (msg.height as usize);
+    let step = msg.point_step as usize;
+    if step == 0 {
+        return Err(ExtractError("point_step is 0"));
+    }
+    if msg.data.len() < n * step {
+        return Err(ExtractError(
+            "data buffer shorter than width*height*point_step",
+        ));
+    }
+    if xo + 4 > step || yo + 4 > step || zo + 4 > step {
+        return Err(ExtractError(
+            "xyz field offsets do not fit within point_step",
+        ));
+    }
+    if msg.is_bigendian {
+        return Err(ExtractError("big-endian point data not supported"));
+    }
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let base = i * step;
+        let x = read_f32_le(&msg.data, base + xo);
+        let y = read_f32_le(&msg.data, base + yo);
+        let z = read_f32_le(&msg.data, base + zo);
+        if x.is_finite() && y.is_finite() && z.is_finite() {
+            out.push((x, y, z));
+        }
+    }
+    Ok(out)
+}
+
+#[inline]
+fn read_f32_le(buf: &[u8], off: usize) -> f32 {
+    let bytes: [u8; 4] = buf[off..off + 4]
+        .try_into()
+        .expect("bounds checked by caller");
+    f32::from_le_bytes(bytes)
 }
 
 #[tokio::main]
