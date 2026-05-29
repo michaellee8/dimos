@@ -17,8 +17,11 @@ AGENTS.md
 # Experimental code/artifacts
 dev/
 
-# Results file (leave untracked)
+# Results / search artifacts (leave untracked)
 results.tsv
+search_log.tsv
+best_config.json
+optuna_study.db
 
 # experiment artifacts
 run.log
@@ -34,4 +37,4 @@ point_lio/Log/*
 !point_lio/Log/.gitkeep
 point_lio/PCD/*
 !point_lio/PCD/do_not_delete_this_file.txt
-point_lio/config/_active.yaml
+point_lio/config/_*.yaml

@@ -930,20 +930,23 @@ static int pump_one_record(std::FILE* fp) {
 
 int main(int argc, char **argv)
 {
-    // --yaml <unilidar_l1.yaml>  --mcap <recording.mcap>
+    // --yaml <unilidar_l1.yaml>  --mcap <recording.mcap>  --out <mat_out.txt>
     std::string yaml_path;
     std::string mcap_path;
+    std::string out_path;  // trajectory dump; per-trial path lets searches run in parallel
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         if (a == "--yaml" && i + 1 < argc) yaml_path = argv[++i];
         else if (a == "--mcap" && i + 1 < argc) mcap_path = argv[++i];
+        else if (a == "--out" && i + 1 < argc) out_path = argv[++i];
     }
     if (mcap_path.empty()) {
         std::fprintf(stderr,
-            "usage: %s --mcap <recording.mcap> [--yaml <unilidar_l1.yaml>]\n",
+            "usage: %s --mcap <recording.mcap> [--yaml <unilidar_l1.yaml>] [--out <mat_out.txt>]\n",
             argv[0]);
         return 2;
     }
+    if (out_path.empty()) out_path = DEBUG_FILE_DIR("mat_out.txt");  // default: ROOT_DIR/Log/mat_out.txt
     readParametersYaml(yaml_path);
     cout << "lidar_type: " << lidar_type << endl;
 
@@ -1014,7 +1017,7 @@ int main(int argc, char **argv)
     fp = fopen(pos_log_dir.c_str(), "w");
 
     ofstream fout_out, fout_imu_pbp;
-    fout_out.open(DEBUG_FILE_DIR("mat_out.txt"), ios::out);
+    fout_out.open(out_path, ios::out);
     fout_imu_pbp.open(DEBUG_FILE_DIR("imu_pbp.txt"), ios::out);
     if (fout_out && fout_imu_pbp)
         cout << "~~~~" << ROOT_DIR << " file opened" << endl;

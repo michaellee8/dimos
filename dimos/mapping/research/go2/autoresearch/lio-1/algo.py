@@ -133,27 +133,62 @@ pcd_save:
         f.write(txt)
 
 
-def main():
+def run(overrides=None, *, yaml_path=None, out_path=None, render=False):
+    """Run Point-LIO once with CONFIG (optionally overridden) and score it.
+
+    `overrides` is a dict merged over CONFIG — this is the importable entry point
+    a hyperparameter search drives (see search.py / search_optuna.py). Pass
+    distinct yaml_path/out_path to run trials concurrently (parallel search);
+    they default to the shared paths, which is correct for sequential use.
+    Returns the evaluate() metrics dict with run_seconds added. Raises on failure
+    (TimeoutExpired, or a ValueError from evaluate() on a missing/malformed
+    trajectory); the caller decides how to treat it.
+    """
     if not os.path.exists(evaluate.POINTLIO_BIN):
         raise SystemExit("pointlio binary not built — run ./setup.sh first.")
-    write_yaml(CONFIG, evaluate.ACTIVE_YAML)
-    if os.path.exists(evaluate.TRAJ_PATH):
-        os.remove(evaluate.TRAJ_PATH)
+    yaml_path = yaml_path or evaluate.ACTIVE_YAML
+    out_path = out_path or evaluate.TRAJ_PATH
+    cfg = {**CONFIG, **(overrides or {})}
+    write_yaml(cfg, yaml_path)
+    if os.path.exists(out_path):
+        os.remove(out_path)
 
     t0 = time.time()
+    subprocess.run(
+        [
+            evaluate.POINTLIO_BIN,
+            "--yaml",
+            yaml_path,
+            "--mcap",
+            evaluate.MCAP_PATH,
+            "--out",
+            out_path,
+        ],
+        cwd=evaluate.POINTLIO_DIR,
+        timeout=evaluate.RUN_TIMEOUT,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    m = evaluate.evaluate(out_path)  # raises if trajectory missing/malformed (= crash)
+    m["run_seconds"] = time.time() - t0
+
+    if render:
+        # Render viz.png + downsampled traj_ds.tsv (non-fatal: a plotting failure
+        # must never fail the run).
+        try:
+            import visualize
+
+            visualize.render()
+        except Exception as e:
+            print(f"(visualize skipped: {e})")
+    return m
+
+
+def main():
     try:
-        subprocess.run(
-            [evaluate.POINTLIO_BIN, "--yaml", evaluate.ACTIVE_YAML, "--mcap", evaluate.MCAP_PATH],
-            cwd=evaluate.POINTLIO_DIR,
-            timeout=evaluate.RUN_TIMEOUT,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        m = run(render=True)
     except subprocess.TimeoutExpired:
         raise SystemExit(f"run exceeded {evaluate.RUN_TIMEOUT}s — treat as failure")
-    run_s = time.time() - t0
-
-    m = evaluate.evaluate()  # raises if trajectory missing/malformed (= crash)
 
     print("---")
     print(f"val_ate_xy:        {m['val_ate_xy']:.6f}")
@@ -164,16 +199,7 @@ def main():
     print(f"gt_path_len:       {m['gt_path_len']:.2f}")
     print(f"num_poses:         {m['num_poses']}")
     print(f"overlap_s:         {m['overlap_s']:.1f}")
-    print(f"run_seconds:       {run_s:.1f}")
-
-    # Render viz.png + downsampled traj_ds.tsv for this run (non-fatal: a plotting
-    # failure must never fail the experiment). Commit these on a "keep".
-    try:
-        import visualize
-
-        visualize.render()
-    except Exception as e:
-        print(f"(visualize skipped: {e})")
+    print(f"run_seconds:       {m['run_seconds']:.1f}")
 
 
 if __name__ == "__main__":
