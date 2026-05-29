@@ -17,7 +17,7 @@
 One invocation = one attempt. Each invocation:
   1. Slices the source pcap to the [1330, 1390] window (cached on disk).
   2. Picks the next attempt_NNN/ directory under RUNS_ROOT.
-  3. Spawns itself with `--worker <attempt_dir>` and redirects the child's
+  3. Spawns itself with ``--worker <attempt_dir>`` and redirects the child's
      stdout/stderr to attempt_dir/stdout.txt and stderr.txt.
   4. The worker brings up a dimos Coordinator with FastLio2 (replay mode) +
      a tiny Rec module that mirrors fastlio_odometry into a sqlite db.
@@ -38,11 +38,16 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 import json
+import os
 from pathlib import Path
 import struct
 import subprocess
 import sys
 import time
+
+from dimos.core.module import Module, ModuleConfig
+from dimos.core.stream import In
+from dimos.msgs.nav_msgs.Odometry import Odometry
 
 # ---------------- Configuration (hardcoded; bump and recommit to change) -----
 
@@ -56,9 +61,22 @@ T_HI_REC_SEC = 1390.0  # window end   (sec into recording)
 RUNS_ROOT = Path("/media/dimos/USB/fastlio_recordings/segment_replays_1330_1390")
 SLICE_PCAP = RUNS_ROOT / "segment_1330_1390.pcap"
 
-# Hard ceiling on a single run's wall-clock. The 60-s window at live rate
-# costs ~60 s of wall + ~30 s of startup/teardown. 300 s is comfortable.
-MAX_WALL_SEC = 300.0
+# The worker passes the attempt dir path to the child Rec module via this
+# env var. (We honor Jeff's "no env vars affecting behavior" rule by
+# treating this as a pure plumbing detail — every behavior knob lives in
+# constants above, this just carries the auto-incremented dir.)
+_ATTEMPT_DIR_ENV = "_REPLAY_SEGMENT_ATTEMPT_DIR"
+
+# Hard ceiling on a single run's wall-clock. Under load on this box the
+# un-hoisted binary runs ~5× slower than real-time, so the 60-s window
+# costs ~300 s of replay + ~30 s of startup/teardown. 600 s gives slack.
+MAX_WALL_SEC = 600.0
+
+# End-of-pcap detection: convert the window's upper bound from epoch
+# → sensor-boot seconds (which is what fastlio publishes when
+# deterministic_clock=True). Constant from prior session memory.
+_SENSOR_BOOT_EPOCH_OFFSET = 1780018948.01
+_PCAP_END_SENSOR_BOOT = REC_START_EPOCH + T_HI_REC_SEC - _SENSOR_BOOT_EPOCH_OFFSET
 
 
 # ---------------- pcap slicing (libpcap classic format, little-endian) ------
@@ -69,7 +87,7 @@ def _slice_pcap_if_needed() -> None:
 
     No-op if SLICE_PCAP already exists. The pcap format we read is the
     classic libpcap one tcpdump writes: 24-byte global header copied as-is,
-    then a sequence of 16-byte record headers + payloads. `ts_sub` is
+    then a sequence of 16-byte record headers + payloads. ``ts_sub`` is
     microseconds for magic 0xa1b2c3d4 (the one tcpdump uses here), so the
     division by 1e6 is correct.
     """
@@ -130,6 +148,46 @@ def _commit_hash() -> str:
         return "unknown"
 
 
+# ---------------- Rec module (module-level so multiprocessing can pickle) --
+
+
+class RecConfig(ModuleConfig):
+    """Configures Rec with the per-attempt sqlite db path."""
+
+    db_path: str = ""
+
+
+_EPS = 1e-9
+
+
+class Rec(Module):
+    """Mirror the FastLio2 odometry stream into a SqliteStore at config.db_path."""
+
+    config: RecConfig
+    fastlio_odometry: In[Odometry]
+    _last_o: float = 0.0
+
+    async def main(self) -> AsyncIterator[None]:
+        # Local import: SqliteStore is only needed in the worker process,
+        # not at module-import time on the orchestrator side.
+        from dimos.memory2.store.sqlite import SqliteStore
+
+        self._store = SqliteStore(path=self.config.db_path)
+        self._os = self._store.stream("fastlio_odometry", Odometry)
+        yield
+        self._store.stop()
+
+    async def handle_fastlio_odometry(self, v: Odometry) -> None:
+        ts = max(getattr(v, "ts", None) or time.time(), self._last_o + _EPS)
+        self._last_o = ts
+        # Pass pose= so SqliteStore populates the indexed pose_x/y/z
+        # columns; without it those columns stay NULL and the plotter
+        # has to decode the raw blob to derive speed.
+        pose = getattr(v, "pose", None)
+        pose_inner = getattr(pose, "pose", None) if pose is not None else None
+        self._os.append(v, ts=ts, pose=pose_inner)
+
+
 # ---------------- orchestrator (parent) -------------------------------------
 
 
@@ -151,11 +209,13 @@ def _orchestrate() -> int:
     }
     print(f"[replay_segment] attempt {attempt_dir.name}  commit {meta['commit'][:8]}", flush=True)
     t0 = time.time()
+    env = {**os.environ, _ATTEMPT_DIR_ENV: str(attempt_dir)}
     with stdout_path.open("w") as out, stderr_path.open("w") as err:
         rc = subprocess.run(
-            [sys.executable, "-m", __spec__.name, "--worker", str(attempt_dir)],
+            [sys.executable, "-m", __spec__.name, "--worker"],
             stdout=out,
             stderr=err,
+            env=env,
             check=False,
         ).returncode
     meta["finished_at"] = time.time()
@@ -172,55 +232,24 @@ def _orchestrate() -> int:
 # ---------------- worker (child) --------------------------------------------
 
 
-def _worker(attempt_dir: Path) -> int:
+def _worker() -> int:
     """Run the replay inside the dimos Coordinator.
 
-    Lives in the same module as the orchestrator so the script stays
-    self-contained; only invoked by the orchestrator via
-    `python -m <module> --worker <attempt_dir>`.
+    Reads the per-attempt directory from the ``_REPLAY_SEGMENT_ATTEMPT_DIR``
+    env var the orchestrator sets. Only invoked by the orchestrator via
+    ``python -m <module> --worker``.
     """
-    # Imports are inside the worker so the orchestrator can run without
-    # bringing up the dimos stack (faster CI/sanity checks).
-    from dimos.core.coordination.blueprints import autoconnect
-    from dimos.core.coordination.module_coordinator import ModuleCoordinator
-    from dimos.core.module import Module, ModuleConfig
-    from dimos.core.stream import In
-    from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
-    from dimos.memory2.store.sqlite import SqliteStore
-    from dimos.msgs.nav_msgs.Odometry import Odometry
-
+    attempt_dir = Path(os.environ[_ATTEMPT_DIR_ENV])
     db_path = attempt_dir / "fastlio.db"
     if db_path.exists():
         db_path.unlink()
     db_path_str = str(db_path)
 
-    # End-of-pcap detection: convert the window's upper bound from epoch
-    # → sensor-boot seconds (which is what fastlio publishes when
-    # deterministic_clock=True). Constant from prior session memory.
-    SENSOR_BOOT_EPOCH_OFFSET = 1780018948.01
-    PCAP_END_SENSOR_BOOT = REC_START_EPOCH + T_HI_REC_SEC - SENSOR_BOOT_EPOCH_OFFSET
-
-    class RecConfig(ModuleConfig):
-        db_path: str = db_path_str
-
-    _EPS = 1e-9
-
-    class Rec(Module):
-        config: RecConfig
-        fastlio_odometry: In[Odometry]
-        _store: SqliteStore
-        _last_o: float = 0.0
-
-        async def main(self) -> AsyncIterator[None]:
-            self._store = SqliteStore(path=self.config.db_path)
-            self._os = self._store.stream("fastlio_odometry", Odometry)
-            yield
-            self._store.stop()
-
-        async def handle_fastlio_odometry(self, v: Odometry) -> None:
-            ts = max(getattr(v, "ts", None) or time.time(), self._last_o + _EPS)
-            self._last_o = ts
-            self._os.append(v, ts=ts)
+    # Imports that pull in the dimos Coordinator stack live in the worker
+    # so the orchestrator can run without paying their import cost.
+    from dimos.core.coordination.blueprints import autoconnect
+    from dimos.core.coordination.module_coordinator import ModuleCoordinator
+    from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
 
     # Kill orphan dimos / fastlio2_native processes from any previous run
     # so their LCM multicast traffic can't bleed into this Rec module.
@@ -240,7 +269,7 @@ def _worker(attempt_dir: Path) -> int:
                 (FastLio2, "odometry", "fastlio_odometry"),
             ]
         ),
-        Rec.blueprint(),
+        Rec.blueprint(db_path=db_path_str),
     ).global_config(n_workers=4, robot_model="mid360_fastlio2_replay")
     coord = ModuleCoordinator.build(bp)
 
@@ -265,7 +294,7 @@ def _worker(attempt_dir: Path) -> int:
             cnt = row[1] if row else 0
             if cnt > 0:
                 saw_first_row = True
-            if last_ts >= PCAP_END_SENSOR_BOOT - 2:
+            if last_ts >= _PCAP_END_SENSOR_BOOT - 2:
                 break  # processed past pcap end
             if not saw_first_row:
                 continue
@@ -295,8 +324,8 @@ def _worker(attempt_dir: Path) -> int:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) >= 3 and argv[1] == "--worker":
-        return _worker(Path(argv[2]))
+    if len(argv) >= 2 and argv[1] == "--worker":
+        return _worker()
     return _orchestrate()
 
 
