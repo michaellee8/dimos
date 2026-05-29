@@ -150,7 +150,7 @@ unitree_go2_record = autoconnect(
         map_freq=-1,
         lidar_ip=os.getenv("LIDAR_IP", "192.168.1.155"),
         record_pcap=True,
-        auto_build=True,
+        deterministic_clock=True,
     ).remappings(
         [
             (FastLio2, "lidar", "fastlio_lidar"),
