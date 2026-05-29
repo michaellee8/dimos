@@ -9,7 +9,7 @@ The `Dimos` class is the main entry point for using DimOS from Python. There are
 
 (Remember to source `.env`.)
 
-```python
+```python skip session=dimos_local
 from dimos import Dimos
 
 app = Dimos(n_workers=8)
@@ -25,10 +25,6 @@ print(app.skills)
 
 # Access a module directly.
 app.ReplanningAStarPlanner
-
-# Access a private variable.
-print(app.ReplanningAStarPlanner._planner._safe_goal_clearance)
-
 
 # Add another module dynamically.
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
@@ -47,19 +43,15 @@ app.stop()
 module's stream. Useful for quick inspection without writing a
 subscriber:
 
-```python
+```python skip
 # Grab the image.
 img = app.peek_stream("color_image", 1.0)
 
 # Display it in a window.
-import cv2, numpy as np
-cv2.imshow("color_image", np.array(img.data))
+import cv2
+cv2.imshow("color_image", img.data)
 cv2.waitKey(0)
 ```
-
-Note, `np.array` is used to turn it into a real numpy array. `img.data` is a
-proxy object. That works in most cases, but `cv2.imshow` checks the actual
-class, so it needs a real numpy array.
 
 ## Remote mode
 
@@ -69,7 +61,7 @@ Start a daemon first (via CLI or another script), then connect to it:
 dimos run unitree-go2-agentic
 ```
 
-```python
+```python skip
 from dimos import Dimos
 
 app = Dimos.connect()
@@ -81,19 +73,13 @@ app.skills.relative_move(forward=2.0)
 app.stop()  # closes the connection (does NOT stop the remote process)
 ```
 
-Connect to a specific instance:
-
-```python
-# By run ID (from `dimos status`)
-app = Dimos.connect(run_id="20260306-143022-unitree-go2")
-
-# By host and port
-app = Dimos.connect(host="192.168.1.50", port=18861)
-```
+`Dimos.connect()` finds the daemon on the local LCM bus. DimOS supports
+one daemon per LCM bus; set `LCM_DEFAULT_URL` to put daemons on different
+buses or to connect across hosts.
 
 `run()` and `restart()` also work against a daemon:
 
-```python
+```python skip
 app = Dimos.connect()
 
 app.run("keyboard-teleop")       # add a module by registry name
@@ -108,13 +94,13 @@ be picklable.
 
 ## Limitations
 
-- `stop()` on a connected instance closes the RPyC connection but does not terminate the remote process. Use `dimos stop` for that.
+- `stop()` on a connected instance closes the LCM connection but does not terminate the remote process. Use `dimos stop` for that.
 
 ## Restarting modules
 
 In local mode, you can hot-restart a module:
 
-```python
+```python skip
 from dimos.agents.mcp.mcp_server import McpServer
 
 app.restart(McpServer)
