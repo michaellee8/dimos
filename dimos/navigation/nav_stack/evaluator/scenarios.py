@@ -112,12 +112,15 @@ def _map_with_walls(*walls: np.ndarray) -> PointCloud2:
     return _cloud(np.vstack([_floor(), *walls]))
 
 
+_GROUND_SURFACE_Z = 0.1
+
+
 def empty_floor() -> PlannerScenario:
     return PlannerScenario(
         name="empty_floor",
         global_map=_cloud(_floor()),
-        start_pose=_odom(-1.0, 0.0, 0.2),
-        goal_pose=_odom(7.0, 0.0, 0.2),
+        start_pose=_odom(-1.0, 0.0, _GROUND_SURFACE_Z),
+        goal_pose=_odom(7.0, 0.0, _GROUND_SURFACE_Z),
         expect_path=True,
     )
 
@@ -126,8 +129,8 @@ def blocked_wall() -> PlannerScenario:
     return PlannerScenario(
         name="blocked_wall",
         global_map=_map_with_walls(_wall(3.0, -3.0, 3.0, 3.0)),
-        start_pose=_odom(-1.0, 0.0, 0.2),
-        goal_pose=_odom(6.0, 0.0, 0.2),
+        start_pose=_odom(-1.0, 0.0, _GROUND_SURFACE_Z),
+        goal_pose=_odom(6.0, 0.0, _GROUND_SURFACE_Z),
         expect_path=False,
     )
 
@@ -139,8 +142,8 @@ def two_rooms_one_door() -> PlannerScenario:
             _wall(3.0, -3.0, 3.0, -0.75),
             _wall(3.0, 0.75, 3.0, 3.0),
         ),
-        start_pose=_odom(-1.0, 0.0, 0.2),
-        goal_pose=_odom(6.0, 0.0, 0.2),
+        start_pose=_odom(-1.0, 0.0, _GROUND_SURFACE_Z),
+        goal_pose=_odom(6.0, 0.0, _GROUND_SURFACE_Z),
         expect_path=True,
     )
 

@@ -75,7 +75,7 @@ pub fn extract_surfaces(
     )
 }
 
-/// Perform dilation and erosion on all xy slices of the extracted surfaces
+/// Dilation and erosion on all xy slices of the extracted surfaces
 /// to fill in small holes.
 fn close_surface_holes(
     standable: Vec<VoxelKey>,
@@ -141,6 +141,7 @@ fn close_at_z(
     }
 
     // use L1 dilation/erosion, expand out in cross shape
+    // could use alternative methods here as well, subject to tuning
     if dilation_passes > 0 {
         img = dilate(&img, Norm::L1, dilation_passes as u8);
     }
