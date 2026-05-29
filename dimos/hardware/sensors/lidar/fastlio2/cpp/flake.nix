@@ -13,7 +13,11 @@
       flake = false;
     };
     fast-lio = {
-      url = "github:dimensionalOS/dimos-module-fastlio2/v0.3.0-quiet-logs";
+      # Switched from github:dimensionalOS/dimos-module-fastlio2/v0.3.0-quiet-logs
+      # to a local git checkout pinned by commit so we can iterate on
+      # debug prints / fixes locally while still building reproducibly.
+      # Bump the rev= when a new fastlio2 commit is needed.
+      url = "git+file:///home/dimos/repos/dimos-module-fastlio2?rev=4862938cdd4237b795f18d94502c314d0949f541&ref=jeff/fix/logs";
       flake = false;
     };
     lcm-extended = {
