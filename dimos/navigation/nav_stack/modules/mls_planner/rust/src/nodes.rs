@@ -31,7 +31,7 @@ pub struct SurfaceGraph {
 pub fn place_nodes(
     surface_cells: &[VoxelKey],
     voxel_size: f32,
-    step_cells: i32,
+    maximum_step_cells: i32,
     node_spacing_m: f32,
     node_wall_buffer_m: f32,
 ) -> SurfaceGraph {
@@ -40,7 +40,7 @@ pub fn place_nodes(
         adj,
         idx_to_cell,
         cell_to_idx,
-    } = build_surface_adjacency(&surface_lookup, voxel_size, step_cells);
+    } = build_surface_adjacency(&surface_lookup, voxel_size, maximum_step_cells);
     let n = adj.n as usize;
 
     if n == 0 {

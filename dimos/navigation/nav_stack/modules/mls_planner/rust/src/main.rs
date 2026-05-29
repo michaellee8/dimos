@@ -19,10 +19,12 @@ use lcm_msgs::std_msgs::{Header, Time};
 use serde::Deserialize;
 use tracing::info;
 
+use ahash::AHashSet;
+
 use crate::edges::{add_node_edges, edges_to_segments, PlannerGraph};
 use crate::nodes::place_nodes;
 use crate::surfaces::extract_surfaces;
-use crate::voxel::surface_point_xyz;
+use crate::voxel::{surface_point_xyz, voxelize, VoxelKey};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -64,7 +66,7 @@ struct MlsPlanner {
     #[config]
     config: Config,
 
-    height_cells: i32,
+    clearance_cells: i32,
     step_cells: i32,
     planner_graph: Option<PlannerGraph>,
     latest_start: Option<(f32, f32, f32)>,
@@ -104,14 +106,14 @@ impl MlsPlanner {
             );
         }
 
-        self.height_cells = (cfg.robot_height / cfg.voxel_size).ceil() as i32;
+        self.clearance_cells = (cfg.robot_height / cfg.voxel_size).ceil() as i32;
         self.step_cells = (cfg.node_step_threshold_m / cfg.voxel_size).floor() as i32;
 
         info!(
             world_frame = %cfg.world_frame,
             voxel_size = cfg.voxel_size,
             robot_height = cfg.robot_height,
-            height_cells = self.height_cells,
+            clearance_cells = self.clearance_cells,
             step_cells = self.step_cells,
             "mls_planner ready",
         );
@@ -134,13 +136,20 @@ impl MlsPlanner {
         }
 
         let cfg = &self.config;
+
+        // convert whatever map we got in to voxels
+        let voxel_map: AHashSet<VoxelKey> = points
+            .iter()
+            .map(|&p| voxelize(p, cfg.voxel_size))
+            .collect();
+
         let surface_cells = extract_surfaces(
-            &points,
-            cfg.voxel_size,
-            self.height_cells,
+            &voxel_map,
+            self.clearance_cells,
             cfg.surface_dilation_passes,
             cfg.surface_erosion_passes,
         );
+
         let sg = place_nodes(
             &surface_cells,
             cfg.voxel_size,
@@ -148,11 +157,13 @@ impl MlsPlanner {
             cfg.node_spacing_m,
             cfg.node_wall_buffer_m,
         );
+
         let n_nodes = sg.nodes.len();
         let plg = add_node_edges(sg);
         let n_edges = plg.node_edges.len();
         info!(
             obstacle_points = points.len(),
+            obstacle_voxels = voxel_map.len(),
             surface_cells = surface_cells.len(),
             nodes = n_nodes,
             edges = n_edges,

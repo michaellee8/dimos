@@ -28,7 +28,7 @@ pub struct SurfaceAdjacency {
     pub cell_to_idx: AHashMap<VoxelKey, u32>,
 }
 
-/// Group cells by XY column with sorted unique iz per column.
+/// Group cells in to xy columns and sort their z indexes.
 pub fn build_surface_lookup(cells: &[VoxelKey]) -> SurfaceLookup {
     let mut lookup: SurfaceLookup = AHashMap::new();
     for &(ix, iy, iz) in cells {
@@ -51,6 +51,7 @@ pub fn build_surface_adjacency(
     let mut columns: Vec<(i32, i32)> = surface_lookup.keys().copied().collect();
     columns.sort_unstable();
 
+    // assign ids to each cell
     let mut idx_to_cell: Vec<VoxelKey> = Vec::new();
     for &(ix, iy) in &columns {
         for &iz in &surface_lookup[&(ix, iy)] {
@@ -58,6 +59,8 @@ pub fn build_surface_adjacency(
         }
     }
     let n = idx_to_cell.len();
+
+    // also build the reverse so cells can look up their id
     let cell_to_idx: AHashMap<VoxelKey, u32> = idx_to_cell
         .iter()
         .enumerate()

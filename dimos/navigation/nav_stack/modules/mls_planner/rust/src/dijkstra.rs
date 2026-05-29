@@ -3,10 +3,8 @@
 
 //! Multi-source Dijkstra over the CSR adjacency.
 //!
-//! Always tracks distance, predecessors, and per-cell source labels. Some
-//! callers only need `dist` (e.g. wall-distance in nodes.rs) and ignore the
-//! rest. The extra arrays cost two Vec<i32> allocations and two writes per
-//! heap pop, which is negligible against the algorithmic work.
+//! Tracks the path taken and distance for each cell. This can be used to
+//! reconstruct shortest paths to any of the source cells.
 
 #![allow(dead_code)]
 
