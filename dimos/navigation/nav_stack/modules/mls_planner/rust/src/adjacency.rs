@@ -1,8 +1,6 @@
 // Copyright 2026 Dimensional Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(dead_code)] // consumed incrementally by later stage modules
-
 use ahash::AHashMap;
 
 use crate::voxel::VoxelKey;
@@ -56,10 +54,6 @@ impl SurfaceAdjacency {
 
     pub fn contains(&self, cell: VoxelKey) -> bool {
         self.cells.contains_key(&cell)
-    }
-
-    pub fn len(&self) -> usize {
-        self.cells.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -131,7 +125,6 @@ mod tests {
     fn empty_input_yields_empty_adjacency() {
         let lookup = build_surface_lookup(&[]);
         let adj = build_surface_adjacency(&lookup, VOXEL, 2);
-        assert_eq!(adj.len(), 0);
         assert!(adj.is_empty());
     }
 
@@ -139,7 +132,7 @@ mod tests {
     fn single_cell_has_no_edges() {
         let lookup = build_surface_lookup(&[(0, 0, 0)]);
         let adj = build_surface_adjacency(&lookup, VOXEL, 2);
-        assert_eq!(adj.len(), 1);
+        assert_eq!(adj.cells().count(), 1);
         assert!(adj.contains((0, 0, 0)));
         assert!(neighbors_of(&adj, (0, 0, 0)).is_empty());
     }
@@ -207,6 +200,6 @@ mod tests {
     fn deduplicates_repeated_cells() {
         let lookup = build_surface_lookup(&[(0, 0, 0), (0, 0, 0), (1, 0, 0)]);
         let adj = build_surface_adjacency(&lookup, VOXEL, 2);
-        assert_eq!(adj.len(), 2);
+        assert_eq!(adj.cells().count(), 2);
     }
 }

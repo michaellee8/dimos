@@ -3,8 +3,6 @@
 
 //! Voxel-grid coordinate math.
 
-#![allow(dead_code)] // consumed incrementally by later stage modules
-
 pub type VoxelKey = (i32, i32, i32);
 
 #[inline]

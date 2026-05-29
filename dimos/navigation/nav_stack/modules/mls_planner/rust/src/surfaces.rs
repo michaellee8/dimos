@@ -5,8 +5,6 @@
 //! robot-height clearance above as standable, then morphologically close
 //! per-z-level holes without letting closing bridge across walls.
 
-#![allow(dead_code)] // consumed incrementally
-
 use ahash::{AHashMap, AHashSet};
 use image::{GrayImage, Luma};
 use imageproc::distance_transform::Norm;

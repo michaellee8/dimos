@@ -8,8 +8,6 @@
 //! the Voronoi region. We use the boundaries of these regions to build the
 //! edges between start nodes.
 
-#![allow(dead_code)]
-
 use ahash::AHashMap;
 
 use crate::adjacency::{SurfaceAdjacency, SurfaceLookup};
@@ -28,7 +26,6 @@ pub struct NodeEdge {
 }
 
 pub struct PlannerGraph {
-    pub adj: SurfaceAdjacency,
     pub surface_lookup: SurfaceLookup,
     pub nodes: Vec<NodeData>,
     pub node_edges: Vec<NodeEdge>,
@@ -46,7 +43,6 @@ pub fn add_node_edges(sg: SurfaceGraph) -> PlannerGraph {
 
     if nodes.is_empty() {
         return PlannerGraph {
-            adj,
             surface_lookup,
             nodes,
             node_edges: Vec::new(),
@@ -66,7 +62,6 @@ pub fn add_node_edges(sg: SurfaceGraph) -> PlannerGraph {
     }
 
     PlannerGraph {
-        adj,
         surface_lookup,
         nodes,
         node_edges,

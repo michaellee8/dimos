@@ -1,8 +1,6 @@
 // Copyright 2026 Dimensional Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-#![allow(dead_code)]
-
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 

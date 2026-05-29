@@ -2,9 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Multi-source Dijkstra over the cell-keyed surface adjacency.
-//!
-
-#![allow(dead_code)]
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;

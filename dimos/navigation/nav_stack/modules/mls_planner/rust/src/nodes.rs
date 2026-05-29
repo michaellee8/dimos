@@ -5,8 +5,6 @@
 //! nodes at local maxima via NMS, and rescale cell-edge costs to push paths
 //! toward corridor centers.
 
-#![allow(dead_code)] // consumed incrementally
-
 use ahash::{AHashMap, AHashSet};
 
 use crate::adjacency::{
