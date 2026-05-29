@@ -22,6 +22,7 @@ results.tsv
 
 # experiment artifacts
 run.log
+logs/
 
 # large human-debug recordings (kept on disk, not in git; derivable from the mcap)
 human-debug/*.mcap
