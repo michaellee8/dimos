@@ -67,10 +67,11 @@ SLICE_PCAP = RUNS_ROOT / "segment_1330_1390.pcap"
 # constants above, this just carries the auto-incremented dir.)
 _ATTEMPT_DIR_ENV = "_REPLAY_SEGMENT_ATTEMPT_DIR"
 
-# Hard ceiling on a single run's wall-clock. Under load on this box the
-# un-hoisted binary runs ~5× slower than real-time, so the 60-s window
-# costs ~300 s of replay + ~30 s of startup/teardown. 600 s gives slack.
-MAX_WALL_SEC = 600.0
+# Hard ceiling on a single run's wall-clock. After the two-thread replay
+# refactor (commit 32d7914f8), replay matches live wall throughput so the
+# 60-s window costs ~60 s of replay + ~10 s of dimos startup/shutdown.
+# 180 s gives generous slack against a wedged binary.
+MAX_WALL_SEC = 180.0
 
 # End-of-pcap detection: convert the window's upper bound from epoch
 # → sensor-boot seconds (which is what fastlio publishes when
