@@ -5,6 +5,7 @@ mod adjacency;
 mod dijkstra;
 mod edges;
 mod nodes;
+mod plan;
 mod surfaces;
 mod voxel;
 
