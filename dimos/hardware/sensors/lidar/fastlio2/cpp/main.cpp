@@ -96,9 +96,13 @@ static std::atomic<bool> g_first_packet_marker_written{false};
 // the first SDK callback gives replay an exact boundary to skip on. Wall clock
 // would only let us match within delivery latency (sub-ms).
 static void mark_first_packet(uint64_t pkt_timestamp_ns) {
-    if (g_first_packet_marker_path.empty()) return;
+    if (g_first_packet_marker_path.empty()) {
+        return;
+    }
     bool expected = false;
-    if (!g_first_packet_marker_written.compare_exchange_strong(expected, true)) return;
+    if (!g_first_packet_marker_written.compare_exchange_strong(expected, true)) {
+        return;
+    }
     FILE* f = std::fopen(g_first_packet_marker_path.c_str(), "w");
     if (f) {
         std::fprintf(f, "%lu\n", static_cast<unsigned long>(pkt_timestamp_ns));
@@ -122,7 +126,9 @@ static double get_publish_ts() {
 static std::optional<std::chrono::steady_clock::time_point> virtual_now() {
     if (g_deterministic_clock.load() || g_replay_mode.load()) {
         uint64_t ns = g_virtual_clock_ns.load();
-        if (ns == 0) return std::nullopt;
+        if (ns == 0) {
+            return std::nullopt;
+        }
         return std::chrono::steady_clock::time_point(std::chrono::nanoseconds(ns));
     }
     return std::chrono::steady_clock::now();
@@ -337,7 +343,9 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
     uint64_t ts_ns = get_timestamp_ns(data);
     uint16_t dot_num = data->dot_num;
 
-    if (!g_replay_mode.load()) mark_first_packet(ts_ns);
+    if (!g_replay_mode.load()) {
+        mark_first_packet(ts_ns);
+    }
 
     std::lock_guard<std::mutex> lock(g_pc_mutex);
 
@@ -393,7 +401,9 @@ static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
     if (!g_running.load() || data == nullptr || !g_fastlio) return;
 
     uint64_t pkt_ts_ns = get_timestamp_ns(data);
-    if (!g_replay_mode.load()) mark_first_packet(pkt_ts_ns);
+    if (!g_replay_mode.load()) {
+        mark_first_packet(pkt_ts_ns);
+    }
 
     double ts = static_cast<double>(pkt_ts_ns) / 1e9;
     auto* imu_pts = reinterpret_cast<const LivoxLidarImuRawPoint*>(data->data);
@@ -542,7 +552,9 @@ int main(int argc, char** argv) {
     uint64_t replay_skip_until_ns = 0;
     {
         std::string s = mod.arg("replay_skip_until_ns", "0");
-        if (!s.empty()) replay_skip_until_ns = std::stoull(s);
+        if (!s.empty()) {
+            replay_skip_until_ns = std::stoull(s);
+        }
     }
 
     // Live mode: write the wall_clock_ns of the first SDK callback to this
@@ -656,10 +668,18 @@ int main(int argc, char** argv) {
                     std::chrono::nanoseconds(first));
             }
         }
-        if (!last_emit.has_value()) last_emit = seed;
-        if (!last_pc_publish.has_value()) last_pc_publish = seed;
-        if (!last_odom_publish.has_value()) last_odom_publish = seed;
-        if (global_map && !last_map_publish.has_value()) last_map_publish = seed;
+        if (!last_emit.has_value()) {
+            last_emit = seed;
+        }
+        if (!last_pc_publish.has_value()) {
+            last_pc_publish = seed;
+        }
+        if (!last_odom_publish.has_value()) {
+            last_odom_publish = seed;
+        }
+        if (global_map && !last_map_publish.has_value()) {
+            last_map_publish = seed;
+        }
 
         // At frame rate: drain accumulated raw points into a CustomMsg
         // and feed to FAST-LIO. Hold g_pc_mutex across the rate-limit
@@ -770,12 +790,16 @@ int main(int argc, char** argv) {
                 // In deterministic mode the callbacks already pushed the
                 // sensor pkt->timestamp into g_virtual_clock_ns — don't
                 // overwrite with the pcap (wall) ts.
-                if (g_deterministic_clock.load()) return;
+                if (g_deterministic_clock.load()) {
+                    return;
+                }
                 g_virtual_clock_ns.store(pcap_ts_ns);
             };
             rep.on_iter = [&]() {
                 auto vn = virtual_now();
-                if (vn.has_value()) run_main_iter(*vn);
+                if (vn.has_value()) {
+                    run_main_iter(*vn);
+                }
             };
             rep.running = &g_running;
             // Serialized replay drives the main loop per packet, so wall
@@ -833,8 +857,12 @@ int main(int argc, char** argv) {
     // Cleanup
     if (debug) printf("[fastlio2] Shutting down...\n");
     g_fastlio = nullptr;
-    if (replay_thread.joinable()) replay_thread.join();
-    if (!g_replay_mode.load()) LivoxLidarSdkUninit();
+    if (replay_thread.joinable()) {
+        replay_thread.join();
+    }
+    if (!g_replay_mode.load()) {
+        LivoxLidarSdkUninit();
+    }
     g_lcm = nullptr;
 
     if (debug) printf("[fastlio2] Done.\n");

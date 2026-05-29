@@ -98,7 +98,9 @@ struct Replayer {
 
         while (running == nullptr || running->load()) {
             f.read(reinterpret_cast<char*>(rec_hdr), 16);
-            if (!f) break;
+            if (!f) {
+                break;
+            }
 
             uint32_t ts_sec, ts_sub, incl_len, orig_len;
             std::memcpy(&ts_sec, rec_hdr + 0, 4);
@@ -113,28 +115,48 @@ struct Replayer {
 
             buf.resize(incl_len);
             f.read(reinterpret_cast<char*>(buf.data()), incl_len);
-            if (!f) break;
+            if (!f) {
+                break;
+            }
             pkts++;
 
-            if (buf.size() < ETH_HDR_LEN) continue;
+            if (buf.size() < ETH_HDR_LEN) {
+                continue;
+            }
             uint16_t ethertype = (static_cast<uint16_t>(buf[12]) << 8) | buf[13];
-            if (ethertype != ETHERTYPE_IPV4) continue;
+            if (ethertype != ETHERTYPE_IPV4) {
+                continue;
+            }
             size_t ip_off = ETH_HDR_LEN;
-            if (buf.size() < ip_off + IP_MIN_HDR_LEN) continue;
+            if (buf.size() < ip_off + IP_MIN_HDR_LEN) {
+                continue;
+            }
             uint8_t vihl = buf[ip_off];
-            if ((vihl >> 4) != 4) continue;
+            if ((vihl >> 4) != 4) {
+                continue;
+            }
             int ihl = (vihl & 0x0f) * 4;
-            if (ihl < static_cast<int>(IP_MIN_HDR_LEN)) continue;
-            if (buf[ip_off + 9] != IPPROTO_UDP) continue;
+            if (ihl < static_cast<int>(IP_MIN_HDR_LEN)) {
+                continue;
+            }
+            if (buf[ip_off + 9] != IPPROTO_UDP) {
+                continue;
+            }
             size_t udp_off = ip_off + ihl;
-            if (buf.size() < udp_off + UDP_HDR_LEN) continue;
+            if (buf.size() < udp_off + UDP_HDR_LEN) {
+                continue;
+            }
             uint16_t dst_port = (static_cast<uint16_t>(buf[udp_off + 2]) << 8) | buf[udp_off + 3];
             uint16_t udp_len = (static_cast<uint16_t>(buf[udp_off + 4]) << 8) | buf[udp_off + 5];
             size_t payload_off = udp_off + UDP_HDR_LEN;
             size_t payload_end = std::min(buf.size(), static_cast<size_t>(udp_off + udp_len));
-            if (payload_end <= payload_off) continue;
+            if (payload_end <= payload_off) {
+                continue;
+            }
             size_t payload_len = payload_end - payload_off;
-            if (payload_len < LIVOX_ETH_HDR_LEN) continue;
+            if (payload_len < LIVOX_ETH_HDR_LEN) {
+                continue;
+            }
 
             auto* livox_pkt =
                 reinterpret_cast<LivoxLidarEthernetPacket*>(buf.data() + payload_off);
@@ -145,7 +167,9 @@ struct Replayer {
             if (skip_until_ns > 0) {
                 uint64_t pkt_ts;
                 std::memcpy(&pkt_ts, livox_pkt->timestamp, sizeof(uint64_t));
-                if (pkt_ts < skip_until_ns) continue;
+                if (pkt_ts < skip_until_ns) {
+                    continue;
+                }
             }
 
             if (realtime) {
@@ -156,15 +180,21 @@ struct Replayer {
                 } else {
                     auto target = start_wall + std::chrono::nanoseconds(pcap_ts_ns - first_pcap_ts_ns);
                     auto now = std::chrono::steady_clock::now();
-                    if (target > now) std::this_thread::sleep_until(target);
+                    if (target > now) {
+                        std::this_thread::sleep_until(target);
+                    }
                 }
             }
 
             if (dst_port == host_point_port) {
-                if (on_point) on_point(livox_pkt);
+                if (on_point) {
+                    on_point(livox_pkt);
+                }
                 pts++;
             } else if (dst_port == host_imu_port) {
-                if (on_imu) on_imu(livox_pkt);
+                if (on_imu) {
+                    on_imu(livox_pkt);
+                }
                 imu++;
             } else {
                 other++;
@@ -172,11 +202,15 @@ struct Replayer {
             // Advance the virtual clock AFTER the payload has been added to
             // accumulators. Reverse order would let the main-loop thread see
             // the clock advance and emit a scan that's missing this packet.
-            if (on_clock) on_clock(pcap_ts_ns);
+            if (on_clock) {
+                on_clock(pcap_ts_ns);
+            }
 
             // Run one main-loop iteration synchronously so feeding and
             // processing are strictly serialized in replay mode.
-            if (on_iter) on_iter();
+            if (on_iter) {
+                on_iter();
+            }
         }
 
         printf("[replay] done: %zu pcap records (point=%zu imu=%zu other=%zu)\n",
