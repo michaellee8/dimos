@@ -71,6 +71,7 @@ all_blueprints = {
     "learning-dataprep": "dimos.learning.dataprep_blueprint:learning_dataprep",
     "learning-dataprep-whole-session": "dimos.learning.dataprep_blueprint:learning_dataprep_whole_session",
     "learning-infer-chunkpolicy-only": "dimos.learning.inference.blueprint:learning_infer_chunkpolicy_only",
+    "learning-infer-xarm7": "dimos.learning.inference.blueprint:learning_infer_xarm7",
     "learning-train": "dimos.learning.training.blueprint:learning_train",
     "mid360": "dimos.hardware.sensors.lidar.livox.livox_blueprints:mid360",
     "mid360-fastlio": "dimos.hardware.sensors.lidar.fastlio2.fastlio_blueprints:mid360_fastlio",

@@ -16,21 +16,32 @@
 
 `ChunkPolicyModule` publishes `joint_command` directly so a coordinator's
 servo / position task can consume it without an `ActionReplayer` task in
-the tick loop. Compose with the user's coordinator blueprint at the call
-site, e.g.::
+the tick loop. Two variants are provided:
 
-    autoconnect(learning_infer_chunkpolicy_only, my_servo_coordinator)
+* ``learning_infer_chunkpolicy_only`` — policy + camera only. Compose at
+  the call site with your own coordinator::
+
+      autoconnect(learning_infer_chunkpolicy_only, my_servo_coordinator)
+
+* ``learning_infer_xarm7`` — sample fully wired blueprint: policy +
+  camera + XArm7 ControlCoordinator running a servo task. The
+  coordinator publishes ``joint_state`` and consumes ``joint_command``
+  on the same LCM topics the policy uses, so ``autoconnect`` closes the
+  loop with no extra glue. Use as a template for other arms.
 """
 
 from __future__ import annotations
 
+from dimos.control.coordinator import ControlCoordinator
 from dimos.core.coordination.blueprints import autoconnect
+from dimos.core.global_config import global_config
 from dimos.core.transport import LCMTransport
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
 from dimos.learning.inference.chunk_policy_module import ChunkPolicyModule
 from dimos.learning.policy.base import ActionChunk
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.JointState import JointState
+from dimos.robot.catalog.ufactory import xarm7 as _catalog_xarm7
 
 # Stable topics so external tools (lcmspy, dimos topic echo) work without rebuild.
 _T_COLOR_IMAGE   = "/camera/color_image"
@@ -55,4 +66,33 @@ learning_infer_chunkpolicy_only = autoconnect(
 ).transports(_INFER_TRANSPORTS)
 
 
-__all__ = ["learning_infer_chunkpolicy_only"]
+# Sample end-to-end inference blueprint: policy → coordinator → hardware.
+# Mirror the arm config used in collection (xarm7 + gripper) so trained
+# joint_names line up with what the servo task claims.
+_xarm7_infer_cfg = _catalog_xarm7(
+    name="arm",
+    adapter_type="xarm",
+    address=global_config.xarm7_ip,
+    add_gripper=True,
+)
+
+learning_infer_xarm7 = autoconnect(
+    RealSenseCamera.blueprint(enable_pointcloud=False),
+    ChunkPolicyModule.blueprint(
+        policy_path="data/runs/act_pickplace_001",
+        inference_rate_hz=30.0,
+        publish_joint_command=True,
+    ),
+    ControlCoordinator.blueprint(
+        hardware=[_xarm7_infer_cfg.to_hardware_component()],
+        tasks=[
+            _xarm7_infer_cfg.to_task_config(task_type="servo", task_name="servo_arm"),
+        ],
+    ),
+).transports(_INFER_TRANSPORTS)
+
+
+__all__ = [
+    "learning_infer_chunkpolicy_only",
+    "learning_infer_xarm7",
+]
