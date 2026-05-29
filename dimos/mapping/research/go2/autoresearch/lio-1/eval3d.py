@@ -139,16 +139,24 @@ def euler_deg_to_R(rpy_deg):
     r, p, y = a[:, 0], a[:, 1], a[:, 2]
     cr, sr, cp, sp, cy, sy = np.cos(r), np.sin(r), np.cos(p), np.sin(p), np.cos(y), np.sin(y)
     R = np.empty((len(r), 3, 3))
-    R[:, 0, 0] = cy * cp; R[:, 0, 1] = cy * sp * sr - sy * cr; R[:, 0, 2] = cy * sp * cr + sy * sr
-    R[:, 1, 0] = sy * cp; R[:, 1, 1] = sy * sp * sr + cy * cr; R[:, 1, 2] = sy * sp * cr - cy * sr
-    R[:, 2, 0] = -sp;     R[:, 2, 1] = cp * sr;                R[:, 2, 2] = cp * cr
+    R[:, 0, 0] = cy * cp
+    R[:, 0, 1] = cy * sp * sr - sy * cr
+    R[:, 0, 2] = cy * sp * cr + sy * sr
+    R[:, 1, 0] = sy * cp
+    R[:, 1, 1] = sy * sp * sr + cy * cr
+    R[:, 1, 2] = sy * sp * cr - cy * sr
+    R[:, 2, 0] = -sp
+    R[:, 2, 1] = cp * sr
+    R[:, 2, 2] = cp * cr
     return R[0] if np.ndim(rpy_deg) == 1 else R
 
 
 # --- trajectory loaders -----------------------------------------------------
 def load_mat_out(path):
     """Point-LIO Log/mat_out.txt -> (t_rel[N], pos[N,3], R[N,3,3]). Harness output."""
-    M = np.loadtxt(path, usecols=(0, 1, 2, 3, 4, 5, 6))  # t, euler(rpy deg), pos(xyz) — skip the rest
+    M = np.loadtxt(
+        path, usecols=(0, 1, 2, 3, 4, 5, 6)
+    )  # t, euler(rpy deg), pos(xyz) — skip the rest
     t, eul, pos = M[:, 0], M[:, 1:4], M[:, 4:7]
     R = euler_deg_to_R(eul)  # vectorized -> (N,3,3)
     return t, pos, R
@@ -294,7 +302,9 @@ def _detect_tags(mcap_path):
         cv2.aruco.DetectorParameters(),
     )
     s = TAG_SIZE_M
-    objp = np.array([[-s / 2, s / 2, 0], [s / 2, s / 2, 0], [s / 2, -s / 2, 0], [-s / 2, -s / 2, 0]])
+    objp = np.array(
+        [[-s / 2, s / 2, 0], [s / 2, s / 2, 0], [s / 2, -s / 2, 0], [-s / 2, -s / 2, 0]]
+    )
     out = []
     with open(mcap_path, "rb") as f:
         for _, _ch, m in make_reader(f).iter_messages(topics=["rt/frontvideo"]):
