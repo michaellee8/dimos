@@ -1,6 +1,8 @@
 // Copyright 2026 Dimensional Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+mod voxel;
+
 use dimos_module::{run, Input, LcmTransport, Module, Output};
 use lcm_msgs::nav_msgs::{Odometry, Path};
 use lcm_msgs::sensor_msgs::PointCloud2;
