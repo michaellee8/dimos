@@ -54,35 +54,71 @@ from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.std_msgs.Int8 import Int8
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_coordinator import (
     unitree_go2_coordinator,
+    unitree_go2_coordinator_rage,
 )
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
 from dimos.utils.benchmarking.characterization import Characterizer
 from dimos.utils.benchmarking.characterization_recorder import CharacterizationRecorder
 
-unitree_go2_characterization = autoconnect(
-    unitree_go2_coordinator,
-    KeyboardTeleop.blueprint(publish_only_when_active=True),
-    Characterizer.blueprint(robot="go2", mode="hw", gate_source="stream"),
-    CharacterizationRecorder.blueprint(robot_id="go2"),
-).transports(
-    {
-        # Operator gate events from the pygame window -> Characterizer.
-        # autoconnect pairs KeyboardTeleop.gate (Out) with
-        # Characterizer.gate (In) by name+type; the LCM transport gives
-        # them a wire since the modules live in different worker
-        # subprocesses. Int8 carries the gate code (0=advance, 1=skip,
-        # 2=quit) — see GATE_* constants in keyboard_teleop.
-        ("gate", Int8): LCMTransport("/characterizer/gate", Int8),
-        # CharacterizationRecorder taps the LCM topics the rest of the
-        # stack already publishes on. LCM is multicast so additional
-        # subscribers are free. The recorder's `odom: In[PoseStamped]`
-        # port is named plain `odom` — GO2Connection's outbound odom is
-        # remapped to `go2_odom` on the bus, so we explicitly route the
-        # recorder's port to /go2/odom here.
-        ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        ("odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
+
+def _make(coord, gait_mode: str, max_dist: float | None = None, step_s: float | None = None):
+    """Compose the characterization blueprint.
+
+    ``max_dist`` and ``step_s`` are per-step safety caps (the step ends
+    on whichever comes first). For the default Go2 gait the profile
+    defaults (6 m / 8 s) are sane. For rage we cut max_dist hard — the
+    same commanded amplitude produces roughly 2x the output velocity,
+    so the robot covers the default 6 m well before the FOPDT step
+    finishes. 3 m keeps the high-amplitude steps inside a reasonable
+    test arena while still allowing 1.5 s ~= 3.75*tau at 2 m/s output --
+    enough to capture the rise to steady-state.
+    """
+    char_kwargs = {
+        "robot": "go2",
+        "mode": "hw",
+        "gate_source": "stream",
+        "gait_mode": gait_mode,
     }
+    if max_dist is not None:
+        char_kwargs["max_dist"] = max_dist
+    if step_s is not None:
+        char_kwargs["step_s"] = step_s
+    return autoconnect(
+        coord,
+        KeyboardTeleop.blueprint(publish_only_when_active=True),
+        Characterizer.blueprint(**char_kwargs),
+        CharacterizationRecorder.blueprint(robot_id="go2", tag=f"recording_{gait_mode}"),
+    ).transports(
+        {
+            ("gate", Int8): LCMTransport("/characterizer/gate", Int8),
+            ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
+            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+            ("odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
+        }
+    )
+
+
+unitree_go2_characterization = _make(unitree_go2_coordinator, gait_mode="default")
+# Rage variant: same composition but the Go2 firmware is put into
+# FsmRageMode on startup (faster / harder gait). Use it when you want
+# to characterize the plant in rage mode for tuning the precision
+# follower against that envelope. ``gait_mode="rage"`` is stamped into
+# the artifact's provenance so the resulting JSON is clearly tagged
+# (DERIVE uses it for the caveat string).
+#
+# Distance caps are tightened (3 m, 4 s) because rage roughly doubles
+# the output velocity per commanded amp — the default 6 m / 8 s would
+# run the robot off the floor at amp=2.0. Override per run with:
+#   dimos run unitree-go2-characterization-rage \
+#       -o characterizer.max_dist=2.0 -o characterizer.step_s=3.0
+unitree_go2_characterization_rage = _make(
+    unitree_go2_coordinator_rage,
+    gait_mode="rage",
+    max_dist=3.0,
+    step_s=4.0,
 )
 
-__all__ = ["unitree_go2_characterization"]
+__all__ = [
+    "unitree_go2_characterization",
+    "unitree_go2_characterization_rage",
+]

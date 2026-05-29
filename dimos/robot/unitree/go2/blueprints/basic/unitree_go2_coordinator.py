@@ -15,8 +15,20 @@
 
 """Unitree Go2 ControlCoordinator — GO2Connection + coordinator via LCM transport adapter.
 
+Two variants are exposed:
+
+* ``unitree_go2_coordinator``      — default gait (``mode="default"``)
+* ``unitree_go2_coordinator_rage`` — rage gait (``mode="rage"``); same
+  composition, just toggles the Go2 firmware's FsmRageMode at startup
+  so the robot runs faster / harder.
+
+Both are identical apart from the GO2Connection mode, so downstream
+blueprints (characterization, benchmark, precision_nav) compose either
+without modification.
+
 Usage:
     dimos run unitree-go2-coordinator
+    dimos run unitree-go2-coordinator-rage
     dimos --simulation run unitree-go2-coordinator
 """
 
@@ -34,69 +46,100 @@ from dimos.utils.path_utils import get_project_root
 
 _go2_joints = make_twist_base_joints("go2")
 
-unitree_go2_coordinator = (
-    autoconnect(
-        GO2Connection.blueprint(),
-        ControlCoordinator.blueprint(
-            hardware=[
-                HardwareComponent(
-                    hardware_id="go2",
-                    hardware_type=HardwareType.BASE,
-                    joints=_go2_joints,
-                    adapter_type="transport_lcm",
-                ),
-            ],
-            tasks=[
-                TaskConfig(
-                    name="vel_go2",
-                    type="velocity",
-                    joint_names=_go2_joints,
-                    priority=20,
-                    params={"zero_on_timeout": False},
-                ),
-                # Closed-loop path follower used by the benchmark tool.
-                # Inactive until the tool RPCs configure(...) + start_path(...).
-                TaskConfig(
-                    name="path_follower",
-                    type="path_follower",
-                    joint_names=_go2_joints,
-                    priority=10,
-                ),
-                # RG-arm path follower — same control law as path_follower
-                # but owns its own solve_profile() recompute reacting to
-                # KeyboardTeleop's e_max stream. artifact_path is the
-                # tuning JSON the task loads on start_path() for the plant
-                # model + velocity-profile constants;
-                TaskConfig(
-                    name="precision_follower",
-                    type="precision_path_follower",
-                    joint_names=_go2_joints,
-                    priority=10,
-                    params={
-                        "artifact_path": str(
-                            get_project_root() / "data" / "characterization" / "go2" / ""
-                        ),
-                    },
-                ),
-            ],
-        ),
-    )
-    .remappings(
-        [
-            (GO2Connection, "cmd_vel", "go2_cmd_vel"),
-            (GO2Connection, "odom", "go2_odom"),
-        ]
-    )
-    .transports(
-        {
-            ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
-            ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-            ("go2_cmd_vel", Twist): LCMTransport("/go2/cmd_vel", Twist),
-            ("go2_odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
-            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        }
-    )
-    .global_config(obstacle_avoidance=False)
-)
 
-__all__ = ["unitree_go2_coordinator"]
+def _make_coordinator(mode: str = "default"):
+    """Build a coordinator blueprint with the Go2 firmware in the given
+    gait mode. ``mode="rage"`` toggles FsmRageMode on at startup; any
+    other string passes through unmodified.
+
+    The ``precision_follower`` task's ``artifact_path`` points at the
+    ``data/characterization/go2/`` directory by default. Override the
+    specific file per run with:
+        -o coordinator.tasks[2].params.artifact_path=<full/path/to.json>
+    """
+    return (
+        autoconnect(
+            GO2Connection.blueprint(mode=mode),
+            ControlCoordinator.blueprint(
+                # publish_joint_state=False: the 100Hz JointState publish
+                # on the shared LCM multicast bus saturates the kernel
+                # rmem buffer in ~20s and drops large lidar packets first.
+                # Matches the r1pro README note about heavy sensor UDP
+                # starving control traffic — same problem in reverse on
+                # our coord. Re-enable only if a downstream consumer
+                # actually needs joint_state on LCM, and consider
+                # throttling the publish rate or routing it via a
+                # dedicated LCM URL.
+                publish_joint_state=False,
+                hardware=[
+                    HardwareComponent(
+                        hardware_id="go2",
+                        hardware_type=HardwareType.BASE,
+                        joints=_go2_joints,
+                        adapter_type="transport_lcm",
+                    ),
+                ],
+                tasks=[
+                    TaskConfig(
+                        name="vel_go2",
+                        type="velocity",
+                        joint_names=_go2_joints,
+                        priority=20,
+                        params={"zero_on_timeout": False},
+                    ),
+                    # Closed-loop path follower used by the benchmark tool.
+                    # Inactive until the tool RPCs configure(...) + start_path(...).
+                    TaskConfig(
+                        name="path_follower",
+                        type="path_follower",
+                        joint_names=_go2_joints,
+                        priority=10,
+                    ),
+                    # RG-arm path follower — same control law as path_follower
+                    # but owns its own solve_profile() recompute reacting to
+                    # KeyboardTeleop's e_max stream. artifact_path is the
+                    # tuning JSON the task loads on start_path() for the plant
+                    # model + velocity-profile constants;
+                    TaskConfig(
+                        name="precision_follower",
+                        type="precision_path_follower",
+                        joint_names=_go2_joints,
+                        priority=10,
+                        params={
+                            "artifact_path": str(
+                                get_project_root()
+                                / "data"
+                                / "characterization"
+                                / "go2"
+                                / "go2_config_hw_concrete_2026-05-28_normal.json"
+                            ),
+                            "speed": 1.4,
+                            "v_max_override": 1.4,
+                        },
+                    ),
+                ],
+            ),
+        )
+        .remappings(
+            [
+                (GO2Connection, "cmd_vel", "go2_cmd_vel"),
+                (GO2Connection, "odom", "go2_odom"),
+            ]
+        )
+        .transports(
+            {
+                ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
+                ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
+                ("go2_cmd_vel", Twist): LCMTransport("/go2/cmd_vel", Twist),
+                ("go2_odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
+                ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+            }
+        )
+        .global_config(obstacle_avoidance=False)
+    )
+
+
+unitree_go2_coordinator = _make_coordinator(mode="default")
+unitree_go2_coordinator_rage = _make_coordinator(mode="rage")
+
+__all__ = ["unitree_go2_coordinator", "unitree_go2_coordinator_rage"]

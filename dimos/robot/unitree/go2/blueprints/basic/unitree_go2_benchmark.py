@@ -19,7 +19,7 @@ Bundles GO2Connection + ControlCoordinator + pygame keyboard teleop +
 the :class:`Benchmarker` module + a per-session telemetry recorder so
 the operator runs a single command:
 
-    dimos run unitree-go2-benchmark --module.benchmarker.config <artifact>
+    dimos run unitree-go2-benchmark -o benchmarker.config=<artifact>
 
 instead of the two-terminal CLI flow. Defaults are the bare baseline
 arm (ff/profile/rg all OFF) — use a sibling blueprint
@@ -31,9 +31,9 @@ Backspace to quit.
 
 Comparison arms are config flags (all default OFF — bare baseline):
 
-    --module.benchmarker.ff=true       # apply derived feedforward
-    --module.benchmarker.profile=true  # apply derived static velocity profile
-    --module.benchmarker.rg=true       # route runs through precision_follower
+    -o benchmarker.ff=true        # apply derived feedforward
+    -o benchmarker.profile=true   # apply derived static velocity profile
+    -o benchmarker.rg=true        # route runs through precision_follower
 
 The RG arm runs against the operator coord's ``precision_follower`` task
 (a ``PathFollowerTask`` subclass that owns its own ``solve_profile()``
@@ -60,38 +60,42 @@ from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.msgs.std_msgs.Int8 import Int8
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_coordinator import (
     unitree_go2_coordinator,
+    unitree_go2_coordinator_rage,
 )
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
 from dimos.utils.benchmarking.benchmark import Benchmarker
 from dimos.utils.benchmarking.characterization_recorder import CharacterizationRecorder
 from dimos.utils.path_utils import get_project_root
 
-unitree_go2_benchmark = autoconnect(
-    unitree_go2_coordinator,
-    KeyboardTeleop.blueprint(publish_only_when_active=True),
-    Benchmarker.blueprint(robot="go2", mode="hw", gate_source="stream"),
-    CharacterizationRecorder.blueprint(
-        robot_id="go2",
-        tag="benchmark",
-        out_dir=str(get_project_root() / "data" / "benchmark" / "go2"),
-    ),
-).transports(
-    {
-        # Operator gate events from the pygame window -> Benchmarker.
-        # Distinct topic from B1 (`/characterizer/gate`) so the two
-        # blueprints don't cross-talk if both happen to run on the same
-        # LCM bus.
-        ("gate", Int8): LCMTransport("/benchmark/gate", Int8),
-        # KeyboardTeleop's number-key (0-9) corridor stream -> any task in
-        # the coord with set_e_max(). No-ops for the bare arm (path_follower
-        # ignores it), live for the RG arm (precision_follower recomputes).
-        ("e_max", Float32): LCMTransport("/e_max", Float32),
-        # Recorder taps the same LCM topics the rest of the stack
-        # already uses; no new wires, just additional subscribers.
-        ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        ("odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
-    }
-)
 
-__all__ = ["unitree_go2_benchmark"]
+def _make(coord, gait_tag: str):
+    return autoconnect(
+        coord,
+        KeyboardTeleop.blueprint(publish_only_when_active=True),
+        Benchmarker.blueprint(robot="go2", mode="hw", gate_source="stream"),
+        CharacterizationRecorder.blueprint(
+            robot_id="go2",
+            tag=f"benchmark_{gait_tag}",
+            out_dir=str(get_project_root() / "data" / "benchmark" / "go2"),
+        ),
+    ).transports(
+        {
+            ("gate", Int8): LCMTransport("/benchmark/gate", Int8),
+            ("e_max", Float32): LCMTransport("/e_max", Float32),
+            ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
+            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+            ("odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
+        }
+    )
+
+
+unitree_go2_benchmark = _make(unitree_go2_coordinator, gait_tag="default")
+# Rage variant — composition is identical apart from the coordinator's
+# Go2Connection mode. The Benchmarker module itself does NOT need any
+# changes: it reads K/τ/L/envelope from whichever artifact you pass via
+# ``--module.benchmarker.config``, and the artifact already encodes the
+# gait mode in its provenance. Use this with an artifact produced by
+# ``unitree-go2-characterization-rage`` for a consistent measurement.
+unitree_go2_benchmark_rage = _make(unitree_go2_coordinator_rage, gait_tag="rage")
+
+__all__ = ["unitree_go2_benchmark", "unitree_go2_benchmark_rage"]

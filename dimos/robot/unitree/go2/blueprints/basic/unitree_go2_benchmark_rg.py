@@ -25,8 +25,8 @@ The precision_follower needs its own copy of the artifact path so it can
 load the plant + velocity-profile constants:
 
     dimos run unitree-go2-benchmark-rg \\
-        --module.benchmarker.config <artifact> \\
-        -o coordinator.tasks[1].params.artifact_path=<artifact>
+        -o benchmarker.config=<artifact> \\
+        -o coordinator.tasks[2].params.artifact_path=<artifact>
 """
 
 from __future__ import annotations
@@ -40,31 +40,39 @@ from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.msgs.std_msgs.Int8 import Int8
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_coordinator import (
     unitree_go2_coordinator,
+    unitree_go2_coordinator_rage,
 )
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
 from dimos.utils.benchmarking.benchmark import Benchmarker
 from dimos.utils.benchmarking.characterization_recorder import CharacterizationRecorder
 from dimos.utils.path_utils import get_project_root
 
-unitree_go2_benchmark_rg = autoconnect(
-    unitree_go2_coordinator,
-    KeyboardTeleop.blueprint(publish_only_when_active=True),
-    Benchmarker.blueprint(robot="go2", mode="hw", gate_source="stream", rg=True),
-    CharacterizationRecorder.blueprint(
-        robot_id="go2",
-        tag="benchmark",
-        out_dir=str(get_project_root() / "data" / "benchmark" / "go2"),
-    ),
-).transports(
-    {
-        ("gate", Int8): LCMTransport("/benchmark/gate", Int8),
-        # KeyboardTeleop's number-key (0-9) corridor stream -> coord's
-        # e_max input -> precision_follower.set_e_max(). Live RG corridor.
-        ("e_max", Float32): LCMTransport("/e_max", Float32),
-        ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        ("odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
-    }
-)
 
-__all__ = ["unitree_go2_benchmark_rg"]
+def _make(coord, gait_tag: str):
+    return autoconnect(
+        coord,
+        KeyboardTeleop.blueprint(publish_only_when_active=True),
+        Benchmarker.blueprint(robot="go2", mode="hw", gate_source="stream", rg=True),
+        CharacterizationRecorder.blueprint(
+            robot_id="go2",
+            tag=f"benchmark_rg_{gait_tag}",
+            out_dir=str(get_project_root() / "data" / "benchmark" / "go2"),
+        ),
+    ).transports(
+        {
+            ("gate", Int8): LCMTransport("/benchmark/gate", Int8),
+            ("e_max", Float32): LCMTransport("/e_max", Float32),
+            ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
+            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+            ("odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
+        }
+    )
+
+
+unitree_go2_benchmark_rg = _make(unitree_go2_coordinator, gait_tag="default")
+# Rage variant — pair with an artifact from
+# ``unitree-go2-characterization-rage`` so the precision_follower's
+# envelope/plant matches the gait it's tuned against.
+unitree_go2_benchmark_rg_rage = _make(unitree_go2_coordinator_rage, gait_tag="rage")
+
+__all__ = ["unitree_go2_benchmark_rg", "unitree_go2_benchmark_rg_rage"]

@@ -79,7 +79,6 @@ profile on each keypress and atomically swaps the per-waypoint cap.
 from __future__ import annotations
 
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.core.global_config import global_config
 from dimos.core.transport import LCMTransport
 from dimos.mapping.costmapper import CostMapper
 from dimos.mapping.voxels import VoxelGridMapper
@@ -92,45 +91,53 @@ from dimos.msgs.std_msgs.Int8 import Int8
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_coordinator import (
     unitree_go2_coordinator,
+    unitree_go2_coordinator_rage,
 )
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
 from dimos.utils.benchmarking.characterization_recorder import CharacterizationRecorder
 from dimos.utils.path_utils import get_project_root
-from dimos.visualization.vis_module import vis_module
 
-unitree_go2_precision_nav = (
-    autoconnect(
-        unitree_go2_coordinator,
-        vis_module(viewer_backend=global_config.viewer),
-        KeyboardTeleop.blueprint(
-            publish_only_when_active=True,
-            disable_movement=True,  # 0-9 e_max slider only; no WASD Twist
-        ),
-        VoxelGridMapper.blueprint(emit_every=5),
-        CostMapper.blueprint(),
-        ReplanningAStarPlanner.blueprint(),
-        CharacterizationRecorder.blueprint(
-            robot_id="go2",
-            tag="precision_nav",
-            out_dir=str(get_project_root() / "data" / "precision_nav" / "go2"),
-        ),
-    )
-    .transports(
-        {
-            # KeyboardTeleop 0-9 -> coord.e_max -> precision_follower.set_e_max.
-            ("e_max", Float32): LCMTransport("/e_max", Float32),
-            # ReplanningAStarPlanner.path -> coord.path -> precision_follower.set_path.
-            ("path", Path): LCMTransport("/precision_nav/path", Path),
-            # Recorder taps — same conventions as B1/B2.
-            ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
-            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-            ("odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
-            # KeyboardTeleop's gate stream stays available for any tool that
-            # wants ENTER/K/Backspace; no consumer in B3 today.
-            ("gate", Int8): LCMTransport("/precision_nav/gate", Int8),
-        }
-    )
-    .global_config(n_workers=10, robot_model="unitree_go2")
-)
 
-__all__ = ["unitree_go2_precision_nav"]
+def _make(coord, gait_tag: str):
+    return (
+        autoconnect(
+            coord,
+            # vis_module DISABLED for the lidar-dropout bisect. RerunBridge
+            # subscribes_all to LCM and forwards everything to the rerun
+            # gRPC sink; if the viewer is on software GL (DRI3 error in
+            # logs) the sink drains slowly, blocking the shared LCM
+            # callback thread and starving lidar publish.
+            # vis_module(viewer_backend=global_config.viewer),
+            KeyboardTeleop.blueprint(
+                publish_only_when_active=True,
+                disable_movement=True,  # 0-9 e_max slider only; no WASD Twist
+            ),
+            VoxelGridMapper.blueprint(emit_every=5),
+            CostMapper.blueprint(),
+            ReplanningAStarPlanner.blueprint(),
+            CharacterizationRecorder.blueprint(
+                robot_id="go2",
+                tag=f"precision_nav_{gait_tag}",
+                out_dir=str(get_project_root() / "data" / "precision_nav" / "go2"),
+            ),
+        )
+        .transports(
+            {
+                ("e_max", Float32): LCMTransport("/e_max", Float32),
+                ("path", Path): LCMTransport("/precision_nav/path", Path),
+                ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
+                ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+                ("odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
+                ("gate", Int8): LCMTransport("/precision_nav/gate", Int8),
+            }
+        )
+        .global_config(n_workers=10, robot_model="unitree_go2")
+    )
+
+
+unitree_go2_precision_nav = _make(unitree_go2_coordinator, gait_tag="default")
+# Rage variant — pair with a rage-mode artifact so the precision
+# follower's plant model + envelope match the gait it's tracking.
+unitree_go2_precision_nav_rage = _make(unitree_go2_coordinator_rage, gait_tag="rage")
+
+__all__ = ["unitree_go2_precision_nav", "unitree_go2_precision_nav_rage"]
