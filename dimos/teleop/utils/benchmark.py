@@ -32,6 +32,7 @@ Compose at the CLI::
 from __future__ import annotations
 
 from datetime import datetime
+import json
 from pathlib import Path
 import threading
 import time
@@ -47,6 +48,7 @@ from dimos.core.stream import In
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.teleop.quest.quest_types import Buttons
+from dimos.teleop.utils.stream_stats import classify_e2e, loss_pct, pcts, reorder_count
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -55,56 +57,70 @@ logger = setup_logger()
 _E2E_BANDS = [(50.0, "excellent"), (100.0, "good"), (150.0, "usable")]
 _LOSS_THRESHOLD_PCT = 1.0
 
-
-def _pcts(values: list[float]) -> dict[str, float] | None:
-    """p50/p95/p99/max of *values* in their native unit, or None if empty."""
-    if not values:
-        return None
-    a = np.asarray(values, dtype=float)
-    return {
-        "p50": float(np.percentile(a, 50)),
-        "p95": float(np.percentile(a, 95)),
-        "p99": float(np.percentile(a, 99)),
-        "max": float(a.max()),
-    }
+# Sidecar the hosted teleop module appends the operator's video_stats to (one
+# JSON object per line). The two modules run in separate workers and can't share
+# memory, so this file is the bridge. We truncate it in start() and read it back
+# at report time. Writer: HostedTeleopModule._append_video_stats.
+_VIDEO_STATS_PATH = "/tmp/dimos_video_stats.jsonl"
 
 
-def _loss_pct(seqs: list[int]) -> float | None:
-    """Loss % from gaps in a monotonic sequence; None if fewer than 2 samples.
+def _read_video_stats() -> list[dict[str, Any]]:
+    """Load the operator video_stats samples from the sidecar (one JSON/line).
 
-    ``loss = 1 - distinct_received / (max_seq - min_seq + 1)``. Reorders and
-    duplicates do not inflate it — only genuinely missing seq values count.
+    Returns the parsed samples in arrival order; an empty list if the file is
+    missing/empty. Malformed lines are skipped — the sidecar is best-effort.
     """
-    valid = [s for s in seqs if s]
-    if len(valid) < 2:
-        return None
-    expected = max(valid) - min(valid) + 1
-    received = len(set(valid))
-    return max(0.0, (1.0 - received / expected) * 100.0)
-
-
-def _reorder_count(seqs: list[int]) -> int:
-    """Count messages that arrived with a seq below an already-seen maximum."""
-    count = 0
-    running_max = -1
-    for s in seqs:
-        if not s:
+    samples: list[dict[str, Any]] = []
+    try:
+        text = Path(_VIDEO_STATS_PATH).read_text()
+    except OSError:
+        return samples
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
             continue
-        if s < running_max:
-            count += 1
-        else:
-            running_max = s
-    return count
+        try:
+            samples.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return samples
 
 
-def _classify_e2e(p50_ms: float) -> str:
-    """Map an E2E p50 latency to an acceptance band label."""
-    if p50_ms < 0:
-        return "clock skew"
-    for threshold, label in _E2E_BANDS:
-        if p50_ms < threshold:
-            return label
-    return "degraded"
+def _summarize_video_stats(samples: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Aggregate the per-sample video_stats into report figures, or None.
+
+    fps/kbps/jitter-buffer/decode are reported as p50 + p95 (median quality and
+    a worst-case tail); resolution as the modal WxH; dropped frames and freezes
+    as the run total (max of the operator's monotonic counters).
+    """
+    if not samples:
+        return None
+
+    def col(key: str) -> list[float]:
+        return [float(s[key]) for s in samples if s.get(key) is not None]
+
+    def last(key: str) -> float:
+        vals = [float(s[key]) for s in samples if s.get(key) is not None]
+        return max(vals) if vals else 0.0
+
+    resolutions = [
+        f"{s.get('width')}x{s.get('height')}"
+        for s in samples
+        if s.get("width") and s.get("height")
+    ]
+    resolution = max(set(resolutions), key=resolutions.count) if resolutions else "n/a"
+
+    return {
+        "count": len(samples),
+        "resolution": resolution,
+        "fps": pcts(col("fps")),
+        "kbps": pcts(col("kbps")),
+        "loss_pct": pcts(col("loss_pct")),
+        "jitter_buffer_ms": pcts(col("jitter_buffer_ms")),
+        "decode_ms": pcts(col("decode_ms")),
+        "frames_dropped": last("frames_dropped"),
+        "freezes": last("freezes"),
+    }
 
 
 class _Record(NamedTuple):
@@ -179,12 +195,12 @@ class StreamStats:
         return {
             "count": count,
             "rate_hz": (count - 1) / span if span > 0 else None,
-            "jitter_ms": _pcts(intervals_ms),
-            "loss_pct": _loss_pct(seqs),
-            "reorder_count": _reorder_count(seqs),
+            "jitter_ms": pcts(intervals_ms),
+            "loss_pct": loss_pct(seqs),
+            "reorder_count": reorder_count(seqs),
             "stall_count": len(stalls),
             "stall_total_s": sum(stalls) / 1000.0,
-            "e2e_ms": _pcts(e2e_ms),
+            "e2e_ms": pcts(e2e_ms),
         }
 
     def live_summary(self, window_s: float) -> dict[str, Any]:
@@ -274,6 +290,13 @@ class TeleopBenchmarkModule(Module):
             self.register_disposable(Disposable(unsubscribe))
             logger.info("Benchmarking %s (%s)", name, port.type.__name__)
 
+        # Truncate the video_stats sidecar so this run owns its window; the
+        # teleop module (separate worker) appends to it as the operator reports.
+        try:
+            Path(_VIDEO_STATS_PATH).write_text("")
+        except OSError:
+            logger.debug("could not truncate %s", _VIDEO_STATS_PATH, exc_info=True)
+
         self._start_perf = time.perf_counter()
         self._start_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self._report_written = False
@@ -353,9 +376,12 @@ class TeleopBenchmarkModule(Module):
         summaries = {name: stats.final_summary() for name, stats in self._stats.items()}
         active = {n: s for n, s in summaries.items() if s.get("rate_hz")}
 
+        video = _summarize_video_stats(_read_video_stats())
         graph_lines = self._write_graphs(out_dir, list(active))
         report_path = out_dir / "report.md"
-        report_path.write_text(self._format_report(timestamp, duration_s, active, graph_lines))
+        report_path.write_text(
+            self._format_report(timestamp, duration_s, active, video, graph_lines)
+        )
         logger.info("Benchmark report written to %s", report_path)
 
     def _write_graphs(self, out_dir: Path, names: list[str]) -> list[str]:
@@ -416,6 +442,7 @@ class TeleopBenchmarkModule(Module):
         timestamp: str,
         duration_s: float,
         active: dict[str, dict[str, Any]],
+        video: dict[str, Any] | None,
         graph_lines: list[str],
     ) -> str:
         """Render the markdown report body for the active (non-empty) streams."""
@@ -436,9 +463,10 @@ class TeleopBenchmarkModule(Module):
             f"- **Active streams:** {len(active)}",
             *([f"- **netem profile:** {netem_profile}"] if netem_profile else []),
             "",
-            "> E2E latency is **uncalibrated** — browser/robot clocks are not "
-            "synced (Phase 1.5 adds a clock-sync handshake). Treat it as "
-            "indicative only. Rate, jitter, loss and stalls are clock-independent.",
+            "> E2E latency is **clock-sync calibrated** — the operator stamps "
+            "commands in the robot clock frame (NTP-style min-RTT offset over "
+            "`state_reliable`), so `wall_arrival - ts` is a real one-way latency. "
+            "Rate, jitter, loss and stalls are clock-independent.",
             "",
         ]
         if not active:
@@ -456,12 +484,12 @@ class TeleopBenchmarkModule(Module):
                     f"loss {'PASS' if loss < _LOSS_THRESHOLD_PCT else 'WARN'} ({loss:.2f}%)"
                 )
             if e2e is not None:
-                checks.append(f"E2E {_classify_e2e(e2e['p50'])} (p50 {e2e['p50']:.0f}ms)")
+                checks.append(f"E2E {classify_e2e(e2e['p50'])} (p50 {e2e['p50']:.0f}ms)")
 
             loss_line = f"{loss:.2f}%" if loss is not None else "n/a (no seq)"
             if e2e is not None:
                 e2e_line = (
-                    f"- E2E latency (ms, uncalibrated): p50 {e2e['p50']:.1f} "
+                    f"- E2E latency (ms): p50 {e2e['p50']:.1f} "
                     f"/ p95 {e2e['p95']:.1f} / p99 {e2e['p99']:.1f} / max {e2e['max']:.1f}"
                 )
             else:
@@ -481,8 +509,45 @@ class TeleopBenchmarkModule(Module):
                 f"- **Checks:** {', '.join(checks) if checks else 'n/a'}",
                 "",
             ]
+        lines += self._video_lines(video)
         lines += graph_lines
         return "\n".join(lines) + "\n"
+
+    @staticmethod
+    def _video_lines(video: dict[str, Any] | None) -> list[str]:
+        """Render the operator-side video health section, or a hint if absent.
+
+        These come from the operator's ``pc.getStats()`` (receive side) relayed
+        over ``state_reliable`` — the robot's send side can't see what actually
+        arrived. Empty when no operator was streaming video during the run.
+        """
+        if not video:
+            return [
+                "## Video (operator receive-side)",
+                "",
+                "_No video_stats received — connect an operator with video to capture them._",
+                "",
+            ]
+
+        def pp(stats: dict[str, float] | None, unit: str = "") -> str:
+            if not stats:
+                return "n/a"
+            return f"p50 {stats['p50']:.1f}{unit} / p95 {stats['p95']:.1f}{unit}"
+
+        return [
+            "## Video (operator receive-side)",
+            "",
+            f"- Samples: {video['count']}",
+            f"- Resolution (modal): {video['resolution']}",
+            f"- FPS: {pp(video['fps'])}",
+            f"- Bitrate: {pp(video['kbps'], ' kbps')}",
+            f"- Packet loss: {pp(video['loss_pct'], '%')}",
+            f"- Jitter buffer: {pp(video['jitter_buffer_ms'], ' ms')}",
+            f"- Decode time: {pp(video['decode_ms'], ' ms')}",
+            f"- Frames dropped (total): {video['frames_dropped']:.0f}",
+            f"- Freezes (total): {video['freezes']:.0f}",
+            "",
+        ]
 
 
 __all__ = [

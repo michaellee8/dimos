@@ -13,16 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hosted teleop subclasses (WebRTC-via-Cloudflare-Realtime transport).
-
-Mirrors the role of ``dimos/teleop/quest/quest_extensions.py`` but for the
-hosted module — small overrides on top of ``HostedTeleopModule``:
-
-  - ``HostedArmTeleopModule``: per-hand task_name routing + analog trigger
-    packing (Quest VR mode, arm robots).
-  - ``HostedTwistTeleopModule``: scales incoming Twist by configured
-    linear/angular speeds (keyboard mode, mobile-base robots like Go2).
-"""
+"""Hosted teleop subclasses: arm IK and mobile-base twist."""
 
 import time
 from typing import Any
@@ -43,23 +34,13 @@ from dimos.teleop.quest_hosted.hosted_teleop_module import (
 
 
 class HostedArmTeleopConfig(HostedTeleopConfig):
-    """Adds ``task_names`` for routing per-hand commands to coordinator tasks.
-
-    ``task_names`` maps lower-case hand names (``"left"``, ``"right"``) to
-    the coordinator task name (e.g. ``"teleop_xarm"``). Used to set
-    ``frame_id`` on the published ``PoseStamped`` so the coordinator routes
-    to the correct ``TeleopIKTask``.
-    """
-
+    # task_names maps "left"/"right" → coordinator task name (e.g. "teleop_xarm"),
+    # used as frame_id so the coordinator routes to the right TeleopIKTask.
     task_names: dict[str, str] = Field(default_factory=dict)
 
 
 class HostedArmTeleopModule(HostedTeleopModule):
-    """Hosted teleop with per-hand task_name routing + analog trigger packing.
-
-    Same overrides as ``ArmTeleopModule`` but on top of the WebRTC-via-broker
-    ``HostedTeleopModule`` instead of the local-WebSocket ``QuestTeleopModule``.
-    """
+    """Arm-IK subclass: routes per-hand poses to coordinator tasks + analog triggers."""
 
     config: HostedArmTeleopConfig
 
@@ -70,7 +51,7 @@ class HostedArmTeleopModule(HostedTeleopModule):
         }
 
     def _publish_msg(self, hand: Hand, output_msg: PoseStamped) -> None:
-        """Stamp ``frame_id`` with the configured task name, then publish."""
+        # Stamp frame_id with the per-hand task name so the coordinator routes.
         task_name = self._task_names.get(hand)
         if task_name:
             output_msg = PoseStamped(
@@ -86,7 +67,7 @@ class HostedArmTeleopModule(HostedTeleopModule):
         left: QuestControllerState | None,
         right: QuestControllerState | None,
     ) -> None:
-        """Publish ``Buttons`` with analog triggers packed into bits 16-29."""
+        # Same as base, plus analog triggers packed into Buttons bits 16-29.
         buttons = Buttons.from_controllers(left, right)
         buttons.pack_analog_triggers(
             left=left.trigger if left is not None else 0.0,
@@ -96,29 +77,13 @@ class HostedArmTeleopModule(HostedTeleopModule):
 
 
 class HostedTwistTeleopConfig(HostedTeleopConfig):
-    """Adds ``linear_speed`` / ``angular_speed`` for scaling incoming Twist.
-
-    The operator's keyboard sends normalized commands in [-1, 1] (with
-    Shift = 2x, Ctrl = 0.5x). The robot side multiplies by these speeds
-    to get final m/s and rad/s. Defaults are reasonable for an indoor Go2.
-    """
-
+    # Operator sends normalized [-1, 1] (Shift=2x, Ctrl=0.5x); we scale here.
     linear_speed: float = 0.5
     angular_speed: float = 0.8
 
 
 class HostedTwistTeleopModule(HostedTeleopModule):
-    """Hosted teleop variant for mobile-base robots (Go2, wheeled, etc.).
-
-    Drives the base from two input modalities, whichever the operator client
-    sends — both normalized to [-1, 1] and scaled by ``linear_speed`` /
-    ``angular_speed``:
-
-      - Keyboard ``TwistStamped`` (desktop WASD) → ``_on_twist_bytes``.
-      - VR controller thumbsticks (in the per-hand ``Joy``) → ``_on_joy_bytes``:
-        right stick Y = forward/back, left stick X = strafe. The browser sends
-        raw Joy; the velocity interpretation lives here.
-    """
+    """Mobile-base subclass. Drives cmd_vel from keyboard TwistStamped or VR Joy."""
 
     config: HostedTwistTeleopConfig
 
@@ -127,7 +92,6 @@ class HostedTwistTeleopModule(HostedTeleopModule):
     def _publish_twist(
         self, lx: float, ly: float, az: float, ts: float, frame_id: str, seq: int
     ) -> None:
-        """Scale a normalized command and publish on cmd_vel (+ stamped)."""
         ls = self.config.linear_speed
         as_ = self.config.angular_speed
         linear = Vector3(lx * ls, ly * ls, 0.0)
@@ -138,16 +102,16 @@ class HostedTwistTeleopModule(HostedTeleopModule):
         )
 
     def _on_twist_bytes(self, data: bytes) -> None:
+        # Keyboard/touch path: stamped ts + seq feed the HUD command-plane stats.
         msg = TwistStamped.lcm_decode(data)
+        self._record_cmd_arrival(msg.ts, msg.seq)
         self._publish_twist(
             msg.linear.x, msg.linear.y, msg.angular.z, msg.ts, msg.frame_id, msg.seq
         )
 
     def _on_joy_bytes(self, data: bytes) -> None:
-        # Derive base velocity from the VR thumbsticks (base class parses +
-        # stores the controllers). Left stick: Y → forward/back, X → strafe.
-        # Right stick: X → yaw. Stick-up is +y, stick-left is −x; negate so
-        # up=forward, left=+strafe, left=+yaw (ROS CCW). Right stick Y unused.
+        # VR thumbsticks → base velocity. Left Y = fwd/back, left X = strafe,
+        # right X = yaw. Stick conventions are opposite ROS, so negate.
         super()._on_joy_bytes(data)
         with self._lock:
             right = self._controllers.get(Hand.RIGHT)

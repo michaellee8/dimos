@@ -13,12 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hosted Teleop Module — Cloudflare Realtime SFU client.
-
-Robot dials out to a broker (``dimensional-teleop``); operator commands
-arrive on a negotiated ``cmd_unreliable`` DataChannel bound to an SCTP id
-the broker hands us via heartbeat ack after an operator joins.
-"""
+"""Hosted Teleop Module — Cloudflare Realtime SFU client."""
 
 from __future__ import annotations
 
@@ -53,10 +48,13 @@ from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.Joy import Joy
 from dimos.teleop.quest.quest_types import Buttons, QuestControllerState
+from dimos.teleop.utils.stream_stats import LiveStreamStats
 from dimos.teleop.utils.teleop_transforms import webxr_to_robot
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
+
+_VIDEO_STATS_PATH = "/tmp/dimos_video_stats.jsonl"
 
 
 class Hand(IntEnum):
@@ -65,16 +63,7 @@ class Hand(IntEnum):
 
 
 def _propagate_bundle_candidates(sdp: str) -> str:
-    """Copy ICE candidate lines into every bundled m-section that lacks them.
-
-    Workaround for an aiortc MAX_BUNDLE bug: aiortc keys remote candidates by
-    transport, and under one bundled transport the LAST m-section processed wins
-    the dict. CF Realtime puts a=candidate / a=end-of-candidates only on the
-    first (video) section; the empty SCTP section then overwrites it, so the one
-    transport gets zero remote candidates and ICE stalls at 'checking'.
-    Replicating the candidate block into the candidate-less sections makes the
-    applied set correct no matter which section wins.
-    """
+    """Workaround for aiortc MAX_BUNDLE candidate-dict overwrite (see README)."""
     sections = re.split(r"(?m)^(?=m=)", sdp)
     cand_lines: list[str] = []
     for s in sections:
@@ -84,21 +73,18 @@ def _propagate_bundle_candidates(sdp: str) -> str:
                 cand_lines = found
                 break
     if not cand_lines:
-        return sdp  # nothing to propagate
+        return sdp
 
     block = "\r\n".join(cand_lines) + "\r\n"
     out = []
     for s in sections:
         if s.startswith("m=") and not re.search(r"(?m)^a=candidate:", s):
-            # Append the candidate block at the end of this section.
             out.append(s.rstrip("\r\n") + "\r\n" + block)
         else:
             out.append(s)
     return "".join(out)
 
 
-# ImageFormat → PyAV pixel-format string. Anything not listed falls back to
-# bgr24 — av will reformat as needed if the encoder requests something else.
 _AV_FORMAT_MAP = {
     ImageFormat.BGR: "bgr24",
     ImageFormat.RGB: "rgb24",
@@ -111,44 +97,37 @@ _AV_FORMAT_MAP = {
 class CameraVideoTrack(VideoStreamTrack):
     """aiortc video track sourced from the latest Image on the In port.
 
-    Drain-mode: ``recv()`` returns only when a *new* Image has arrived since
-    the last delivery, naturally throttling encode rate to the source's
-    cadence. Avoids feeding the encoder duplicate frames at startup (which
-    cause a warm-up burst that the browser plays in fast-forward).
-
-    Wall-clock PTSs: timestamps reflect real elapsed time since the first
-    delivered frame, not aiortc's idealized 30 fps schedule — so the browser
-    paces playback at whatever the source actually produced.
+    Drain-mode (recv only returns on a NEW frame) + wall-clock PTSs — so the
+    browser paces playback at the source's real cadence, not aiortc's 30fps
+    schedule, and we don't feed duplicates at startup (would warm up the
+    encoder and the browser would play the burst in fast-forward).
     """
 
     def __init__(self) -> None:
         super().__init__()
         self._lock = threading.Lock()
         self._latest: Image | None = None
-        self._frame_seq = 0  # bumped on each set_latest
-        self._consumed_seq = 0  # last seq recv() returned
-        self._armed = False  # gate: ignore everything until arm()
+        self._frame_seq = 0
+        self._consumed_seq = 0
+        self._armed = False
         self._first_wall: float | None = None
 
     def arm(self) -> None:
-        """Discard any frames received so far and start delivering from now.
+        """Discard buffered frames; start delivering from now.
 
-        Called by ``HostedTeleopModule`` once the PeerConnection is fully
-        ``connected`` — guarantees the operator's video starts at "this
-        instant", not at "whenever the robot booted".
+        Called once the PC is ``connected`` so the operator's video starts at
+        "this instant", not "whenever the robot booted".
         """
         with self._lock:
             self._consumed_seq = self._frame_seq
             self._armed = True
 
     def set_latest(self, img: Image) -> None:
-        """Subscribe callback — overwrite the latest frame, bump seq."""
         with self._lock:
             self._latest = img
             self._frame_seq += 1
 
     async def recv(self) -> av.VideoFrame:
-        # Block until armed AND a new (unconsumed) frame arrives.
         while True:
             with self._lock:
                 if (
@@ -186,6 +165,7 @@ class HostedTeleopConfig(ModuleConfig):
     turn_credential: str = ""
 
     heartbeat_hz: float = 1.0
+    telemetry_hz: float = 3.0  # robot → operator HUD command-plane stats
 
 
 class HostedTeleopModule(Module):
@@ -200,9 +180,7 @@ class HostedTeleopModule(Module):
     left_controller_output: Out[PoseStamped]
     right_controller_output: Out[PoseStamped]
     buttons: Out[Buttons]
-    # Stamped twist is the generic observability stream (recorders / latency
-    # analyzers). The plain-Twist actuation port (cmd_vel) lives only on the
-    # mobile-base subclass HostedTwistTeleopModule — the arm/VR path has no base.
+    # cmd_vel actuation port is on the mobile-base subclass; this stays generic.
     cmd_vel_stamped: Out[TwistStamped]
     color_image: In[Image]
 
@@ -218,7 +196,6 @@ class HostedTeleopModule(Module):
         }
         self._lock = threading.RLock()
 
-        # aiortc + httpx are async; run them on a dedicated event loop thread.
         self._loop: asyncio.AbstractEventLoop | None = None
         self._loop_thread: threading.Thread | None = None
 
@@ -226,26 +203,21 @@ class HostedTeleopModule(Module):
         self._http: httpx.AsyncClient | None = None
         self._session_id: str | None = None
 
-        # cmd_unreliable is opened lazily as a negotiated channel once the
-        # broker reports an SCTP id via heartbeat ack (after an operator joins).
+        # All three datachannels are negotiated; SCTP ids come from the broker
+        # heartbeat ack (so they're None until an operator joins).
         self._cmd_channel = None
         self._cmd_channel_id: int | None = None
-
-        # state_reliable mirrors cmd_unreliable but ordered+reliable, robot↔
-        # operator. Phase 1.5: carries JSON ping/pong for clock sync; future
-        # low-rate control-plane events (mode switch, etc.) ride here too.
-        # CF Realtime bridges datachannels publisher→subscriber only, so we
-        # use two channels: state_reliable (operator→robot inbound) and
-        # state_reliable_back (robot→operator outbound for pongs/state).
         self._state_channel = None
         self._state_channel_id: int | None = None
         self._state_back_channel = None
         self._state_back_channel_id: int | None = None
 
         self._video_track = CameraVideoTrack()
+        self._cmd_stats = LiveStreamStats()
 
         self._control_loop_thread: threading.Thread | None = None
         self._heartbeat_thread: threading.Thread | None = None
+        self._telemetry_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
 
         self._decoders: dict[bytes, Any] = {
@@ -262,6 +234,7 @@ class HostedTeleopModule(Module):
         self._start_event_loop()
         self._connect_blocking()
         self._start_heartbeat()
+        self._start_telemetry()
         self._start_control_loop()
         logger.info("HostedTeleopModule started")
 
@@ -274,6 +247,9 @@ class HostedTeleopModule(Module):
         if self._heartbeat_thread is not None:
             self._heartbeat_thread.join(timeout=2.0)
             self._heartbeat_thread = None
+        if self._telemetry_thread is not None:
+            self._telemetry_thread.join(timeout=2.0)
+            self._telemetry_thread = None
         if self._loop is not None and self._loop.is_running():
             try:
                 asyncio.run_coroutine_threadsafe(self._disconnect(), self._loop).result(timeout=5.0)
@@ -306,12 +282,9 @@ class HostedTeleopModule(Module):
     def _connect_blocking(self) -> None:
         assert self._loop is not None
         future = asyncio.run_coroutine_threadsafe(self._connect(), self._loop)
-        # Must exceed the HTTP timeout below + ICE gathering round-trip.
         future.result(timeout=45.0)
 
     async def _connect(self) -> None:
-        # Generous read timeout: registration is one POST, but the broker makes
-        # CF round-trips behind it; 10s can be too tight under a slow link.
         self._http = httpx.AsyncClient(timeout=30.0)
 
         ice_servers = [RTCIceServer(urls=u) for u in self.config.stun_urls]
@@ -324,38 +297,20 @@ class HostedTeleopModule(Module):
                 )
             )
 
-        # aiortc 1.14 + CF need MAX_BUNDLE so video + SCTP share ONE ICE
-        # transport (default BALANCED makes two; the video one fails ICE against
-        # CF's single bundled transport). DO NOT remove — and addTrack must come
-        # before createDataChannel below; see that comment.
+        # MAX_BUNDLE, addTrack-before-createDataChannel, and the id=0 throwaway
+        # below are all CF/aiortc workarounds — see README before changing.
         self._pc = RTCPeerConnection(
             RTCConfiguration(
                 iceServers=ice_servers,
                 bundlePolicy=RTCBundlePolicy.MAX_BUNDLE,
             )
         )
-
-        # Robot→operator camera. MUST be added BEFORE createDataChannel: that
-        # makes a transceiver exist when the SCTP transport is created, so
-        # aiortc marks sctp._bundled=True. Otherwise setRemoteDescription's
-        # bundle-collapse discards the shared transport and ICE never starts.
-        # The track is the sendonly m=video the broker publishes to the SFU
-        # (via /tracks/new) and the operator pulls.
         self._pc.addTrack(self._video_track)
-
-        # Throwaway DataChannel — forces an SCTP m-line into the offer so the SFU
-        # has a transport to bind the real channels to later. Pinned to
-        # negotiated id=0: a plain createDataChannel auto-grabs SCTP id 1 at
-        # connect, which is the SAME id the broker assigns cmd_unreliable →
-        # createDataChannel(id=1) then collides and throws. id=0 is reserved and
-        # never handed out by the broker (it assigns 1,2,3…), so cmd/state/
-        # state_back stay collision-free. Kept open: under MAX_BUNDLE it shares
-        # the one transport with video; closing it would risk that transport.
         sctp_init = self._pc.createDataChannel("_sctp_init", negotiated=True, id=0)
 
         @self._pc.on("connectionstatechange")
         async def _on_state() -> None:
-            if self._pc is None:  # fired during shutdown
+            if self._pc is None:
                 return
             logger.info(f"PC state: {self._pc.connectionState}")
             if self._pc.connectionState == "connected":
@@ -364,13 +319,13 @@ class HostedTeleopModule(Module):
         offer = await self._pc.createOffer()
         await self._pc.setLocalDescription(offer)
 
-        # Non-trickle ICE: wait for gathering before posting.
+        # Wait for ICE gathering before posting (non-trickle).
         if self._pc.iceGatheringState != "complete":
             done: asyncio.Future[None] = asyncio.get_event_loop().create_future()
 
             @self._pc.on("icegatheringstatechange")
             def _on_gathering() -> None:
-                if self._pc is None:  # fired during shutdown
+                if self._pc is None:
                     return
                 if self._pc.iceGatheringState == "complete" and not done.done():
                     done.set_result(None)
@@ -385,9 +340,7 @@ class HostedTeleopModule(Module):
         }
         resp = await self._http.post(url, json=body, headers=self._auth_headers())
         if resp.status_code >= 400:
-            # Surface the broker's error body — raise_for_status() discards it.
-            # A FastAPI HTTPException gives JSON {"detail": ...}; Caddy's own
-            # 502 gives an HTML page (→ upstream crashed/unreachable).
+            # raise_for_status drops the body; surface the broker's JSON detail.
             logger.error(
                 "Broker POST /sessions -> %s: %s",
                 resp.status_code,
@@ -397,20 +350,10 @@ class HostedTeleopModule(Module):
         data = resp.json()
         self._session_id = data["session_id"]
 
-        # Work around aiortc's MAX_BUNDLE candidate-dict overwrite: CF puts ICE
-        # candidates only on the video section, but both bundled sections share
-        # one transport and the empty SCTP section wins → remote=0. Replicate the
-        # candidates into the candidate-less section(s) so they're applied.
         answer_sdp = _propagate_bundle_candidates(data["sdp_answer"])
-
         await self._pc.setRemoteDescription(RTCSessionDescription(sdp=answer_sdp, type="answer"))
 
-        # NOTE: do NOT close sctp_init here. Under MAX_BUNDLE the SCTP shares
-        # the single bundled ICE/DTLS transport with video; closing the only
-        # datachannel would tear that transport down. The throwaway DC is
-        # harmless to leave open — the real negotiated channels reuse the same
-        # SCTP association by id later.
-        _ = sctp_init  # keep a reference; intentionally left open
+        _ = sctp_init  # intentionally left open
 
         logger.info(
             f"Registered with broker: session_id={self._session_id}, "
@@ -453,10 +396,6 @@ class HostedTeleopModule(Module):
                             timeout=2.0
                         )
                     except Exception:
-                        # Log the full exception: this path also opens the
-                        # negotiated channels (_open_cmd_channel etc.), so a
-                        # failure here can be a channel bug, not just an
-                        # unreachable broker — don't swallow it as a bare warning.
                         logger.exception("Heartbeat/channel-open failed")
                 self._stop_event.wait(interval)
 
@@ -465,12 +404,45 @@ class HostedTeleopModule(Module):
         )
         self._heartbeat_thread.start()
 
+    def _record_cmd_arrival(self, ts: float | None, seq: int | None) -> None:
+        """Hook for the subclass cmd-decode path; feeds the HUD telemetry."""
+        self._cmd_stats.record(ts, seq)
+
+    def _start_telemetry(self) -> None:
+        """Push command-plane health (latency/jitter/loss/rate) to the operator HUD."""
+        def send_telemetry() -> None:
+            stats = self._cmd_stats.snapshot()
+            channel = self._state_back_channel
+            if stats is None or channel is None or channel.readyState != "open":
+                return
+            try:
+                channel.send(json.dumps({
+                    "type": "robot_telemetry",
+                    "cmd": stats,
+                    "robot_ts": time.time(),
+                }))
+            except Exception:
+                logger.debug("telemetry send failed", exc_info=True)
+
+        def runner() -> None:
+            interval = 1.0 / max(self.config.telemetry_hz, 0.1)
+            while not self._stop_event.is_set():
+                if self._loop is not None and self._loop.is_running():
+                    self._loop.call_soon_threadsafe(send_telemetry)
+                self._stop_event.wait(interval)
+
+        self._telemetry_thread = threading.Thread(
+            target=runner, daemon=True, name="HostedTeleopTelemetry"
+        )
+        self._telemetry_thread.start()
+
     async def _heartbeat(self) -> None:
+        """POST a heartbeat; react to the SCTP ids the broker hands back by
+        opening / re-opening / closing the three negotiated datachannels."""
         if self._http is None or self._session_id is None:
             return
         url = f"{self.config.broker_url.rstrip('/')}/api/v1/sessions/{self._session_id}/heartbeat"
         try:
-            # Broker's HeartbeatRequest requires a JSON body; {} hits the defaults.
             resp = await self._http.post(url, json={}, headers=self._auth_headers())
             resp.raise_for_status()
         except Exception as e:
@@ -510,6 +482,7 @@ class HostedTeleopModule(Module):
                 self._open_state_back_channel(state_back_pub_id_int)
 
     def _open_cmd_channel(self, sctp_id: int) -> None:
+        """Operator → robot, unreliable + unordered. Carries LCM-encoded commands."""
         if self._pc is None:
             return
         logger.info("Opening negotiated cmd_unreliable on SCTP id %d", sctp_id)
@@ -537,12 +510,7 @@ class HostedTeleopModule(Module):
             self._cmd_channel = None
 
     def _open_state_channel(self, sctp_id: int) -> None:
-        """Open the negotiated ``state_reliable`` channel on *sctp_id*.
-
-        Reliable + ordered (opposite of ``cmd_unreliable``). Carries JSON
-        messages — currently just the clock-sync ping/pong handshake; future
-        low-rate control-plane events will ride here too.
-        """
+        """Operator → robot, reliable + ordered. JSON control plane (ping, clock_report, video_stats)."""
         if self._pc is None:
             return
         logger.info("Opening negotiated state_reliable on SCTP id %d", sctp_id)
@@ -568,13 +536,7 @@ class HostedTeleopModule(Module):
             self._state_channel = None
 
     def _open_state_back_channel(self, sctp_id: int) -> None:
-        """Open the negotiated ``state_reliable_back`` publisher channel.
-
-        CF Realtime datachannels are unidirectional in their bridging — the
-        existing ``state_reliable`` carries operator→robot only. This second
-        channel carries the reverse direction (robot→operator) for clock-sync
-        pong replies and any future robot-originated state updates.
-        """
+        """Robot → operator (CF bridges one-way). Pong replies + robot_telemetry."""
         if self._pc is None:
             return
         logger.info("Opening negotiated state_reliable_back on SCTP id %d", sctp_id)
@@ -595,13 +557,7 @@ class HostedTeleopModule(Module):
             self._state_back_channel = None
 
     def _on_state_message(self, data: Any) -> None:
-        """Handle one JSON message from ``state_reliable``.
-
-        Recognises ``{"type":"ping","client_ts":<seconds>}`` and echoes a
-        ``{"type":"pong","client_ts":<same>,"robot_ts":<seconds>}``. Unknown
-        types are logged and dropped — leaves room for future control-plane
-        messages without breaking older clients.
-        """
+        """Dispatch a JSON message from state_reliable: ping → pong, plus clock_report / video_stats logging."""
         if isinstance(data, bytes):
             try:
                 data = data.decode("utf-8")
@@ -620,19 +576,12 @@ class HostedTeleopModule(Module):
             if client_ts is None:
                 return
             pong = json.dumps({"type": "pong", "client_ts": client_ts, "robot_ts": time.time()})
-            # Prefer the reverse-direction channel (CF only bridges robot →
-            # operator on this one). Fall back to state_reliable for older
-            # brokers that don't provide a back channel — that path won't
-            # actually route through CF, but at least we don't crash.
             out = self._state_back_channel or self._state_channel
             if out is not None and out.readyState == "open":
                 out.send(pong)
             else:
                 logger.warning("state_reliable: ping received but no open channel for pong")
         elif kind == "clock_report":
-            # The operator computes RTT + clock offset (min-RTT over the ping
-            # burst); it can't be derived robot-side from one-way pings, so the
-            # browser reports it here for visibility in the robot terminal.
             rtt = msg.get("rtt_ms")
             off = msg.get("offset_ms")
             logger.info(
@@ -641,9 +590,6 @@ class HostedTeleopModule(Module):
                 float(off) if off is not None else float("nan"),
             )
         elif kind == "video_stats":
-            # Inbound-video health from the operator's pc.getStats() (the robot's
-            # send side can't see what the operator actually received). Logged
-            # for live visibility + per-netem-profile comparison via journalctl.
             logger.info(
                 "video: %sx%s %.1ffps %.0fkbps loss=%.2f%% jbuf=%.0fms "
                 "decode=%.1fms dropped=%s freezes=%s",
@@ -652,8 +598,21 @@ class HostedTeleopModule(Module):
                 msg.get("jitter_buffer_ms", 0.0), msg.get("decode_ms", 0.0),
                 msg.get("frames_dropped"), msg.get("freezes"),
             )
+            self._append_video_stats(msg)
         else:
             logger.debug(f"state_reliable: unknown message type {kind!r}")
+
+    def _append_video_stats(self, msg: dict[str, Any]) -> None:
+        try:
+            sample = {k: msg.get(k) for k in (
+                "width", "height", "fps", "kbps", "loss_pct",
+                "jitter_buffer_ms", "decode_ms", "frames_dropped", "freezes",
+            )}
+            sample["wall"] = time.time()
+            with open(_VIDEO_STATS_PATH, "a") as f:
+                f.write(json.dumps(sample) + "\n")
+        except Exception:
+            logger.debug("video_stats sidecar append failed", exc_info=True)
 
     def _dispatch_bytes(self, data: bytes) -> None:
         decoder = self._decoders.get(data[:8])
@@ -690,9 +649,7 @@ class HostedTeleopModule(Module):
             self._controllers[hand] = controller
 
     def _on_twist_bytes(self, data: bytes) -> None:
-        # Keyboard mode — no engagement gating. Publishes the stamped twist
-        # (observability). The mobile-base subclass overrides this to also emit
-        # the scaled plain-Twist actuation command on cmd_vel.
+        # Mobile-base subclass overrides this to actuate cmd_vel.
         msg = TwistStamped.lcm_decode(data)
         self.cmd_vel_stamped.publish(msg)
 
@@ -714,6 +671,11 @@ class HostedTeleopModule(Module):
         self._control_loop_thread.start()
 
     def _control_loop(self) -> None:
+        """Fixed-rate cycle: engage-gating → per-hand publish → buttons publish.
+
+        Drives the subclass-overridable hooks; the inbound cmd / pose / joy
+        decode happens off this loop (in the datachannel callbacks).
+        """
         period = 1.0 / self.config.control_loop_hz
         while not self._stop_event.is_set():
             loop_start = time.perf_counter()
