@@ -212,6 +212,22 @@ class Observation(Generic[T]):
         )
         return type(self)(**kwargs)
 
+    def with_pose(self, pose: Any) -> Self:
+        """Return a new observation with ``pose`` attached, payload kept lazy.
+
+        ``pose`` accepts anything :func:`_to_tuple` handles (a 3-/7-tuple,
+        ``Pose``/``PoseStamped``/``Transform``, or ``None`` to clear).
+        """
+        kwargs: dict[str, Any] = {f.name: getattr(self, f.name) for f in fields(self)}
+        kwargs.pop("pose_tuple", None)
+        kwargs.update(
+            pose=pose,
+            _data=_UNLOADED,
+            _loader=lambda: self.data,
+            _data_lock=threading.Lock(),
+        )
+        return type(self)(**kwargs)
+
 
 @dataclass(init=False)
 class EmbeddedObservation(Observation[T]):
