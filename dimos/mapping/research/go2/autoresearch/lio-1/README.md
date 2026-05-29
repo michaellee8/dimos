@@ -11,9 +11,9 @@ odometry, keep or discard, repeat.
 
 Three files matter (same idiom as the original autoresearch):
 
-- **`prepare.py`** — fixed data paths, the Point-LIO substrate location, and the
+- **`evaluate.py`** — fixed data paths, the Point-LIO substrate location, and the
   evaluation (`evaluate`, the ground-truth metric). Not modified.
-- **`train.py`** — the single file the agent edits. Holds the Point-LIO `CONFIG`
+- **`algo.py`** — the single file the agent edits. Holds the Point-LIO `CONFIG`
   and the run/eval driver. **Edited and iterated on by the agent.**
 - **`program.md`** — baseline instructions for the agent. **Edited by the human.**
 
@@ -52,7 +52,7 @@ cd lio-1
 ./setup.sh
 
 # 3. Run a single baseline experiment (~1-3 min)
-python train.py
+python algo.py
 ```
 
 If those work, you're ready for autonomous mode: point your agent at
@@ -61,8 +61,8 @@ If those work, you're ready for autonomous mode: point your agent at
 ## Project structure
 
 ```
-prepare.py        — data paths (via get_data), substrate location, evaluation (do not modify)
-train.py          — Point-LIO CONFIG + run/eval driver (agent modifies this)
+evaluate.py        — data paths (via get_data), substrate location, evaluation (do not modify)
+algo.py          — Point-LIO CONFIG + run/eval driver (agent modifies this)
 program.md        — agent instructions
 setup.sh          — environment prep (build point_lio; checks the dimos venv)
 config/v2_imu.yaml— the baseline config, for reference

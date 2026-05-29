@@ -13,9 +13,9 @@ To set up a new experiment, work with the user to:
 2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current master.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
-   - `prepare.py` — fixed data paths, the Point-LIO substrate location, and the evaluation (the `evaluate` ground-truth metric). Do not modify.
-   - `train.py` — the file you modify. The Point-LIO `CONFIG` and the run/eval driver.
-4. **Verify the build + data exist**: Check that `point_lio/build/pointlio_mapping` exists and that `python prepare.py` reports the input bin and ground truth present. If not, tell the human to run `./setup.sh`.
+   - `evaluate.py` — fixed data paths, the Point-LIO substrate location, and the evaluation (the `evaluate` ground-truth metric). Do not modify.
+   - `algo.py` — the file you modify. The Point-LIO `CONFIG` and the run/eval driver.
+4. **Verify the build + data exist**: Check that `point_lio/build/pointlio_mapping` exists and that `python evaluate.py` reports the input bin and ground truth present. If not, tell the human to run `./setup.sh`.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Confirm and go**: Confirm setup looks good.
 
@@ -25,16 +25,16 @@ Once you get confirmation, kick off the experimentation.
 
 Each experiment runs the offline Point-LIO once on the recorded Go2 LiDAR+IMU
 stream (a fixed input). It runs to completion on CPU — typically ~1-3 minutes.
-You launch it simply as: `python train.py` (in the dimos venv / `nix develop`).
+You launch it simply as: `python algo.py` (in the dimos venv / `nix develop`).
 
 **What you CAN do:**
-- Modify `train.py` — this is the only file you edit. The `CONFIG` dict (which maps 1:1 to the Point-LIO yaml) is fair game: covariances, plane threshold, match scale, voxel filter sizes, IMU integration dt, extrinsics, blind range, FoV, etc. You may also adjust the Python pre/post-processing in this file.
+- Modify `algo.py` — this is the only file you edit. The `CONFIG` dict (which maps 1:1 to the Point-LIO yaml) is fair game: covariances, plane threshold, match scale, voxel filter sizes, IMU integration dt, extrinsics, blind range, FoV, etc. You may also adjust the Python pre/post-processing in this file.
 
 **What you CANNOT do:**
-- Modify `prepare.py`. It is read-only. It contains the fixed data paths, the substrate location, and the evaluation harness.
+- Modify `evaluate.py`. It is read-only. It contains the fixed data paths, the substrate location, and the evaluation harness.
 - Modify the `point_lio/` C++ substrate. It is the fixed Point-LIO engine, built once by `setup.sh` (the analog of a fixed model framework). You tune its configuration via `CONFIG`, not its source.
 - Install new packages or add dependencies. You can only use what's already in the dimos venv (numpy, matplotlib, and the dimos package).
-- Modify the evaluation. The `evaluate` function in `prepare.py` is the ground truth metric.
+- Modify the evaluation. The `evaluate` function in `evaluate.py` is the ground truth metric.
 - Use anything in `human-debug/`. The convert script (`mcap_to_plnr1.py`), the raw `.mcap` recording, and the `.rrd` rerun file there are for **human debugging only** — they are NOT part of the experiment. The input bin and ground truth are already prepared in `data/`; never regenerate them in the loop.
 
 **The goal is simple: get the lowest `val_ate_xy`** — the 2D (xy) absolute trajectory error of the rigid-aligned LIO trajectory vs the `robot_odom` ground truth, in meters. The metric is **2D only** for now (this recording is flat and single-story, so the robot's z is near-constant and uninformative); 3D criteria (measured height/range change at specific timesteps) will be added later once a stairs recording is captured. The only constraint is that the code runs without crashing and finishes within the time budget.
@@ -104,9 +104,9 @@ The experiment runs on a dedicated branch (e.g. `autoresearch/mar5`).
 LOOP FOREVER:
 
 1. Look at the git state: the current branch/commit we're on
-2. Tune `train.py`'s `CONFIG` with an experimental idea by directly hacking the code.
+2. Tune `algo.py`'s `CONFIG` with an experimental idea by directly hacking the code.
 3. git commit
-4. Run the experiment: `python train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+4. Run the experiment: `python algo.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^val_ate_xy:\|^run_seconds:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)

@@ -28,5 +28,5 @@ cmake --build point_lio/build -j"$(nproc 2>/dev/null || echo 4)"
 
 # --- sanity check (pulls the data via get_data on first run) ---
 echo ">> data + harness check"
-python prepare.py
-echo ">> setup done. Run a baseline with:  python train.py > run.log 2>&1"
+python evaluate.py
+echo ">> setup done. Run a baseline with:  python algo.py > run.log 2>&1"

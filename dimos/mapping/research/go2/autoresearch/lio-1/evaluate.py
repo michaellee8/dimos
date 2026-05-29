@@ -17,7 +17,7 @@ autoresearch experiment. This is the analog of nanochat-autoresearch's
 prepare.py: it is READ-ONLY. It defines where the input data and ground truth
 live, how to build the Point-LIO substrate, and — most importantly — the
 ground-truth metric `evaluate()`. Do not modify this file; tuning happens in
-train.py.
+algo.py.
 
 The experiment: run Point-LIO (offline, on a recorded Go2 L1 lidar+IMU stream)
 to produce an odometry trajectory, and score how well it agrees with the
@@ -50,7 +50,7 @@ GT_PATH = str(get_data("go2dds_data1/gt_robot_odom.tsv"))  # robot_odom ground t
 POINTLIO_DIR = os.path.join(HERE, "point_lio")
 POINTLIO_BIN = os.path.join(POINTLIO_DIR, "build", "pointlio_mapping")
 TRAJ_PATH = os.path.join(POINTLIO_DIR, "Log", "mat_out.txt")  # written by each run
-ACTIVE_YAML = os.path.join(POINTLIO_DIR, "config", "_active.yaml")  # train.py writes this
+ACTIVE_YAML = os.path.join(POINTLIO_DIR, "config", "_active.yaml")  # algo.py writes this
 
 # --- run limits ---
 RUN_TIMEOUT = 600  # seconds; a healthy run is ~1-3 min, kill at 10 min
@@ -151,16 +151,23 @@ def evaluate_3d(traj_path=TRAJ_PATH):
 
 
 if __name__ == "__main__":
-    print("LIO autoresearch — data + harness check")
+    # Score the latest algo.py run against ground truth. Also a setup check:
+    # if the data/binary or a trajectory is missing, it says what to do.
+    print("LIO autoresearch — evaluate")
     print(f"  HERE: {HERE}")
-    ok = check_data()
-    if ok:
-        gt_t, gt_p = load_gt()
-        print(
-            f"  GT: {len(gt_t)} poses, t {gt_t[0]:.1f}..{gt_t[-1]:.1f}s, "
-            f"xy path {_path_len(gt_p[:, :2]):.2f}m, "
-            f"xy loop {np.linalg.norm(gt_p[-1, :2] - gt_p[0, :2]):.3f}m"
-        )
-        print("Done! Ready to run train.py.")
-    else:
-        print("Setup incomplete — run ./setup.sh.")
+    if not check_data():
+        raise SystemExit("Setup incomplete — run ./setup.sh.")
+
+    gt_t, gt_p = load_gt()
+    print(
+        f"  GT: {len(gt_t)} poses, t {gt_t[0]:.1f}..{gt_t[-1]:.1f}s, "
+        f"xy path {_path_len(gt_p[:, :2]):.2f}m, "
+        f"xy loop {np.linalg.norm(gt_p[-1, :2] - gt_p[0, :2]):.3f}m"
+    )
+
+    if not os.path.exists(TRAJ_PATH):
+        raise SystemExit(f"No trajectory at {TRAJ_PATH} yet — run `python algo.py` first.")
+
+    print(f"  scoring {TRAJ_PATH}")
+    for k, v in evaluate().items():
+        print(f"    {k:14} {v}")

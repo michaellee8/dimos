@@ -14,7 +14,7 @@
 
 """Render a trajectory visualization for the current run and save a small,
 commit-friendly downsampled trajectory. Called automatically at the end of
-train.py (non-fatal), or run standalone: `uv run visualize.py`.
+algo.py (non-fatal), or run standalone: `uv run visualize.py`.
 
 Outputs (overwritten each run; commit them on a "keep" so git history holds the
 per-experiment version):
@@ -29,8 +29,8 @@ import matplotlib
 import numpy as np
 
 matplotlib.use("Agg")
+import evaluate
 import matplotlib.pyplot as plt
-import prepare
 
 DS_POSES = 2000  # downsample target for the saved trajectory + plot
 FIT_WINDOW = 30.0  # seconds; the second top-down panel aligns only on the early
@@ -39,9 +39,9 @@ VIZ_PNG = "viz.png"
 TRAJ_DS = "traj_ds.tsv"
 
 
-def render(traj_path=prepare.TRAJ_PATH, out_png=VIZ_PNG, out_traj=TRAJ_DS):
-    gt_t, gt_p = prepare.load_gt()
-    t, P = prepare.load_traj(traj_path)
+def render(traj_path=evaluate.TRAJ_PATH, out_png=VIZ_PNG, out_traj=TRAJ_DS):
+    gt_t, gt_p = evaluate.load_gt()
+    t, P = evaluate.load_traj(traj_path)
 
     # --- save downsampled raw trajectory (commit-friendly) ---
     step = max(1, len(t) // DS_POSES)
@@ -62,7 +62,7 @@ def render(traj_path=prepare.TRAJ_PATH, out_png=VIZ_PNG, out_traj=TRAJ_DS):
     gti = np.column_stack([np.interp(tv, gt_t, gt_xy[:, k]) for k in range(2)])
 
     def align(fit_mask):
-        R, tr = prepare._umeyama_2d(xyv[fit_mask], gti[fit_mask])
+        R, tr = evaluate._umeyama_2d(xyv[fit_mask], gti[fit_mask])
         al = (R @ xyv.T).T + tr
         return al, np.linalg.norm(al - gti, axis=1)
 
