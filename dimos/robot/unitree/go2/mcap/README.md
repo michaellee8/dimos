@@ -67,3 +67,13 @@ Stream("odom_bestz"):    34724 items, 2026-05-29 14:49:47 — 15:09:04 (1157.1s)
 (GPU voxel grid, pose-dedup) and writes an `.rrd`. Notes: odom is downsampled to
 ~30 Hz; a few onboard JPEG frames log a harmless "Corrupt JPEG data" warning and
 are skipped.
+
+# marker validation
+
+for debugging just camera
+
+`dimos map replay-marker go2_china_office_indoor --camera-info dimos/robot/unitree/go2/front_camera_1080.yaml --duration 30`
+
+for global map that includes markers
+
+`dimos map global go2_china_office_indoor --lidar lidar_bestz --voxel 0.1 --duration 60 --markers --camera-info dimos/robot/unitree/go2/front_camera_1080.yaml --image-pose odom_bestz`

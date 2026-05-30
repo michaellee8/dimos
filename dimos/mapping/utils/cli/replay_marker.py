@@ -56,6 +56,11 @@ def main(
         None, "--duration", help="Use only N seconds from --seek (default: to the end)"
     ),
     marker_size: float = typer.Option(0.1, "--marker-size", help="Marker edge length (m)"),
+    camera_info: Path | None = typer.Option(
+        None,
+        "--camera-info",
+        help="YAML calibration file for detection; defaults to Go2 builtin",
+    ),
     marker_max_speed: float = typer.Option(
         0.5, "--marker-max-speed", help="Detection speed gate (m/s); 0 disables"
     ),
@@ -73,6 +78,7 @@ def main(
     from dimos.memory2.store.sqlite import SqliteStore
     from dimos.memory2.transform import QualityWindow, SpeedLimit
     from dimos.memory2.vis.color import Color
+    from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
     from dimos.msgs.sensor_msgs.Image import Image
     from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
     from dimos.perception.fiducial.marker_transformer import DetectMarkers
@@ -82,7 +88,7 @@ def main(
     db_path = resolve_named_path(dataset, ".db")
     if out is None:
         out = Path.cwd() / f"{db_path.stem}.rrd"
-    cam_info = _camera_info_static()
+    cam_info = CameraInfo.from_yaml(str(camera_info)) if camera_info else _camera_info_static()
 
     rr.init("dimos markers", recording_id=db_path.stem)
     rr.save(str(out))
