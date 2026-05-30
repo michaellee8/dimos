@@ -1,0 +1,116 @@
+####################################################
+# lidar sdconfiguration
+####################################################
+dds:
+  domain_id: 0
+  # config_file_path: "/unitree/etc/cyclonedds.xml"
+  config_file_path: "/home/mlb/cyclonedds.xml" 
+
+enable_debug: false
+
+lidar_state:
+  version: "1.0.0.38"
+  min_dis: 0.02
+  srp_max: 6111         # unit: us, normal rotation speed = 10800 r/min, period = 0.0055556s
+  crp_max: 4294967295   # unit: us, normal rotation speed = 660 r/min, period = 0.090909s
+  dirty_percentage_max: 100 # dirty percentage max allowed
+  cloud_latency_max: 30 # unit: second
+
+lidar_switch_default: true
+
+mapping:
+  stop_when_dance: false
+  stop_mode: [5, 7, 8, 10, 11, 12, 13, 14]
+                  # 0. idle, default stand
+  		            # 1. balanceStand
+                  # 2. pose
+                  # 3. locomotion
+                  # 4. reserve
+                  # 5. lieDown
+                  # 6. jointLock
+                  # 7. damping
+                  # 8. recoveryStand
+                  # 9. reserve
+                  # 10. sit
+                  # 11. frontFlip
+                  # 12. frontJump
+                  # 13. frontPounce
+                  # 14. wallow
+
+serial:
+  # port: "/dev/ttyACM0" # default
+  port: "/dev/GBUNICH6"
+  baudrate: 2000000
+
+calibration:
+  range_scale_factor: 0.001 # 0.001
+  range_bias: 0 # -0.0065
+  range_max: 50
+  range_min: 0.0 # 0.4
+  rotate_yaw_bias: -123 # unit: degree; default: 57-180=-123; 
+                       # Note: you can calibrate `rotate_yaw_bias` according to the front-leg position
+  rotate_axis_bias_correction: false
+  rotate_axis_z: [0, 0, 1]
+  rotate_axis_y: [0, 1, 0]
+
+lidar:
+  frame: "utlidar"
+  single_scan_topic: "rt/utlidar/scan"
+  multi_scan_topic: "rt/utlidar/cloud"
+  multi_scan_num: 12
+  
+imu:
+  enable: true
+  frame: "utlidar_imu"
+  topic: "rt/utlidar/imu"
+  imu2lidar: [0, 0, 0, 3.1415926536, 0, 0] # x, y, z, roll, pitch, yaw # default imu reading: [yaw=-57.8994, pitch=-8.0973, roll=-167.3450]
+
+
+baselink:
+  frame: "base_link"
+  # baselink2lidar: [0.304, 0, -0.03, 0, 2.88, 0] # default: [0.304, 0, 0.02, 0, 2.88, 0]
+  baselink2lidar: [0.28216, 0, -0.02467, 0, 2.88, 0]
+
+world_frame:
+  frame: "odom"
+
+truncation:
+  enable: true
+  method: 0
+  polar_azimuth_list: [[0, 2, -0.7, 0.7]] # range_to_eliminate: [polarMin, plarMax, azimuthMin, azimuthMax]
+  box: [-100, 0.04,-0.25,0.25,-100,100] # [xmin, xmax, ymin, ymax, zmin, zmax]
+  box2: [-100, -0.15,-0.37,0.37,-100,100]
+
+spherical_rectangle:
+  length_margin: 0.2
+  half_width: 0.25
+  enable_leg_removal: true
+  
+outliers_removal:
+  enable: false
+  radius: 0.2
+  min_num_of_points: 2
+
+pointcloud_deskew:
+  enable: true
+  odometry_topic: "rt/utlidar/robot_odom"
+
+sport_mode:
+  state_topic: "rt/sportmodestate"
+  frequency: 250
+  enable_system_stamp: false
+
+ros2:
+  odom_topic: "rt/utlidar/robot_odom"
+  odom_frame: "odom"
+  base_link_frame: "base_link"
+  topic_foot_position: "rt/utlidar/foot_position"
+  pose_topic: "rt/utlidar/robot_pose"
+  pose_pub_period: 0.05
+
+robot_config:
+  b1x: 0.1881
+  b1y: 0.04675
+  b2: 0.08
+  b3: 0.213
+  b4: 0.213

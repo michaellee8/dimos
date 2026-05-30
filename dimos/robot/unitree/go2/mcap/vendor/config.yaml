@@ -1,0 +1,11 @@
+dds:
+  domain: 0
+  network_interface: eth0
+  config_file: "/unitree/etc/cyclonedds_noshm.xml"
+common:
+  topic_client_cmd: rt/utlidar/client_command
+  topic_server_log: rt/utlidar/server_log
+
+lidar_search_list: [go2_l2, go2_l1]
+lidar_search_time: 5
+lidar_search_cycle_max: 10

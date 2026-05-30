@@ -1,0 +1,100 @@
+dds:
+    domain: 0
+    network_interface: eno1
+
+debug:
+    enable: false
+
+sub_pointcloud0:
+    enable: true
+    topic: "rt/utlidar/cloud"
+    point_type: "unilidar"
+    frame_cloud: "utlidar_lidar"
+    frame_parent: "base_link"
+    # T_parent2cloud: [0.28216, 0, -0.02467, -2.92072, -0.141324, -1.01053] # for L2 down
+    T_parent2cloud: [0.28216, 0, -0.02467, 0, 2.88, 0]
+    range_min: 0
+    range_max: 100
+
+# 订阅机器人状态
+sub_sportmodestate:
+    topic: "rt/sportmodestate"
+    enable_system_stamp: false
+    period: 0.004
+
+sub_lowstate:
+    topic: "rt/lowstate"
+    enable_system_stamp: false
+
+# 发布机器人里程计
+pub_robot_odometry:
+    enable: true
+    frequency: 200
+    topic: "rt/utlidar/robot_odom"
+    frame: "odom"
+
+# 发布机器人里程计的位姿
+pub_robot_pose:
+    topic: "rt/utlidar/robot_pose"
+    period: 0.05
+
+# 发布机身坐标系下的原始点云
+pub_pointcloud_fusion:
+    enable: true
+    frequency: 15
+    topic: "rt/utlidar/cloud_base"
+    frame: "base_link"
+
+# 发布世界坐标系下的去畸变点云
+pub_pointcloud_deskewed:
+    enable: true
+    topic: "rt/utlidar/cloud_deskewed"
+    frame: "base_link"
+
+robot:
+    type: "go2"
+    world_frame: "odom"
+    base_frame: "base_link"
+
+
+##########################################################################
+
+voxel_height_mapping:
+    topic_mapping_cmd: "rt/utlidar/mapping_cmd"
+    stop_when_dance: false
+    stop_mode: [5, 7, 8, 10, 11, 12, 13, 14]
+                    # 0. idle, default stand
+                        # 1. balanceStand
+                    # 2. pose
+                    # 3. locomotion
+                    # 4. reserve
+                    # 5. lieDown
+                    # 6. jointLock
+                    # 7. damping
+                    # 8. recoveryStand
+                    # 9. reserve
+                    # 10. sit
+                    # 11. frontFlip
+                    # 12. frontJump
+                    # 13. frontPounce
+                    # 14. wallow
+
+truncation:
+    enable: true # true for L1
+    box: [-100, 0.32,-0.25,0.25,-100,100] # [xmin, xmax, ymin, ymax, zmin, zmax]
+    box2: [-100, 0.17,-0.37,0.37,-100,100]
+
+link_remove:
+    enable: false
+
+cloud_deskew:
+    enable: true
+
+cloud_filter:
+    enable: false
+    radius: 0.2
+    min_num_of_points: 2
+
+cloud_downsample:
+    enable: true
+    min_dis: 0.02
