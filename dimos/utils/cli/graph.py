@@ -540,31 +540,33 @@ function setupViewport(vp, labelColors, disconnectedList) {{
     }});
 
     vp._fitToView = fitToView;
-
-    document.getElementById('zoomIn').addEventListener('click', () => {{
+    vp._zoomBy = (factor) => {{
         const rect = vp.getBoundingClientRect();
         const cx = rect.width / 2, cy = rect.height / 2;
-        const newScale = Math.min(scale * 1.3, 50);
+        const newScale = Math.min(Math.max(scale * factor, 0.05), 50);
         panX = cx - (cx - panX) * (newScale / scale);
         panY = cy - (cy - panY) * (newScale / scale);
         scale = newScale; apply();
-    }});
-    document.getElementById('zoomOut').addEventListener('click', () => {{
-        const rect = vp.getBoundingClientRect();
-        const cx = rect.width / 2, cy = rect.height / 2;
-        const newScale = Math.max(scale / 1.3, 0.05);
-        panX = cx - (cx - panX) * (newScale / scale);
-        panY = cy - (cy - panY) * (newScale / scale);
-        scale = newScale; apply();
-    }});
-    document.getElementById('resetView').addEventListener('click', () => {{
-        fitToView();
-    }});
+    }};
 }}
 
+let activeViewport = null;
 document.querySelectorAll('.tab-panel').forEach((panel, idx) => {{
     const vp = panel.querySelector('.viewport');
-    if (vp) setupViewport(vp, allLabelColors[idx] || {{}}, allDisconnected[idx] || []);
+    if (vp) {{
+        setupViewport(vp, allLabelColors[idx] || {{}}, allDisconnected[idx] || []);
+        if (panel.classList.contains('active')) activeViewport = vp;
+    }}
+}});
+
+document.getElementById('zoomIn').addEventListener('click', () => {{
+    if (activeViewport?._zoomBy) activeViewport._zoomBy(1.3);
+}});
+document.getElementById('zoomOut').addEventListener('click', () => {{
+    if (activeViewport?._zoomBy) activeViewport._zoomBy(1 / 1.3);
+}});
+document.getElementById('resetView').addEventListener('click', () => {{
+    if (activeViewport?._fitToView) activeViewport._fitToView();
 }});
 
 document.querySelectorAll('.tab-panel:not(.active)').forEach(p => p.classList.add('hidden'));
@@ -582,7 +584,10 @@ document.querySelectorAll('.tab-btn').forEach(btn => {{
         panel.classList.add('active');
         panel.classList.remove('hidden');
         const vp = panel.querySelector('.viewport');
-        if (vp && vp._fitToView) setTimeout(() => vp._fitToView(), 0);
+        if (vp) {{
+            activeViewport = vp;
+            if (vp._fitToView) setTimeout(() => vp._fitToView(), 0);
+        }}
     }});
 }});
 </script>
