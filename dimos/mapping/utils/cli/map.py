@@ -164,6 +164,7 @@ def progress(total: int, label: str = "") -> Callable[[Observation[Any]], None]:
 def _log_reconstruction(
     *,
     voxel: float,
+    cubes: bool = False,
     global_map: PointCloud2 | None,
     path: list[tuple[float, float, float]],
     pgo_map: PointCloud2 | None,
@@ -178,8 +179,12 @@ def _log_reconstruction(
     from dimos.msgs.geometry_msgs.Transform import Transform
 
     rr.send_blueprint(rrb.Blueprint(rrb.Spatial3DView(origin="world")))
+    # Cubes tile the grid at full voxel size; dots (spheres) stay at half.
+    map_kw: dict[str, Any] = (
+        {"voxel_size": voxel, "mode": "boxes"} if cubes else {"voxel_size": voxel / 2}
+    )
     if global_map is not None:
-        rr.log("world/raw_map/pointcloud", global_map.to_rerun(voxel_size=voxel / 2), static=True)
+        rr.log("world/raw_map/pointcloud", global_map.to_rerun(**map_kw), static=True)
     if path:
         rr.log(
             "world/raw_map/path",
@@ -187,11 +192,11 @@ def _log_reconstruction(
             static=True,
         )
     if pgo_map is not None:
-        rr.log("world/pgo_map/pointcloud", pgo_map.to_rerun(voxel_size=voxel / 2), static=True)
+        rr.log("world/pgo_map/pointcloud", pgo_map.to_rerun(**map_kw), static=True)
     if full_pgo_map is not None:
         rr.log(
             "world/full_pgo_map/pointcloud",
-            full_pgo_map.to_rerun(voxel_size=voxel / 2),
+            full_pgo_map.to_rerun(**map_kw),
             static=True,
         )
     if pgo_path:
@@ -292,6 +297,9 @@ def main(
         None, "--duration", help="Use only N seconds from --seek (default: to the end)"
     ),
     voxel: float = typer.Option(0.05, "--voxel", help="Voxel size for the rebuild"),
+    cubes: bool = typer.Option(
+        False, "--cubes", help="Render the map as voxel-sized cubes instead of dots"
+    ),
     device: str = typer.Option(
         "CUDA:0", "--device", help="Open3D compute device (e.g. CUDA:0, CPU:0)"
     ),
@@ -523,6 +531,7 @@ def main(
     rr.save(str(out))
     _log_reconstruction(
         voxel=voxel,
+        cubes=cubes,
         global_map=global_map,
         path=path,
         pgo_map=pgo_map,

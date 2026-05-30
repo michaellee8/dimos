@@ -77,3 +77,7 @@ for debugging just camera
 for global map that includes markers
 
 `dimos map global go2_china_office_indoor --lidar lidar_bestz --voxel 0.1 --duration 60 --markers --camera-info dimos/robot/unitree/go2/front_camera_1080.yaml --image-pose odom_bestz`
+
+for replay of global map creation
+
+`dimos map replay go2_china_office_indoor --duration 100 --voxel 0.05 --map --cube --no-image`

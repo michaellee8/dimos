@@ -164,8 +164,10 @@ def main(
         "--voxel",
         help="Voxel grid resolution (m) for --map/--map-final; rendering follows the same size",
     ),
-    point_mode: str = typer.Option(
-        "spheres", "--point-mode", help="Render mode: 'spheres', 'boxes', or 'points'"
+    cube: bool = typer.Option(
+        False,
+        "--cube",
+        help="Render the accumulated --map/--map-final as voxel-sized cubes instead of spheres",
     ),
     camera_hz: float = typer.Option(
         0.0,
@@ -201,6 +203,7 @@ def main(
         "--map-emit-every",
         help="Emit accumulated map every N frames (0 = only at end); --map only",
     ),
+    no_image: bool = typer.Option(False, "--no-image", help="Skip logging color_image frames"),
 ) -> None:
     """Dump a recording to .rrd (lidar clouds + camera frames) and open it in rerun."""
     from dimos.mapping.utils.cli.summary import _stream_payload_types
@@ -232,9 +235,10 @@ def main(
 
     # Static pinhole on the camera entity; per-frame Transform3D goes on the
     # same entity. Image is the child so it projects through the pinhole.
-    pinhole = cam_info.to_rerun()
-    assert not isinstance(pinhole, list)
-    rr.log("world/camera", pinhole, static=True)
+    if not no_image:
+        pinhole = cam_info.to_rerun()
+        assert not isinstance(pinhole, list)
+        rr.log("world/camera", pinhole, static=True)
 
     # Static axis triads as children of each moving Transform3D, so the
     # transforms are actually visible in the 3D view.
@@ -257,10 +261,10 @@ def main(
         has_livox = "fastlio_lidar" in store.streams
         livox = clipped("fastlio_lidar", PointCloud2) if has_livox else None
 
-        # ---- per-frame raw clouds ----
-        _log_clouds("       lidar", lidar, "world/lidar", voxel, point_mode)
+        # ---- per-frame raw clouds (always spheres) ----
+        _log_clouds("       lidar", lidar, "world/lidar", voxel, "spheres")
         if livox is not None:
-            _log_clouds("fastlio_lidar", livox, "world/fastlio_lidar", voxel, point_mode)
+            _log_clouds("fastlio_lidar", livox, "world/fastlio_lidar", voxel, "spheres")
 
         # ---- accumulated voxel maps over the selected PointCloud2 streams ----
         # --map logs a growing map per stream; --map-final logs one static map
@@ -268,6 +272,10 @@ def main(
         # voxel (good for forward-facing lidar like the Go2 L1); off by default.
         if map or map_final:
             grid_kwargs = {"voxel_size": voxel, "device": map_device, "show_startup_log": False}
+            # --cube tiles the grid at the true voxel size; spheres render
+            # smaller so the gaps between them read as transparency.
+            map_mode = "boxes" if cube else "spheres"
+            map_render = voxel if cube else voxel / 4
             for name in map_sources:
                 src = clipped(name, PointCloud2)
                 if not src.exists():
@@ -283,8 +291,8 @@ def main(
                             )
                         ),
                         f"world/{name}_voxels",
-                        voxel / 4,  # render smaller than the grid → gaps read as transparency
-                        point_mode,
+                        map_render,
+                        map_mode,
                         total=max(1, src.count() // max(map_emit_every, 1)),
                     )
                 if map_final:
@@ -296,7 +304,7 @@ def main(
                     ).last()
                     rr.log(
                         f"world/{name}_map",
-                        final.data.to_rerun(voxel_size=voxel / 4, mode=point_mode),
+                        final.data.to_rerun(voxel_size=map_render, mode=map_mode),
                         static=True,
                     )
 
@@ -349,23 +357,24 @@ def main(
             )
 
         # ---- pass 2: camera pose + image per color_image ----
-        cam_pipeline = (
-            color_image.transform(throttle(1.0 / camera_hz)) if camera_hz > 0 else color_image
-        )
-        n_img = cam_pipeline.count()
-        cb = _progress(n_img, "  color_image")
-        for img_obs in cam_pipeline:
-            cb(img_obs)
-            rr.set_time(TIMELINE, timestamp=img_obs.ts)
-            if img_obs.pose_tuple is not None:
-                x, y, z, qx, qy, qz, qw = img_obs.pose_tuple
-                rr.log(
-                    "world/camera",
-                    rr.Transform3D(
-                        translation=[x, y, z], quaternion=rr.Quaternion(xyzw=[qx, qy, qz, qw])
-                    ),
-                )
-            rr.log("world/camera/image", img_obs.data.to_rerun())
+        if not no_image:
+            cam_pipeline = (
+                color_image.transform(throttle(1.0 / camera_hz)) if camera_hz > 0 else color_image
+            )
+            n_img = cam_pipeline.count()
+            cb = _progress(n_img, "  color_image")
+            for img_obs in cam_pipeline:
+                cb(img_obs)
+                rr.set_time(TIMELINE, timestamp=img_obs.ts)
+                if img_obs.pose_tuple is not None:
+                    x, y, z, qx, qy, qz, qw = img_obs.pose_tuple
+                    rr.log(
+                        "world/camera",
+                        rr.Transform3D(
+                            translation=[x, y, z], quaternion=rr.Quaternion(xyzw=[qx, qy, qz, qw])
+                        ),
+                    )
+                rr.log("world/camera/image", img_obs.data.to_rerun())
 
     print(f"wrote {out}")
     if no_gui:
