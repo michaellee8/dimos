@@ -20,7 +20,7 @@ forces a full re-read of every row, so any pre-existing corruption surfaces
 immediately. Streams not mentioned in ``--rename`` are copied verbatim.
 
 Usage:
-    uv run python -m dimos.mapping.loop_closure.utils.rename_streams mid360 \\
+    uv run python -m dimos.mapping.utils.rename mid360 \\
         --out mid360_renamed.db \\
         --rename go2_lidar=lidar \\
         --rename lidar=fastlio_lidar \\
@@ -40,12 +40,13 @@ import typer
 
 from dimos.memory2.codecs.base import _resolve_payload_type
 from dimos.memory2.store.sqlite import SqliteStore
+from dimos.memory2.stream import Stream
 from dimos.memory2.type.observation import Observation
 from dimos.utils.data import resolve_named_path
 
 
 def progress(total: int, label: str = "") -> Callable[[Observation[Any]], None]:
-    """Matches dimos/utils/cli/map.py:progress — kept inline to avoid pulling rerun."""
+    """Matches dimos/mapping/utils/globalmap.py:progress — kept inline to avoid pulling rerun."""
     seen = 0
     wall_start: float | None = None
     last_wall: float | None = None
@@ -113,7 +114,12 @@ def main(
     drop: list[str] = typer.Option(
         [], "--drop", help="Stream name to omit from output (can be passed multiple times)"
     ),
+    seek: float = typer.Option(0.0, "--seek", help="Skip the first N seconds of the recording"),
+    duration: float | None = typer.Option(
+        None, "--duration", help="Use only N seconds from --seek (default: to the end)"
+    ),
 ) -> None:
+    """Copy a recording into a new .db, renaming and/or dropping streams."""
     src_path = resolve_named_path(dataset, ".db")
     if out.exists():
         raise typer.BadParameter(f"Output already exists: {out}")
@@ -158,8 +164,8 @@ def main(
         with dst:
             for src_name, dst_name in kept.items():
                 ptype = payload_types[src_name]
-                src_s = src.stream(src_name, ptype)
-                dst_s = dst.stream(dst_name, ptype)
+                src_s: Stream[Any] = src.stream(src_name, ptype).clip(seek, duration)
+                dst_s: Stream[Any] = dst.stream(dst_name, ptype)
                 total = src_s.count()
                 cb = progress(total, f"{dst_name:>16s}")
                 for obs in src_s:

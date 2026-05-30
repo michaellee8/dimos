@@ -15,7 +15,7 @@
 """Print ``Store.summary()`` for a memory2 sqlite recording.
 
 Usage:
-    uv run python -m dimos.mapping.loop_closure.utils.summary mid360
+    uv run python -m dimos.mapping.utils.summary mid360
 """
 
 from __future__ import annotations

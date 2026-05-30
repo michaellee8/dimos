@@ -29,8 +29,8 @@ their entity path (no parent transform). Entities written:
 - ``world/camera/image``  — color_image frames
 
 Usage:
-    uv run python -m dimos.mapping.loop_closure.utils.map_rrd mid360 --out map.rrd
-    uv run python -m dimos.mapping.loop_closure.utils.map_rrd mid360 --out map.rrd --map
+    uv run python -m dimos.mapping.utils.replay mid360 --out map.rrd
+    uv run python -m dimos.mapping.utils.replay mid360 --out map.rrd --map
     rerun map.rrd
 """
 
@@ -38,29 +38,26 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+import subprocess
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import rerun as rr
 import typer
 
-from dimos.mapping.voxels import VoxelMapTransformer
-from dimos.memory2.store.sqlite import SqliteStore
-from dimos.memory2.stream import Stream
-from dimos.memory2.transform import throttle
-from dimos.memory2.type.observation import Observation
-from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-from dimos.msgs.nav_msgs.Odometry import Odometry
-from dimos.msgs.sensor_msgs.Image import Image
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2, register_colormap_annotation
-from dimos.robot.unitree.go2.connection import _camera_info_static
-from dimos.utils.data import resolve_named_path
+# Heavy dimos imports (mapping/memory2 → torch, scipy, open3d) are deferred into
+# main() so that `dimos map --help` stays fast. See test_cli_startup.py and the
+# same pattern in dimos/mapping/utils/globalmap.py.
+if TYPE_CHECKING:
+    from dimos.memory2.stream import Stream
+    from dimos.memory2.type.observation import Observation
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
 TIMELINE = "ts"
 
 
 def _progress(total: int, label: str) -> Callable[[Observation[Any]], None]:
-    """Matches dimos/utils/cli/map.py:progress."""
+    """Matches dimos/mapping/utils/globalmap.py:progress."""
     seen = 0
     wall_start: float | None = None
     last_wall: float | None = None
@@ -153,7 +150,14 @@ def _log_path(
 
 def main(
     dataset: str = typer.Argument(..., help="Dataset .db: bare name (cwd or data/) or path"),
-    out: Path = typer.Option(..., "--out", help="Output .rrd path"),
+    out: Path | None = typer.Option(
+        None, "--out", help="Output .rrd path (default: ./<dataset>.rrd)"
+    ),
+    no_gui: bool = typer.Option(False, "--no-gui", help="Don't launch rerun on the result"),
+    seek: float = typer.Option(0.0, "--seek", help="Skip the first N seconds of the recording"),
+    duration: float | None = typer.Option(
+        None, "--duration", help="Use only N seconds from --seek (default: to the end)"
+    ),
     voxel: float = typer.Option(
         0.05, "--voxel", help="Voxel size hint for the point cloud renderer"
     ),
@@ -182,7 +186,20 @@ def main(
         help="Emit accumulated map every N frames (0 = only at end); --map only",
     ),
 ) -> None:
+    """Dump a recording to .rrd (lidar clouds + camera frames) and open it in rerun."""
+    from dimos.mapping.voxels import VoxelMapTransformer
+    from dimos.memory2.store.sqlite import SqliteStore
+    from dimos.memory2.transform import throttle
+    from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+    from dimos.msgs.nav_msgs.Odometry import Odometry
+    from dimos.msgs.sensor_msgs.Image import Image
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2, register_colormap_annotation
+    from dimos.robot.unitree.go2.connection import _camera_info_static
+    from dimos.utils.data import resolve_named_path
+
     db_path = resolve_named_path(dataset, ".db")
+    if out is None:
+        out = Path.cwd() / f"{db_path.stem}.rrd"
     cam_info = _camera_info_static()
 
     rr.init("dimos map_rrd", recording_id=db_path.stem)
@@ -208,10 +225,13 @@ def main(
     with store:
         print(store.summary())
 
-        lidar = store.stream("lidar", PointCloud2)
-        color_image = store.stream("color_image", Image)
+        def clipped(name: str, ptype: type[Any]) -> Stream[Any]:
+            return store.stream(name, ptype).clip(seek, duration)
+
+        lidar = clipped("lidar", PointCloud2)
+        color_image = clipped("color_image", Image)
         has_livox = "fastlio_lidar" in store.streams
-        livox = store.stream("fastlio_lidar", PointCloud2) if has_livox else None
+        livox = clipped("fastlio_lidar", PointCloud2) if has_livox else None
 
         # ---- per-frame raw clouds ----
         _log_clouds("       lidar", lidar, "world/lidar", voxel, point_mode)
@@ -251,7 +271,7 @@ def main(
 
         # ---- fastlio pose axis + path from fastlio_odometry stream ----
         if "fastlio_odometry" in store.streams:
-            odometry = store.stream("fastlio_odometry", Odometry)
+            odometry = clipped("fastlio_odometry", Odometry)
             cb = _progress(odometry.count(), "fastlio_odometry")
             for obs in odometry:
                 cb(obs)
@@ -268,14 +288,14 @@ def main(
                 )
             _log_path(
                 "  fastlio_path",
-                store.stream("fastlio_odometry", Odometry),
+                clipped("fastlio_odometry", Odometry),
                 "world/fastlio_path",
                 color=(255, 165, 0),  # orange
             )
 
         # ---- Go2 native odom pose axis + path ----
         if "odom" in store.streams:
-            odom = store.stream("odom", PoseStamped)
+            odom = clipped("odom", PoseStamped)
             cb = _progress(odom.count(), "        odom")
             for odom_obs in odom:
                 cb(odom_obs)
@@ -292,7 +312,7 @@ def main(
                 )
             _log_path(
                 "     odom_path",
-                store.stream("odom", PoseStamped),
+                clipped("odom", PoseStamped),
                 "world/odom_path",
                 color=(0, 200, 100),  # green
             )
@@ -317,7 +337,10 @@ def main(
             rr.log("world/camera/image", img_obs.data.to_rerun())
 
     print(f"wrote {out}")
-    print(f"open with: rerun {out}")
+    if no_gui:
+        print(f"open with: rerun {out}")
+    else:
+        subprocess.Popen(["rerun", str(out)])
 
 
 if __name__ == "__main__":

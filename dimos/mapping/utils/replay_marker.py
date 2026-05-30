@@ -20,7 +20,7 @@ Walks a recorded SQLite dataset and writes an rrd containing:
 - per detection: marker box in world frame, at the detection timestamp
 
 Usage:
-    uv run python -m dimos.utils.cli.markers_rrd hk_village1 --out hk.rrd
+    uv run python -m dimos.mapping.utils.replay_marker hk_village1 --out hk.rrd
     rerun hk.rrd
 
 Throwaway script next to ``map.py``; remove once the apriltag reliability work
@@ -30,27 +30,31 @@ lands.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+import subprocess
+from typing import TYPE_CHECKING, Any
 
 import rerun as rr
 import typer
 
-from dimos.memory2.store.sqlite import SqliteStore
-from dimos.memory2.stream import Stream
-from dimos.memory2.transform import QualityWindow, SpeedLimit
-from dimos.memory2.vis.color import Color
-from dimos.msgs.sensor_msgs.Image import Image
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.perception.fiducial.marker_transformer import DetectMarkers
-from dimos.robot.unitree.go2.connection import _camera_info_static
-from dimos.utils.data import resolve_named_path
+# Heavy dimos imports (memory2/perception → torch, scipy, cv2) are deferred into
+# main() so that `dimos map --help` stays fast. See test_cli_startup.py and the
+# same pattern in dimos/mapping/utils/globalmap.py.
+if TYPE_CHECKING:
+    from dimos.memory2.stream import Stream
 
 TIMELINE = "ts"
 
 
 def main(
     dataset: str = typer.Argument(..., help="Dataset .db: bare name (cwd or data/) or path"),
-    out: Path = typer.Option(..., "--out", help="Output .rrd path"),
+    out: Path | None = typer.Option(
+        None, "--out", help="Output .rrd path (default: ./<dataset>.rrd)"
+    ),
+    no_gui: bool = typer.Option(False, "--no-gui", help="Don't launch rerun on the result"),
+    seek: float = typer.Option(0.0, "--seek", help="Skip the first N seconds of the recording"),
+    duration: float | None = typer.Option(
+        None, "--duration", help="Use only N seconds from --seek (default: to the end)"
+    ),
     marker_size: float = typer.Option(0.1, "--marker-size", help="Marker edge length (m)"),
     marker_max_speed: float = typer.Option(
         0.5, "--marker-max-speed", help="Detection speed gate (m/s); 0 disables"
@@ -65,7 +69,19 @@ def main(
         7.5, "--smoothing-window", help="Buffer window for averaged-track pass (s); 0 disables"
     ),
 ) -> None:
+    """Dump an AprilTag detection replay to .rrd and open it in rerun."""
+    from dimos.memory2.store.sqlite import SqliteStore
+    from dimos.memory2.transform import QualityWindow, SpeedLimit
+    from dimos.memory2.vis.color import Color
+    from dimos.msgs.sensor_msgs.Image import Image
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+    from dimos.perception.fiducial.marker_transformer import DetectMarkers
+    from dimos.robot.unitree.go2.connection import _camera_info_static
+    from dimos.utils.data import resolve_named_path
+
     db_path = resolve_named_path(dataset, ".db")
+    if out is None:
+        out = Path.cwd() / f"{db_path.stem}.rrd"
     cam_info = _camera_info_static()
 
     rr.init("dimos markers", recording_id=db_path.stem)
@@ -79,15 +95,15 @@ def main(
 
     store = SqliteStore(path=str(db_path))
     with store:
-        color_image = store.stream("color_image", Image)
-        lidar = store.stream("lidar", PointCloud2)
+        color_image = store.stream("color_image", Image).clip(seek, duration)
+        lidar = store.stream("lidar", PointCloud2).clip(seek, duration)
 
         # ---- pass 1: robot base pose over time (from lidar.pose) ----
         for lidar_obs in lidar:
-            if lidar_obs.pose is None:
+            if lidar_obs.pose_tuple is None:
                 continue
             rr.set_time(TIMELINE, timestamp=lidar_obs.ts)
-            x, y, z, qx, qy, qz, qw = lidar_obs.pose
+            x, y, z, qx, qy, qz, qw = lidar_obs.pose_tuple
             rr.log(
                 "world/robot",
                 rr.Transform3D(
@@ -99,8 +115,8 @@ def main(
         n_img = color_image.count()
         for i, img_obs in enumerate(color_image):
             rr.set_time(TIMELINE, timestamp=img_obs.ts)
-            if img_obs.pose is not None:
-                x, y, z, qx, qy, qz, qw = img_obs.pose
+            if img_obs.pose_tuple is not None:
+                x, y, z, qx, qy, qz, qw = img_obs.pose_tuple
                 rr.log(
                     "world/camera",
                     rr.Transform3D(
@@ -226,7 +242,10 @@ def main(
             print(f"tracks: {len(seen_tracks)} unique, {n_updates} updates")
 
     print(f"wrote {out}")
-    print(f"open with: rerun {out}")
+    if no_gui:
+        print(f"open with: rerun {out}")
+    else:
+        subprocess.Popen(["rerun", str(out)])
 
 
 if __name__ == "__main__":

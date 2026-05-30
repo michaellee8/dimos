@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 import math
 from pathlib import Path
+import subprocess
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -160,8 +161,136 @@ def progress(total: int, label: str = "") -> Callable[[Observation[Any]], None]:
     return _progress
 
 
+def _log_reconstruction(
+    *,
+    voxel: float,
+    global_map: PointCloud2 | None,
+    path: list[tuple[float, float, float]],
+    pgo_map: PointCloud2 | None,
+    full_pgo_map: PointCloud2 | None,
+    pgo_path: list[tuple[float, float, float]],
+    graph: PoseGraph | None,
+    marker_dets: list[Observation[Any]],
+    marker_size: float,
+) -> None:
+    """Log maps, paths, the PGO graph, and markers to the active rerun recording."""
+    from dimos.memory2.vis.color import Color
+    from dimos.msgs.geometry_msgs.Transform import Transform
+
+    rr.send_blueprint(rrb.Blueprint(rrb.Spatial3DView(origin="world")))
+    if global_map is not None:
+        rr.log("world/raw_map/pointcloud", global_map.to_rerun(voxel_size=voxel / 2), static=True)
+    if path:
+        rr.log(
+            "world/raw_map/path",
+            rr.LineStrips3D(strips=[path], colors=[[231, 76, 60]], radii=[PATH_THICKNESS]),
+            static=True,
+        )
+    if pgo_map is not None:
+        rr.log("world/pgo_map/pointcloud", pgo_map.to_rerun(voxel_size=voxel / 2), static=True)
+    if full_pgo_map is not None:
+        rr.log(
+            "world/full_pgo_map/pointcloud",
+            full_pgo_map.to_rerun(voxel_size=voxel / 2),
+            static=True,
+        )
+    if pgo_path:
+        rr.log(
+            "world/pgo_map/path",
+            rr.LineStrips3D(strips=[pgo_path], colors=[[255, 255, 255]], radii=[PATH_THICKNESS]),
+            static=True,
+        )
+        rr.log(
+            "world/pgo_map/pgo/keyframes",
+            rr.Points3D(positions=pgo_path, colors=[[255, 0, 0]], radii=[0.025]),
+            static=True,
+        )
+    if graph is not None and graph.loops:
+        loop_strips = [
+            [
+                (lc.source.translation.x, lc.source.translation.y, lc.source.translation.z),
+                (lc.target.translation.x, lc.target.translation.y, lc.target.translation.z),
+            ]
+            for lc in graph.loops
+        ]
+        rr.log(
+            "world/pgo_map/pgo/loop_closures",
+            rr.LineStrips3D(strips=loop_strips, colors=[[231, 76, 60]], radii=[0.025]),
+            static=True,
+        )
+    if marker_dets:
+        half = marker_size / 2.0
+        n = len(marker_dets)
+        fill_half = [(half, half, 0.005)] * n
+        # Outline sits just outside the fill so both stay visible.
+        outline_bump = marker_size * 0.05
+        outline_half = [(half + outline_bump, half + outline_bump, 0.006)] * n
+        raw_centers = [(d.data.center.x, d.data.center.y, d.data.center.z) for d in marker_dets]
+        raw_quats = [
+            (d.data.orientation.x, d.data.orientation.y, d.data.orientation.z, d.data.orientation.w)
+            for d in marker_dets
+        ]
+        # One entry per tracked marker session — color stable per track_id.
+        colors = [
+            Color.from_cmap("tab10", (d.data.track_id % 10) / 10.0).rgb_u8() for d in marker_dets
+        ]
+        labels = [f"track={d.data.track_id} id={d.data.marker_id}" for d in marker_dets]
+
+        _log_markers(
+            "world/raw_map/markers",
+            raw_centers,
+            raw_quats,
+            fill_half=fill_half,
+            outline_half=outline_half,
+            colors=colors,
+            labels=labels,
+        )
+
+        if graph is not None:
+            # PGO-correct each raw marker pose: lift it from world_raw into
+            # world_corrected so it lines up with pgo_map.
+            pgo_centers: list[tuple[float, float, float]] = []
+            pgo_quats: list[tuple[float, float, float, float]] = []
+            for d in marker_dets:
+                raw_tf = Transform(
+                    translation=d.data.center,
+                    rotation=d.data.orientation,
+                    frame_id="world",
+                    child_frame_id=f"marker_{d.data.marker_id}",
+                    ts=d.ts,
+                )
+                corrected = graph.correct(raw_tf)
+                pgo_centers.append(
+                    (corrected.translation.x, corrected.translation.y, corrected.translation.z)
+                )
+                pgo_quats.append(
+                    (
+                        corrected.rotation.x,
+                        corrected.rotation.y,
+                        corrected.rotation.z,
+                        corrected.rotation.w,
+                    )
+                )
+            _log_markers(
+                "world/pgo_map/markers",
+                pgo_centers,
+                pgo_quats,
+                fill_half=fill_half,
+                outline_half=outline_half,
+                colors=colors,
+                labels=labels,
+            )
+
+
 def main(
     dataset: str = typer.Argument(..., help="Dataset .db: bare name (cwd or data/) or path"),
+    lidar_stream: str = typer.Option(
+        "lidar", "--lidar", help="Lidar point-cloud stream to reconstruct"
+    ),
+    seek: float = typer.Option(0.0, "--seek", help="Skip the first N seconds of the recording"),
+    duration: float | None = typer.Option(
+        None, "--duration", help="Use only N seconds from --seek (default: to the end)"
+    ),
     voxel: float = typer.Option(0.05, "--voxel", help="Voxel size for the rebuild"),
     device: str = typer.Option(
         "CUDA:0", "--device", help="Open3D compute device (e.g. CUDA:0, CPU:0)"
@@ -189,7 +318,10 @@ def main(
         "--full-pgo",
         help="Also build a full-replay PGO map (every frame) for comparison (implies --pgo)",
     ),
-    no_gui: bool = typer.Option(False, "--no-gui", help="Skip rerun visualization"),
+    out: Path | None = typer.Option(
+        None, "--out", help="Output .rrd path (default: ./<dataset>.rrd)"
+    ),
+    no_gui: bool = typer.Option(False, "--no-gui", help="Write the .rrd but don't launch rerun"),
     markers: bool = typer.Option(
         False,
         "--markers",
@@ -224,25 +356,26 @@ def main(
         help="Sliding-window track buffer for marker pose averaging (s); 0 disables (one box per raw detection)",
     ),
 ) -> None:
-    """Rebuild a voxel map from a recorded SQLite dataset and view it in rerun."""
+    """Rebuild a voxel map from a recorded SQLite dataset, write a .rrd, and open it in rerun."""
     from dimos.mapping.loop_closure.pgo import PGO
     from dimos.memory2.store.sqlite import SqliteStore
     from dimos.memory2.transform import QualityWindow, SpeedLimit
-    from dimos.memory2.vis.color import Color
-    from dimos.msgs.geometry_msgs.Transform import Transform
     from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
     from dimos.msgs.sensor_msgs.Image import Image
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
     from dimos.perception.fiducial.marker_transformer import DetectMarkers
     from dimos.robot.unitree.go2.connection import _camera_info_static
     from dimos.utils.data import resolve_named_path
     from dimos.visualization.rerun.init import rerun_init
 
     db_path = resolve_named_path(dataset, ".db")
+    if out is None:
+        out = Path.cwd() / f"{db_path.stem}.rrd"
     if export or full_pgo:
         pgo = True
 
     store = SqliteStore(path=db_path)
-    lidar = store.streams.lidar
+    lidar = store.stream(lidar_stream, PointCloud2).clip(seek, duration)
 
     print(lidar.summary())
 
@@ -325,7 +458,7 @@ def main(
         # frame_id="camera_optical", so obs.pose is already optical-in-world
         # (verified: matches lidar_base_pose + BASE_TO_OPTICAL to ~1mm).
         # No mount composition needed.
-        color_image = store.stream("color_image", Image)
+        color_image = store.stream("color_image", Image).clip(seek, duration)
         cam_info = CameraInfo.from_yaml(str(camera_info)) if camera_info else _camera_info_static()
         xf = DetectMarkers(
             camera_info=cam_info,
@@ -361,125 +494,24 @@ def main(
             f"across {len(unique_ids)} unique ids {unique_ids}"
         )
 
-    if not no_gui:
-        rerun_init("dimos map tool", spawn=True)
-        rr.send_blueprint(rrb.Blueprint(rrb.Spatial3DView(origin="world")))
-        if global_map is not None:
-            rr.log(
-                "world/raw_map/pointcloud", global_map.to_rerun(voxel_size=voxel / 2), static=True
-            )
-        if path:
-            rr.log(
-                "world/raw_map/path",
-                rr.LineStrips3D(strips=[path], colors=[[231, 76, 60]], radii=[PATH_THICKNESS]),
-                static=True,
-            )
-        if pgo_map is not None:
-            rr.log("world/pgo_map/pointcloud", pgo_map.to_rerun(voxel_size=voxel / 2), static=True)
-        if full_pgo_map is not None:
-            rr.log(
-                "world/full_pgo_map/pointcloud",
-                full_pgo_map.to_rerun(voxel_size=voxel / 2),
-                static=True,
-            )
-        if pgo_path:
-            rr.log(
-                "world/pgo_map/path",
-                rr.LineStrips3D(
-                    strips=[pgo_path], colors=[[255, 255, 255]], radii=[PATH_THICKNESS]
-                ),
-                static=True,
-            )
-            rr.log(
-                "world/pgo_map/pgo/keyframes",
-                rr.Points3D(positions=pgo_path, colors=[[255, 0, 0]], radii=[0.025]),
-                static=True,
-            )
-        if graph is not None and graph.loops:
-            loop_strips = [
-                [
-                    (lc.source.translation.x, lc.source.translation.y, lc.source.translation.z),
-                    (lc.target.translation.x, lc.target.translation.y, lc.target.translation.z),
-                ]
-                for lc in graph.loops
-            ]
-            rr.log(
-                "world/pgo_map/pgo/loop_closures",
-                rr.LineStrips3D(strips=loop_strips, colors=[[231, 76, 60]], radii=[0.025]),
-                static=True,
-            )
-        if marker_dets:
-            half = marker_size / 2.0
-            n = len(marker_dets)
-            fill_half = [(half, half, 0.005)] * n
-            # Outline sits just outside the fill so both stay visible.
-            outline_bump = marker_size * 0.05
-            outline_half = [(half + outline_bump, half + outline_bump, 0.006)] * n
-            raw_centers = [(d.data.center.x, d.data.center.y, d.data.center.z) for d in marker_dets]
-            raw_quats = [
-                (
-                    d.data.orientation.x,
-                    d.data.orientation.y,
-                    d.data.orientation.z,
-                    d.data.orientation.w,
-                )
-                for d in marker_dets
-            ]
-            # One entry per tracked marker session — color stable per track_id.
-            colors = [
-                Color.from_cmap("tab10", (d.data.track_id % 10) / 10.0).rgb_u8()
-                for d in marker_dets
-            ]
-            labels = [f"track={d.data.track_id} id={d.data.marker_id}" for d in marker_dets]
-
-            _log_markers(
-                "world/raw_map/markers",
-                raw_centers,
-                raw_quats,
-                fill_half=fill_half,
-                outline_half=outline_half,
-                colors=colors,
-                labels=labels,
-            )
-
-            if graph is not None:
-                # PGO-correct each raw marker pose: lift it from world_raw
-                # into world_corrected so it lines up with pgo_map.
-                pgo_centers: list[tuple[float, float, float]] = []
-                pgo_quats: list[tuple[float, float, float, float]] = []
-                for d in marker_dets:
-                    raw_tf = Transform(
-                        translation=d.data.center,
-                        rotation=d.data.orientation,
-                        frame_id="world",
-                        child_frame_id=f"marker_{d.data.marker_id}",
-                        ts=d.ts,
-                    )
-                    corrected = graph.correct(raw_tf)
-                    pgo_centers.append(
-                        (
-                            corrected.translation.x,
-                            corrected.translation.y,
-                            corrected.translation.z,
-                        )
-                    )
-                    pgo_quats.append(
-                        (
-                            corrected.rotation.x,
-                            corrected.rotation.y,
-                            corrected.rotation.z,
-                            corrected.rotation.w,
-                        )
-                    )
-                _log_markers(
-                    "world/pgo_map/markers",
-                    pgo_centers,
-                    pgo_quats,
-                    fill_half=fill_half,
-                    outline_half=outline_half,
-                    colors=colors,
-                    labels=labels,
-                )
+    rerun_init("dimos map tool")
+    rr.save(str(out))
+    _log_reconstruction(
+        voxel=voxel,
+        global_map=global_map,
+        path=path,
+        pgo_map=pgo_map,
+        full_pgo_map=full_pgo_map,
+        pgo_path=pgo_path,
+        graph=graph,
+        marker_dets=marker_dets,
+        marker_size=marker_size,
+    )
+    print(f"wrote {out}")
+    if no_gui:
+        print(f"open with: rerun {out}")
+    else:
+        subprocess.Popen(["rerun", str(out)])
 
     if export and pgo_map is not None:
         out_path = Path.cwd() / f"{db_path.stem}.pc2.lcm"

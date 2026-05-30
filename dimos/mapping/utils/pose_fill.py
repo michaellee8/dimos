@@ -30,11 +30,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from dimos.memory2.backend import Backend
-from dimos.memory2.stream import Stream
-from dimos.memory2.type.observation import Observation
+import typer
+
+# Heavy dimos imports are deferred (TYPE_CHECKING / inside functions) so that
+# `dimos map --help` stays fast. See test_cli_startup.py.
+if TYPE_CHECKING:
+    from dimos.memory2.backend import Backend
+    from dimos.memory2.stream import Stream
+    from dimos.memory2.type.observation import Observation
 
 
 def pose_fill(
@@ -67,6 +72,8 @@ def pose_fill_db(
     pose_source: str = "odom",
     tolerance: float = 0.1,
     streams: list[str] | None = None,
+    seek: float = 0.0,
+    duration: float | None = None,
 ) -> dict[str, int]:
     """Copy a SQLite dataset to *dest_path*, baking *pose_source* poses into *target*.
 
@@ -104,10 +111,12 @@ def pose_fill_db(
         # the source blob still resolves); plain metadata for everything else.
         if name == target:
             rows: Iterable[Observation[Any]] = pose_fill(
-                src.stream(name), src.stream(pose_source), tolerance=tolerance
+                src.stream(name).clip(seek, duration),
+                src.stream(pose_source).clip(seek, duration),
+                tolerance=tolerance,
             )
         else:
-            rows = src.stream(name).order_by("ts")
+            rows = src.stream(name).clip(seek, duration).order_by("ts")
 
         scalar = src_b.data_type in (int, float)
         n = 0
@@ -131,23 +140,24 @@ def pose_fill_db(
 
 
 def main(
-    dataset: str,
-    out: str | None = None,
-    target: str = "lidar",
-    pose_source: str = "odom",
-    tolerance: float = 0.1,
-    streams: str | None = None,
+    dataset: str = typer.Argument(..., help="Source .db: bare name (cwd or data/) or path"),
+    out: str | None = typer.Option(
+        None, "--out", help="Output .db path (default: <dataset>_posed.db beside the source)"
+    ),
+    target: str = typer.Option("lidar", "--target", help="Stream to bake poses into"),
+    pose_source: str = typer.Option(
+        "odom", "--pose-source", help="Stream to read the nearest poses from"
+    ),
+    tolerance: float = typer.Option(0.1, "--tolerance", help="Max |Δts| for a pose match (s)"),
+    streams: str | None = typer.Option(
+        None, "--streams", help="Comma-separated subset of streams to copy (default: all)"
+    ),
+    seek: float = typer.Option(0.0, "--seek", help="Skip the first N seconds of the recording"),
+    duration: float | None = typer.Option(
+        None, "--duration", help="Use only N seconds from --seek (default: to the end)"
+    ),
 ) -> None:
-    """Write a copy of *dataset* with *pose_source* poses baked into *target*.
-
-    Run as ``python -m dimos.mapping.loop_closure.utils.pose_fill <dataset>``.
-    The output (``<dataset>_posed.db`` by default) is then usable directly with
-    ``dimos map reconstruct <out> --pgo``.
-
-    *streams* is a comma-separated subset to copy (default: all) — restrict to
-    e.g. ``lidar,odom`` for a smaller map-only db instead of copying every
-    stream (images, fastlio, …). Blobs are copied verbatim either way.
-    """
+    """Copy a recording, baking nearest pose_source poses into the target stream."""
     from dimos.utils.data import resolve_named_path
 
     src = resolve_named_path(dataset, ".db")
@@ -155,15 +165,20 @@ def main(
     names = [s.strip() for s in streams.split(",")] if streams else None
     print(f"pose-filling {src.name}: {target!r} <- nearest {pose_source!r} (±{tolerance}s)")
     written = pose_fill_db(
-        src, dest, target=target, pose_source=pose_source, tolerance=tolerance, streams=names
+        src,
+        dest,
+        target=target,
+        pose_source=pose_source,
+        tolerance=tolerance,
+        streams=names,
+        seek=seek,
+        duration=duration,
     )
     for name, n in written.items():
         print(f"  {name}: {n}")
     print(f"wrote {dest}")
-    print(f"now run: dimos map reconstruct {dest.stem} --pgo")
+    print(f"now run: dimos map global {dest.stem} --pgo")
 
 
 if __name__ == "__main__":
-    import typer
-
     typer.run(main)

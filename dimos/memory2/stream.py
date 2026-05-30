@@ -232,6 +232,17 @@ class Stream(CompositeResource, Generic[T, O]):
         t0 = self.first().ts
         return self.at(t0 + t, tolerance=tolerance)
 
+    def clip(self, seek: float = 0.0, duration: float | None = None) -> Stream[T, O]:
+        """Window to a snippet ``seek`` seconds in, ``duration`` seconds long.
+
+        Offsets are relative to the first observation; ``duration=None`` runs to
+        the end. A no-op when ``seek<=0`` and ``duration is None``.
+        """
+        if seek <= 0 and duration is None:
+            return self
+        start = self.first().ts + seek
+        return self.after(start) if duration is None else self.time_range(start, start + duration)
+
     def near(self, pose: Any, radius: float) -> Stream[T, O]:
         # Accept Pose/PoseStamped (any object with `.position`), Vector3,
         # numpy arrays, or (x, y, z) tuples — Vector3() handles the rest.
