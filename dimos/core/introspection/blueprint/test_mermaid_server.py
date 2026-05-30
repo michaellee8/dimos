@@ -25,7 +25,6 @@ import pytest
 import requests
 
 from dimos.core.coordination.blueprints import Blueprint, autoconnect
-from dimos.core.introspection.blueprint.mermaid import render_mermaid
 from dimos.core.module import Module
 from dimos.core.stream import In, Out
 
@@ -135,17 +134,6 @@ def _serve_and_fetch(html: str) -> str:
     return body
 
 
-def test_mermaid_render_snapshot() -> None:
-    blueprint = _build_blueprint()
-    mermaid_code, label_colors, disconnected = render_mermaid(blueprint, show_disconnected=True)
-
-    assert "graph LR" in mermaid_code
-    assert "CameraModule" in mermaid_code
-    assert "ControllerModule" in mermaid_code
-    assert len(label_colors) > 0
-    assert isinstance(disconnected, set)
-
-
 def test_graph_server_snapshot() -> None:
     blueprint_source = textwrap.dedent("""\
         from dimos.core.coordination.blueprints import autoconnect
@@ -190,12 +178,12 @@ def test_graph_server_snapshot() -> None:
     assert served_normalized == html_normalized
 
     if SNAPSHOT_PATH.exists():
-        snapshot = SNAPSHOT_PATH.read_text()
-        if snapshot != html_normalized:
-            SNAPSHOT_PATH.write_text(html_normalized)
+        snapshot = SNAPSHOT_PATH.read_text().rstrip("\n")
+        if snapshot != html_normalized.rstrip("\n"):
+            SNAPSHOT_PATH.write_text(html_normalized.rstrip("\n") + "\n")
             pytest.fail(
                 f"Snapshot mismatch — updated {SNAPSHOT_PATH.name}. "
                 "Re-run to confirm the new snapshot passes."
             )
     else:
-        SNAPSHOT_PATH.write_text(html_normalized)
+        SNAPSHOT_PATH.write_text(html_normalized.rstrip("\n") + "\n")

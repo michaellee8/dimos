@@ -399,6 +399,19 @@ def print_markdown(
     print("\n\n".join(sections))
 
 
+def save_html(
+    python_file: str,
+    *,
+    output_path: str,
+    show_disconnected: bool,
+    theme: str = DEFAULT_THEME,
+) -> None:
+    html = _build_html(python_file, show_disconnected=show_disconnected, theme=theme)
+    with open(output_path, "w") as file:
+        file.write(html)
+    print(f"Wrote {output_path}", file=sys.stderr)
+
+
 def serve_graph(
     python_file: str, *, show_disconnected: bool, port: int, theme: str = DEFAULT_THEME
 ) -> None:

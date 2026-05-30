@@ -796,16 +796,20 @@ def graph(
     markdown: bool = typer.Option(
         False, "--markdown", help="Print Mermaid markdown to stdout and exit"
     ),
+    html: str = typer.Option("", "--html", help="Write HTML to a file instead of serving"),
     theme: str = typer.Option(
         "tailwind", "--theme", help="Color theme (tailwind, ocean, ember, forest, light)"
     ),
 ) -> None:
-    """Render DimOS Blueprint graphs as Mermaid diagrams in the browser."""
-    from dimos.utils.cli.graph import print_markdown, serve_graph
+    """Render DimOS Blueprint graphs. Serves in browser by default, or use --markdown / --html."""
+    from dimos.utils.cli.graph import print_markdown, save_html, serve_graph
 
     show_disconnected = not no_disconnected
     if markdown:
         print_markdown(python_file, show_disconnected=show_disconnected, theme=theme)
+        return
+    if html:
+        save_html(python_file, output_path=html, show_disconnected=show_disconnected, theme=theme)
         return
     serve_graph(python_file, show_disconnected=show_disconnected, port=port, theme=theme)
 
