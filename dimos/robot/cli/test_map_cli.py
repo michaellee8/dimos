@@ -137,6 +137,26 @@ def test_replay_marker_snippet(dataset: str, tmp_path: Path) -> None:
     assert out.exists() and out.stat().st_size > 0
 
 
+def test_replay_map_final_snippet(dataset: str, tmp_path: Path) -> None:
+    out = tmp_path / "replay_map.rrd"
+    # CPU device keeps the voxel accumulation runnable without a GPU.
+    res = _run(
+        "replay",
+        dataset,
+        "--out",
+        str(out),
+        "--no-gui",
+        "--duration",
+        str(DURATION),
+        "--map-final",
+        "--map-carve-columns",
+        "--map-device",
+        "CPU:0",
+    )
+    assert res.returncode == 0, res.stderr
+    assert out.exists() and out.stat().st_size > 0
+
+
 def test_global_snippet(dataset: str, tmp_path: Path) -> None:
     out = tmp_path / "global.rrd"
     # CPU device + small block budget keeps this runnable without a GPU.
