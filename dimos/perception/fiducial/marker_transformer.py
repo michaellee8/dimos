@@ -41,7 +41,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.perception.detection.type.detection3d.marker import Detection3DMarker
-from dimos.perception.fiducial.marker_tf_module import (
+from dimos.perception.fiducial.marker_pose import (
     camera_info_to_cv_matrices,
     create_aruco_detector,
     estimate_marker_pose,
