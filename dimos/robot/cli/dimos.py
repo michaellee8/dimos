@@ -796,15 +796,18 @@ def graph(
     markdown: bool = typer.Option(
         False, "--markdown", help="Print Mermaid markdown to stdout and exit"
     ),
+    theme: str = typer.Option(
+        "tailwind", "--theme", help="Color theme (tailwind, ocean, ember, forest, light)"
+    ),
 ) -> None:
     """Render DimOS Blueprint graphs as Mermaid diagrams in the browser."""
     from dimos.utils.cli.graph import print_markdown, serve_graph
 
     show_disconnected = not no_disconnected
     if markdown:
-        print_markdown(python_file, show_disconnected=show_disconnected)
+        print_markdown(python_file, show_disconnected=show_disconnected, theme=theme)
         return
-    serve_graph(python_file, show_disconnected=show_disconnected, port=port)
+    serve_graph(python_file, show_disconnected=show_disconnected, port=port, theme=theme)
 
 
 @main.command(name="rerun-bridge")
