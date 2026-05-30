@@ -12,37 +12,56 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""End-to-end tests for the `dimos map` verbs, run as external subprocesses.
+"""End-to-end tests for the `dimos map` verbs, run in-process.
 
 Each test invokes the real CLI against the `go2_short` recording (60s, auto-
 pulled via LFS) and asserts on the artifact it produces. A short `--duration`
 snippet keeps every invocation to a few seconds, and `--no-gui` stops the rrd
 verbs from spawning a rerun viewer.
+
+The CLI is invoked in-process via Typer's CliRunner (not a subprocess per case),
+so the heavy dimos import is paid once for the whole module instead of per case.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-import subprocess
-import sys
+import traceback
+from types import SimpleNamespace
 
 import pytest
+from typer.testing import CliRunner
+
+# These drive the real CLI against an LFS recording (CPU voxel accumulation,
+# multi-second runs) — self-hosted runner only.
+pytestmark = pytest.mark.self_hosted
 
 # A few seconds in, then a couple seconds long — small enough to stay fast,
 # long enough that the robot moves (so dedup/PGO/markers have something to do).
 SEEK = 4.0
 DURATION = 3.0
+
 # go2_short has 461 lidar frames over ~60s; a 3s snippet must be far fewer.
 FULL_LIDAR_COUNT = 461
 
+_runner = CliRunner()
 
-def _run(*args: str, timeout: float = 300.0) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, "-m", "dimos.robot.cli.dimos", "map", *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+
+def _run(*args: str, timeout: float = 300.0) -> SimpleNamespace:
+    """Invoke `dimos map <args>` in-process and capture its result.
+
+    Uses Typer's CliRunner so the dimos import cost is paid once (module import)
+    rather than per case. `timeout` is kept for call-site compatibility but is a
+    no-op here — pytest-timeout covers hangs. Returns a result with the
+    .returncode/.stdout/.stderr fields the test bodies use.
+    """
+    from dimos.robot.cli.dimos import main as cli_app
+
+    res = _runner.invoke(cli_app, ["map", *args])
+    err = res.output
+    if res.exception is not None and not isinstance(res.exception, SystemExit):
+        err += "\n" + "".join(traceback.format_exception(res.exception))
+    return SimpleNamespace(returncode=res.exit_code, stdout=res.output, stderr=err)
 
 
 def _stream_counts(db_path: Path) -> dict[str, int]:
