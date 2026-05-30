@@ -20,7 +20,7 @@ forces a full re-read of every row, so any pre-existing corruption surfaces
 immediately. Streams not mentioned in ``--rename`` are copied verbatim.
 
 Usage:
-    uv run python -m dimos.mapping.utils.rename mid360 \\
+    uv run python -m dimos.mapping.utils.cli.rename mid360 \\
         --out mid360_renamed.db \\
         --rename go2_lidar=lidar \\
         --rename lidar=fastlio_lidar \\
@@ -46,7 +46,7 @@ from dimos.utils.data import resolve_named_path
 
 
 def progress(total: int, label: str = "") -> Callable[[Observation[Any]], None]:
-    """Matches dimos/mapping/utils/globalmap.py:progress — kept inline to avoid pulling rerun."""
+    """Matches dimos/mapping/utils/cli/globalmap.py:progress — kept inline to avoid pulling rerun."""
     seen = 0
     wall_start: float | None = None
     last_wall: float | None = None

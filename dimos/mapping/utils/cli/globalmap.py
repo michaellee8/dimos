@@ -479,7 +479,7 @@ def main(
         color_image = store.stream("color_image", Image).clip(seek, duration)
         n_images = color_image.count()
         if image_pose is not None:
-            from dimos.mapping.utils.pose_fill import pose_fill
+            from dimos.mapping.utils.cli.pose_fill import pose_fill
 
             src_pose: Stream[Any] = store.stream(image_pose).clip(seek, duration)
             print(f"re-posing color_image from {image_pose!r} + camera optical mount")

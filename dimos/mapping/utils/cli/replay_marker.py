@@ -20,7 +20,7 @@ Walks a recorded SQLite dataset and writes an rrd containing:
 - per detection: marker box in world frame, at the detection timestamp
 
 Usage:
-    uv run python -m dimos.mapping.utils.replay_marker hk_village1 --out hk.rrd
+    uv run python -m dimos.mapping.utils.cli.replay_marker hk_village1 --out hk.rrd
     rerun hk.rrd
 
 Throwaway script next to ``map.py``; remove once the apriltag reliability work
@@ -38,7 +38,7 @@ import typer
 
 # Heavy dimos imports (memory2/perception → torch, scipy, cv2) are deferred into
 # main() so that `dimos map --help` stays fast. See test_cli_startup.py and the
-# same pattern in dimos/mapping/utils/globalmap.py.
+# same pattern in dimos/mapping/utils/cli/globalmap.py.
 if TYPE_CHECKING:
     from dimos.memory2.stream import Stream
 
