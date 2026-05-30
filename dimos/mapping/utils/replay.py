@@ -283,7 +283,7 @@ def main(
                             )
                         ),
                         f"world/{name}_voxels",
-                        voxel / 2,  # render smaller than the grid → gaps read as transparency
+                        voxel / 4,  # render smaller than the grid → gaps read as transparency
                         point_mode,
                         total=max(1, src.count() // max(map_emit_every, 1)),
                     )
@@ -296,7 +296,7 @@ def main(
                     ).last()
                     rr.log(
                         f"world/{name}_map",
-                        final.data.to_rerun(voxel_size=voxel / 2, mode=point_mode),
+                        final.data.to_rerun(voxel_size=voxel / 4, mode=point_mode),
                         static=True,
                     )
 
