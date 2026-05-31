@@ -234,7 +234,7 @@ def render(space: Space, app_id: str = "space", spawn: bool = True) -> None:
                 + Go2Config.static_transforms["camera_optical"]
             )
             world_T_optical = Transform.from_pose("world", ps) + base_to_optical
-            rr.log(path, world_T_optic)static=True)
+            rr.log(path, world_T_optical.to_pose().to_rerun(), static=True)
             h, w = img.shape[:2]
             focal = max(w, h)
             rr.log(
