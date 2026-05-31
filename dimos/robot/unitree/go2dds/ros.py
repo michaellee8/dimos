@@ -224,7 +224,7 @@ def decode_pointcloud2(buf: bytes) -> PointCloud2:
     )
     arr = w.data.view(dt)
     xyz = np.stack([arr["x"], arr["y"], arr["z"]], axis=-1).astype(np.float32)
-    inten = arr["intensity"].astype(np.float32) if "intensity" in dt.names else None
+    inten = arr["intensity"].astype(np.float32) if dt.names and "intensity" in dt.names else None
     return PointCloud2.from_numpy(xyz, frame, ts, inten)
 
 

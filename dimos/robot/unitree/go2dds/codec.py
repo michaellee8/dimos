@@ -50,7 +50,8 @@ from dimos.robot.unitree.go2dds.msgs.Telemetry import Telemetry
 class DdsCodec(Protocol):
     """Codec between DDS wire bytes (CDR) and a payload message."""
 
-    payload_type: type
+    @property
+    def payload_type(self) -> type: ...
 
     def decode(self, data: bytes) -> Any: ...
     def encode(self, msg: Any) -> bytes: ...

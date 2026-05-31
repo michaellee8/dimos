@@ -25,8 +25,9 @@ Read-only: no append, blobs, vectors, or embeddings. Payloads decode lazily on
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
+from functools import partial
 from typing import Any, Protocol, runtime_checkable
 
 from mcap.reader import make_reader
@@ -36,6 +37,7 @@ from dimos.memory2.codecs.base import codec_for
 from dimos.memory2.notifier.subject import SubjectNotifier
 from dimos.memory2.observationstore.base import ObservationStore, ObservationStoreConfig
 from dimos.memory2.store.base import Store, StoreConfig
+from dimos.memory2.type.filter import StreamQuery
 from dimos.memory2.type.observation import Observation
 
 
@@ -43,7 +45,8 @@ from dimos.memory2.type.observation import Observation
 class StreamCodec(Protocol):
     """What the store needs to turn a channel's stored bytes into a payload."""
 
-    payload_type: type
+    @property
+    def payload_type(self) -> type: ...
 
     def decode(self, data: bytes) -> Any: ...
 
@@ -82,15 +85,14 @@ class McapObservationStore(ObservationStore[Any]):
         with open(self._path, "rb") as f:
             msgs = make_reader(f).iter_messages(topics=[self._topic], reverse=reverse)
             for i, (_s, _c, m) in enumerate(msgs):
-                data = m.data
                 yield Observation(
                     id=(n - 1 - i) if reverse else i,
                     ts=m.log_time / 1e9,
                     data_type=dtype,
-                    _loader=(lambda d=data: decode(d)),
+                    _loader=partial(decode, m.data),
                 )
 
-    def query(self, q: Any) -> Iterator[Observation[Any]]:
+    def query(self, q: StreamQuery) -> Iterator[Observation[Any]]:
         # mcap is natively log-time ordered (== ts == our id), so serve ts/id
         # ordering by iterating forward/reverse instead of materializing + sorting.
         if q.order_field in ("ts", "id"):
@@ -99,7 +101,7 @@ class McapObservationStore(ObservationStore[Any]):
             return q.apply(it)
         return q.apply(self._iter())
 
-    def count(self, q: Any) -> int:
+    def count(self, q: StreamQuery) -> int:
         if not q.filters and q.search_text is None and q.search_vec is None:
             n = self._count
             if q.offset_val:
@@ -134,7 +136,7 @@ class McapStore(Store):
     def __init__(
         self,
         *,
-        codecs: dict[str, StreamCodec],
+        codecs: Mapping[str, StreamCodec],
         streams: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
