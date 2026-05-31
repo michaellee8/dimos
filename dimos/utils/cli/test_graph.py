@@ -26,7 +26,7 @@ from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.core.module import Module
 from dimos.core.stream import In, Out
 
-SNAPSHOT_PATH = Path(__file__).with_name("test_mermaid_server_snapshot.html")
+SNAPSHOT_PATH = Path(__file__).with_name("test_graph_snapshot.html")
 
 
 class ImageData:
@@ -135,7 +135,7 @@ def _serve_and_fetch(html: str) -> str:
 
 
 def test_graph_server_snapshot() -> None:
-    blueprint_file = str(Path(__file__).with_name("test_mermaid_blueprint.py"))
+    blueprint_file = str(Path(__file__).with_name("test_graph_blueprints.py"))
 
     from dimos.utils.cli.graph import _build_html
 

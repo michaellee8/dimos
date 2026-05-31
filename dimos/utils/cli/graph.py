@@ -32,10 +32,11 @@ import webbrowser
 import jinja2
 
 from dimos.core.coordination.blueprints import Blueprint
-from dimos.core.introspection.blueprint.mermaid import DEFAULT_THEME, THEMES, render_mermaid
+from dimos.core.introspection.mermaid import DEFAULT_THEME, THEMES, render_mermaid
+from dimos.utils.data import get_data
 
 _CLI_DIR = Path(__file__).parent
-_MERMAID_JS = (_CLI_DIR / "mermaid.min.js").read_text(encoding="utf-8")
+_MERMAID_JS = get_data("mermaid.min.js").read_text(encoding="utf-8")
 _TEMPLATE = jinja2.Template(
     (_CLI_DIR / "graph.html.jinja").read_text(encoding="utf-8"),
     autoescape=False,

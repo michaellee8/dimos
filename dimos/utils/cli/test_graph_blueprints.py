@@ -20,7 +20,7 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.module import Module
 from dimos.core.stream import In, Out
 
-SNAPSHOT_PATH = Path(__file__).with_name("test_mermaid_server_snapshot.html")
+SNAPSHOT_PATH = Path(__file__).with_name("test_graph_snapshot.html")
 
 
 class ImageData:
