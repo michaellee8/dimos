@@ -62,11 +62,11 @@ def _align_of(t: Any) -> int:
     raise TypeError(f"unknown field type {t!r}")
 
 
-def _struct_align(cls: type) -> int:
+def _struct_align(cls: Any) -> int:
     a = getattr(cls, "__cdr_align__", None)
     if a is None:
         a = max((_align_of(t) for _, t in cls.__cdr_fields__), default=1)
-        cls.__cdr_align__ = a  # type: ignore[attr-defined]
+        cls.__cdr_align__ = a
     return a
 
 
@@ -120,11 +120,11 @@ def _read(cur: Cursor, t: Any) -> Any:
     raise TypeError(f"unknown field type {t!r}")
 
 
-def _read_struct(cur: Cursor, cls: type) -> Any:
+def _read_struct(cur: Cursor, cls: Any) -> Any:
     return cls(**{name: _read(cur, t) for name, t in cls.__cdr_fields__})
 
 
-def decode(buf: bytes, cls: type) -> tuple[Any, int]:
+def decode(buf: bytes, cls: Any) -> tuple[Any, int]:
     """Decode ``buf`` as a CDR ``cls``. Returns ``(instance, end_offset)``.
 
     ``end_offset`` should equal ``len(buf)`` for a fixed-layout message — the
