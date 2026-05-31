@@ -233,6 +233,7 @@ perception = [
 unitree = [
     "dimos[base,mapping]",
     "unitree-webrtc-connect-leshy>=2.0.7",
+    "mcap>=1.2.0",  # decode Go2 DDS mcap recordings (go2dds store/reader)
 ]
 
 unitree-dds = [
