@@ -42,7 +42,7 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.robot.unitree.go2dds import cdr
 
 
-# --- shared wire specs ------------------------------------------------------
+# Shared wire specs (Header/Time) reused by the per-message layouts below.
 @dataclass
 class _Time:
     sec: int
@@ -63,7 +63,7 @@ def _ts(h: _Header) -> float:
     return h.stamp.sec + h.stamp.nanosec * 1e-9
 
 
-# --- sensor_msgs/Imu --------------------------------------------------------
+# sensor_msgs/Imu
 @dataclass
 class _ImuWire:
     header: _Header
@@ -102,7 +102,7 @@ def decode_imu(buf: bytes) -> Imu:
     )
 
 
-# --- nav_msgs/Odometry ------------------------------------------------------
+# nav_msgs/Odometry
 @dataclass
 class _PoseWire:
     position: np.ndarray  # f64[3]
@@ -167,7 +167,7 @@ def decode_odometry(buf: bytes) -> Odometry:
     )
 
 
-# --- sensor_msgs/PointCloud2 ------------------------------------------------
+# sensor_msgs/PointCloud2
 @dataclass
 class _PointField:
     name: str
@@ -231,7 +231,7 @@ def decode_pointcloud2(buf: bytes) -> PointCloud2:
     return PointCloud2.from_numpy(xyz, frame, ts, inten)
 
 
-# --- sensor_msgs/CompressedImage --------------------------------------------
+# sensor_msgs/CompressedImage
 @dataclass
 class _CImgWire:
     header: _Header

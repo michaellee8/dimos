@@ -535,6 +535,8 @@ module = [
     "faster_whisper",
     "geometry_msgs.*",
     "lazy_loader",
+    "mcap",
+    "mcap.*",
     "mujoco",
     "mujoco_playground.*",
     "nav_msgs.*",

@@ -196,7 +196,7 @@ class Stream(CompositeResource, Generic[T, O]):
     def offset(self, n: int) -> Stream[T, O]:
         return self._replace_query(offset_val=n)
 
-    # --- windowing (None on either bound = unbounded that side) ---
+    # Windowing helpers — None on either bound means unbounded on that side.
     def from_seek(self, i: int | None) -> Stream[T, O]:
         """Window by index: drop the first ``i`` observations."""
         return self if i is None else self.offset(i)

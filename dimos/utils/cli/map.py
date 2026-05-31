@@ -128,10 +128,6 @@ def _accumulate(
     return result.data if result is not None else None
 
 
-# Moved to memory2 (generic per-observation progress); re-exported for compatibility.
-from dimos.memory2.utils.progress import progress
-
-
 def main(
     dataset: str = typer.Argument(..., help="Dataset .db: bare name (cwd or data/) or path"),
     voxel: float = typer.Option(0.05, "--voxel", help="Voxel size for the rebuild"),
@@ -200,6 +196,7 @@ def main(
     from dimos.mapping.loop_closure.pgo import PGO
     from dimos.memory2.store.sqlite import SqliteStore
     from dimos.memory2.transform import QualityWindow, SpeedLimit
+    from dimos.memory2.utils.progress import progress
     from dimos.memory2.vis.color import Color
     from dimos.msgs.geometry_msgs.Transform import Transform
     from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
