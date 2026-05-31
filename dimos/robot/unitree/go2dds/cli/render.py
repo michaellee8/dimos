@@ -35,11 +35,13 @@ import subprocess
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
+import rerun as rr
 import typer
 
 from dimos.memory2.transform import throttle
 from dimos.memory2.utils.progress import progress
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
@@ -51,6 +53,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from dimos.memory2.type.observation import Observation
+    from dimos.msgs.sensor_msgs.Image import Image
     from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
 WORLD = "world"
@@ -154,7 +157,6 @@ def accumulate_path(upstream: Iterator[Observation[PoseStamped]]) -> Iterator[Ob
 
 def leg_odom(store: Go2McapStore, seconds: float | None) -> None:
     """Leg-inertial odometry — pose stream (Transform3D) + accumulated Path line."""
-    import rerun as rr
 
     def log_pose(obs: Observation[PoseStamped]) -> None:
         rr.set_time("time", timestamp=obs.ts)
@@ -178,7 +180,6 @@ def leg_odom(store: Go2McapStore, seconds: float | None) -> None:
 
 def imu_odom(store: Go2McapStore, seconds: float | None) -> None:
     """Dead-reckoned IMU odometry — accel -> velocity -> position -> growing Path (drifts)."""
-    import rerun as rr
 
     def log_path(obs: Observation[Path]) -> None:
         rr.set_time("time", timestamp=obs.ts)
@@ -199,7 +200,6 @@ def imu_odom(store: Go2McapStore, seconds: float | None) -> None:
 
 def lidar(store: Go2McapStore, seconds: float | None) -> None:
     """Lidar point cloud, under the leg_odom transform (lidar -> base -> world)."""
-    import rerun as rr
 
     def log_lidar(obs: Observation[PointCloud2]) -> None:
         rr.set_time("time", timestamp=obs.ts)
@@ -210,11 +210,80 @@ def lidar(store: Go2McapStore, seconds: float | None) -> None:
     (src.tap(progress(src.count(), "lidar")).tap(log_lidar).drain())
 
 
+def _interp_pose(
+    tt: np.ndarray, pos: np.ndarray, quat: np.ndarray, t: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """LERP position + NLERP quaternion (xyzw) of a trajectory at scalar time t."""
+    i = int(np.clip(np.searchsorted(tt, t), 1, len(tt) - 1))
+    t0, t1 = tt[i - 1], tt[i]
+    f = 0.0 if t1 == t0 else float(np.clip((t - t0) / (t1 - t0), 0.0, 1.0))
+    p = pos[i - 1] * (1 - f) + pos[i] * f
+    q0, q1 = quat[i - 1], quat[i].copy()
+    if float(q0 @ q1) < 0:
+        q1 = -q1
+    q = q0 * (1 - f) + q1 * f
+    return p, q / np.linalg.norm(q)
+
+
+def world_lidar(store: Go2McapStore, seconds: float | None) -> None:
+    from dimos.mapping.voxels import VoxelMapTransformer
+
+    ext = LIDAR_TO_BASE  # lidar -> base (standard Transform from extrinsics)
+
+    # pre-load the leg-odom trajectory for per-cloud pose interpolation
+    odom = store.streams.odom.to_time(seconds).to_list()
+    tt = np.array([o.ts for o in odom])
+    poses = [o.data.pose.pose for o in odom]
+    pos = np.array([[p.position.x, p.position.y, p.position.z] for p in poses])
+    quat = np.array(
+        [[p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w] for p in poses]
+    )
+
+    def to_world(obs: Observation[PointCloud2]) -> PointCloud2:
+        p, q = _interp_pose(tt, pos, quat, obs.ts)
+        b2w = Transform.from_pose(
+            WORLD,
+            PoseStamped(ts=obs.ts, frame_id=WORLD, position=p.tolist(), orientation=q.tolist()),
+        )
+        return obs.data.transform(b2w.apply(ext))  # lidar -> base -> world
+
+    def log_voxels(obs: Observation[PointCloud2]) -> None:
+        rr.set_time("time", timestamp=obs.ts)
+        rr.log("world/world_lidar", obs.data.to_rerun())
+
+    src = store.streams.lidar.to_time(seconds)
+    (
+        src.tap(progress(src.count(), "world_lidar"))
+        .map_data(to_world)  # lidar cloud -> world-frame cloud
+        .transform(VoxelMapTransformer(emit_every=10, voxel_size=0.1))  # global voxel map
+        .tap(log_voxels)
+        .drain()
+    )
+
+
+def camera(store: Go2McapStore, seconds: float | None, hz: float) -> None:
+    """Front camera frames, throttled to ``hz`` (off by default; enable with --image).
+
+    Throttling runs before ``obs.data``, so thinned frames never pay the jpeg
+    decode; frames that fail to decode (``None``) are skipped.
+    """
+
+    def log_image(obs: Observation[Image]) -> None:
+        if obs.data is None:  # truncated/corrupt frame
+            return
+        rr.set_time("time", timestamp=obs.ts)
+        rr.log("world/camera", obs.data.to_rerun())
+
+    src = store.streams.color_image.to_time(seconds)
+    (src.tap(progress(src.count(), "camera")).transform(throttle(1.0 / hz)).tap(log_image).drain())
+
+
 # Add a source: write a (store, seconds) -> None function and append it.
 PIPELINES: list[Callable[[Go2McapStore, float | None], None]] = [
     leg_odom,
     imu_odom,
     lidar,
+    world_lidar,
 ]
 
 
@@ -222,10 +291,10 @@ def main(
     mcap: str = typer.Argument(..., help="Go2 .mcap (path or data-dir name)"),
     out: str = typer.Option("go2_odom.rrd", "--out", help="Output .rrd"),
     seconds: float = typer.Option(None, "--seconds", help="Only the first N seconds"),
+    image: bool = typer.Option(False, "--image", help="Also render the front camera"),
+    image_hz: float = typer.Option(10.0, "--image-hz", help="Camera frame rate when --image"),
     no_gui: bool = typer.Option(False, "--no-gui", help="Write the .rrd but don't open the viewer"),
 ) -> None:
-    import rerun as rr
-
     from dimos.visualization.rerun.init import rerun_init
 
     store = Go2McapStore(path=mcap)
@@ -233,6 +302,8 @@ def main(
     rr.save(out)
     for pipeline in PIPELINES:
         pipeline(store, seconds)
+    if image:
+        camera(store, seconds, image_hz)
     rr.rerun_shutdown()
     print(f"wrote {out}")
     if not no_gui:
