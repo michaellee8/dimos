@@ -26,6 +26,7 @@ Read-only: no append, blobs, vectors, or embeddings. Payloads decode lazily on
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
 from typing import Any, Protocol, runtime_checkable
 
 from mcap.reader import make_reader
@@ -45,6 +46,15 @@ class StreamCodec(Protocol):
     payload_type: type
 
     def decode(self, data: bytes) -> Any: ...
+
+
+def _slug(topic: str) -> str:
+    """Auto stream name from a topic: drop the ``rt/`` prefix and ``/`` -> ``_``.
+
+    ``rt/`` is the ROS2-over-DDS topic prefix; ``removeprefix`` only strips it
+    where present (e.g. app-level ``control_log`` is left alone).
+    """
+    return topic.removeprefix("rt/").replace("/", "_")
 
 
 class McapObservationStoreConfig(ObservationStoreConfig):
@@ -67,19 +77,26 @@ class McapObservationStore(ObservationStore[Any]):
     def name(self) -> str:
         return self.config.name
 
-    def _iter(self) -> Iterator[Observation[Any]]:
-        decode, dtype = self._codec.decode, self._codec.payload_type
+    def _iter(self, reverse: bool = False) -> Iterator[Observation[Any]]:
+        decode, dtype, n = self._codec.decode, self._codec.payload_type, self._count
         with open(self._path, "rb") as f:
-            for i, (_s, _c, m) in enumerate(make_reader(f).iter_messages(topics=[self._topic])):
+            msgs = make_reader(f).iter_messages(topics=[self._topic], reverse=reverse)
+            for i, (_s, _c, m) in enumerate(msgs):
                 data = m.data
                 yield Observation(
-                    id=i,
+                    id=(n - 1 - i) if reverse else i,
                     ts=m.log_time / 1e9,
                     data_type=dtype,
                     _loader=(lambda d=data: decode(d)),
                 )
 
     def query(self, q: Any) -> Iterator[Observation[Any]]:
+        # mcap is natively log-time ordered (== ts == our id), so serve ts/id
+        # ordering by iterating forward/reverse instead of materializing + sorting.
+        if q.order_field in ("ts", "id"):
+            it = self._iter(reverse=q.order_desc)
+            q = replace(q, order_field=None, order_desc=False)
+            return q.apply(it)
         return q.apply(self._iter())
 
     def count(self, q: Any) -> int:
@@ -107,8 +124,9 @@ class McapStoreConfig(StoreConfig):
 class McapStore(Store):
     """A memory2 store backed by an mcap file (read-only).
 
-    ``codecs`` maps topic -> :class:`StreamCodec`. ``streams`` maps a friendly
-    stream name -> topic; defaults to using the topic as the name.
+    Every channel present in the file with a codec is exposed. Names default to
+    the slugified topic (see :func:`_slug`); ``streams`` (friendly name -> topic)
+    overrides the name for specific topics.
     """
 
     config: McapStoreConfig
@@ -122,17 +140,18 @@ class McapStore(Store):
     ) -> None:
         super().__init__(**kwargs)
         self._codecs = codecs
-        self._stream_topic = streams if streams is not None else {t: t for t in codecs}
+        name_of = {topic: name for name, topic in (streams or {}).items()}  # topic -> override
         with open(self.config.path, "rb") as f:
             summary = make_reader(f).get_summary()
-        counts: dict[str, int] = {}
+        self._stream_topic: dict[str, str] = {}  # stream name -> topic
+        self._available: dict[str, int] = {}  # stream name -> message count
         if summary is not None and summary.statistics is not None:
-            by_topic = {ch.topic: cid for cid, ch in summary.channels.items()}
-            for name, topic in self._stream_topic.items():
-                cid = by_topic.get(topic)
-                if cid is not None and topic in self._codecs:
-                    counts[name] = summary.statistics.channel_message_counts.get(cid, 0)
-        self._available = counts  # stream name -> count, present & decodable channels only
+            for cid, ch in summary.channels.items():
+                if ch.topic not in self._codecs:
+                    continue
+                name = name_of.get(ch.topic) or _slug(ch.topic)
+                self._stream_topic[name] = ch.topic
+                self._available[name] = summary.statistics.channel_message_counts.get(cid, 0)
 
     def list_streams(self) -> list[str]:
         return sorted(set(self._available) | set(self._streams))

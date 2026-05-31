@@ -21,7 +21,7 @@
 A :class:`DdsCodec` is the bytes<->payload pair for one DDS message type. The
 same codec decodes a recorded mcap message and a live DDS sample (both are CDR),
 and its ``encode`` half publishes back to the wire — so this is shared by the
-reader, :class:`~dimos.robot.unitree.go2dds.store.McapStore`, and (later) a live
+reader, :class:`~dimos.robot.unitree.go2dds.store.Go2McapStore`, and (later) a live
 DDS bridge. It is distinct from memory2's storage codecs (pickle/lcm/jpeg);
 they only coincide when an mcap is opened as a store.
 
@@ -31,7 +31,8 @@ they only coincide when an mcap is opened as a store.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
+import json
 from typing import Any, Protocol, runtime_checkable
 
 from dimos.msgs.nav_msgs.Odometry import Odometry
@@ -39,8 +40,10 @@ from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.robot.unitree.go2dds import cdr, ros
+from dimos.robot.unitree.go2dds.msgs.ControlEvent import ControlEvent
 from dimos.robot.unitree.go2dds.msgs.LowState import LowState
 from dimos.robot.unitree.go2dds.msgs.SportModeState import SportModeState
+from dimos.robot.unitree.go2dds.msgs.Telemetry import Telemetry
 
 
 @runtime_checkable
@@ -80,7 +83,28 @@ class FnCodec:
         raise NotImplementedError(f"encode not implemented for {self.payload_type.__name__}")
 
 
-# Go2 DDS topic -> codec. The default registry (only platform we have today).
+@dataclass(frozen=True)
+class JsonCodec:
+    """Codec for app-level JSON channels -> a dataclass.
+
+    Keys absent from ``payload_type`` are dropped, so heterogeneous event logs
+    (e.g. ``control_log``) and future fields decode without error.
+    """
+
+    payload_type: type
+
+    def decode(self, data: bytes) -> Any:
+        d = json.loads(data)
+        names = {f.name for f in fields(self.payload_type)}
+        return self.payload_type(**{k: v for k, v in d.items() if k in names})
+
+    def encode(self, msg: Any) -> bytes:
+        from dataclasses import asdict
+
+        return json.dumps(asdict(msg)).encode()
+
+
+# Go2 channel topic -> codec. The default registry (only platform we have today).
 GO2_CODECS: dict[str, DdsCodec] = {
     "rt/utlidar/cloud": FnCodec(PointCloud2, ros.decode_pointcloud2),
     "rt/utlidar/imu": FnCodec(Imu, ros.decode_imu),
@@ -88,4 +112,6 @@ GO2_CODECS: dict[str, DdsCodec] = {
     "rt/frontvideo": FnCodec(Image, ros.decode_compressed_image),
     "rt/lowstate": CdrStructCodec(LowState),
     "rt/sportmodestate": CdrStructCodec(SportModeState),
+    "telemetry": JsonCodec(Telemetry),
+    "control_log": JsonCodec(ControlEvent),
 }

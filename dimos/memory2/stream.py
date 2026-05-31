@@ -358,20 +358,25 @@ class Stream(CompositeResource, Generic[T, O]):
         return (first.ts, last.ts)
 
     def summary(self) -> str:
-        """Return a short human-readable summary: count, time range, duration."""
+        """Return a short human-readable summary: count, time range, avg frequency.
+
+        Relies on ``count()`` and ``get_time_range()`` (``first()`` + ``last()``),
+        all of which backends are expected to serve cheaply — SQL via ORDER BY,
+        the mcap store via forward/reverse iteration.
+        """
         from datetime import datetime, timezone
 
         n = self.count()
         if n == 0:
             return f"{self}: empty"
 
-        (t0, t1) = self.get_time_range()
-
+        t0, t1 = self.get_time_range()
+        dur = t1 - t0
+        hz = (n - 1) / dur if n > 1 and dur > 0 else 0.0
         fmt = "%Y-%m-%d %H:%M:%S"
         dt0 = datetime.fromtimestamp(t0, tz=timezone.utc).strftime(fmt)
         dt1 = datetime.fromtimestamp(t1, tz=timezone.utc).strftime(fmt)
-        dur = t1 - t0
-        return f"{self}: {n} items, {dt0} — {dt1} ({dur:.1f}s)"
+        return f"{self}: {n} items, {dt0} — {dt1} ({dur:.1f}s, {hz:.1f} Hz)"
 
     def materialize(self) -> Stream[T, O]:
         """Materialize into memory and return a replayable stream.
@@ -385,6 +390,9 @@ class Stream(CompositeResource, Generic[T, O]):
         target = cast("Stream[T, O]", mem.stream("materialize"))
         self.save(target).drain()
         return target
+
+    def run(self) -> int:
+        return self.drain()
 
     def drain(self) -> int:
         """Consume all observations, discarding results. Returns count consumed.

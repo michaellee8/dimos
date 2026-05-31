@@ -24,13 +24,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from dimos.robot.unitree.go2dds.msgs.base import PrettyMsg
 from dimos.robot.unitree.go2dds.msgs.IMUState import IMUState
 from dimos.robot.unitree.go2dds.msgs.PathPoint import PathPoint
 from dimos.robot.unitree.go2dds.msgs.TimeSpec import TimeSpec
 
 
-@dataclass
-class SportModeState:
+@dataclass(repr=False)
+class SportModeState(PrettyMsg):
     stamp: TimeSpec
     error_code: int
     imu_state: IMUState

@@ -24,13 +24,14 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from dimos.robot.unitree.go2dds.msgs.base import PrettyMsg
 from dimos.robot.unitree.go2dds.msgs.BmsState import BmsState
 from dimos.robot.unitree.go2dds.msgs.IMUState import IMUState
 from dimos.robot.unitree.go2dds.msgs.MotorState import MotorState
 
 
-@dataclass
-class LowState:
+@dataclass(repr=False)
+class LowState(PrettyMsg):
     head: np.ndarray  # u8[2]
     level_flag: int
     frame_reserve: int
