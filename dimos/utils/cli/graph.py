@@ -138,7 +138,7 @@ def _build_html(
                 if stream.direction == "out":
                     topic = f"{stream.name}:{stream.type.__name__}"
                     producers.setdefault(topic, []).append(atom.module.__name__)
-        conflicts = [
+        conflicts: list[dict[str, object]] = [
             {
                 "topic": topic,
                 "topicColor": label_colors.get(topic, "#ccc"),
