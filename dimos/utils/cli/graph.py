@@ -26,6 +26,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from typing import Any
 import webbrowser
 
 from dimos.core.coordination.blueprints import Blueprint
@@ -118,7 +119,7 @@ def _build_html(
     per_bp_label_colors: list[dict[str, str]] = []
     per_bp_disconnected: list[set[str]] = []
     per_bp_node_colors: list[dict[str, str]] = []
-    per_bp_conflicts: list[list[dict[str, object]]] = []
+    per_bp_conflicts: list[list[dict[str, Any]]] = []
     per_bp_typos: list[list[dict[str, object]]] = []
 
     tab_buttons = []
