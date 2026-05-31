@@ -37,14 +37,18 @@ struct Estimator {
     int max_iterations = 20;
     double transform_eps = 1e-6;
 
-    // Estimate per-scan body-frame velocity. Returns
-    //   (ok, vx, vy, vz, scan_dt)
-    // where vx/vy/vz is the body-frame velocity (m/s) from the last scan
-    // to the current one. Caches the (down-sampled) current scan for the
-    // next call. ok=false on the first call or when ICP fails to converge.
+    // Estimate per-scan body-frame velocity AND angular velocity. Returns
+    //   (ok, vx, vy, vz, wx, wy, wz, scan_dt)
+    // where vx/vy/vz is body-frame linear velocity (m/s) and wx/wy/wz is
+    // body-frame angular velocity (rad/s), extracted from the ICP 4×4.
+    // Caches the (down-sampled) current scan for the next call. ok=false
+    // on the first call or when ICP fails to converge.
     struct Result {
         bool ok = false;
         float vx = 0.0f, vy = 0.0f, vz = 0.0f;
+        // Body-frame angular velocity in rad/s. To convert to deg/s,
+        // multiply by 180/pi.
+        float wx = 0.0f, wy = 0.0f, wz = 0.0f;
         double scan_dt = 0.0;
     };
 
@@ -83,6 +87,14 @@ struct Estimator {
                 r.vx = T(0, 3) / static_cast<float>(dt);
                 r.vy = T(1, 3) / static_cast<float>(dt);
                 r.vz = T(2, 3) / static_cast<float>(dt);
+                // Rotation: 3×3 → axis-angle (Eigen AngleAxisf) → axis * angle.
+                // Divide by dt to get angular velocity in rad/s.
+                Eigen::Matrix3f R = T.block<3, 3>(0, 0);
+                Eigen::AngleAxisf aa(R);
+                Eigen::Vector3f omega = aa.axis() * (aa.angle() / static_cast<float>(dt));
+                r.wx = omega.x();
+                r.wy = omega.y();
+                r.wz = omega.z();
                 r.scan_dt = dt;
             }
         }

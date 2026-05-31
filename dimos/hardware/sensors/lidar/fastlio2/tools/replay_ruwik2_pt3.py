@@ -60,21 +60,17 @@ _ATTEMPT_DIR_ENV = "_REPLAY_RUWIK2_PT3_ATTEMPT_DIR"
 # 480 s gives slack against a stall.
 MAX_WALL_SEC = 480.0
 
-# Acceleration guardrail cap (m/s²) passed to FastLio2Config. The check is
-# per-update vel-correction / scan_dt > cap. Set to 0 to disable. Bump per
-# experiment and recommit so meta.json's commit hash maps to the cap.
-# ~30 m/s² is the Go2 default; physical 3 g.
-GUARDRAIL_MAX_ACCEL_NORM_MS2 = 35.0  # just above the ±5s-divergence p99 (~32)
+# Rotational-velocity-gap preventative map-skip. Replaces the old linear
+# accel/vel guardrail. The binary computes |ω_ieskf − ω_icp| each scan and
+# skips map_incremental when the gap exceeds this threshold (deg/s). The
+# default value can be overridden with the same-named env var for sweeps.
+ROTATION_GAP_THRESHOLD_DEG_S = float(os.environ.get("ROTATION_GAP_THRESHOLD_DEG_S", "10.0"))
 
-# ICP cross-check rollback. When ICP reports a speed slower than the
-# IESKF's by more than ONLY_CORRECT_WHEN_ICP_SLOWER_BY_PCT, and the IESKF
-# itself exceeds ONLY_CORRECT_ABOVE_SPEED_MS, rewind REWIND_WINDOW_MS into
-# the ring buffer for the anchor pose, integrate ICP forward from there,
-# and overwrite IESKF pos+vel.
+# ICP cross-check rollback (linear-velocity check that resets pose+quat+vel).
 ICP_CORRECTION_ENABLED = True
 ONLY_CORRECT_ABOVE_SPEED_MS = 5.0
 ONLY_CORRECT_WHEN_ICP_SLOWER_BY_PCT = 80.0
-REWIND_WINDOW_MS = 1000.0
+REWIND_WINDOW_MS = float(os.environ.get("REWIND_WINDOW_MS", "5000.0"))
 
 
 # ---------------- attempt-dir auto-increment --------------------------------
@@ -213,7 +209,7 @@ def _worker() -> int:
             replay_pcap=PCAP_PATH,
             deterministic_clock=True,
             debug=False,
-            guardrail_max_accel_norm_ms2=GUARDRAIL_MAX_ACCEL_NORM_MS2,
+            rotation_gap_threshold_deg_s=ROTATION_GAP_THRESHOLD_DEG_S,
             icp_correction_enabled=ICP_CORRECTION_ENABLED,
             only_correct_above_speed_ms=ONLY_CORRECT_ABOVE_SPEED_MS,
             only_correct_when_icp_slower_by_pct=ONLY_CORRECT_WHEN_ICP_SLOWER_BY_PCT,

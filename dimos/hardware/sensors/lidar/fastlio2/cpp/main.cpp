@@ -542,12 +542,12 @@ int main(int argc, char** argv) {
     double msr_freq = mod.arg_float("msr_freq", 50.0f);
     double main_freq = mod.arg_float("main_freq", 5000.0f);
 
-    // Post-IESKF-update guardrail caps. pos-jump = per-update position
-    // correction in metres. accel = per-update velocity correction divided
-    // by scan_dt, in m/s² — physics gate that doesn't cap platform velocity.
-    // Set either to 0 to disable that check.
-    double guardrail_max_pos_jump_m = mod.arg_float("guardrail_max_pos_jump_m", 0.5f);
-    double guardrail_max_accel_norm_ms2 = mod.arg_float("guardrail_max_accel_norm_ms2", 30.0f);
+    // Rotational-gap preventative map-skip. After each IESKF update we
+    // compute the IESKF's own body-frame angular velocity, compare its
+    // magnitude difference against ICP's body-frame ω (passed in via
+    // set_icp_omega_body per scan), and skip map_incremental if the gap
+    // exceeds this threshold. Zero disables. Default 10°/s.
+    double rotation_gap_threshold_deg_s = mod.arg_float("rotation_gap_threshold_deg_s", 10.0f);
 
     // ICP cross-check rollback. Disabled unless the ICP topic is also set.
     // Trigger when IESKF |v| > min_ieskf_v_ms AND ICP |v| is at least
@@ -682,8 +682,7 @@ int main(int argc, char** argv) {
 
     // Init FAST-LIO with config
     if (debug) printf("[fastlio2] Initializing FAST-LIO...\n");
-    FastLio fast_lio(config_path, msr_freq, main_freq,
-                     guardrail_max_pos_jump_m, guardrail_max_accel_norm_ms2);
+    FastLio fast_lio(config_path, msr_freq, main_freq, rotation_gap_threshold_deg_s);
     g_fastlio = &fast_lio;
     if (debug) printf("[fastlio2] FAST-LIO initialized.\n");
 
@@ -795,7 +794,10 @@ int main(int argc, char** argv) {
             // Scan-to-scan ICP velocity on the raw body-frame points BEFORE
             // we hand them off to fastlio (which moves them out below). This
             // gives a lidar-derived velocity independent of the IESKF state.
-            if (!g_icp_velocity_topic.empty() || g_icp_correction_enabled) {
+            // Always run ICP when rotation-gap is configured — it needs the
+            // body-frame ω BEFORE fast_lio.process() can gate map_incremental.
+            if (!g_icp_velocity_topic.empty() || g_icp_correction_enabled
+                || rotation_gap_threshold_deg_s > 0) {
                 icp_velocity::CloudT::Ptr cloud(new icp_velocity::CloudT);
                 cloud->reserve(points.size());
                 for (const auto& p : points) {
@@ -833,6 +835,14 @@ int main(int argc, char** argv) {
             lidar_msg->points = std::move(points);
             timing::Scope s(t_feed_lidar);
             fast_lio.feed_lidar(lidar_msg);
+        }
+
+        // Hand the ICP body-frame ω to FastLio so its rotational-gap check
+        // can gate map_incremental within this scan's IESKF iteration.
+        if (icp_result.ok && rotation_gap_threshold_deg_s > 0) {
+            fast_lio.set_icp_omega_body(icp_result.wx, icp_result.wy, icp_result.wz);
+        } else {
+            fast_lio.clear_icp_omega();
         }
 
         // Run one FAST-LIO IESKF step. Cheap when the IMU/lidar queues
@@ -909,8 +919,9 @@ int main(int argc, char** argv) {
                         r.anchor_age_ms, r.anchor_ts, r.ieskf_v, r.icp_v,
                         r.new_pos.x(), r.new_pos.y(), r.new_pos.z(),
                         r.new_vel.x(), r.new_vel.y(), r.new_vel.z());
-                    fast_lio.set_world_pose_vel(
+                    fast_lio.set_world_pose_quat_vel(
                         r.new_pos.x(), r.new_pos.y(), r.new_pos.z(),
+                        r.new_quat.x(), r.new_quat.y(), r.new_quat.z(), r.new_quat.w(),
                         r.new_vel.x(), r.new_vel.y(), r.new_vel.z());
                 }
             }

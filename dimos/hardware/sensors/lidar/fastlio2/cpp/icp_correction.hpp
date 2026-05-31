@@ -42,6 +42,7 @@ struct Config {
 struct Result {
     bool corrected = false;
     Eigen::Vector3d new_pos = Eigen::Vector3d::Zero();
+    Eigen::Quaterniond new_quat = Eigen::Quaterniond::Identity();
     Eigen::Vector3d new_vel = Eigen::Vector3d::Zero();
     double anchor_ts = 0.0;
     double anchor_age_ms = 0.0;
@@ -119,9 +120,14 @@ public:
         }
         const ScanEntry& anchor = history[anchor_idx];
         r.new_pos = anchor.ieskf_pos + disp;
-        // New velocity = current ICP body velocity rotated to world
-        // using the current orientation (best available).
-        r.new_vel = cur.ieskf_quat * cur.icp_v_body;
+        // Restore the anchor's orientation too — the gravity-leak bug is
+        // primarily orientation drift, and rolling back pos+vel while
+        // leaving rotation corrupted means the next IMU step starts from
+        // a known-bad attitude and re-drifts.
+        r.new_quat = anchor.ieskf_quat;
+        // New velocity = current ICP body velocity rotated to world using
+        // the anchor orientation (matches the orientation we're restoring).
+        r.new_vel = anchor.ieskf_quat * cur.icp_v_body;
         r.corrected = true;
         r.anchor_ts = anchor.ts;
         r.anchor_age_ms = (cur.ts - anchor.ts) * 1000.0;

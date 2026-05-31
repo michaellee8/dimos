@@ -129,8 +129,14 @@ class FastLio2Config(NativeModuleConfig):
     # jump of 100+ m/s (the divergence failure mode) is clearly above
     # any realistic ground-platform's acceleration. Default 30 m/s²
     # (~3 g) covers Go2 + most ground vehicles.
-    guardrail_max_pos_jump_m: float = 0.5
-    guardrail_max_accel_norm_ms2: float = 30.0
+    # Rotational-gap preventative map-skip. After each IESKF update the
+    # binary computes the IESKF's own body-frame angular velocity, compares
+    # its magnitude difference against the ICP scan-to-scan body-frame ω
+    # supplied internally, and skips map_incremental if the gap exceeds
+    # this threshold (deg/s). Zero disables. Replaces the previous linear
+    # vel/accel guardrail — see commit notes for why orientation
+    # disagreement is the seed cause of the gravity-leak divergence loop.
+    rotation_gap_threshold_deg_s: float = 10.0
 
     # ICP cross-check rollback. The binary maintains a ring buffer of
     # per-scan (IESKF pose, IESKF orientation, ICP body-frame velocity)
