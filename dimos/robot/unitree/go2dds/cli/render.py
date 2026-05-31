@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from dimos.memory2.type.observation import Observation
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
 WORLD = "world"
 
@@ -200,7 +201,7 @@ def lidar(store: Go2McapStore, seconds: float | None) -> None:
     """Lidar point cloud, under the leg_odom transform (lidar -> base -> world)."""
     import rerun as rr
 
-    def log_lidar(obs: Observation[PoseStamped]) -> None:
+    def log_lidar(obs: Observation[PointCloud2]) -> None:
         rr.set_time("time", timestamp=obs.ts)
         rr.log("world/leg_odom/lidar", obs.data.to_rerun())
 

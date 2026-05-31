@@ -60,7 +60,10 @@ class CdrStructCodec:
     payload_type: type  # the spec dataclass; also the decoded payload type
 
     def decode(self, data: bytes) -> Any:
-        return cdr.decode(data, self.payload_type)[0]
+        msg, end = cdr.decode(data, self.payload_type)
+        # Fixed-layout struct: leftover bytes mean the spec is wrong — fail loud.
+        assert end == len(data), f"{self.payload_type.__name__}: {end} != {len(data)} bytes"
+        return msg
 
     def encode(self, msg: Any) -> bytes:
         raise NotImplementedError("CDR struct encode not implemented yet")

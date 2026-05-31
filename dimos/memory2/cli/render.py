@@ -107,6 +107,9 @@ def render_store(
             if seconds is not None and obs.ts - t0 > seconds:
                 print()  # terminate the windowed (sub-100%) progress line
                 break
+            if obs.data is None:  # e.g. a truncated/corrupt frame that failed to decode
+                report(obs)
+                continue
             rr.set_time("time", duration=obs.ts - t0)
             data = obs.data.to_rerun()
             if isinstance(data, list):  # RerunMulti: [(subpath, archetype), ...]
