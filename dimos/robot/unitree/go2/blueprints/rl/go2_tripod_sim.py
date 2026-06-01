@@ -67,10 +67,6 @@ _joints = [f"{_HW}/{j}" for j in GO2_JOINT_ORDER]
 # Quest teleop task; the RL policy masks them.
 _FR_JOINTS = [f"{_HW}/FR_hip_joint", f"{_HW}/FR_thigh_joint", f"{_HW}/FR_calf_joint"]
 
-# Rest pose for FR while teleop is active: matches training default
-# (hip +0.1, thigh 0.9, calf -1.8). Operator deltas perturb around this.
-_FR_REST = [0.1, 0.9, -1.8]
-
 # Task name the Quest module stamps into right-controller PoseStamped frame_id.
 # The coordinator routes the PoseStamped to the task with this exact name.
 _FR_TASK_NAME = "fr_teleop"
@@ -120,20 +116,14 @@ go2_tripod_sim = (
                     priority=20,
                     auto_start=True,
                     params={
-                        "rest_pose": _FR_REST,
+                        # FR-leg URDF (base_link -> FR_hip -> FR_thigh -> FR_calf
+                        # -> FR_foot). ee_joint_id=3 is FR_calf_joint, the last
+                        # movable joint; the foot is a fixed offset that cancels
+                        # in delta math.
+                        "model_path": "data/go2_mjlab/go2_fr_leg.urdf",
+                        "ee_joint_id": 3,
                         "command_timeout": 0.3,
-                        # Controller -> FR leg joint mapping. Controller pose is
-                        # already in robot frame (X=fwd, Y=left, Z=up - see
-                        # teleop_transforms.VR_TO_ROBOT_FRAME). 3x3 row-major:
-                        # rows = controller (x, y, z), cols = (hip, thigh, calf).
-                        #   x fwd        -> thigh pitch fwd
-                        #   y left       -> hip rotates inward (-)
-                        #   z up         -> calf extends (- = straighter leg)
-                        "axis_map": [
-                            0.0, -3.0,  0.0,   # x -> -thigh  (push fwd  -> paw back)
-                            3.0,  0.0,  0.0,   # y ->  hip    (controller left -> paw right)
-                            0.0,  0.0, -3.0,   # z -> -calf   (up -> paw up)
-                        ],
+                        "max_joint_delta_deg": 30.0,
                     },
                 ),
             ],

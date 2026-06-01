@@ -12,30 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Joint-space Quest teleop for a small joint group (e.g. the Go2 FR leg).
+"""Cartesian Quest teleop for a small joint chain (e.g. the Go2 FR leg).
 
-Maps Quest controller pose deltas directly to N joint deltas, without IK.
-Receives pose via the coordinator's `cartesian_command` routing (the Quest
-module stamps `frame_id = task_name`; only deltas while the right primary
-button is held - that's the base `QuestTeleopModule` engage behavior).
+Uses the shared [PinocchioIK] solver to translate controller pose deltas
+into joint targets. Pattern mirrors [TeleopIKTask] - snapshot EE pose on
+first command after engage, apply incoming deltas relative to it, solve IK
+warm-started from current joint state.
 
-Use case: Go2 tripod - operator holds A on right controller, then waves
-the controller to wiggle the held-up FR paw. Joint-space avoids IK
-singularities and feels direct for a 3-DOF leg.
-
-Default 3-joint mapping (override `axis_map` for other configs):
-    controller delta x -> j0  (hip abduction)
-    controller delta y -> j1  (thigh pitch, scaled negative so push-fwd = lift)
-    controller delta z -> j2  (calf curl)
+Use case: Go2 tripod blueprint. Operator holds right A; subsequent right-
+controller motion drives the held-up FR paw in body frame.
 """
 
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import pinocchio
 from pydantic import Field
 
 from dimos.control.task import (
@@ -44,6 +40,11 @@ from dimos.control.task import (
     CoordinatorState,
     JointCommandOutput,
     ResourceClaim,
+)
+from dimos.manipulation.planning.kinematics.pinocchio_ik import (
+    PinocchioIK,
+    check_joint_delta,
+    pose_to_se3,
 )
 from dimos.protocol.service.spec import BaseConfig
 from dimos.utils.logging_config import setup_logger
@@ -59,47 +60,50 @@ class QuestJointTaskConfig:
     """Per-instance config built from TaskConfig.params."""
 
     joint_names: list[str]
-    rest_pose: list[float]
-    # 3xN row-major mapping: rows = controller (x, y, z), cols = joints.
-    # Default fits Go2 FR leg: dx->hip, -dy->thigh (push fwd = lift), dz->calf.
-    axis_map: list[float] = field(default_factory=lambda: [
-        2.0, 0.0, 0.0,   # x -> j0
-        0.0, -2.0, 0.0,  # y -> j1
-        0.0, 0.0, 3.0,   # z -> j2
-    ])
-    joint_limits: list[tuple[float, float]] | None = None
+    model_path: str
+    ee_joint_id: int
     priority: int = 20
     command_timeout: float = 0.3
+    max_joint_delta_deg: float = 30.0
 
 
 class QuestJointTask(BaseControlTask):
-    """Quest right-controller delta -> joint targets, gated by Quest engage upstream."""
+    """Quest controller delta -> IK -> joint targets for a short kinematic chain.
+
+    Engagement is upstream (Quest base module only publishes
+    right_controller_output while A is held). On the first command after
+    engage, snapshot the current EE pose from FK on the *real* joint state;
+    subsequent commands apply the controller delta relative to that.
+    """
 
     def __init__(self, name: str, config: QuestJointTaskConfig) -> None:
+        if not config.joint_names:
+            raise ValueError(f"QuestJointTask {name!r} requires joint_names")
+        if not config.model_path:
+            raise ValueError(f"QuestJointTask {name!r} requires model_path")
+
         self._name = name
         self._config = config
+        self._joint_names = frozenset(config.joint_names)
+        self._joint_names_list = list(config.joint_names)
         self._n = len(config.joint_names)
-        if len(config.rest_pose) != self._n:
-            raise ValueError(
-                f"rest_pose len {len(config.rest_pose)} != joint_names len {self._n}"
-            )
-        axis = np.array(config.axis_map, dtype=np.float32)
-        if axis.size != 3 * self._n:
-            raise ValueError(
-                f"axis_map len {axis.size} != 3*{self._n} for {self._n} joints"
-            )
-        # Stored as (3, N) so axis_map.T @ delta_xyz gives joint deltas.
-        self._axis_map = axis.reshape(3, self._n)
-        self._rest_pose = np.array(config.rest_pose, dtype=np.float32)
-        self._joint_set = frozenset(config.joint_names)
 
-        self._last_delta = np.zeros(3, dtype=np.float32)
-        self._last_command_t = -1.0
+        self._ik = PinocchioIK.from_model_path(config.model_path, config.ee_joint_id)
+        if self._ik.nq != self._n:
+            logger.warning(
+                f"QuestJointTask {name}: URDF nq ({self._ik.nq}) != "
+                f"joint_names count ({self._n})"
+            )
+
         self._lock = threading.Lock()
+        self._target_delta: PoseStamped | None = None
+        self._last_command_t: float = -1.0
+        self._initial_ee_pose: pinocchio.SE3 | None = None
 
         logger.info(
-            f"QuestJointTask {name} initialized for {self._n} joints "
-            f"(priority={config.priority}, joints={config.joint_names})"
+            f"QuestJointTask {name} initialized "
+            f"(model={config.model_path}, ee_joint_id={config.ee_joint_id}, "
+            f"joints={config.joint_names})"
         )
 
     @property
@@ -108,7 +112,7 @@ class QuestJointTask(BaseControlTask):
 
     def claim(self) -> ResourceClaim:
         return ResourceClaim(
-            joints=self._joint_set,
+            joints=self._joint_names,
             priority=self._config.priority,
             mode=ControlMode.SERVO_POSITION,
         )
@@ -119,59 +123,104 @@ class QuestJointTask(BaseControlTask):
 
     def compute(self, state: CoordinatorState) -> JointCommandOutput | None:
         with self._lock:
-            if self._last_command_t < 0.0:
+            if self._last_command_t < 0.0 or self._target_delta is None:
                 return None
-            # Timeout: release joints if no fresh pose (operator dropped A).
             if state.t_now - self._last_command_t > self._config.command_timeout:
+                # Operator released A (or stream dropped) - go inactive and
+                # forget the snapshot so the next engage re-anchors cleanly.
                 self._last_command_t = -1.0
-                self._last_delta[:] = 0.0
+                self._initial_ee_pose = None
+                self._target_delta = None
                 return None
-            delta = self._last_delta.copy()
+            delta_msg = self._target_delta
 
-        joint_deltas = delta @ self._axis_map  # (3,) @ (3,N) -> (N,)
-        target = self._rest_pose + joint_deltas
+        # Pull current joint state in URDF order. For the FR leg this is
+        # [FR_hip_joint, FR_thigh_joint, FR_calf_joint].
+        q_current = self._get_current_joints(state)
+        if q_current is None:
+            return None
 
-        if self._config.joint_limits is not None:
-            for i, (lo, hi) in enumerate(self._config.joint_limits):
-                target[i] = float(np.clip(target[i], lo, hi))
+        # Snapshot initial EE pose on first command after engage.
+        with self._lock:
+            need_snapshot = self._initial_ee_pose is None
+        if need_snapshot:
+            initial_pose = self._ik.forward_kinematics(q_current)
+            with self._lock:
+                self._initial_ee_pose = initial_pose
+
+        # target = initial + controller_delta (translation only; we ignore
+        # controller orientation for the leg since 3 DOF can't reach
+        # arbitrary 6-DOF poses anyway).
+        delta_se3 = pose_to_se3(delta_msg)
+        with self._lock:
+            if self._initial_ee_pose is None:
+                return None
+            target_pose = pinocchio.SE3(
+                self._initial_ee_pose.rotation,  # keep orientation fixed
+                self._initial_ee_pose.translation + delta_se3.translation,
+            )
+
+        q_solution, converged, err = self._ik.solve(target_pose, q_current)
+        if not converged:
+            logger.debug(
+                f"QuestJointTask {self._name}: IK partial (err={err:.4f}), "
+                f"applying anyway"
+            )
+
+        if not check_joint_delta(q_solution, q_current, self._config.max_joint_delta_deg):
+            logger.warning(
+                f"QuestJointTask {self._name}: joint delta > "
+                f"{self._config.max_joint_delta_deg} deg, holding"
+            )
+            return None
 
         return JointCommandOutput(
-            joint_names=list(self._config.joint_names),
-            positions=[float(x) for x in target],
+            joint_names=self._joint_names_list,
+            positions=[float(x) for x in q_solution],
             mode=ControlMode.SERVO_POSITION,
         )
 
     def on_cartesian_command(self, msg: PoseStamped, t_now: float) -> None:
         """Coordinator delivers pose here when `msg.frame_id == self.name`."""
         with self._lock:
-            self._last_delta[0] = float(msg.position.x)
-            self._last_delta[1] = float(msg.position.y)
-            self._last_delta[2] = float(msg.position.z)
+            self._target_delta = msg
             self._last_command_t = t_now
+
+    # --- Internals -----------------------------------------------------------
+
+    def _get_current_joints(self, state: CoordinatorState) -> np.ndarray | None:
+        """Read joint positions in the order URDF expects."""
+        q = np.empty(self._n, dtype=np.float64)
+        for i, jname in enumerate(self._joint_names_list):
+            pos = state.joints.get_position(jname)
+            if pos is None:
+                return None
+            q[i] = pos
+        return q
 
 
 class QuestJointTaskParams(BaseConfig):
     """TaskConfig.params schema."""
 
-    rest_pose: list[float] = Field(...)
-    axis_map: list[float] | None = None
-    joint_limits: list[tuple[float, float]] | None = None
+    model_path: str = Field(..., description="Path to URDF (or MJCF) for IK")
+    ee_joint_id: int = Field(..., description="Pinocchio joint id of the EE")
     command_timeout: float = 0.3
+    max_joint_delta_deg: float = 30.0
 
 
 def create_task(cfg: Any, hardware: Any) -> QuestJointTask:
     params = QuestJointTaskParams.model_validate(cfg.params)
-    kwargs: dict[str, Any] = {
-        "joint_names": cfg.joint_names,
-        "rest_pose": params.rest_pose,
-        "priority": cfg.priority,
-        "command_timeout": params.command_timeout,
-    }
-    if params.axis_map is not None:
-        kwargs["axis_map"] = params.axis_map
-    if params.joint_limits is not None:
-        kwargs["joint_limits"] = params.joint_limits
-    return QuestJointTask(cfg.name, QuestJointTaskConfig(**kwargs))
+    return QuestJointTask(
+        cfg.name,
+        QuestJointTaskConfig(
+            joint_names=cfg.joint_names,
+            model_path=params.model_path,
+            ee_joint_id=params.ee_joint_id,
+            priority=cfg.priority,
+            command_timeout=params.command_timeout,
+            max_joint_delta_deg=params.max_joint_delta_deg,
+        ),
+    )
 
 
 __all__ = ["QuestJointTask", "QuestJointTaskConfig", "create_task"]
