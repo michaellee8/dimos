@@ -46,9 +46,6 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-# tcpdump fails fast (EPERM, bad iface) within a few ms; pause briefly so poll() catches that.
-_TCPDUMP_STARTUP_PROBE_SEC = 0.3
-
 
 def _stamp() -> str:
     now = datetime.now()
@@ -65,22 +62,22 @@ class Go2Mid360MemoryConfig(RecorderConfig):
     recording_dir: Path = Field(default_factory=_default_recording_dir)
     # Filled in by model_post_init below if left at the default.
     db_path: str | Path = ""
-    pcap_path: str | Path = ""
 
     default_frame_id: str = "base_link"
 
-    # tcpdump configuration. Capture is filtered to UDP from the lidar IP.
-    record_pcap: bool = True
+    # tcpdump configuration. Pcap recording is opt-in: set record_pcap=True to
+    # enable. pcap_path defaults to <recording_dir>/mid360.pcap when unset.
+    record_pcap: bool = False
+    pcap_path: Path | None = None
     record_pcap_iface: str = "enp2s0"
     record_pcap_snaplen: int = 2048
     lidar_ip: str = "192.168.1.107"
 
     def model_post_init(self, __context: object) -> None:
         super().model_post_init(__context)
-        # Resolve db/pcap paths from recording_dir if the caller didn't set them.
         if not self.db_path:
             self.db_path = self.recording_dir / "data.db"
-        if not self.pcap_path:
+        if self.record_pcap and self.pcap_path is None:
             self.pcap_path = self.recording_dir / "mid360.pcap"
 
 
@@ -102,6 +99,9 @@ class Go2Mid360Memory(Recorder):
     fastlio_odometry: In[Odometry]
     livox_lidar: In[PointCloud2]
     livox_imu: In[Imu]
+
+    # tcpdump fails fast (EPERM, bad iface) within a few ms; pause briefly so poll() catches that.
+    _TCPDUMP_STARTUP_PROBE_SEC: float = 0.3
 
     _pcap_proc: subprocess.Popen[bytes] | None = None
 
@@ -174,7 +174,7 @@ class Go2Mid360Memory(Recorder):
             start_new_session=True,
         )
         # tcpdump exits within a few ms on EPERM; wait briefly so we can detect that.
-        time.sleep(_TCPDUMP_STARTUP_PROBE_SEC)
+        time.sleep(self._TCPDUMP_STARTUP_PROBE_SEC)
         if proc.poll() is not None:
             stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
             self._pcap_proc = None
@@ -292,12 +292,13 @@ unitree_go2_record = autoconnect(
         frame_id="world",
         map_freq=-1,
         lidar_ip=_LIDAR_IP,
+        max_velocity_norm_ms=3.1,
     ).remappings(
         [
             (FastLio2, "lidar", "fastlio_lidar"),
             (FastLio2, "odometry", "fastlio_odometry"),
         ]
     ),
-    Go2Mid360Memory.blueprint(lidar_ip=_LIDAR_IP),
+    Go2Mid360Memory.blueprint(lidar_ip=_LIDAR_IP, record_pcap=True),
     SpeedWarner.blueprint(),
 ).global_config(n_workers=10, robot_model="unitree_go2")

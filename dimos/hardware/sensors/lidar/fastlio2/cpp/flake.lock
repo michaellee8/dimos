@@ -37,16 +37,16 @@
     "fast-lio": {
       "flake": false,
       "locked": {
-        "lastModified": 1778784133,
-        "narHash": "sha256-bZEmIJlrzcqrHLxCiXXXf7fgi2yjVRuad8z08HN1eMU=",
+        "lastModified": 1780353421,
+        "narHash": "sha256-HL64XVYsbiEbXqADj07BwX1Eij2Xm6vj+a2o0RQhSrs=",
         "owner": "dimensionalOS",
         "repo": "dimos-module-fastlio2",
-        "rev": "d93bc6795babe9e63cc77d2bf2b72294d9afa839",
+        "rev": "fd28a0995384352962558c4bf843d7bdfc17c1ed",
         "type": "github"
       },
       "original": {
         "owner": "dimensionalOS",
-        "ref": "v0.3.0-quiet-logs",
+        "ref": "jeff/feat/velocity-cap",
         "repo": "dimos-module-fastlio2",
         "type": "github"
       }

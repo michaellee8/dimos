@@ -411,6 +411,11 @@ int main(int argc, char** argv) {
     float map_max_range = mod.arg_float("map_max_range", 100.0f);
     float map_freq = mod.arg_float("map_freq", 0.0f);
 
+    // Optional override of the FAST-LIO post-IESKF-update velocity cap (m/s).
+    // Zero (default) means use the upstream default; any positive value
+    // overrides. Size to the platform's physical envelope.
+    double max_velocity_norm_ms = mod.arg_float("max_velocity_norm_ms", 0.0f);
+
     // Verbose logging — propagates to the FAST-LIO C++ core via the
     // `fastlio_debug` global. Default false → only real errors print.
     bool debug = mod.arg_bool("debug", false);
@@ -487,6 +492,9 @@ int main(int argc, char** argv) {
     // Init FAST-LIO with config
     if (debug) printf("[fastlio2] Initializing FAST-LIO...\n");
     FastLio fast_lio(config_path, msr_freq, main_freq);
+    if (max_velocity_norm_ms > 0.0) {
+        fast_lio.set_max_velocity_norm_ms(max_velocity_norm_ms);
+    }
     g_fastlio = &fast_lio;
     if (debug) printf("[fastlio2] FAST-LIO initialized.\n");
 
