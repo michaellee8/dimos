@@ -287,12 +287,12 @@ def main(
         if "odom" in store.streams:
             odom = store.stream("odom", PoseStamped)
             cb = _progress(odom.count(), "        odom")
-            for obs in odom:
-                cb(obs)
-                p = obs.pose_tuple
+            for pose_obs in odom:
+                cb(pose_obs)
+                p = pose_obs.pose_tuple
                 if p is None:
                     continue
-                rr.set_time(TIMELINE, timestamp=obs.ts)
+                rr.set_time(TIMELINE, timestamp=pose_obs.ts)
                 x, y, z, qx, qy, qz, qw = p
                 rr.log(
                     "world/odom",
