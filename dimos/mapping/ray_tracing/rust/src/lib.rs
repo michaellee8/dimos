@@ -6,11 +6,9 @@
 use ahash::{AHashMap, AHashSet};
 use lcm_msgs::sensor_msgs::{PointCloud2, PointField};
 use lcm_msgs::std_msgs::{Header, Time};
-use numpy::ndarray::Array2;
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2};
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
 use serde::Deserialize;
+
+mod python;
 
 pub type VoxelKey = (i32, i32, i32);
 
@@ -220,8 +218,19 @@ pub fn find_misses_along_ray(
     let shadow_sq = shadow_depth.powi(2);
     let grace_sq = grace_depth.powi(2);
 
+    let ray_len = (dx * dx + dy * dy + dz * dz).sqrt();
+    let t_max = 1.0 + shadow_depth / ray_len.max(f32::EPSILON);
+
     let mut past_endpoint = false;
     loop {
+        let t_enter = tx.min(ty).min(tz);
+        if t_enter > t_max {
+            return;
+        }
+        if t_enter >= 1.0 {
+            past_endpoint = true;
+        }
+
         if tx < ty {
             if tx < tz {
                 x += step_x;
@@ -444,95 +453,6 @@ pub fn build_pointclouds(
     (global_cloud, local_cloud)
 }
 
-#[pyclass]
-pub struct VoxelRayMap {
-    config: VoxelMapperConfig,
-    map: VoxelMap,
-}
-
-#[pymethods]
-impl VoxelRayMap {
-    #[new]
-    #[pyo3(signature = (
-        voxel_size,
-        max_range,
-        ray_subsample = 1,
-        shadow_depth = 0.2,
-        grace_depth = 0.2,
-        min_health = -2,
-        max_health = 1,
-    ))]
-    fn new(
-        voxel_size: f32,
-        max_range: f32,
-        ray_subsample: u32,
-        shadow_depth: f32,
-        grace_depth: f32,
-        min_health: i32,
-        max_health: i32,
-    ) -> PyResult<Self> {
-        let config = VoxelMapperConfig {
-            voxel_size,
-            max_range,
-            ray_subsample,
-            shadow_depth,
-            grace_depth,
-            min_health,
-            max_health,
-        };
-        config.validate().map_err(PyValueError::new_err)?;
-        Ok(Self {
-            config,
-            map: VoxelMap::default(),
-        })
-    }
-
-    fn add_frame(
-        &mut self,
-        points: PyReadonlyArray2<'_, f32>,
-        origin: (f32, f32, f32),
-    ) -> PyResult<()> {
-        let arr = points.as_array();
-        let shape = arr.shape();
-        if shape.len() != 2 || shape[1] != 3 {
-            return Err(PyValueError::new_err(format!(
-                "points must be (N, 3) float32, got shape {:?}",
-                shape
-            )));
-        }
-        let n = shape[0];
-        let pts: Vec<(f32, f32, f32)> = (0..n)
-            .map(|i| (arr[[i, 0]], arr[[i, 1]], arr[[i, 2]]))
-            .collect();
-        update_map(&mut self.map, origin, &pts, &self.config);
-        Ok(())
-    }
-
-    fn global_map<'py>(&self, py: Python<'py>) -> Bound<'py, PyArray2<f32>> {
-        let voxel_size = self.config.voxel_size;
-        let half = voxel_size * 0.5;
-        let mut positions: Vec<f32> = Vec::with_capacity(self.map.voxels.len() * 3);
-        for (&(kx, ky, kz), &health) in &self.map.voxels {
-            if health <= 0 {
-                continue;
-            }
-            positions.push(kx as f32 * voxel_size + half);
-            positions.push(ky as f32 * voxel_size + half);
-            positions.push(kz as f32 * voxel_size + half);
-        }
-        let n = positions.len() / 3;
-        Array2::from_shape_vec((n, 3), positions)
-            .expect("3 elements pushed per voxel")
-            .into_pyarray_bound(py)
-    }
-}
-
-#[pymodule]
-fn _voxel_ray_tracing(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<VoxelRayMap>()?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -600,7 +520,7 @@ mod tests {
         let origin_voxel = world_to_voxel(origin.0, origin.1, origin.2, inv);
         let endpoint = world_to_voxel(end.0, end.1, end.2, inv);
 
-        let expected: AHashSet<VoxelKey> = [
+        let walked: AHashSet<VoxelKey> = [
             (1, 0, 0),
             (1, 1, 0),
             (1, 1, 1),
@@ -613,7 +533,7 @@ mod tests {
         .into_iter()
         .collect();
         let mut map_voxels: AHashMap<VoxelKey, i32> = AHashMap::new();
-        for v in &expected {
+        for v in &walked {
             map_voxels.insert(*v, 1);
         }
 
@@ -630,6 +550,13 @@ mod tests {
             endpoint,
         );
 
+        // z-slab protection skips voxels in the endpoint's z-slab (z=1) when the
+        // ray crosses z-slabs.
+        let expected: AHashSet<VoxelKey> = walked
+            .iter()
+            .filter(|v| v.2 != endpoint.2)
+            .copied()
+            .collect();
         assert_eq!(misses, expected);
     }
 
@@ -823,6 +750,68 @@ mod tests {
             build_pointclouds(&map, &live, 1.0, &cylinder, "world", Time::default());
         assert!(cloud_points(&global).contains(&voxel_center(10, 10, 10)));
         assert!(cloud_points(&local).contains(&voxel_center(10, 10, 10)));
+    }
+
+    /// Test how bad the planar ray clipping is.
+    /// For example, points on floors can be counted as misses because they are close to the same ray as the hit.
+    #[test]
+    fn ground_clipping_single_ray() {
+        let voxel_size = 0.1_f32;
+        let lidar_height = 1.0_f32;
+        let cfg = VoxelMapperConfig {
+            voxel_size,
+            max_range: 50.0,
+            ray_subsample: 1,
+            shadow_depth: 0.2,
+            grace_depth: 0.2,
+            min_health: 0,
+            max_health: 1,
+        };
+        let inv = 1.0 / voxel_size;
+
+        // Cover the full range we will probe, plus a little for shadow.
+        let max_x = 25.0_f32;
+        let n_ground = (max_x / voxel_size).ceil() as i32;
+
+        let ranges: Vec<f32> = (1..=20).map(|i| i as f32).collect();
+        let mut table = format!(
+            "voxel_size={voxel_size} lidar_height={lidar_height} grace={} shadow={}\n\
+             range_m  ground_voxels_in_row  clipped  clipped_pct\n",
+            cfg.grace_depth, cfg.shadow_depth
+        );
+        let mut total_clipped = 0usize;
+        for &range in &ranges {
+            let mut map = VoxelMap::default();
+            for i in 0..n_ground {
+                let x = (i as f32) * voxel_size + voxel_size * 0.5;
+                let key = world_to_voxel(x, 0.0, 0.0, inv);
+                map.voxels.insert(key, cfg.max_health);
+            }
+            let n_before = map.voxels.len();
+
+            let origin = (0.0_f32, 0.0_f32, lidar_height);
+            let hits = vec![(range, 0.0_f32, 0.0_f32)];
+            update_map(&mut map, origin, &hits, &cfg);
+
+            let n_after_ground: usize = (0..n_ground)
+                .filter(|i| {
+                    let x = (*i as f32) * voxel_size + voxel_size * 0.5;
+                    let key = world_to_voxel(x, 0.0, 0.0, inv);
+                    map.voxels.contains_key(&key)
+                })
+                .count();
+            let clipped = n_before - n_after_ground;
+            let pct = 100.0 * clipped as f32 / n_before as f32;
+            table.push_str(&format!(
+                "{range:>6.1}  {n_before:>20}  {clipped:>7}  {pct:>10.1}\n"
+            ));
+            total_clipped += clipped;
+        }
+        eprint!("{table}");
+        assert!(
+            total_clipped == 0,
+            "planar grace regressed, ground voxels clipped:\n{table}"
+        );
     }
 
     #[test]
