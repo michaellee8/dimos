@@ -24,6 +24,7 @@ from dimos_lcm.nav_msgs import Odometry as LCMOdometry
 import numpy as np
 
 from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.PoseWithCovariance import PoseWithCovariance
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.TwistWithCovariance import TwistWithCovariance
@@ -132,9 +133,6 @@ class Odometry(Timestamped):
         return self.pose.yaw
 
     def to_pose_stamped(self) -> PoseStamped:
-        """Convert to PoseStamped, dropping twist and covariance."""
-        from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-
         return PoseStamped(
             ts=self.ts,
             frame_id=self.frame_id,
