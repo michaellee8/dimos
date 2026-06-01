@@ -8,6 +8,10 @@ sudo apt-get update
 # "libGL.so.1: cannot open shared object file" (e.g. on minimal/headless/Docker installs).
 sudo apt-get install -y curl g++ portaudio19-dev git-lfs libturbojpeg libgl1 libegl1 python3-dev
 
+# optional: graphviz enables blueprint-graph visualization. Without it dimos logs
+# "graphviz not found, skipping blueprint graph" at startup (everything else still works).
+# sudo apt-get install -y graphviz
+
 # install uv
 curl -LsSf https://astral.sh/uv/install.sh | sh && export PATH="$HOME/.local/bin:$PATH"
 # NOTE: the `export` above only affects the current shell. Open a new terminal (or run
