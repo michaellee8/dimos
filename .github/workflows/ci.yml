@@ -148,7 +148,7 @@ jobs:
         working-directory: docs
         run: npm run validate
 
-  test:
+  full-release-test:
     env:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
