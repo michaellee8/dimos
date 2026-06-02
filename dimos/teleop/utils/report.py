@@ -282,9 +282,7 @@ def _format_report(
 
         checks: list[str] = []
         if loss is not None:
-            checks.append(
-                f"loss {'PASS' if loss < _LOSS_THRESHOLD_PCT else 'WARN'} ({loss:.2f}%)"
-            )
+            checks.append(f"loss {'PASS' if loss < _LOSS_THRESHOLD_PCT else 'WARN'} ({loss:.2f}%)")
         e2e = s["e2e_ms"]
         if e2e is not None:
             checks.append(f"E2E {classify_e2e(e2e['p50'])} (p50 {e2e['p50']:.0f}ms)")

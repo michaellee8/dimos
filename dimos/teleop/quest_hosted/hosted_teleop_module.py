@@ -56,7 +56,6 @@ from dimos.utils.logging_config import setup_logger
 logger = setup_logger()
 
 
-
 class Hand(IntEnum):
     LEFT = 0
     RIGHT = 1
