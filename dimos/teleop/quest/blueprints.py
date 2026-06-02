@@ -19,8 +19,7 @@ Single sim/real blueprints — pass `--simulation` to run inside MuJoCo, omit fo
 hardware. The underlying coordinator blueprints branch on `global_config.simulation`.
 """
 
-from pathlib import Path
-
+from dimos.constants import DEFAULT_CAPACITY_COLOR_IMAGE
 from dimos.control.blueprints.teleop import (
     coordinator_teleop_dual,
     coordinator_teleop_piper,
@@ -28,9 +27,7 @@ from dimos.control.blueprints.teleop import (
     coordinator_teleop_xarm7,
 )
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.core.stream import In
 from dimos.core.transport import LCMTransport, pSHMTransport
-from dimos.memory2.module import Recorder, RecorderConfig
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.Image import Image
@@ -149,8 +146,6 @@ teleop_quest_go2 = (
 
 
 __all__ = [
-    "TeleopRecorder",
-    "TeleopRecorderConfig",
     "teleop_quest_dual",
     "teleop_quest_go2",
     "teleop_quest_piper",
