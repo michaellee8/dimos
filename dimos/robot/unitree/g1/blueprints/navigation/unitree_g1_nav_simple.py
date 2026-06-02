@@ -21,7 +21,7 @@ from dimos.mapping.pointclouds.occupancy import HeightCostConfig
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
-from dimos.robot.unitree.g1.blueprints.primitive.unitree_g1_onboard import unitree_g1_onboard
+from dimos.robot.unitree.g1.blueprints.primitive.unitree_g1_onboard import _unitree_g1_onboard
 from dimos.robot.unitree.g1.blueprints.primitive.unitree_g1_vis import unitree_g1_vis
 from dimos.robot.unitree.g1.config import G1
 
@@ -32,7 +32,7 @@ g1_rotation_diameter = 0.8
 voxel_resolution = 0.05
 
 unitree_g1_nav_simple = autoconnect(
-    unitree_g1_onboard,
+    _unitree_g1_onboard,
     RayTracingVoxelMap.blueprint(voxel_size=voxel_resolution),
     CostMapper.blueprint(
         config=HeightCostConfig(

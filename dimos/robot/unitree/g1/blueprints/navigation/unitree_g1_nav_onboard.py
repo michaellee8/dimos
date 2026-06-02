@@ -20,7 +20,7 @@ from dimos.core.global_config import global_config
 from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_stack.main import create_nav_stack, nav_stack_rerun_config
-from dimos.robot.unitree.g1.blueprints.primitive.unitree_g1_onboard import unitree_g1_onboard
+from dimos.robot.unitree.g1.blueprints.primitive.unitree_g1_onboard import _unitree_g1_onboard
 from dimos.robot.unitree.g1.config import G1, G1_LOCAL_PLANNER_PRECOMPUTED_PATHS
 from dimos.robot.unitree.g1.g1_rerun import (
     g1_odometry_tf_override,
@@ -30,7 +30,7 @@ from dimos.visualization.vis_module import vis_module
 
 unitree_g1_nav_onboard = (
     autoconnect(
-        unitree_g1_onboard,
+        _unitree_g1_onboard,
         create_nav_stack(
             planner="simple",
             vehicle_height=G1.height_clearance,
