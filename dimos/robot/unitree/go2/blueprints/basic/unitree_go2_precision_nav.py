@@ -86,6 +86,8 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.std_msgs.Float32 import Float32
+from dimos.msgs.std_msgs.Int8 import Int8
+from dimos.navigation.costmap_precision_governor.module import CostmapPrecisionGovernor
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_coordinator import (
     unitree_go2_coordinator,
@@ -107,6 +109,7 @@ def _make(coord):
             VoxelGridMapper.blueprint(emit_every=5),
             CostMapper.blueprint(),
             ReplanningAStarPlanner.blueprint(),
+            CostmapPrecisionGovernor.blueprint(),
         )
         .transports(
             {
