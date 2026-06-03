@@ -49,11 +49,14 @@ dimOS controls physical robots. Contributions that affect control loops, motor d
 
 We want people to use Dimensional, learn it, and help us building it. You do not need robotics hardware or prior experience with every part of the stack to make a useful contribution.
 
-**Start here.** Browse [open issues labeled `good first issue`](https://github.com/dimensionalOS/dimos/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22). These are scoped tasks that maintainers have marked as approachable for newcomers. Pick one, read the description, and comment if you want to work on it or need clarification. Maintainers are happy to point you in the right direction.
+**Start here.** 
+Browse [open issues labeled `good first issue`](https://github.com/dimensionalOS/dimos/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22). These are scoped tasks that maintainers have marked as approachable for newcomers. Pick one, read the description, and comment if you want to work on it or need clarification. Maintainers are happy to point you in the right direction.
 
-**Get set up.** Follow [`AGENTS.md`](AGENTS.md) for install (`uv sync --extra all`), running blueprints in simulation or replay, and the test workflow (`uv run pytest`). Most changes can be developed and validated without a physical robot.
+**Get set up.** 
+Follow [`AGENTS.md`](AGENTS.md) for install (`uv sync --extra all`), running blueprints in simulation or replay, and the test workflow (`uv run pytest`). Most changes can be developed and validated without a physical robot.
 
-**This still applies to you.** The [critical rule](#the-critical-rule) and [AI policy](AI_POLICY.md) apply to everyone. Use AI tools if they help you learn the codebase, but understand what you submit. Link your PR to the issue you are working on.
+**This still applies to you.** 
+The [critical rule](#the-critical-rule) and [AI policy](AI_POLICY.md) apply to everyone. Use AI tools if they help you learn the codebase, but understand what you submit. Link your PR to the issue you are working on.
 
 ## Issues vs Discussions
 
@@ -78,16 +81,16 @@ This means most contributions start as a discussion, not an issue or a PR.
 
 ## How to submit a pull request:
 
-1. **PRs should map to an accepted issue.** If you open a PR for something that was not discussed and accepted first, it may sit unreviewed or be closed. This is not because the idea is bad, but because unscoped PRs are expensive to review. When in doubt, open a discussion and link your branch.
-2. **Sign the CLA.** All contributions require a signed [Contributor License Agreement](CLA.md). See [Contributor License Agreement](#contributor-license-agreement) below.
-3. **Follow the build and style conventions in [`AGENTS.md`](AGENTS.md).** Use branch prefixes (`feat/`, `fix/`, `docs/`, and so on), target `main`, run the fast test suite (`uv run pytest`), pass pre-commit, and do not force-push or spam pushes. Every push triggers roughly an hour of CI.
-4. **Fill out the PR description template.** GitHub pre-fills it when you open the pull request. Do not clear it. Complete every section:
+1. **PRs should map to an accepted issue:** If you open a PR for something that was not discussed and accepted first, it may sit unreviewed or be closed. This is not because the idea is bad, but because unscoped PRs are expensive to review. When in doubt, open a discussion and link your branch.
+2. **Sign the CLA:** All contributions require a signed [Contributor License Agreement](CLA.md). See [Contributor License Agreement](#contributor-license-agreement) below.
+3. **Follow the build and style conventions in [`AGENTS.md`](AGENTS.md):** Use branch prefixes (`feat/`, `fix/`, `docs/`, and so on), target `main`, run the fast test suite (`uv run pytest`), pass pre-commit, and do not force-push or spam pushes. Every push triggers roughly an hour of CI.
+4. **Fill out the PR description template:** GitHub pre-fills it when you open the pull request. Do not clear it. Complete every section:
 
-   - **Problem.** What is broken or missing.
-   - **Solution.** What your change does.
-   - **How to Test.** The sim, replay, or hardware steps a reviewer can follow.
-   - **AI assistance.** What was AI-assisted, as required by the [AI policy](AI_POLICY.md).
-   - **CLA checkbox.** Confirm you have signed.
+   - Problem: What is broken or missing.
+   - Solution: What your change does.
+   - How to Test: The sim, replay, or hardware steps a reviewer can follow.
+   - AI assistance: What was AI-assisted, as required by the [AI policy](AI_POLICY.md).
+   - CLA checkbox: Confirm you have signed.
 
    If you strip out the template, maintainers may close the PR without reviewing it.
 5. **PRs are not the place to debate design.** If a feature needs discussion, use a discussion and link your branch.
@@ -102,7 +105,7 @@ dimOS is developed by Dimensional Inc. Before your first contribution can be mer
 
 ## Code of conduct
 
-Be respectful. There are humans on the other side of every issue, discussion, and review. Low-effort or hostile contributions put the burden of cleanup on a small team, so please do not create them. We are happy to help newcomers learn and grow. Meet us halfway with effort and good faith. See [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) if present, or the conduct guidelines in our community spaces.
+Be respectful. There are humans on the other side of every issue, discussion, and review. Low-effort or hostile contributions put the burden of cleanup on a small team, so please do not create them. We are happy to help newcomers learn and grow. Meet us halfway with effort and good faith. 
 
 ---
 
