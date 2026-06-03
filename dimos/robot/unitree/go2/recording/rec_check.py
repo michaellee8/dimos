@@ -18,11 +18,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+import json
 import math
 from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+from typing import Any
 
 STREAMS = (
     "livox_imu",
@@ -34,6 +36,8 @@ STREAMS = (
     "color_image",
 )
 RECORDINGS_DIR = Path("go2_recordings")
+# A pcap with only its global header (no packets) is exactly this many bytes.
+PCAP_HEADER_BYTES = 24
 
 
 def find_dir(argv: list[str]) -> Path:
@@ -148,6 +152,63 @@ def format_clock(seconds: float | None) -> str:
     return datetime.fromtimestamp(seconds).strftime("%H:%M:%S")
 
 
+def summarize(directory: Path) -> dict[str, Any]:
+    """The same stats report() prints, as a JSON-able dict."""
+    pcap = directory / "raw_mid360.pcap"
+    db = directory / "mem2.db"
+    summary: dict[str, Any] = {
+        "directory": str(directory),
+        "files": {},
+        "pcap": None,
+        "streams": {},
+        "fastlio_odometry_travel": None,
+    }
+    for path in (pcap, db, directory / "mem2.db-wal", directory / "mem2.db-shm"):
+        summary["files"][path.name] = path.stat().st_size if path.exists() else None
+
+    if pcap.exists() and pcap.stat().st_size > PCAP_HEADER_BYTES:
+        stats = pcap_stats(pcap)
+        if stats is not None:
+            packets, first, last = stats
+            span = last - first
+            summary["pcap"] = {
+                "packets": packets,
+                "first": first,
+                "last": last,
+                "span_s": span,
+                "rate_pkt_s": packets / span if span > 0 else 0,
+            }
+
+    if not db.exists():
+        summary["error"] = "mem2.db missing"
+        return summary
+
+    connection = sqlite3.connect(db)
+    cur = connection.cursor()
+    for name in STREAMS:
+        n, t0, t1, pose_n = stream_rows(cur, name)
+        if n == 0:
+            summary["streams"][name] = {"rows": 0}
+            continue
+        span = (t1 - t0) if (t0 and t1) else 0
+        summary["streams"][name] = {
+            "rows": n,
+            "span_s": span,
+            "hz": (n - 1) / span if span > 0 else 0,
+            "pose_pct": 100 * pose_n / n if n else 0,
+        }
+    summary["fastlio_odometry_travel"] = odometry_travel(cur)
+    connection.close()
+    return summary
+
+
+def write_summary(directory: Path) -> Path:
+    """Write summarize() to <directory>/summary.json and return its path."""
+    path = directory / "summary.json"
+    path.write_text(json.dumps(summarize(directory), indent=2))
+    return path
+
+
 def main() -> int:
     return report(find_dir(sys.argv))
 
@@ -166,7 +227,7 @@ def report(directory: Path) -> int:
             print(f"  {path.name:<20} (missing)")
     print()
 
-    if pcap.exists() and pcap.stat().st_size > 24:
+    if pcap.exists() and pcap.stat().st_size > PCAP_HEADER_BYTES:
         stats = pcap_stats(pcap)
         if stats is None:
             print("pcap: present (capinfos/tcpdump unavailable to inspect)")
