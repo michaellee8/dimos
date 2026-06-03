@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 Dimensional Inc.
+# Copyright 2025-2026 Dimensional Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,14 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# Copyright 2025-2026 Dimensional Inc.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
 
 """Unit tests for the clock-sync ping/pong protocol.
 
@@ -44,6 +36,9 @@ def module():
     m = HostedTeleopModule.__new__(HostedTeleopModule)
     m._state_channel = MagicMock()
     m._state_channel.readyState = "open"
+    # Pong path prefers state_back_channel if set; force fallback to state_channel
+    # so the existing assertions on m._state_channel.send still hold.
+    m._state_back_channel = None
     return m
 
 
