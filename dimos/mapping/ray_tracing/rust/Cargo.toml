@@ -24,6 +24,7 @@ ahash = "0.8"
 tracing = "0.1"
 pyo3 = { version = "0.25", features = ["extension-module", "abi3-py310"] }
 numpy = "0.25"
+validator = { version = "0.20", features = ["derive"] }
 
 [profile.release]
 lto = "thin"

@@ -5,6 +5,7 @@ use numpy::ndarray::Array2;
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArray2, PyUntypedArrayMethods};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use validator::Validate;
 
 use crate::voxel_map::{iter_global_points, update_map, Config, LocalBounds, VoxelMap};
 
@@ -45,7 +46,9 @@ impl VoxelRayMap {
             min_health,
             max_health,
         };
-        config.validate().map_err(PyValueError::new_err)?;
+        config
+            .validate()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(Self {
             config,
             map: VoxelMap::default(),

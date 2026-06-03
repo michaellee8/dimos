@@ -3,58 +3,34 @@
 
 use ahash::{AHashMap, AHashSet};
 use serde::Deserialize;
+use validator::{Validate, ValidationError};
 
 pub type VoxelKey = (i32, i32, i32);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
+#[validate(schema(function = "validate_health_range"))]
 pub struct Config {
+    #[validate(range(exclusive_min = 0.0))]
     pub voxel_size: f32,
+    #[validate(range(min = 0.0))]
     pub max_range: f32,
+    #[validate(range(min = 1))]
     pub ray_subsample: u32,
+    #[validate(range(min = 0.0))]
     pub shadow_depth: f32,
+    #[validate(range(min = 0.0))]
     pub grace_depth: f32,
     pub min_health: i32,
+    #[validate(range(min = 1))]
     pub max_health: i32,
 }
 
-impl Config {
-    pub fn validate(&self) -> Result<(), String> {
-        if !self.voxel_size.is_finite() || self.voxel_size <= 0.0 {
-            return Err(format!("voxel_size must be > 0, got {}", self.voxel_size));
-        }
-        if !self.max_range.is_finite() || self.max_range < 0.0 {
-            return Err(format!("max_range must be >= 0, got {}", self.max_range));
-        }
-        if !self.shadow_depth.is_finite() || self.shadow_depth < 0.0 {
-            return Err(format!(
-                "shadow_depth must be >= 0, got {}",
-                self.shadow_depth
-            ));
-        }
-        if !self.grace_depth.is_finite() || self.grace_depth < 0.0 {
-            return Err(format!(
-                "grace_depth must be >= 0, got {}",
-                self.grace_depth
-            ));
-        }
-        if self.ray_subsample == 0 {
-            return Err("ray_subsample must be >= 1, got 0".to_string());
-        }
-        if self.max_health <= 0 {
-            return Err(format!(
-                "max_health must be > 0 or voxels can never become visible, got {}",
-                self.max_health
-            ));
-        }
-        if self.min_health >= self.max_health {
-            return Err(format!(
-                "min_health ({}) must be < max_health ({})",
-                self.min_health, self.max_health
-            ));
-        }
-        Ok(())
+fn validate_health_range(cfg: &Config) -> Result<(), ValidationError> {
+    if cfg.min_health >= cfg.max_health {
+        return Err(ValidationError::new("min_health_lt_max_health"));
     }
+    Ok(())
 }
 
 #[derive(Default)]

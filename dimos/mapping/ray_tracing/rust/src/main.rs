@@ -13,7 +13,6 @@ use lcm_msgs::sensor_msgs::{PointCloud2, PointField};
 use lcm_msgs::std_msgs::{Header, Time};
 
 #[derive(Module)]
-#[module(setup = validate_config)]
 struct RayTracingVoxelMap {
     #[input(decode = PointCloud2::decode, handler = on_lidar)]
     lidar: Input<PointCloud2>,
@@ -35,12 +34,6 @@ struct RayTracingVoxelMap {
 }
 
 impl RayTracingVoxelMap {
-    async fn validate_config(&self) {
-        if let Err(e) = self.config.validate() {
-            panic!("voxel_ray_tracing: {}", e);
-        }
-    }
-
     async fn on_odometry(&mut self, msg: Odometry) {
         self.last_origin = Some((
             msg.pose.pose.position.x as f32,
@@ -281,9 +274,7 @@ async fn main() {
     let transport = LcmTransport::new()
         .await
         .expect("failed to create LCM transport");
-    run::<RayTracingVoxelMap, _>(transport)
-        .await
-        .expect("voxel_ray_tracing run failed");
+    run::<RayTracingVoxelMap, _>(transport).await;
 }
 
 #[cfg(test)]
