@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
@@ -28,6 +30,7 @@ from dimos.mapping.loop_closure.pgo import (
 )
 from dimos.memory2.store.memory import MemoryStore
 from dimos.memory2.stream import Stream
+from dimos.memory2.utils.trajectory import PoseTrajectory
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -292,6 +295,15 @@ class TestKeyframeType:
         assert isinstance(kf.optimized, Transform)
 
 
+def _lidar_with_odom_poses(lidar: Stream[PointCloud2], odom: Stream[Any]) -> Stream[PointCloud2]:
+    """Re-emit each lidar frame with the interpolated odom pose attached."""
+    traj = PoseTrajectory.from_poses((obs.ts, obs.data) for obs in odom)
+    posed: Stream[PointCloud2] = MemoryStore().stream("lidar", PointCloud2)
+    for obs in lidar:
+        posed.append(obs.data, ts=obs.ts, pose=traj.at(obs.ts))
+    return posed
+
+
 # Real-recording smoke test. ~45-60s on go2_short.db. get_data() auto-pulls
 # the LFS archive on first use.
 class TestRealRecording:
@@ -307,7 +319,7 @@ class TestRealRecording:
         from dimos.utils.data import get_data
 
         store = SqliteStore(path=get_data("go2_short.db"))
-        lidar = store.streams.lidar
+        lidar = _lidar_with_odom_poses(store.streams.lidar, store.streams.odom)
         in_count = lidar.count()
         assert in_count > 0, "recording is empty"
 
@@ -330,6 +342,6 @@ class TestRealRecording:
         # loop_closures_out side-channel is gone — graph.loops carries them.
         assert len(graph.loops) > 0
 
-        # PoseGraph-as-Transformer preserves frame count, including pose=None rows.
+        # PoseGraph-as-Transformer preserves frame count.
         out_count = sum(1 for _ in lidar.transform(graph))
         assert out_count == in_count

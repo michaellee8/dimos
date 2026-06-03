@@ -40,6 +40,7 @@ import typer
 
 from dimos.memory2.transform import throttle
 from dimos.memory2.utils.progress import progress
+from dimos.memory2.utils.trajectory import PoseTrajectory
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
@@ -210,21 +211,6 @@ def lidar(store: Go2McapStore, seconds: float | None) -> None:
     (src.tap(progress(src.count(), "lidar")).tap(log_lidar).drain())
 
 
-def _interp_pose(
-    tt: np.ndarray, pos: np.ndarray, quat: np.ndarray, t: float
-) -> tuple[np.ndarray, np.ndarray]:
-    """LERP position + NLERP quaternion (xyzw) of a trajectory at scalar time t."""
-    i = int(np.clip(np.searchsorted(tt, t), 1, len(tt) - 1))
-    t0, t1 = tt[i - 1], tt[i]
-    f = 0.0 if t1 == t0 else float(np.clip((t - t0) / (t1 - t0), 0.0, 1.0))
-    p = pos[i - 1] * (1 - f) + pos[i] * f
-    q0, q1 = quat[i - 1], quat[i].copy()
-    if float(q0 @ q1) < 0:
-        q1 = -q1
-    q = q0 * (1 - f) + q1 * f
-    return p, q / np.linalg.norm(q)
-
-
 def world_lidar(store: Go2McapStore, seconds: float | None) -> None:
     from dimos.mapping.voxels import VoxelMapTransformer
 
@@ -232,19 +218,10 @@ def world_lidar(store: Go2McapStore, seconds: float | None) -> None:
 
     # pre-load the leg-odom trajectory for per-cloud pose interpolation
     odom = store.streams.odom.to_time(seconds).to_list()
-    tt = np.array([o.ts for o in odom])
-    poses = [o.data.pose.pose for o in odom]
-    pos = np.array([[p.position.x, p.position.y, p.position.z] for p in poses])
-    quat = np.array(
-        [[p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w] for p in poses]
-    )
+    traj = PoseTrajectory.from_poses((o.ts, o.data.pose.pose) for o in odom)
 
     def to_world(obs: Observation[PointCloud2]) -> PointCloud2:
-        p, q = _interp_pose(tt, pos, quat, obs.ts)
-        b2w = Transform.from_pose(
-            WORLD,
-            PoseStamped(ts=obs.ts, frame_id=WORLD, position=p.tolist(), orientation=q.tolist()),
-        )
+        b2w = Transform.from_pose(WORLD, traj.at(obs.ts, frame_id=WORLD))
         return obs.data.transform(b2w.apply(ext))  # lidar -> base -> world
 
     def log_voxels(obs: Observation[PointCloud2]) -> None:
