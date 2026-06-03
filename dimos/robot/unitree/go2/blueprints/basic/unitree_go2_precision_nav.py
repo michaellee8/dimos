@@ -48,9 +48,7 @@ Composition:
   ``odom: In[PoseStamped]`` (no SLAM step needed) and
   ``clicked_point: In[PointStamped]`` from the rerun server. Emits
   ``path: Out[Path]`` which the coord consumes.
-- ``CharacterizationRecorder`` (kept name; ``tag="precision_nav"``)
-  for the per-session SQLite black box. Lands at
-  ``<repo>/data/precision_nav/go2/go2_precision_nav_<date>_<sha>.db``.
+
 
 Wiring (all by-port-name, no remappings):
 
@@ -88,7 +86,6 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.std_msgs.Float32 import Float32
-from dimos.msgs.std_msgs.Int8 import Int8
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_coordinator import (
     unitree_go2_coordinator,
@@ -98,7 +95,7 @@ from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
 from dimos.visualization.vis_module import vis_module
 
 
-def _make(coord, gait_tag: str):
+def _make(coord):
     return (
         autoconnect(
             coord,
@@ -110,11 +107,6 @@ def _make(coord, gait_tag: str):
             VoxelGridMapper.blueprint(emit_every=5),
             CostMapper.blueprint(),
             ReplanningAStarPlanner.blueprint(),
-            # CharacterizationRecorder.blueprint(
-            #     robot_id="go2",
-            #     tag=f"precision_nav_{gait_tag}",
-            #     out_dir=str(get_project_root() / "data" / "precision_nav" / "go2"),
-            # ),
         )
         .transports(
             {
@@ -123,16 +115,15 @@ def _make(coord, gait_tag: str):
                 ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
                 ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
                 ("odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
-                ("gate", Int8): LCMTransport("/precision_nav/gate", Int8),
             }
         )
         .global_config(n_workers=10, robot_model="unitree_go2")
     )
 
 
-unitree_go2_precision_nav = _make(unitree_go2_coordinator, gait_tag="default")
+unitree_go2_precision_nav = _make(unitree_go2_coordinator)
 # Rage variant — pair with a rage-mode artifact so the precision
 # follower's plant model + envelope match the gait it's tracking.
-unitree_go2_precision_nav_rage = _make(unitree_go2_coordinator_rage, gait_tag="rage")
+unitree_go2_precision_nav_rage = _make(unitree_go2_coordinator_rage)
 
 __all__ = ["unitree_go2_precision_nav", "unitree_go2_precision_nav_rage"]
