@@ -126,6 +126,9 @@ jobs:
       - name: Check disk space
         if: failure()
         run: df -h
+      - name: Restore workspace ownership for host runner
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' /__w)" "$GITHUB_WORKSPACE"
 
   build-sdist:
     needs: validate
