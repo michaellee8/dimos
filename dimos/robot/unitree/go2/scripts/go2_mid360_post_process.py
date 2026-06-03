@@ -136,12 +136,20 @@ def process_db(
     map_voxel=0.1,
     cloud_stride=3,
     mid360_pitch=False,
+    check_only=False,
 ):
     print(f">> {db}")
     try:
         rec_check.report(db.parent)
     except Exception as error:
         print(f"   rec_check skipped: {error}")
+
+    if check_only:
+        try:
+            print(f"   wrote {rec_check.write_summary(db.parent)}")
+        except Exception as error:
+            print(f"   summary failed: {error}")
+        return
 
     with SqliteStore(path=str(db)) as store:
         already_corrected = gtsam_stream in store.list_streams()
@@ -197,6 +205,11 @@ def main():
     parser.add_argument("--dictionary", default="DICT_APRILTAG_36h11")
     parser.add_argument("--force", action="store_true", help="reprocess even if gtsam_odom exists")
     parser.add_argument(
+        "--check",
+        action="store_true",
+        help="only sanity-check each recording and write summary.json (no GTSAM/re-anchor/.rrd)",
+    )
+    parser.add_argument(
         "--no-gtsam",
         action="store_true",
         help="skip AprilTag/GTSAM/re-anchor (e.g. rebuild only the .rrd)",
@@ -246,6 +259,7 @@ def main():
                 map_voxel=args.map_voxel,
                 cloud_stride=args.cloud_stride,
                 mid360_pitch=args.mid360_pitch,
+                check_only=args.check,
             )
         except Exception as error:
             print(f"   !! failed: {error}")
