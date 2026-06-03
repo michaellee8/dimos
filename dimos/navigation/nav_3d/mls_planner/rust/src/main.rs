@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dimos_mls_planner::edges::{edges_to_segments, PlannerGraph};
-use dimos_mls_planner::pipeline::{Config, Planner};
+use dimos_mls_planner::mls_planner::{Config, Planner};
 use dimos_mls_planner::voxel::surface_point_xyz;
 use dimos_module::{error_throttled, run, warn_throttled, Input, LcmTransport, Module, Output};
 use lcm_msgs::geometry_msgs::{Point, Pose, PoseStamped, Quaternion};

@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use validator::Validate;
 
 use crate::edges::edges_to_segments;
-use crate::pipeline::{Config, Planner};
+use crate::mls_planner::{Config, Planner};
 use crate::voxel::surface_point_xyz;
 
 #[pyclass]

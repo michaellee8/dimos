@@ -7,7 +7,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use validator::Validate;
 
-use crate::voxel_map::{iter_global_points, update_map, Config, LocalBounds, VoxelMap};
+use crate::voxel_ray_tracer::{iter_global_points, update_map, Config, LocalBounds, VoxelMap};
 
 #[pyclass]
 pub struct VoxelRayMapper {

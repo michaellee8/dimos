@@ -4,8 +4,8 @@
 mod adjacency;
 mod dijkstra;
 pub mod edges;
+pub mod mls_planner;
 mod nodes;
-pub mod pipeline;
 mod planner;
 mod surfaces;
 pub mod voxel;

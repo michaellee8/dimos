@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use ahash::AHashSet;
 use dimos_module::{error_throttled, run, warn_throttled, Input, LcmTransport, Module, Output};
-use dimos_voxel_ray_tracing::voxel_map::{
+use dimos_voxel_ray_tracing::voxel_ray_tracer::{
     iter_global_points, update_map, Config, LocalBounds, VoxelKey, VoxelMap,
 };
 use lcm_msgs::nav_msgs::Odometry;
