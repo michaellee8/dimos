@@ -79,6 +79,7 @@ profile on each keypress and atomically swaps the per-waypoint cap.
 from __future__ import annotations
 
 from dimos.core.coordination.blueprints import autoconnect
+from dimos.core.global_config import global_config
 from dimos.core.transport import LCMTransport
 from dimos.mapping.costmapper import CostMapper
 from dimos.mapping.voxels import VoxelGridMapper
@@ -94,20 +95,14 @@ from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_coordinator import (
     unitree_go2_coordinator_rage,
 )
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
-from dimos.utils.benchmarking.characterization_recorder import CharacterizationRecorder
-from dimos.utils.path_utils import get_project_root
+from dimos.visualization.vis_module import vis_module
 
 
 def _make(coord, gait_tag: str):
     return (
         autoconnect(
             coord,
-            # vis_module DISABLED for the lidar-dropout bisect. RerunBridge
-            # subscribes_all to LCM and forwards everything to the rerun
-            # gRPC sink; if the viewer is on software GL (DRI3 error in
-            # logs) the sink drains slowly, blocking the shared LCM
-            # callback thread and starving lidar publish.
-            # vis_module(viewer_backend=global_config.viewer),
+            vis_module(viewer_backend=global_config.viewer),
             KeyboardTeleop.blueprint(
                 publish_only_when_active=True,
                 disable_movement=True,  # 0-9 e_max slider only; no WASD Twist
@@ -115,11 +110,11 @@ def _make(coord, gait_tag: str):
             VoxelGridMapper.blueprint(emit_every=5),
             CostMapper.blueprint(),
             ReplanningAStarPlanner.blueprint(),
-            CharacterizationRecorder.blueprint(
-                robot_id="go2",
-                tag=f"precision_nav_{gait_tag}",
-                out_dir=str(get_project_root() / "data" / "precision_nav" / "go2"),
-            ),
+            # CharacterizationRecorder.blueprint(
+            #     robot_id="go2",
+            #     tag=f"precision_nav_{gait_tag}",
+            #     out_dir=str(get_project_root() / "data" / "precision_nav" / "go2"),
+            # ),
         )
         .transports(
             {

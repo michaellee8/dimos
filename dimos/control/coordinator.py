@@ -543,12 +543,51 @@ class ControlCoordinator(Module):
                     set_e_max(value)
 
     def _on_path(self, msg: Path) -> None:
-        """Forward a planned path to any task with set_path(path)."""
+        """Forward a planned path + a fresh odom snapshot to any task with
+        ``set_path(path, odom)``.
+
+        TODO: upgrade to option C — add an always-called ``update_state(state)``
+        hook on ``BaseControlTask`` that ``TickLoop._compute_all_tasks``
+        invokes BEFORE the ``is_active()`` filter. Then tasks own their
+        own odom snapshot every tick regardless of active state, and the
+        ``set_path`` API can drop the ``odom`` arg. Cleaner architecturally
+        — current odom-via-set_path is a surgical fix for the immediate
+        race. See PR/issue [TODO link] for the framework-level change.
+        """
+        odom = None
+        with self._hardware_lock:
+            for hw in self._hardware.values():
+                if hw.component.hardware_type != HardwareType.BASE:
+                    continue
+                read_odometry = getattr(hw.adapter, "read_odometry", None)
+                if not callable(read_odometry):
+                    continue
+                try:
+                    xyt = read_odometry()
+                except Exception:
+                    continue
+                if xyt is None or len(xyt) < 3:
+                    continue
+                from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+                from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+                from dimos.msgs.geometry_msgs.Vector3 import Vector3
+
+                odom = PoseStamped(
+                    ts=time.perf_counter(),
+                    position=Vector3(float(xyt[0]), float(xyt[1]), 0.0),
+                    orientation=Quaternion.from_euler(Vector3(0.0, 0.0, float(xyt[2]))),
+                )
+                break
+
         with self._task_lock:
             for task in self._tasks.values():
                 set_path = getattr(task, "set_path", None)
-                if set_path is not None:
-                    set_path(msg)
+                if set_path is None:
+                    continue
+                try:
+                    set_path(msg, odom)
+                except TypeError:
+                    set_path(msg)  # backwards compat with single-arg set_path
 
     @rpc
     def set_activated(self, engaged: bool) -> None:

@@ -99,24 +99,31 @@ class PrecisionPathFollowerTask(PathFollowerTask):
         if self._path is not None:
             self._recompute_profile()
 
-    def set_path(self, path: Path) -> None:
+    def set_path(self, path: Path, odom: PoseStamped | None = None) -> None:
         """Coordinator broadcast hook for nav-stack-emitted paths.
-        Pulls the latest odom from ``self._current_odom`` (populated by
-        the parent task's compute() every tick from CoordinatorState).
-        If no compute tick has fired yet, ``_current_odom`` is None and
-        we drop the path with a warning — the race window is one tick
-        wide at startup and shouldn't fire in practice."""
-        if self._current_odom is None:
+
+        Prefers the caller-supplied ``odom`` (the coord snapshots a fresh
+        one from the twist-base adapter every time it calls us — see
+        ``ControlCoordinator._on_path``). Falls back to
+        ``self._current_odom`` for backwards compatibility with callers
+        that still use the single-arg form.
+
+        TODO: drop the ``odom`` arg once option C lands (always-called
+        ``update_state(state)`` hook on ``BaseControlTask``), at which
+        point ``self._current_odom`` is reliable on its own and the coord
+        doesn't need to push it. See ``_on_path`` for context."""
+        use_odom = odom if odom is not None else self._current_odom
+        if use_odom is None:
             logger.warning(
                 f"PrecisionPathFollowerTask '{self._name}': received path "
-                f"but no odom yet; dropping (race at startup)."
+                f"but no odom available; dropping."
             )
             return
         logger.info(
             f"PrecisionPathFollowerTask '{self._name}': received path "
             f"from stream (n={len(path.poses)})"
         )
-        self.start_path(path, self._current_odom)
+        self.start_path(path, use_odom)
 
     # ------------------------------------------------------------------
     # Path lifecycle
@@ -209,7 +216,7 @@ class PrecisionPathFollowerTaskParams(BaseConfig):
     artifact_path: str
     speed: float = 0.55
     control_frequency: float = 10.0
-    goal_tolerance: float = 0.05
+    goal_tolerance: float = 0.2
     orientation_tolerance: float = 0.1
     k_angular: float = 0.5
     e_max_default: float = 0.2

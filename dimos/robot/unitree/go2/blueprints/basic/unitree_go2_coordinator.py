@@ -61,16 +61,7 @@ def _make_coordinator(mode: str = "default"):
         autoconnect(
             GO2Connection.blueprint(mode=mode),
             ControlCoordinator.blueprint(
-                # publish_joint_state=False: the 100Hz JointState publish
-                # on the shared LCM multicast bus saturates the kernel
-                # rmem buffer in ~20s and drops large lidar packets first.
-                # Matches the r1pro README note about heavy sensor UDP
-                # starving control traffic — same problem in reverse on
-                # our coord. Re-enable only if a downstream consumer
-                # actually needs joint_state on LCM, and consider
-                # throttling the publish rate or routing it via a
-                # dedicated LCM URL.
-                publish_joint_state=False,
+                publish_joint_state=True,
                 hardware=[
                     HardwareComponent(
                         hardware_id="go2",
