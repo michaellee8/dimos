@@ -64,7 +64,7 @@ def _stop_when_parent_dies(cmd: list[str]) -> list[str]:
 
 
 def _default_recording_dir() -> Path:
-    return Path("go2_recordings") / _stamp()
+    return Path("recordings") / _stamp()
 
 
 class FastLio2RecorderConfig(RecorderConfig):

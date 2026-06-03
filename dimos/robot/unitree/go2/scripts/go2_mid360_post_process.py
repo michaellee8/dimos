@@ -195,7 +195,7 @@ def main():
     )
     parser.add_argument(
         "--recordings-dir",
-        default="./go2_recordings",
+        default="./recordings",
         help="root searched when no target is given",
     )
     parser.add_argument("--image-stream", default="color_image")
