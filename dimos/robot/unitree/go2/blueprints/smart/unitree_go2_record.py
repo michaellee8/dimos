@@ -116,7 +116,7 @@ class Go2TfHackRecorder(FastLio2Recorder):
             pose = None
             if name == "fastlio_odometry":
                 self._latest_fastlio_odom = msg
-            elif name == "fastlio_lidar":
+            elif name == "fastlio_lidar" or name == "fastlio_lidar_no_cap":
                 world_to_base = self._world_to_base_from_fastlio()
                 if world_to_base is not None:
                     pose = world_to_base.to_pose()
