@@ -13,10 +13,10 @@
 # limitations under the License.
 
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.hardware.sensors.lidar.fastlio2_rust.fastlio2_rust_replay import LivoxDbReplay
-from dimos.hardware.sensors.lidar.fastlio2_rust.module import FastLio2Rust
-from dimos.hardware.sensors.lidar.fastlio2_rust.recorder import FastLio2Recorder
 from dimos.hardware.sensors.lidar.livox.module import Mid360
+from dimos.hardware.sensors.lidar.rustlio2.module import Rustlio2
+from dimos.hardware.sensors.lidar.rustlio2.recorder import Rustlio2Recorder
+from dimos.hardware.sensors.lidar.rustlio2.rustlio2_replay import LivoxDbReplay
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.mapping.voxels import VoxelGridMapper
 from dimos.utils.data import LfsPath
@@ -24,9 +24,9 @@ from dimos.visualization.vis_module import vis_module
 
 voxel_size = 0.05
 
-fastlio2_rust = autoconnect(
+rustlio2 = autoconnect(
     Mid360.blueprint(),
-    FastLio2Rust.blueprint(),
+    Rustlio2.blueprint(),
     vis_module(
         "rerun",
         rerun_config={
@@ -37,10 +37,10 @@ fastlio2_rust = autoconnect(
     ),
 ).global_config(n_workers=3)
 
-fastlio2_rust_record = autoconnect(
+rustlio2_record = autoconnect(
     Mid360.blueprint(),
-    FastLio2Rust.blueprint(),
-    FastLio2Recorder.blueprint(),
+    Rustlio2.blueprint(),
+    Rustlio2Recorder.blueprint(),
     vis_module(
         "rerun",
         rerun_config={
@@ -51,11 +51,11 @@ fastlio2_rust_record = autoconnect(
     ),
 ).global_config(n_workers=4)
 
-fastlio2_rust_replay = autoconnect(
+rustlio2_replay = autoconnect(
     LivoxDbReplay.blueprint(
         dataset=LfsPath("fastlio_stairwell_odom_divergence.db"),
     ),
-    FastLio2Rust.blueprint(),
+    Rustlio2.blueprint(),
     vis_module(
         "rerun",
         rerun_config={
@@ -66,9 +66,9 @@ fastlio2_rust_replay = autoconnect(
     ),
 ).global_config(n_workers=4)
 
-fastlio2_rust_voxels = autoconnect(
+rustlio2_voxels = autoconnect(
     Mid360.blueprint(),
-    FastLio2Rust.blueprint(),
+    Rustlio2.blueprint(),
     VoxelGridMapper.blueprint(voxel_size=voxel_size, carve_columns=False),
     vis_module(
         "rerun",
@@ -80,9 +80,9 @@ fastlio2_rust_voxels = autoconnect(
     ),
 ).global_config(n_workers=4)
 
-fastlio2_rust_ray_trace = autoconnect(
+rustlio2_ray_trace = autoconnect(
     Mid360.blueprint(),
-    FastLio2Rust.blueprint(),
+    Rustlio2.blueprint(),
     RayTracingVoxelMap.blueprint(voxel_size=voxel_size),
     vis_module(
         "rerun",

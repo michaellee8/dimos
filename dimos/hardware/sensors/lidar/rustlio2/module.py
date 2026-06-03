@@ -15,14 +15,14 @@
 """
 Usage::
 
-    from dimos.hardware.sensors.lidar.fastlio2_rust.module import FastLio2Rust
+    from dimos.hardware.sensors.lidar.rustlio2.module import Rustlio2
     from dimos.hardware.sensors.lidar.livox.module import Mid360
     from dimos.core.coordination.blueprints import autoconnect
 
     from dimos.core.coordination.module_coordinator import ModuleCoordinator
     ModuleCoordinator.build(autoconnect(
         Mid360.blueprint(host_ip="192.168.1.5"),
-        FastLio2Rust.blueprint(),
+        Rustlio2.blueprint(),
     )).loop()
 """
 
@@ -51,10 +51,10 @@ from dimos.spec import perception
 _CONFIG_DIR = Path(__file__).resolve().parent.parent / "fastlio2" / "config"
 
 
-class FastLio2RustConfig(NativeModuleConfig):
+class Rustlio2Config(NativeModuleConfig):
     cwd: str | None = "rust"
-    executable: str = "result/bin/fastlio2_rust_native"
-    build_command: str | None = "nix build .#fastlio2_rust_native"
+    executable: str = "result/bin/rustlio2_native"
+    build_command: str | None = "nix build .#rustlio2_native"
     stdin_config: bool = True
 
     debug: bool = False
@@ -105,8 +105,8 @@ class FastLio2RustConfig(NativeModuleConfig):
         return config
 
 
-class FastLio2Rust(NativeModule, perception.Odometry):
-    config: FastLio2RustConfig
+class Rustlio2(NativeModule, perception.Odometry):
+    config: Rustlio2Config
 
     lidar: In[PointCloud2]
     imu: In[Imu]
@@ -144,4 +144,4 @@ class FastLio2Rust(NativeModule, perception.Odometry):
 
 # Verify protocol port compliance (mypy will flag missing ports)
 if TYPE_CHECKING:
-    FastLio2Rust()
+    Rustlio2()

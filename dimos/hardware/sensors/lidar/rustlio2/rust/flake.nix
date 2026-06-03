@@ -15,8 +15,8 @@
         # path deps (../../../../../../native/rust/{dimos-module,dimos-module-macros}).
         # Reassemble that tree at the same relative depth so the paths resolve
         # inside the build sandbox.
-        combinedSrc = pkgs.runCommandLocal "fastlio2-rust-src" { } ''
-          crate=$out/dimos/hardware/sensors/lidar/fastlio2_rust/rust
+        combinedSrc = pkgs.runCommandLocal "rustlio2-src" { } ''
+          crate=$out/dimos/hardware/sensors/lidar/rustlio2/rust
           mkdir -p "$crate" $out/native/rust
           cp -r ${./.}/. "$crate"
           cp -r ${../../../../../../native/rust/dimos-module} $out/native/rust/dimos-module
@@ -28,12 +28,12 @@
         # dimos-lcm and lcm-msgs are the same git source at the same rev.
         dimosLcmHash = "sha256-4DWFTf7Xqnx6pd2jXA/MVpRmZiFr6HqTSp9Qo9ZjToA=";
 
-        fastlio2_rust_native = pkgs.rustPlatform.buildRustPackage {
-          pname = "fastlio2_rust_native";
+        rustlio2_native = pkgs.rustPlatform.buildRustPackage {
+          pname = "rustlio2_native";
           version = "0.1.0";
 
           src = combinedSrc;
-          sourceRoot = "fastlio2-rust-src/dimos/hardware/sensors/lidar/fastlio2_rust/rust";
+          sourceRoot = "rustlio2-src/dimos/hardware/sensors/lidar/rustlio2/rust";
 
           cargoLock = {
             lockFile = ./Cargo.lock;
@@ -47,8 +47,8 @@
         };
       in {
         packages = {
-          default = fastlio2_rust_native;
-          inherit fastlio2_rust_native;
+          default = rustlio2_native;
+          inherit rustlio2_native;
         };
       });
 }

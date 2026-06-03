@@ -15,9 +15,9 @@ use lcm_msgs::std_msgs::{Header, Time};
 use nalgebra::UnitQuaternion;
 use serde::Deserialize;
 
-use fastlio_rs::commons::{Config as PipelineConfig, IMUData, Point, PointCloud, SyncPackage, V3D};
-use fastlio_rs::lidar_processor::LidarProcessor;
-use fastlio_rs::map_builder::{BuilderStatus, MapBuilder};
+use rustlio2::commons::{Config as PipelineConfig, IMUData, Point, PointCloud, SyncPackage, V3D};
+use rustlio2::lidar_processor::LidarProcessor;
+use rustlio2::map_builder::{BuilderStatus, MapBuilder};
 
 const POINT_STEP: i32 = 16;
 const FLOAT32: u8 = PointField::FLOAT32 as u8;
@@ -26,7 +26,7 @@ const FLOAT32: u8 = PointField::FLOAT32 as u8;
 macro_rules! debug_log {
     ($cond:expr, $($arg:tt)*) => {
         if $cond {
-            tracing::info!(target: "fastlio2_rust_native", $($arg)*);
+            tracing::info!(target: "rustlio2_native", $($arg)*);
         }
     };
 }
@@ -77,7 +77,7 @@ fn default_max_velocity() -> f64 {
 
 #[derive(Module)]
 #[module(setup = on_start)]
-struct FastLio2Rust {
+struct Rustlio2 {
     #[input(decode = PointCloud2::decode, handler = on_lidar)]
     lidar: Input<PointCloud2>,
 
@@ -119,7 +119,7 @@ fn should_publish(freq: f64, now: f64, last: Option<f64>) -> bool {
     }
 }
 
-impl FastLio2Rust {
+impl Rustlio2 {
     async fn on_start(&mut self) {
         let mut pipeline = if self.config.config_path.is_empty() {
             PipelineConfig::default()
@@ -150,7 +150,7 @@ impl FastLio2Rust {
             max_velocity = self.config.max_velocity,
             map_freq = self.config.map_freq,
             debug = self.config.debug,
-            "fastlio2_rust initialized"
+            "rustlio2 initialized"
         );
     }
 
@@ -327,8 +327,8 @@ fn stamp_to_sec(stamp: &Time) -> f64 {
 
 fn build_odometry(builder: &MapBuilder, config: &ModuleConfig, stamp: Time) -> Odometry {
     let state = &builder.kf.x;
-    let translation = state.t_wi;
-    let quaternion = UnitQuaternion::from_matrix(&state.r_wi);
+    let translation = state.imu_to_world_trans;
+    let quaternion = UnitQuaternion::from_matrix(&state.imu_to_world_rot);
     let velocity = state.v;
     Odometry {
         header: Header {
@@ -503,9 +503,9 @@ async fn main() {
     let transport = LcmTransport::new()
         .await
         .expect("failed to create LCM transport");
-    run::<FastLio2Rust, _>(transport)
+    run::<Rustlio2, _>(transport)
         .await
-        .expect("fastlio2_rust run failed");
+        .expect("rustlio2 run failed");
 }
 
 #[cfg(test)]

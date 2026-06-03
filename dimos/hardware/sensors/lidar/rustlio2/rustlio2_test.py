@@ -23,7 +23,7 @@ fails while the divergence is present and passes once the pipeline is fixed.
 Marked ``tool`` because it needs the nix-built native binary and the LFS-hosted
 recording, so it is excluded from the fast and slow CI lanes. Run it directly::
 
-    uv run pytest dimos/hardware/sensors/lidar/fastlio2_rust/fastlio_rust_test.py
+    uv run pytest dimos/hardware/sensors/lidar/rustlio2/rustlio2_test.py
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In
-from dimos.hardware.sensors.lidar.fastlio2_rust.fastlio2_rust_replay import LivoxDbReplay
-from dimos.hardware.sensors.lidar.fastlio2_rust.module import FastLio2Rust
+from dimos.hardware.sensors.lidar.rustlio2.module import Rustlio2
+from dimos.hardware.sensors.lidar.rustlio2.rustlio2_replay import LivoxDbReplay
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.utils.data import get_data
 
@@ -82,7 +82,7 @@ def _read_positions(path: Path) -> np.ndarray:
 
 @pytest.mark.tool
 @pytest.mark.heavy
-def test_fastlio_rust_replay_trajectory_is_bounded(tmp_path: Path) -> None:
+def test_rustlio2_replay_trajectory_is_bounded(tmp_path: Path) -> None:
     output_file = tmp_path / "trajectory.txt"
     output_file.touch()
 
@@ -91,7 +91,7 @@ def test_fastlio_rust_replay_trajectory_is_bounded(tmp_path: Path) -> None:
             LivoxDbReplay.blueprint(
                 dataset=get_data(RECORDING_DATASET), duration=REPLAY_DURATION_SECONDS
             ),
-            FastLio2Rust.blueprint(),
+            Rustlio2.blueprint(),
             TrajectoryProbe.blueprint(output_file=str(output_file)),
         )
     )

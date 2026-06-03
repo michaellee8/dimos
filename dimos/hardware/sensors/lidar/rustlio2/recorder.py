@@ -14,7 +14,7 @@
 
 """Record the Rust FAST-LIO2 outputs plus the raw Livox inputs to a ``.db``.
 
-Wire it to :class:`FastLio2Rust` and :class:`Mid360` via ``autoconnect`` — the
+Wire it to :class:`Rustlio2` and :class:`Mid360` via ``autoconnect`` — the
 matching ``odometry`` / ``global_map`` (FAST-LIO2 outputs) and ``lidar`` /
 ``imu`` (Livox outputs) ports connect automatically — to capture a SLAM run
 for later replay or analysis.
@@ -34,19 +34,19 @@ from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
 
-class FastLio2RecorderConfig(RecorderConfig):
+class Rustlio2RecorderConfig(RecorderConfig):
     db_path: str | Path = (
         DIMOS_PROJECT_ROOT / "recordings" / f"fastlio_rs_{datetime.now():%Y-%m-%d_%H-%M-%S}.db"
     )
 
 
-class FastLio2Recorder(Recorder):
+class Rustlio2Recorder(Recorder):
     """Record FAST-LIO2 ``odometry`` / ``global_map`` plus Livox ``lidar`` / ``imu`` to a ``.db``.
 
     Defaults to a fresh, timestamped ``recordings/fastlio_rs_<date_time>.db`` per run.
     """
 
-    config: FastLio2RecorderConfig
+    config: Rustlio2RecorderConfig
 
     odometry: In[Odometry]
     global_map: In[PointCloud2]
