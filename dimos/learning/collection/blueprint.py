@@ -12,7 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Recording blueprints. RecordReplay is enabled via `--record-path`."""
+"""Recording blueprints.
+
+`CollectionRecorder` (a memory2 Recorder) captures the obs/action/status
+streams to a SQLite session DB during the run and flushes it durably on
+shutdown. DataPrep reads that DB afterwards.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +28,7 @@ from dimos.learning.collection.episode_monitor import (
     EpisodeMonitorModule,
     EpisodeStatus,
 )
+from dimos.learning.collection.recorder import CollectionRecorder
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.teleop.quest.blueprints import (
     teleop_quest_piper,
@@ -41,6 +47,7 @@ learning_collect_quest_xarm7 = autoconnect(
     teleop_quest_xarm7,
     RealSenseCamera.blueprint(enable_pointcloud=False),
     EpisodeMonitorModule.blueprint(button_map=_DEFAULT_BUTTON_MAP),
+    CollectionRecorder.blueprint(),
 ).transports({
     ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
     ("color_image", Image): LCMTransport("/camera/color_image", Image),
@@ -52,6 +59,7 @@ learning_collect_quest_piper = autoconnect(
     teleop_quest_piper,
     RealSenseCamera.blueprint(enable_pointcloud=False),
     EpisodeMonitorModule.blueprint(button_map=_DEFAULT_BUTTON_MAP),
+    CollectionRecorder.blueprint(),
 ).transports({
     ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
     ("color_image", Image): LCMTransport("/camera/color_image", Image),
