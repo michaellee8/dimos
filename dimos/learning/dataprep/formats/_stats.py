@@ -21,8 +21,8 @@ to per-channel summaries so per-pixel stats don't blow up memory.
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass, field
+import random
 from typing import Any
 
 import numpy as np
@@ -45,8 +45,9 @@ class FeatureAggregator:
 class StreamingStats:
     """Single-pass mean/std/min/max/quantile aggregator across many features."""
 
-    def __init__(self, image_subsample: int = 10, quantile_reservoir: int = 10_000,
-                 seed: int = 0) -> None:
+    def __init__(
+        self, image_subsample: int = 10, quantile_reservoir: int = 10_000, seed: int = 0
+    ) -> None:
         self.image_subsample = image_subsample
         self.quantile_reservoir = quantile_reservoir
         self._rng = random.Random(seed)
@@ -56,14 +57,19 @@ class StreamingStats:
         a = np.asarray(value)
         is_image = a.ndim >= 3
         agg = self.aggs.setdefault(
-            name, FeatureAggregator(is_image=is_image, shape=tuple(a.shape), dtype=str(a.dtype)),
+            name,
+            FeatureAggregator(is_image=is_image, shape=tuple(a.shape), dtype=str(a.dtype)),
         )
 
         if is_image:
             agg.image_seen += 1
             if (agg.image_seen - 1) % self.image_subsample != 0:
                 return
-            v = a.astype(np.float32).mean(axis=(0, 1)) if a.ndim == 3 else a.astype(np.float32).reshape(-1)
+            v = (
+                a.astype(np.float32).mean(axis=(0, 1))
+                if a.ndim == 3
+                else a.astype(np.float32).reshape(-1)
+            )
         else:
             v = a.astype(np.float64)
 
@@ -99,10 +105,10 @@ class StreamingStats:
             var = agg.m2 / n if agg.n > 1 else np.zeros_like(agg.mean)
             std = np.sqrt(var)
             entry: dict[str, Any] = {
-                "mean":  agg.mean.tolist(),
-                "std":   std.tolist(),
-                "min":   agg.minv.tolist() if agg.minv is not None else None,
-                "max":   agg.maxv.tolist() if agg.maxv is not None else None,
+                "mean": agg.mean.tolist(),
+                "std": std.tolist(),
+                "min": agg.minv.tolist() if agg.minv is not None else None,
+                "max": agg.maxv.tolist() if agg.maxv is not None else None,
                 "count": int(agg.n),
             }
             if agg.reservoir:

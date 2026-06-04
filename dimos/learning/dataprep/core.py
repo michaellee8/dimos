@@ -332,8 +332,9 @@ def compute_stats(
     """
     from dimos.learning.dataprep.formats._stats import StreamingStats
 
-    s = StreamingStats(image_subsample=image_subsample,
-                       quantile_reservoir=quantile_reservoir, seed=seed)
+    s = StreamingStats(
+        image_subsample=image_subsample, quantile_reservoir=quantile_reservoir, seed=seed
+    )
     for sample in samples:
         for k, v in sample.observation.items():
             s.update(f"observation.{k}", np.asarray(v))

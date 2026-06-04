@@ -48,11 +48,13 @@ learning_collect_quest_xarm7 = autoconnect(
     RealSenseCamera.blueprint(enable_pointcloud=False),
     EpisodeMonitorModule.blueprint(button_map=_DEFAULT_BUTTON_MAP),
     CollectionRecorder.blueprint(),
-).transports({
-    ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
-    ("color_image", Image): LCMTransport("/camera/color_image", Image),
-    ("status", EpisodeStatus): LCMTransport("/learning/episode_status", EpisodeStatus),
-})
+).transports(
+    {
+        ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
+        ("color_image", Image): LCMTransport("/camera/color_image", Image),
+        ("status", EpisodeStatus): LCMTransport("/learning/episode_status", EpisodeStatus),
+    }
+)
 
 
 learning_collect_quest_piper = autoconnect(
@@ -60,11 +62,13 @@ learning_collect_quest_piper = autoconnect(
     RealSenseCamera.blueprint(enable_pointcloud=False),
     EpisodeMonitorModule.blueprint(button_map=_DEFAULT_BUTTON_MAP),
     CollectionRecorder.blueprint(),
-).transports({
-    ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
-    ("color_image", Image): LCMTransport("/camera/color_image", Image),
-    ("status", EpisodeStatus): LCMTransport("/learning/episode_status", EpisodeStatus),
-})
+).transports(
+    {
+        ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
+        ("color_image", Image): LCMTransport("/camera/color_image", Image),
+        ("status", EpisodeStatus): LCMTransport("/learning/episode_status", EpisodeStatus),
+    }
+)
 
 
 __all__ = [

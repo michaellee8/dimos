@@ -20,11 +20,11 @@ just adds the Module lifecycle + thread + status tracking.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 import json
+from pathlib import Path
 import threading
 import traceback
-from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 
 from dimos.core.core import rpc
@@ -47,13 +47,13 @@ logger = setup_logger()
 class DataPrepModuleConfig(ModuleConfig):
     # Fields are defaulted so partial CLI overrides (e.g. just `source=...`)
     # pass blueprint validation; blueprint atoms supply real values.
-    source:      str = ""
-    episodes:    EpisodeExtractor = EpisodeExtractor()
+    source: str = ""
+    episodes: EpisodeExtractor = EpisodeExtractor()
     observation: dict[str, StreamField] = {}
-    action:      dict[str, StreamField] = {}
-    sync:        SyncConfig = SyncConfig(anchor="image", rate_hz=30.0, tolerance_ms=50.0)
-    output:      OutputConfig = OutputConfig(format="lerobot", path="data/datasets/default")
-    auto_run:    bool = False
+    action: dict[str, StreamField] = {}
+    sync: SyncConfig = SyncConfig(anchor="image", rate_hz=30.0, tolerance_ms=50.0)
+    output: OutputConfig = OutputConfig(format="lerobot", path="data/datasets/default")
+    auto_run: bool = False
 
 
 class DataPrepModule(Module):
@@ -66,13 +66,13 @@ class DataPrepModule(Module):
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._status: dict[str, Any] = {
-            "state":         "idle",   # idle | running | succeeded | failed
-            "current_phase": None,     # scan_episodes | write | done
-            "progress_pct":  0.0,
-            "dataset_path":  None,
-            "error":         None,
+            "state": "idle",  # idle | running | succeeded | failed
+            "current_phase": None,  # scan_episodes | write | done
+            "progress_pct": 0.0,
+            "dataset_path": None,
+            "error": None,
             "episodes_seen": 0,
-            "samples_seen":  0,
+            "samples_seen": 0,
         }
 
     # ── lifecycle ────────────────────────────────────────────────────────────
@@ -123,13 +123,13 @@ class DataPrepModule(Module):
             dropped = sum(1 for e in episodes if not e.success)
             durations = [e.duration for e in episodes if e.success]
             return {
-                "source":         self.config.source,
-                "streams":        store.list_streams(),
+                "source": self.config.source,
+                "streams": store.list_streams(),
                 "episodes_saved": saved,
                 "episodes_dropped": dropped,
-                "duration_s":     {
-                    "min":  min(durations) if durations else 0.0,
-                    "max":  max(durations) if durations else 0.0,
+                "duration_s": {
+                    "min": min(durations) if durations else 0.0,
+                    "max": max(durations) if durations else 0.0,
                     "mean": (sum(durations) / len(durations)) if durations else 0.0,
                 },
             }
@@ -161,7 +161,8 @@ class DataPrepModule(Module):
                 episodes = [e for e in all_eps if e.success]
                 logger.info(
                     "[dataprep] episodes extracted: %d total / %d successful",
-                    len(all_eps), len(episodes),
+                    len(all_eps),
+                    len(episodes),
                 )
                 self._update_status(episodes_seen=len(episodes))
 
@@ -179,7 +180,8 @@ class DataPrepModule(Module):
                 action_keys = set(self.config.action)
                 logger.info(
                     "[dataprep] obs streams=%s  action streams=%s  sync=%s",
-                    sorted(obs_keys), sorted(action_keys),
+                    sorted(obs_keys),
+                    sorted(action_keys),
                     self.config.sync.model_dump(),
                 )
 
@@ -188,7 +190,8 @@ class DataPrepModule(Module):
                 self._update_status(current_phase="write")
                 logger.info(
                     "[dataprep] writing %s dataset to %s",
-                    self.config.output.format, self.config.output.path,
+                    self.config.output.format,
+                    self.config.output.path,
                 )
 
                 samples_seen = 0
@@ -215,7 +218,9 @@ class DataPrepModule(Module):
                                 logger.info(
                                     "[dataprep] %.1f%%  samples=%d  ep %d/%d",
                                     100.0 * episodes_done / total,
-                                    samples_seen, episodes_done, total,
+                                    samples_seen,
+                                    episodes_done,
+                                    total,
                                 )
                             yield sample
                         episodes_done += 1
@@ -236,7 +241,9 @@ class DataPrepModule(Module):
                 )
                 logger.info(
                     "[dataprep] succeeded — wrote %d samples across %d episodes to %s",
-                    samples_seen, total, dataset_path,
+                    samples_seen,
+                    total,
+                    dataset_path,
                 )
             finally:
                 store.stop()
@@ -249,17 +256,22 @@ class DataPrepModule(Module):
         """Sidecar describing how this dataset was built, recording the
         obs/action schema alongside the dataset."""
         meta = {
-            "source":      self.config.source,
+            "source": self.config.source,
             "observation": {k: v.model_dump() for k, v in self.config.observation.items()},
-            "action":      {k: v.model_dump() for k, v in self.config.action.items()},
-            "sync":        self.config.sync.model_dump(),
-            "episodes":    [
-                {"id": e.id, "start_ts": e.start_ts, "end_ts": e.end_ts,
-                 "task_label": e.task_label, "success": e.success}
+            "action": {k: v.model_dump() for k, v in self.config.action.items()},
+            "sync": self.config.sync.model_dump(),
+            "episodes": [
+                {
+                    "id": e.id,
+                    "start_ts": e.start_ts,
+                    "end_ts": e.end_ts,
+                    "task_label": e.task_label,
+                    "success": e.success,
+                }
                 for e in episodes
             ],
-            "format":      self.config.output.format,
-            "metadata":    self.config.output.metadata,
+            "format": self.config.output.format,
+            "metadata": self.config.output.metadata,
         }
         with open(dataset_path / "dimos_meta.json", "w") as f:
             json.dump(meta, f, indent=2, default=str)

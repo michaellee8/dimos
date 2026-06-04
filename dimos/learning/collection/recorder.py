@@ -44,10 +44,10 @@ class CollectionRecorder(Recorder):
 
     config: CollectionRecorderConfig
 
-    color_image: In[Image]          # observation (camera)
-    joint_state: In[JointState]     # observation + action (measured/next state)
-    status:      In[EpisodeStatus]  # episode start/save/discard segmentation
-    buttons:     In[Buttons]        # raw teleop input (kept for debugging)
+    color_image: In[Image]  # observation (camera)
+    joint_state: In[JointState]  # observation + action (measured/next state)
+    status: In[EpisodeStatus]  # episode start/save/discard segmentation
+    buttons: In[Buttons]  # raw teleop input (kept for debugging)
 
 
 __all__ = ["CollectionRecorder", "CollectionRecorderConfig"]

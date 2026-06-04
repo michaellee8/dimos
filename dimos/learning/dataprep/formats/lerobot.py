@@ -33,8 +33,8 @@ timestamp.
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterator
+import json
 from pathlib import Path
 from typing import Any
 
@@ -49,8 +49,9 @@ VIDEO_DIR = "videos"
 META_DIR = "meta"
 
 
-def _feature_name(prefix: str, key: str, is_image: bool,
-                  single_action: bool, single_state: bool = False) -> str:
+def _feature_name(
+    prefix: str, key: str, is_image: bool, single_action: bool, single_state: bool = False
+) -> str:
     """Translate (prefix, key) into the LeRobot v2 feature name.
 
     Canonical names lerobot policies (ACT, Diffusion, π₀) expect:
@@ -143,16 +144,17 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
         current_video_writers = {}
 
         cols: dict[str, list[Any]] = {
-            "timestamp":     [f["timestamp"] for f in current_frames],
-            "frame_index":   [f["frame_index"] for f in current_frames],
+            "timestamp": [f["timestamp"] for f in current_frames],
+            "frame_index": [f["frame_index"] for f in current_frames],
             "episode_index": [f["episode_index"] for f in current_frames],
-            "index":         [f["index"] for f in current_frames],
-            "task_index":    [f["task_index"] for f in current_frames],
+            "index": [f["index"] for f in current_frames],
+            "task_index": [f["task_index"] for f in current_frames],
         }
         single_state = len(state_keys) == 1
         for k in state_keys:
-            name = _feature_name("observation", k, is_image=False,
-                                 single_action=False, single_state=single_state)
+            name = _feature_name(
+                "observation", k, is_image=False, single_action=False, single_state=single_state
+            )
             cols[name] = [f["obs"][k].tolist() for f in current_frames]
         single_action = len(action_keys) == 1
         for k in action_keys:
@@ -164,11 +166,13 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
         table = pa.Table.from_pydict(cols)
         pq.write_table(table, _episode_path_parquet(current_episode_index))
 
-        episodes_meta.append({
-            "episode_index": current_episode_index,
-            "tasks": [list(tasks_index.keys())[current_frames[0]["task_index"]]],
-            "length": len(current_frames),
-        })
+        episodes_meta.append(
+            {
+                "episode_index": current_episode_index,
+                "tasks": [list(tasks_index.keys())[current_frames[0]["task_index"]]],
+                "length": len(current_frames),
+            }
+        )
         current_frames = []
 
     for sample in samples:
@@ -189,8 +193,9 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
         for k, arr in sample.observation.items():
             a = np.asarray(arr)
             is_image = a.ndim >= 3
-            name = _feature_name("observation", k, is_image=is_image,
-                                 single_action=False, single_state=single_state)
+            name = _feature_name(
+                "observation", k, is_image=is_image, single_action=False, single_state=single_state
+            )
             if name not in feature_shapes:
                 feature_shapes[name] = tuple(a.shape)
                 feature_dtypes[name] = "video" if is_image else str(a.dtype)
@@ -221,15 +226,21 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
                 current_video_writers[k].write(a)
 
         rel_ts = float(sample.ts) - (current_episode_start_ts or 0.0)
-        current_frames.append({
-            "timestamp":     rel_ts,
-            "frame_index":   frame_index,
-            "episode_index": current_episode_index,
-            "index":         global_index,
-            "task_index":    tasks_index[default_task_label],
-            "obs":           {k: np.asarray(v) for k, v in sample.observation.items() if np.asarray(v).ndim < 3},
-            "act":           {k: np.asarray(v) for k, v in sample.action.items()},
-        })
+        current_frames.append(
+            {
+                "timestamp": rel_ts,
+                "frame_index": frame_index,
+                "episode_index": current_episode_index,
+                "index": global_index,
+                "task_index": tasks_index[default_task_label],
+                "obs": {
+                    k: np.asarray(v)
+                    for k, v in sample.observation.items()
+                    if np.asarray(v).ndim < 3
+                },
+                "act": {k: np.asarray(v) for k, v in sample.action.items()},
+            }
+        )
         global_index += 1
 
     _flush_episode()
@@ -265,8 +276,13 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
                 "shape": list(shape),
                 "names": [f"{base}_{i}" for i in range(n)],
             }
-    for col, dt in [("timestamp", "float32"), ("frame_index", "int64"),
-                    ("episode_index", "int64"), ("index", "int64"), ("task_index", "int64")]:
+    for col, dt in [
+        ("timestamp", "float32"),
+        ("frame_index", "int64"),
+        ("episode_index", "int64"),
+        ("index", "int64"),
+        ("task_index", "int64"),
+    ]:
         features[col] = {"dtype": dt, "shape": [1], "names": None}
 
     info = {

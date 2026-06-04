@@ -44,7 +44,7 @@ learning_dataprep = autoconnect(
             ranges=[(1777931622.11, 1777931646.61)],
         ),
         observation={
-            "image":       StreamField(stream="color_image", field="data"),
+            "image": StreamField(stream="color_image", field="data"),
             "joint_state": StreamField(stream="joint_state", field="position"),
         },
         action={
