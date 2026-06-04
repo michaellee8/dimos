@@ -128,6 +128,8 @@ def build_babylon_sim(scene: str | None = None) -> Blueprint:
     return autoconnect(viewer, lidar)
 
 
-babylon_smoketest = build_babylon_sim()
+# Wrapped in autoconnect so the all_blueprints generator (which detects
+# autoconnect/blueprint-method calls, not bare factory calls) registers it.
+babylon_smoketest = autoconnect(build_babylon_sim())
 
 __all__ = ["babylon_smoketest", "build_babylon_sim"]

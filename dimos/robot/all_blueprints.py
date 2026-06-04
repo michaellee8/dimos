@@ -21,6 +21,7 @@ all_blueprints = {
     "agibot-x2-policy-sim": "dimos.robot.agibot.x2_ultra.blueprints.basic.agibot_x2_policy_sim:agibot_x2_policy_sim",
     "alfred-nav": "dimos.robot.diy.alfred.blueprints.alfred_nav:alfred_nav",
     "babylon-nav": "dimos.experimental.pimsim.blueprints.babylon_nav:babylon_nav",
+    "babylon-smoketest": "dimos.experimental.pimsim.blueprints.babylon_smoketest:babylon_smoketest",
     "coordinator-basic": "dimos.control.blueprints.basic:coordinator_basic",
     "coordinator-cartesian-ik-mock": "dimos.control.blueprints.teleop:coordinator_cartesian_ik_mock",
     "coordinator-cartesian-ik-piper": "dimos.control.blueprints.teleop:coordinator_cartesian_ik_piper",
