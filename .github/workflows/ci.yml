@@ -241,9 +241,6 @@ jobs:
       - name: Check disk space
         if: failure()
         run: df -h
-      - name: Restore workspace ownership for host runner
-        if: always()
-        run: chown -R "$(stat -c '%u:%g' /__w)" "$GITHUB_WORKSPACE"
 
   tests:
     timeout-minutes: 20
@@ -449,9 +446,10 @@ jobs:
           # could be abused by attackers.
           persist-credentials: false
       - name: Fix permissions
+        # Container-based jobs on this runner leave root-owned files in the workspace.
         run: |
           git config --global --add safe.directory '*'
-          git clean -ffdx
+          sudo git clean -ffdx
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
