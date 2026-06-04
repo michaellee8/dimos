@@ -46,10 +46,16 @@ logger = setup_logger()
 # frame. See static_transforms.py for the geometry and sources.
 MID360_TO_CAMERA_OPTICAL = REALSENSE_COLOR_OPTICAL_FRAME_TO_MID360_IMU_FRAME.inverse()
 
-# FAST-LIO reports the Mid-360 pose in its own start frame. Re-anchor that onto a flat world
-# frame whose origin is the camera screw and whose axes are level (the camera is angled up).
-# Assumes FAST-LIO initializes at the rig's starting pose.
-WORLD_TO_MID360 = MID360_TO_WORLD.inverse()
+# FAST-LIO inits level (gravity zeroes pitch/roll) with its origin at the Mid-360 IMU, so its
+# world frame already shares our flat world's orientation and only differs by the screw->IMU
+# lever arm. Re-anchor onto the camera screw with a pure translation -- no rotation, since both
+# frames are level and share heading (the rig's screw->IMU offset is pure pitch). Applying the
+# full mid360->world rotation here would wrongly tilt the trajectory by the lidar's ~26deg pitch.
+WORLD_TO_FASTLIO_WORLD = Transform(
+    translation=MID360_TO_WORLD.inverse().translation,
+    frame_id="world",
+    child_frame_id="fastlio_world",
+)
 
 
 _LIDAR_IP = os.getenv("LIDAR_IP", "192.168.1.107")
@@ -128,9 +134,7 @@ class TfHackRecorder(FastLio2Recorder):
             child_frame_id="mid360_link",
             ts=odom.ts,
         )
-        world_to_mid360 = WORLD_TO_MID360 + fastlio_pose
-        world_to_mid360.frame_id = "world"
-        world_to_mid360.child_frame_id = "mid360_link"
+        world_to_mid360 = WORLD_TO_FASTLIO_WORLD + fastlio_pose
         world_to_mid360.ts = odom.ts
         return world_to_mid360
 
