@@ -209,7 +209,7 @@ def save_html(
     theme: ThemeName = DEFAULT_THEME,
 ) -> None:
     html = _build_html(python_file, show_disconnected=show_disconnected, theme=theme)
-    with open(output_path, "w") as file:
+    with open(output_path, "w", encoding="utf-8") as file:
         file.write(html)
     print(f"Wrote {output_path}", file=sys.stderr)
 
