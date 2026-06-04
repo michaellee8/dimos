@@ -258,4 +258,3 @@ def serve_graph(
     print(f"Serving at {url}  (will exit after first request)")
     webbrowser.open(url)
     server.handle_request()
-    print("Served. Exiting.")
