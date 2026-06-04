@@ -257,4 +257,7 @@ def serve_graph(
     url = f"http://localhost:{actual_port}"
     print(f"Serving at {url}  (will exit after first request)")
     webbrowser.open(url)
-    server.handle_request()
+    try:
+        server.handle_request()
+    finally:
+        server.server_close()
