@@ -84,6 +84,10 @@ jobs:
       packages: read  # For pulling the ros-dev container from ghcr.io
     container:
       image: ghcr.io/dimensionalos/ros-dev:dev
+      # Expose the host's NVIDIA driver and GPU into the container.
+      # GHA's `container:` doesn't pass `--gpus all` by default, so libcuda
+      # from the driver isn't visible inside the container without this.
+      options: --gpus all
     steps:
       - uses: actions/checkout@v5
         with:
