@@ -126,7 +126,10 @@ jobs:
           rm /tmp/zed.run
           # get_python_api.py calls `python -m pip install`; uv venvs don't
           # ship pip by default, so add it before invoking the SDK installer.
-          uv pip install pip
+          # `--python .venv/bin/python` targets the project venv explicitly
+          # rather than the system Python (the container sets
+          # UV_SYSTEM_PYTHON=1, which would otherwise win).
+          uv pip install --python .venv/bin/python pip
           uv run python /usr/local/zed/get_python_api.py
           echo "LD_LIBRARY_PATH=/usr/local/zed/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: Build C++ extensions in-place
