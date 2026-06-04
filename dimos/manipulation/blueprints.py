@@ -301,6 +301,36 @@ _xarm7_sim_cfg = _catalog_xarm7(
     pre_grasp_offset=0.05,
 )
 
+
+def _xarm_perception_rerun_blueprint():
+    """Split layout: wrist-camera feeds beside the 3D scene.
+
+    Left column = what the eye-in-hand camera actually sees (color + depth) so you
+    can check whether an object is in frame; right = the 3D world (arm, TF frames,
+    detections, camera). Replaces the default 3D-only layout which hides the camera.
+    """
+    import rerun as rr
+    import rerun.blueprint as rrb
+
+    return rrb.Blueprint(
+        rrb.Horizontal(
+            rrb.Vertical(
+                rrb.Spatial2DView(origin="world/color_image", name="Wrist cam (color)"),
+                rrb.Spatial2DView(origin="world/depth_image", name="Wrist cam (depth)"),
+            ),
+            rrb.Spatial3DView(
+                origin="world",
+                name="Scene",
+                background=rrb.Background(kind="SolidColor", color=[0, 0, 0]),
+                line_grid=rrb.LineGrid3D(plane=rr.components.Plane3D.XY.with_distance(0.0)),
+            ),
+            column_shares=[1, 2],
+        ),
+        rrb.TimePanel(state="hidden"),
+        rrb.SelectionPanel(state="hidden"),
+    )
+
+
 xarm_perception_sim = autoconnect(
     PickAndPlaceModule.blueprint(
         robots=[_xarm7_sim_cfg.to_robot_model_config()],
@@ -313,6 +343,7 @@ xarm_perception_sim = autoconnect(
         dof=7,
         camera_name="wrist_camera",
         base_frame_id="link7",
+        enable_pointcloud=True,
     ),
     ObjectSceneRegistrationModule.blueprint(target_frame="world"),
     ControlCoordinator.blueprint(
@@ -322,7 +353,7 @@ xarm_perception_sim = autoconnect(
         hardware=[_xarm7_sim_cfg.to_hardware_component()],
         tasks=[_xarm7_sim_cfg.to_task_config()],
     ),
-    RerunBridgeModule.blueprint(),
+    RerunBridgeModule.blueprint(blueprint=_xarm_perception_rerun_blueprint),
 ).transports(
     {
         ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
