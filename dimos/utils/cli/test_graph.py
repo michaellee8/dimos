@@ -22,78 +22,7 @@ import threading
 import pytest
 import requests
 
-from dimos.core.coordination.blueprints import Blueprint, autoconnect
-from dimos.core.module import Module
-from dimos.core.stream import In, Out
-
 SNAPSHOT_PATH = Path(__file__).with_name("test_graph_snapshot.html")
-
-
-class ImageData:
-    pass
-
-
-class DepthData:
-    pass
-
-
-class OdometryData:
-    pass
-
-
-class PlanData:
-    pass
-
-
-class CmdVelData:
-    pass
-
-
-class PointCloudData:
-    pass
-
-
-class CameraModule(Module):
-    color_image: Out[ImageData]
-    depth_image: Out[DepthData]
-    point_cloud: Out[PointCloudData]
-
-
-class OdometryModule(Module):
-    odometry: Out[OdometryData]
-
-
-class PerceptionModule(Module):
-    color_image: In[ImageData]
-    depth_image: In[DepthData]
-    odometry: In[OdometryData]
-
-
-class PlannerModule(Module):
-    odometry: In[OdometryData]
-    plan: Out[PlanData]
-
-
-class ControllerModule(Module):
-    plan: In[PlanData]
-    odometry: In[OdometryData]
-    cmd_vel: Out[CmdVelData]
-
-
-class VisualizerModule(Module):
-    color_image: In[ImageData]
-    point_cloud: In[PointCloudData]
-
-
-def _build_blueprint() -> Blueprint:
-    return autoconnect(
-        CameraModule.blueprint(),
-        OdometryModule.blueprint(),
-        PerceptionModule.blueprint(),
-        PlannerModule.blueprint(),
-        ControllerModule.blueprint(),
-        VisualizerModule.blueprint(),
-    )
 
 
 def _normalize_html(html: str) -> str:
