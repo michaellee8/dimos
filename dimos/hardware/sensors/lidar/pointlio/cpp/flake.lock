@@ -43,12 +43,12 @@
         "rev": "fc979456837be26dd4d4e8fe0a53a7de3f9baf33",
         "revCount": 66,
         "type": "git",
-        "url": "file:///Users/jeffhykin/repos/dimos-module-fastlio2"
+        "url": "ssh://git@github.com/dimensionalOS/dimos-module-fastlio2"
       },
       "original": {
         "ref": "pointlio",
         "type": "git",
-        "url": "file:///Users/jeffhykin/repos/dimos-module-fastlio2"
+        "url": "ssh://git@github.com/dimensionalOS/dimos-module-fastlio2"
       }
     },
     "flake-utils": {
