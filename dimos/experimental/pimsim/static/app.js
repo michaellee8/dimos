@@ -48,6 +48,10 @@ camera.maxZ = 100000;
 camera.wheelPrecision = 40;
 camera.attachControl(canvas, true);
 
+// Exposed so headless tooling can frame a fixed view for recordings.
+window.__pimsimCamera = camera;
+window.__pimsimScene = scene;
+
 new BABYLON.HemisphericLight("skyLight", new BABYLON.Vector3(0.2, 0.4, 1), scene);
 const sun = new BABYLON.DirectionalLight("sun", new BABYLON.Vector3(-0.4, -0.6, -1), scene);
 sun.position = new BABYLON.Vector3(20, 30, 40);
