@@ -190,9 +190,6 @@ THEMES: dict[str, Theme] = {
 
 DEFAULT_THEME = "tailwind"
 
-DEFAULT_IGNORED_CONNECTIONS: set[tuple[str, str]] = set()
-DEFAULT_IGNORED_MODULES: set[str] = set()
-
 
 class _ColorAssigner:
     def __init__(self, palette: list[str]) -> None:
@@ -220,9 +217,9 @@ def render_mermaid(
     Returns (mermaid_code, label_color_map, disconnected_labels, node_color_map).
     """
     if ignored_streams is None:
-        ignored_streams = DEFAULT_IGNORED_CONNECTIONS
+        ignored_streams = set()
     if ignored_modules is None:
-        ignored_modules = DEFAULT_IGNORED_MODULES
+        ignored_modules = set()
 
     producers: dict[tuple[str, type], list[type[ModuleBase]]] = defaultdict(list)
     consumers: dict[tuple[str, type], list[type[ModuleBase]]] = defaultdict(list)
