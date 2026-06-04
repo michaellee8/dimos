@@ -18,10 +18,12 @@
 from dimos.core.blueprints import autoconnect
 from dimos.robot.unitree.g1.blueprints.basic.unitree_g1_basic import unitree_g1_basic
 from dimos.robot.unitree.keyboard_teleop import keyboard_teleop
+from dimos.teleop.keyboard.keyboard_pose_teleop import keyboard_pose_teleop
 
 unitree_g1_joystick = autoconnect(
     unitree_g1_basic,
     keyboard_teleop(),  # Pygame-based joystick control
+    keyboard_pose_teleop(),  # Pygame-based pose goal control
 )
 
 __all__ = ["unitree_g1_joystick"]

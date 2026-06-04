@@ -78,17 +78,12 @@ class KeyboardPoseTeleop(Module):
         return True
 
     @rpc
-    def start(self) -> None:
-        super().start()
-
-            cancel_msg = Bool(data=True)
-            self.cancel_goal.publish(cancel_msg)
-
+    def stop(self) -> None:
         self._stop_event.set()
 
-        if self._thread is None:
-            raise RuntimeError("Cannot stop: thread was never started")
-        self._thread.join(2)
+        if self._thread is not None:
+            self._thread.join(2)
+            self._thread = None
 
         super().stop()
 
