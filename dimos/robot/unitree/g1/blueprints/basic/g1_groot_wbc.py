@@ -873,6 +873,7 @@ def _quest_teleop_blueprint(cmd_vel_topic: str) -> Blueprint | None:
             # goes to a lower quad (the down-looking realsense by default).
             ("color_image", Image): LCMTransport("/camera_image", Image),
             ("workspace_image", Image): LCMTransport("/workspace_image", Image),
+            ("recording", Bool): LCMTransport("/recording", Bool),
         }
     )
 
@@ -891,6 +892,9 @@ def _episode_recorder_blueprint() -> Blueprint | None:
             ("color_image", Image): JpegLcmTransport("/camera_image", Image),
             ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
             ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
+            # REC indicator state — pimsim badge subscribes via the lcm-ws
+            # bridge; the quest module forwards it into the headset.
+            ("recording", Bool): LCMTransport("/recording", Bool),
         }
     )
 

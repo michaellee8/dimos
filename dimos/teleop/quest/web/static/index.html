@@ -98,12 +98,33 @@
         .hidden {
             display: none !important;
         }
+
+        #recBadge {
+            display: none;
+            position: fixed;
+            top: 18px;
+            right: 18px;
+            padding: 10px 22px;
+            font-size: 26px;
+            font-weight: 700;
+            color: #fff;
+            background-color: #e52626;
+            border-radius: 12px;
+            animation: recblink 1s step-end infinite;
+            z-index: 10;
+        }
+
+        @keyframes recblink {
+            0%, 60% { opacity: 1; }
+            60.01%, 100% { opacity: 0.35; }
+        }
     </style>
 </head>
 <body>
     <div id="ui">
         <h1>DimOS Quest-3 Teleop</h1>
         <div id="status">Ready to connect</div>
+        <div id="recBadge">● REC</div>
         <button id="connectBtn" onclick="connect()">Connect</button>
         <button id="disconnectBtn" class="disconnect hidden" onclick="disconnect()">Disconnect</button>
     </div>
@@ -159,10 +180,16 @@
                 ws.onclose = () => {
                     setStatus('WebSocket closed');
                 };
-                // Server → client binary messages. Currently only the camera
-                // tag (0x01) exists; future tags can be added without
-                // breaking the existing pose/joy upstream.
+                // Server → client messages: binary tagged frames (cameras)
+                // and JSON text frames (recorder state).
                 ws.onmessage = async (ev) => {
+                    if (typeof ev.data === 'string') {
+                        try {
+                            const msg = JSON.parse(ev.data);
+                            if (msg.type === 'recording') setRecording(Boolean(msg.active));
+                        } catch (e) { /* ignore malformed */ }
+                        return;
+                    }
                     if (!(ev.data instanceof ArrayBuffer)) return;
                     const view = new Uint8Array(ev.data);
                     if (view.length < 2) return;
@@ -196,7 +223,19 @@
                          offsetX: 0.0,  offsetY:  0.0,  dist: 1.5, height: 0.8 },
             workspace: { tex: null, latest: null, dirty: false, aspect:  4/3,
                          offsetX: 0.0,  offsetY: -0.55, dist: 1.2, height: 0.5 },
+            // Solid-red REC dot pinned above the forward camera quad;
+            // drawn (blinking) only while the episode recorder is live.
+            rec:       { tex: null, latest: null, dirty: false, aspect: 1,
+                         offsetX: 0.6,  offsetY:  0.46, dist: 1.5, height: 0.07 },
         };
+
+        let recordingActive = false;
+        function setRecording(active) {
+            recordingActive = active;
+            const badge = document.getElementById('recBadge');
+            if (badge) badge.style.display = active ? 'block' : 'none';
+            setStatus(active ? '● RECORDING' : 'recording stopped');
+        }
 
         function initCameraQuad() {
             const vs = `
@@ -263,6 +302,14 @@
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
             }
+
+            // The REC dot is a static 1px solid red texture — mark it
+            // permanently "uploaded" so drawQuad never re-uploads it.
+            gl.bindTexture(gl.TEXTURE_2D, quadState.rec.tex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA,
+                          gl.UNSIGNED_BYTE, new Uint8Array([229, 38, 38, 255]));
+            quadState.rec.latest = { width: 1, height: 1 };
+            quadState.rec.dirty = false;
         }
 
         function drawQuad(view, slot) {
@@ -431,6 +478,10 @@
                     gl.viewport(vp.x, vp.y, vp.width, vp.height);
                     drawQuad(view, quadState.camera);
                     drawQuad(view, quadState.workspace);
+                    // Blinking REC dot: 600ms on / 400ms off.
+                    if (recordingActive && (time % 1000) < 600) {
+                        drawQuad(view, quadState.rec);
+                    }
                 }
             }
         }

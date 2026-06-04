@@ -2220,6 +2220,27 @@ function markPimsimSceneReady() {
 // into the existing Babylon renderers — same hooks the old binary frames
 // fed into, no rendering changes.
 
+let recBadgeEl = null;
+function setRecordingBadge(active) {
+  if (!recBadgeEl) {
+    recBadgeEl = document.createElement("div");
+    recBadgeEl.textContent = "● REC";
+    recBadgeEl.style.cssText =
+      "display:none;position:fixed;top:14px;right:14px;z-index:50;" +
+      "padding:6px 14px;font:700 15px system-ui;color:#fff;" +
+      "background:#e52626;border-radius:8px;pointer-events:none;";
+    document.body.appendChild(recBadgeEl);
+    // Blink via opacity toggle — cheap, no CSS file changes.
+    setInterval(() => {
+      if (recBadgeEl.style.display !== "none") {
+        recBadgeEl.style.opacity = recBadgeEl.style.opacity === "0.35" ? "1" : "0.35";
+      }
+    }, 500);
+  }
+  recBadgeEl.style.display = active ? "block" : "none";
+  recBadgeEl.style.opacity = "1";
+}
+
 function whenLcmReady(callback) {
   if (window.dimosLcm && window.dimosMsgs) {
     callback();
@@ -2237,6 +2258,11 @@ function subscribeLcmTopics() {
 
   lcm.subscribePayload("/global_map", M.sensor_msgs.PointCloud2, (payload) => {
     enqueuePointcloudPayload(payload);
+  });
+
+  // Episode-recorder state → blinking REC badge.
+  lcm.subscribe("/recording", M.std_msgs.Bool, (msg) => {
+    setRecordingBadge(Boolean(msg.data));
   });
 
   lcm.subscribe("/nav_path", M.nav_msgs.Path, (msg) => {

@@ -32,6 +32,7 @@ from typing import Any, TypeVar
 import cv2
 from dimos_lcm.geometry_msgs import PoseStamped as LCMPoseStamped
 from dimos_lcm.sensor_msgs import Joy as LCMJoy
+from dimos_lcm.std_msgs import Bool
 from fastapi import WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -114,6 +115,9 @@ class QuestTeleopModule(Module):
     # blueprint transport if you want camera-in-VR; leave unbound otherwise.
     color_image: In[Image]  # forward-facing (tag 0x01)
     workspace_image: In[Image]  # workspace / down-looking (tag 0x02)
+    # Optional: episode-recorder state. Forwarded to WebXR clients as a
+    # text frame so the operator gets an in-headset REC indicator.
+    recording: In[Bool]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -144,6 +148,7 @@ class QuestTeleopModule(Module):
         self._ws_clients_lock = threading.Lock()
         self._ws_clients: set[WebSocket] = set()
         self._server_loop: asyncio.AbstractEventLoop | None = None
+        self._recording_active = False
         self._last_camera_send = 0.0
         self._last_workspace_send = 0.0
         self._camera_min_dt = 1.0 / 30.0  # cap broadcast at 30 Hz per camera
@@ -179,6 +184,10 @@ class QuestTeleopModule(Module):
             self._server_loop = asyncio.get_running_loop()
             with self._ws_clients_lock:
                 self._ws_clients.add(ws)
+            # Late-join sync: a headset connecting mid-episode still gets
+            # the REC indicator immediately.
+            if self._recording_active:
+                await self._send_json_safe(ws, {"type": "recording", "active": True})
             try:
                 while True:
                     data = await ws.receive_bytes()
@@ -207,12 +216,32 @@ class QuestTeleopModule(Module):
         for stream_attr, handler in (
             ("color_image", self._on_color_image),
             ("workspace_image", self._on_workspace_image),
+            ("recording", self._on_recording),
         ):
             try:
                 getattr(self, stream_attr).subscribe(handler)
             except Exception:
                 logger.debug("Quest: %s not wired; skipping in-VR display", stream_attr)
         logger.info("Quest Teleoperation Module started")
+
+    def _on_recording(self, msg: Bool) -> None:
+        """Forward recorder state to WebXR clients (in-headset REC dot)."""
+        self._recording_active = bool(msg.data)
+        loop = self._server_loop
+        if loop is None:
+            return
+        with self._ws_clients_lock:
+            clients = tuple(self._ws_clients)
+        payload = {"type": "recording", "active": self._recording_active}
+        for ws in clients:
+            asyncio.run_coroutine_threadsafe(self._send_json_safe(ws, payload), loop)
+
+    async def _send_json_safe(self, ws: WebSocket, payload: dict[str, Any]) -> None:
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            with self._ws_clients_lock:
+                self._ws_clients.discard(ws)
 
     def _on_color_image(self, image: Image) -> None:
         self._broadcast_image(image, tag=_WS_TAG_CAMERA_JPEG, is_workspace=False)

@@ -33,10 +33,11 @@ from pathlib import Path
 import threading
 from typing import Any
 
+from dimos_lcm.std_msgs import Bool
 from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
-from dimos.core.stream import In
+from dimos.core.stream import In, Out
 from dimos.memory2.module import Recorder, RecorderConfig
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.Image import Image
@@ -45,6 +46,11 @@ from dimos.teleop.quest.quest_types import Buttons
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
+
+# Re-publish the recording state every N button messages (~40 Hz input →
+# ~1.5 s) so late-joining viewers/headsets converge without a dedicated
+# heartbeat thread.
+_RECORDING_REFRESH_EVERY = 60
 
 
 class G1EpisodeRecorderConfig(RecorderConfig):
@@ -69,6 +75,10 @@ class G1EpisodeRecorder(Recorder):
     color_image: In[Image]
     odom: In[PoseStamped]
     buttons: In[Buttons]
+    # True while an episode is open — viewers/headsets render a REC
+    # indicator from this. Published on transitions and refreshed
+    # periodically for late joiners.
+    recording: Out[Bool]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -77,6 +87,7 @@ class G1EpisodeRecorder(Recorder):
         self._episode_open = False
         self._prev_a = False
         self._prev_b = False
+        self._recording_refresh_countdown = 0
 
     @rpc
     def start(self) -> None:
@@ -104,6 +115,7 @@ class G1EpisodeRecorder(Recorder):
     def _on_buttons(self, msg: Buttons) -> None:
         """Edge-detect right-controller A/B into episode markers."""
         a, b = msg.right_primary, msg.right_secondary
+        changed = False
         with self._episode_lock:
             a_pressed = a and not self._prev_a
             b_pressed = b and not self._prev_b
@@ -111,9 +123,11 @@ class G1EpisodeRecorder(Recorder):
 
             if b_pressed and self._episode_open:
                 self._episode_open = False
+                changed = True
                 self._episodes.append("cancel", tags={"episode": self._episode_idx})
                 logger.info("Episode %d CANCELLED", self._episode_idx)
             elif a_pressed:
+                changed = True
                 if self._episode_open:
                     self._episode_open = False
                     self._episodes.append("stop", tags={"episode": self._episode_idx})
@@ -123,6 +137,32 @@ class G1EpisodeRecorder(Recorder):
                     self._episode_open = True
                     self._episodes.append("start", tags={"episode": self._episode_idx})
                     logger.info("Episode %d recording…", self._episode_idx)
+            recording = self._episode_open
+
+        # Publish on transitions, refresh periodically for late joiners.
+        self._recording_refresh_countdown -= 1
+        if changed or self._recording_refresh_countdown <= 0:
+            self._recording_refresh_countdown = _RECORDING_REFRESH_EVERY
+            self._publish_recording(recording)
+
+    def _publish_recording(self, active: bool) -> None:
+        msg = Bool()
+        msg.data = active
+        self.recording.publish(msg)
+
+    @rpc
+    def stop(self) -> None:
+        # Close an open episode as cancelled so the markers stay
+        # self-consistent — the exporter drops dangling starts anyway,
+        # this just makes the db say so explicitly.
+        episodes = getattr(self, "_episodes", None)
+        with self._episode_lock:
+            if self._episode_open and episodes is not None:
+                self._episode_open = False
+                episodes.append("cancel", tags={"episode": self._episode_idx})
+                logger.info("Episode %d still open at shutdown — cancelled", self._episode_idx)
+        self._publish_recording(False)
+        super().stop()
 
 
 g1_episode_recorder = G1EpisodeRecorder.blueprint
