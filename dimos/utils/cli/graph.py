@@ -127,7 +127,7 @@ def _build_html(
     per_bp_disconnected: list[set[str]] = []
     per_bp_node_colors: list[dict[str, str]] = []
     per_bp_conflicts: list[list[dict[str, Any]]] = []
-    per_bp_typos: list[list[dict[str, object]]] = []
+    per_bp_typos: list[list[dict[str, Any]]] = []
 
     tab_buttons: list[dict[str, str]] = []
     tab_panels: list[dict[str, str]] = []
@@ -145,7 +145,7 @@ def _build_html(
                 if stream.direction == "out":
                     topic = f"{stream.name}:{stream.type.__name__}"
                     producers.setdefault(topic, []).append(atom.module.__name__)
-        conflicts: list[dict[str, object]] = [
+        conflicts: list[dict[str, Any]] = [
             {
                 "topic": topic,
                 "topicColor": label_colors.get(topic, "#ccc"),
@@ -170,7 +170,7 @@ def _build_html(
                     inputs.setdefault(key, []).append(atom.module.__name__)
         dangling_outs = {k: v for k, v in outputs.items() if k not in inputs}
         dangling_ins = {k: v for k, v in inputs.items() if k not in outputs}
-        typos: list[dict[str, object]] = []
+        typos: list[dict[str, Any]] = []
         for (out_name, out_type), out_modules in dangling_outs.items():
             for (in_name, in_type), in_modules in dangling_ins.items():
                 if out_type != in_type:
@@ -281,7 +281,7 @@ def serve_graph(
             self.end_headers()
             self.wfile.write(html_bytes)
 
-        def log_message(self, format: str, *args: object) -> None:
+        def log_message(self, format: str, *args: Any) -> None:
             pass
 
     server = HTTPServer(("127.0.0.1", port), Handler)
