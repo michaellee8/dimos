@@ -118,11 +118,15 @@ jobs:
           curl -fL --retry 5 --retry-delay 5 \
             -o /tmp/zed.run \
             https://download.stereolabs.com/zedsdk/5.0/cu12/ubuntu22
-          ls -la /tmp/zed.run
-          file /tmp/zed.run
           chmod +x /tmp/zed.run
-          sudo /tmp/zed.run -- silent runtime_only skip_cuda skip_drivers
+          # `skip_python` stops the SDK installer from auto-installing pyzed
+          # for the system Python 3.10 (wasted, can't be reached from the
+          # uv venv); we install for the venv's Python explicitly below.
+          sudo /tmp/zed.run -- silent runtime_only skip_cuda skip_drivers skip_python
           rm /tmp/zed.run
+          # get_python_api.py calls `python -m pip install`; uv venvs don't
+          # ship pip by default, so add it before invoking the SDK installer.
+          uv pip install pip
           uv run python /usr/local/zed/get_python_api.py
           echo "LD_LIBRARY_PATH=/usr/local/zed/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
       - name: Build C++ extensions in-place
