@@ -383,3 +383,76 @@ def render_mermaid(
         disconnected=disconnected_labels,
         node_colors=node_color.assigned,
     )
+
+
+class ProducerConflict(NamedTuple):
+    topic: str
+    modules: list[str]
+
+
+class StreamTypo(NamedTuple):
+    out_label: str
+    in_label: str
+    out_modules: list[str]
+    in_modules: list[str]
+
+
+def find_producer_conflicts(blueprint_set: Blueprint) -> list[ProducerConflict]:
+    """Find output topics produced by more than one module."""
+    producers: dict[str, list[str]] = {}
+    for atom in blueprint_set.blueprints:
+        for stream in atom.streams:
+            if stream.direction == "out":
+                topic = f"{stream.name}:{stream.type.__name__}"
+                producers.setdefault(topic, []).append(atom.module.__name__)
+    return [
+        ProducerConflict(topic=topic, modules=modules)
+        for topic, modules in producers.items()
+        if len(modules) > 1
+    ]
+
+
+def _levenshtein(a: str, b: str) -> int:
+    if len(a) < len(b):
+        return _levenshtein(b, a)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, char_a in enumerate(a):
+        curr = [i + 1]
+        for j, char_b in enumerate(b):
+            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (char_a != char_b)))
+        prev = curr
+    return prev[-1]
+
+
+def find_stream_typos(blueprint_set: Blueprint) -> list[StreamTypo]:
+    """Find dangling out/in stream pairs of the same type whose names differ by a
+    small edit distance, i.e. likely typos in a stream name."""
+    outputs: dict[tuple[str, str], list[str]] = {}
+    inputs: dict[tuple[str, str], list[str]] = {}
+    for atom in blueprint_set.blueprints:
+        for stream in atom.streams:
+            key = (stream.name, stream.type.__name__)
+            if stream.direction == "out":
+                outputs.setdefault(key, []).append(atom.module.__name__)
+            else:
+                inputs.setdefault(key, []).append(atom.module.__name__)
+    dangling_outs = {k: v for k, v in outputs.items() if k not in inputs}
+    dangling_ins = {k: v for k, v in inputs.items() if k not in outputs}
+
+    typos: list[StreamTypo] = []
+    for (out_name, out_type), out_modules in dangling_outs.items():
+        for (in_name, in_type), in_modules in dangling_ins.items():
+            if out_type != in_type:
+                continue
+            if 0 < _levenshtein(out_name, in_name) <= 2:
+                typos.append(
+                    StreamTypo(
+                        out_label=f"{out_name}:{out_type}",
+                        in_label=f"{in_name}:{in_type}",
+                        out_modules=out_modules,
+                        in_modules=in_modules,
+                    )
+                )
+    return typos

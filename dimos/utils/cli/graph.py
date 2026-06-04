@@ -32,7 +32,13 @@ import webbrowser
 import jinja2
 
 from dimos.core.coordination.blueprints import Blueprint
-from dimos.core.introspection.mermaid import DEFAULT_THEME, THEMES, render_mermaid
+from dimos.core.introspection.mermaid import (
+    DEFAULT_THEME,
+    THEMES,
+    find_producer_conflicts,
+    find_stream_typos,
+    render_mermaid,
+)
 from dimos.core.introspection.utils import ThemeName
 from dimos.utils.data import get_data
 
@@ -42,20 +48,6 @@ _TEMPLATE = jinja2.Template(
     (_CLI_DIR / "graph.html.jinja").read_text(encoding="utf-8"),
     autoescape=False,
 )
-
-
-def _levenshtein(a: str, b: str) -> int:
-    if len(a) < len(b):
-        return _levenshtein(b, a)
-    if not b:
-        return len(a)
-    prev = list(range(len(b) + 1))
-    for i, char_a in enumerate(a):
-        curr = [i + 1]
-        for j, char_b in enumerate(b):
-            curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (char_a != char_b)))
-        prev = curr
-    return prev[-1]
 
 
 def _find_package_root(filepath: str) -> str | None:
@@ -139,61 +131,31 @@ def _build_html(
         per_bp_disconnected.append(render.disconnected)
         per_bp_node_colors.append(node_colors)
 
-        producers: dict[str, list[str]] = {}
-        for atom in bp.blueprints:
-            for stream in atom.streams:
-                if stream.direction == "out":
-                    topic = f"{stream.name}:{stream.type.__name__}"
-                    producers.setdefault(topic, []).append(atom.module.__name__)
         conflicts: list[dict[str, Any]] = [
             {
-                "topic": topic,
-                "topicColor": label_colors.get(topic, "#ccc"),
-                "modules": [
-                    {"name": module_name, "color": node_colors.get(module_name, "#ccc")}
-                    for module_name in modules
-                ],
+                "topic": c.topic,
+                "topicColor": label_colors.get(c.topic, "#ccc"),
+                "modules": [{"name": m, "color": node_colors.get(m, "#ccc")} for m in c.modules],
             }
-            for topic, modules in producers.items()
-            if len(modules) > 1
+            for c in find_producer_conflicts(bp)
         ]
         per_bp_conflicts.append(conflicts)
 
-        outputs: dict[tuple[str, str], list[str]] = {}
-        inputs: dict[tuple[str, str], list[str]] = {}
-        for atom in bp.blueprints:
-            for stream in atom.streams:
-                key = (stream.name, stream.type.__name__)
-                if stream.direction == "out":
-                    outputs.setdefault(key, []).append(atom.module.__name__)
-                else:
-                    inputs.setdefault(key, []).append(atom.module.__name__)
-        dangling_outs = {k: v for k, v in outputs.items() if k not in inputs}
-        dangling_ins = {k: v for k, v in inputs.items() if k not in outputs}
-        typos: list[dict[str, Any]] = []
-        for (out_name, out_type), out_modules in dangling_outs.items():
-            for (in_name, in_type), in_modules in dangling_ins.items():
-                if out_type != in_type:
-                    continue
-                distance = _levenshtein(out_name, in_name)
-                if 0 < distance <= 2:
-                    out_label = f"{out_name}:{out_type}"
-                    in_label = f"{in_name}:{in_type}"
-                    typos.append(
-                        {
-                            "outLabel": out_label,
-                            "inLabel": in_label,
-                            "outColor": label_colors.get(out_label, "#ccc"),
-                            "inColor": label_colors.get(in_label, "#ccc"),
-                            "outModules": [
-                                {"name": m, "color": node_colors.get(m, "#ccc")}
-                                for m in out_modules
-                            ],
-                            "inModules": [
-                                {"name": m, "color": node_colors.get(m, "#ccc")} for m in in_modules
-                            ],
-                        }
-                    )
+        typos: list[dict[str, Any]] = [
+            {
+                "outLabel": t.out_label,
+                "inLabel": t.in_label,
+                "outColor": label_colors.get(t.out_label, "#ccc"),
+                "inColor": label_colors.get(t.in_label, "#ccc"),
+                "outModules": [
+                    {"name": m, "color": node_colors.get(m, "#ccc")} for m in t.out_modules
+                ],
+                "inModules": [
+                    {"name": m, "color": node_colors.get(m, "#ccc")} for m in t.in_modules
+                ],
+            }
+            for t in find_stream_typos(bp)
+        ]
         per_bp_typos.append(typos)
 
         tab_buttons.append({"name": name})
