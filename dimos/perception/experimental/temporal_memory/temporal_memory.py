@@ -33,27 +33,28 @@ from reactivex import Subject, interval
 from reactivex.disposable import Disposable
 
 from dimos.agents.annotation import skill
+from dimos.constants import STATE_DIR
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.models.vl.base import VlModel
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-from dimos.msgs.sensor_msgs import Image
-from dimos.msgs.sensor_msgs.Image import sharpness_barrier
+from dimos.msgs.sensor_msgs.Image import Image, sharpness_barrier
 from dimos.msgs.visualization_msgs.EntityMarkers import EntityMarkers, Marker
 from dimos.utils.logging_config import get_run_log_dir, setup_logger
 
-from . import temporal_utils as tu
 from .clip_filter import CLIP_AVAILABLE, adaptive_keyframes
 from .entity_graph_db import EntityGraphDB
-from .frame_window_accumulator import Frame, FrameWindowAccumulator
+from .frame_window_accumulator import FrameWindowAccumulator
 from .temporal_state import TemporalState
+from .temporal_utils.graph_utils import build_graph_context, extract_time_window
+from .temporal_utils.helpers import is_scene_stale
 from .window_analyzer import WindowAnalyzer
 
 try:
     from .clip_filter import CLIPFrameFilter
 except ImportError:
-    CLIPFrameFilter = type(None)  # type: ignore[misc,assignment]
+    CLIPFrameFilter = type(None)  # type: ignore[assignment, misc]
 
 logger = setup_logger()
 
@@ -67,7 +68,7 @@ class TemporalMemoryConfig(ModuleConfig):
     tune cost / latency / accuracy without touching code.
     """
 
-    vlm: VlModel[Any] | None = None
+    vlm: VlModel | None = None
 
     # Frame processing
     fps: float = 1.0
@@ -104,14 +105,14 @@ class TemporalMemoryConfig(ModuleConfig):
     nearby_distance_meters: float = 5.0
 
 
-class TemporalMemory(Module[TemporalMemoryConfig]):
+class TemporalMemory(Module):
     """Thin orchestrator that wires frames → window accumulator → VLM → state + DB.
 
     Uses RxPY reactive streams for the frame pipeline and ``interval`` for
     periodic window analysis.
     """
 
-    default_config = TemporalMemoryConfig
+    config: TemporalMemoryConfig
 
     color_image: In[Image]
     odom: In[PoseStamped]
@@ -161,11 +162,7 @@ class TemporalMemory(Module[TemporalMemoryConfig]):
         if self.config.db_dir:
             db_dir = Path(self.config.db_dir)
         else:
-            # Default: ~/.local/state/dimos/temporal_memory/
-            # XDG state dir — predictable, works for pip install and git clone.
-            xdg = os.environ.get("XDG_STATE_HOME")
-            state_root = Path(xdg) if xdg else Path.home() / ".local" / "state"
-            db_dir = state_root / "dimos" / "temporal_memory"
+            db_dir = STATE_DIR / "temporal_memory"
         db_dir.mkdir(parents=True, exist_ok=True)
         db_path = db_dir / "entity_graph.db"
         if self.config.new_memory and db_path.exists():
@@ -204,7 +201,7 @@ class TemporalMemory(Module[TemporalMemoryConfig]):
         )
 
     @property
-    def vlm(self) -> VlModel[Any]:
+    def vlm(self) -> VlModel:
         if self._vlm_raw is None:
             from dimos.models.vl.openai import OpenAIVlModel
 
@@ -297,11 +294,11 @@ class TemporalMemory(Module[TemporalMemoryConfig]):
                     f"buffered={len(self._accumulator._buffer)}"
                 )
 
-        self._disposables.add(
+        self.register_disposable(
             frame_subject.pipe(sharpness_barrier(self.config.fps)).subscribe(_on_frame)
         )
         unsub_image = self.color_image.subscribe(frame_subject.on_next)
-        self._disposables.add(Disposable(unsub_image))
+        self.register_disposable(Disposable(unsub_image))
 
         # Odometry tracking for entity world positioning (optional —
         # module works without it, entities just won't have world positions)
@@ -313,14 +310,14 @@ class TemporalMemory(Module[TemporalMemoryConfig]):
 
         if self.odom.transport is not None:
             unsub_odom = self.odom.subscribe(_on_odom)
-            self._disposables.add(Disposable(unsub_odom))
+            self.register_disposable(Disposable(unsub_odom))
         else:
             logger.warning(
                 "[temporal-memory] odom stream not connected — entity positions will be (0,0,0)"
             )
 
         # Periodic window analysis
-        self._disposables.add(
+        self.register_disposable(
             interval(self.config.stride_s).subscribe(lambda _: self._analyze_window())
         )
         logger.info("TemporalMemory started")
@@ -376,7 +373,7 @@ class TemporalMemory(Module[TemporalMemoryConfig]):
         w_start, w_end = window_frames[0].timestamp_s, window_frames[-1].timestamp_s
 
         # Skip stale scenes (frames too close together / camera not moving)
-        if tu.is_scene_stale(window_frames, self.config.stale_scene_threshold):
+        if is_scene_stale(window_frames, self.config.stale_scene_threshold):
             logger.info(f"[temporal-memory] skipping stale window [{w_start:.1f}-{w_end:.1f}s]")
             return
 
@@ -553,13 +550,13 @@ class TemporalMemory(Module[TemporalMemoryConfig]):
 
         # Graph context
         if self._graph_db:
-            time_window_s = tu.extract_time_window(question)
+            time_window_s = extract_time_window(question)
             all_entity_ids = [
                 e["id"] for e in snap.entity_roster if isinstance(e, dict) and "id" in e
             ]
             if all_entity_ids:
                 logger.info(f"query: building graph context for {len(all_entity_ids)} entities")
-                graph_context = tu.build_graph_context(
+                graph_context = build_graph_context(
                     graph_db=self._graph_db,
                     entity_ids=all_entity_ids,
                     time_window_s=time_window_s,
@@ -624,8 +621,3 @@ class TemporalMemory(Module[TemporalMemoryConfig]):
         if not self._graph_db:
             return {"stats": {}, "entities": [], "recent_relations": []}
         return self._graph_db.get_summary()
-
-
-temporal_memory = TemporalMemory.blueprint
-
-__all__ = ["Frame", "TemporalMemory", "TemporalMemoryConfig", "temporal_memory"]

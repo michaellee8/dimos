@@ -18,16 +18,14 @@ from abc import abstractmethod
 from collections import deque
 from dataclasses import field
 from functools import reduce
-from typing import TypeVar
 
 from dimos.memory.timeseries.inmemory import InMemoryStore
-from dimos.msgs.geometry_msgs import PoseStamped, Transform
-from dimos.msgs.tf2_msgs import TFMessage
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.protocol.pubsub.impl.lcmpubsub import LCM, Topic
 from dimos.protocol.pubsub.spec import PubSub
 from dimos.protocol.service.spec import BaseConfig, Service
-
-CONFIG = TypeVar("CONFIG")
 
 
 # generic configuration for transform service
@@ -36,11 +34,10 @@ class TFConfig(BaseConfig):
     rate_limit: float = 10.0  # Hz
 
 
-_TFConfig = TypeVar("_TFConfig", bound=TFConfig)
-
-
 # generic specification for transform service
-class TFSpec(Service[_TFConfig]):
+class TFSpec(Service):
+    config: TFConfig
+
     @abstractmethod
     def publish(self, *args: Transform) -> None: ...
 
@@ -64,10 +61,6 @@ class TFSpec(Service[_TFConfig]):
     def receive_tfmessage(self, msg: TFMessage) -> None:
         for transform in msg.transforms:
             self.receive_transform(transform)
-
-
-MsgT = TypeVar("MsgT")
-TopicT = TypeVar("TopicT")
 
 
 class TBuffer(InMemoryStore[Transform]):
@@ -249,11 +242,8 @@ class PubSubTFConfig(TFConfig):
     autostart: bool = True
 
 
-_PubSubConfig = TypeVar("_PubSubConfig", bound=PubSubTFConfig)
-
-
-class PubSubTF(MultiTBuffer, TFSpec[_PubSubConfig]):
-    default_config: type[_PubSubConfig] = PubSubTFConfig  # type: ignore[assignment]
+class PubSubTF(MultiTBuffer, TFSpec):
+    config: PubSubTFConfig
 
     def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
         TFSpec.__init__(self, **kwargs)
@@ -268,7 +258,7 @@ class PubSubTF(MultiTBuffer, TFSpec[_PubSubConfig]):
         else:
             raise ValueError("PubSub configuration is missing")
 
-        if self.config.autostart:  # type: ignore[attr-defined]
+        if self.config.autostart:
             self.start()
 
     def start(self, sub: bool = True) -> None:
@@ -337,8 +327,8 @@ class LCMPubsubConfig(PubSubTFConfig):
     autostart: bool = True
 
 
-class LCMTF(PubSubTF[LCMPubsubConfig]):
-    default_config = LCMPubsubConfig
+class LCMTF(PubSubTF):
+    config: LCMPubsubConfig
 
 
 TF = LCMTF

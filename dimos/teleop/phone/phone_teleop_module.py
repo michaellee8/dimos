@@ -36,7 +36,9 @@ from fastapi.staticfiles import StaticFiles
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import Out
-from dimos.msgs.geometry_msgs import Twist, TwistStamped, Vector3
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.std_msgs.Bool import Bool
 from dimos.utils.logging_config import setup_logger
 from dimos.utils.path_utils import get_project_root
@@ -54,7 +56,7 @@ class PhoneTeleopConfig(ModuleConfig):
     server_port: int = 8444
 
 
-class PhoneTeleopModule(Module[PhoneTeleopConfig]):
+class PhoneTeleopModule(Module):
     """
     Receives raw sensor data from the phone web app via an embedded WebSocket server:
       - TwistStamped: linear=(roll, pitch, yaw) deg, angular=(gyro) deg/s
@@ -64,7 +66,7 @@ class PhoneTeleopModule(Module[PhoneTeleopConfig]):
         - twist_output: TwistStamped (velocity command for robot)
     """
 
-    default_config = PhoneTeleopConfig
+    config: PhoneTeleopConfig
 
     # Output: velocity command to robot
     twist_output: Out[TwistStamped]
@@ -278,12 +280,3 @@ class PhoneTeleopModule(Module[PhoneTeleopConfig]):
         Override to customize output (e.g., apply limits, remap axes).
         """
         self.twist_output.publish(output_msg)
-
-
-phone_teleop_module = PhoneTeleopModule.blueprint
-
-__all__ = [
-    "PhoneTeleopConfig",
-    "PhoneTeleopModule",
-    "phone_teleop_module",
-]

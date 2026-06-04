@@ -27,26 +27,30 @@ from pydantic import Field
 from reactivex import operators as ops
 from reactivex.subject import Subject
 
-from dimos import spec
 from dimos.agents.annotation import skill
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
+from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.module_coordinator import ModuleCoordinator
 from dimos.core.stream import In, Out
 from dimos.core.transport import LCMTransport, ROSTransport
-from dimos.msgs.geometry_msgs import (
-    PoseStamped,
-    Quaternion,
-    Transform,
-    Twist,
-    TwistStamped,
-    Vector3,
-)
-from dimos.msgs.nav_msgs import Path
-from dimos.msgs.sensor_msgs import Joy, PointCloud2
-from dimos.msgs.std_msgs import Bool, Int8
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.nav_msgs.Path import Path
+from dimos.msgs.sensor_msgs.Joy import Joy
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.std_msgs.Bool import Bool
+from dimos.msgs.std_msgs.Int8 import Int8
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.navigation.base import NavigationInterface, NavigationState
+from dimos.spec.control import LocalPlanner
+from dimos.spec.mapping import GlobalPointcloud
+from dimos.spec.nav import Nav
+from dimos.spec.perception import Pointcloud
 from dimos.utils.logging_config import setup_logger
 from dimos.utils.transform_utils import euler_to_quaternion
 
@@ -62,15 +66,14 @@ class Config(ModuleConfig):
 
 
 class ROSNav(
-    Module[Config],
+    Module,
     NavigationInterface,
-    spec.Nav,
-    spec.GlobalPointcloud,
-    spec.Pointcloud,
-    spec.LocalPlanner,
+    Nav,
+    GlobalPointcloud,
+    Pointcloud,
+    LocalPlanner,
 ):
-    default_config = Config
-
+    config: Config
     # Existing ports (default LCM/pSHM transport)
     goal_req: In[PoseStamped]
 
@@ -128,7 +131,7 @@ class ROSNav(
     def start(self) -> None:
         self._running = True
 
-        self._disposables.add(
+        self.register_disposable(
             self._local_pointcloud_subject.pipe(
                 ops.sample(1.0 / self.config.local_pointcloud_freq),
             ).subscribe(
@@ -137,7 +140,7 @@ class ROSNav(
             )
         )
 
-        self._disposables.add(
+        self.register_disposable(
             self._global_map_subject.pipe(
                 ops.sample(1.0 / self.config.global_map_freq),
             ).subscribe(
@@ -313,7 +316,7 @@ class ROSNav(
         if self._navigation_thread and self._navigation_thread.is_alive():
             logger.warning("Previous navigation still running, cancelling")
             self.stop_navigation()
-            self._navigation_thread.join(timeout=1.0)
+            self._navigation_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
 
         self._navigation_thread = threading.Thread(
             target=self._navigate_to_goal_async,
@@ -378,11 +381,8 @@ class ROSNav(
             super().stop()
 
 
-ros_nav = ROSNav.blueprint
-
-
 def deploy(dimos: ModuleCoordinator):  # type: ignore[no-untyped-def]
-    nav = dimos.deploy(ROSNav)  # type: ignore[attr-defined]
+    nav = dimos.deploy(ROSNav)
 
     # Existing ports on LCM transports
     nav.pointcloud.transport = LCMTransport("/lidar", PointCloud2)
@@ -409,6 +409,3 @@ def deploy(dimos: ModuleCoordinator):  # type: ignore[no-untyped-def]
 
     nav.start()
     return nav
-
-
-__all__ = ["ROSNav", "deploy", "ros_nav"]

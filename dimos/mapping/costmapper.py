@@ -26,8 +26,8 @@ from dimos.mapping.pointclouds.occupancy import (
     HeightCostConfig,
     OccupancyConfig,
 )
-from dimos.msgs.nav_msgs import OccupancyGrid
-from dimos.msgs.sensor_msgs import PointCloud2
+from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -38,9 +38,8 @@ class Config(ModuleConfig):
     config: OccupancyConfig = Field(default_factory=HeightCostConfig)
 
 
-class CostMapper(Module[Config]):
-    default_config = Config
-
+class CostMapper(Module):
+    config: Config
     global_map: In[PointCloud2]
     global_costmap: Out[OccupancyGrid]
 
@@ -60,7 +59,7 @@ class CostMapper(Module[Config]):
             elapsed_ms = (time.perf_counter() - start) * 1000
             return grid, elapsed_ms, rx_monotonic
 
-        self._disposables.add(
+        self.register_disposable(
             self.global_map.observable()  # type: ignore[no-untyped-call]
             .pipe(ops.map(_calculate_and_time))
             .subscribe(lambda result: _publish_costmap(result[0], result[1], result[2]))
@@ -74,6 +73,3 @@ class CostMapper(Module[Config]):
     def _calculate_costmap(self, msg: PointCloud2) -> OccupancyGrid:
         fn = OCCUPANCY_ALGOS[self.config.algo]
         return fn(msg, **asdict(self.config.config))
-
-
-cost_mapper = CostMapper.blueprint

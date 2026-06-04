@@ -1,5 +1,20 @@
+# Copyright 2026 Dimensional Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from functools import cached_property
 import os
+from typing import Any
 import warnings
 
 import moondream as md  # type: ignore[import-untyped]
@@ -7,16 +22,18 @@ import numpy as np
 from PIL import Image as PILImage
 
 from dimos.models.vl.base import VlModel, VlModelConfig
-from dimos.msgs.sensor_msgs import Image
-from dimos.perception.detection.type import Detection2DBBox, Detection2DPoint, ImageDetections2D
+from dimos.msgs.sensor_msgs.Image import Image
+from dimos.perception.detection.type.detection2d.bbox import Detection2DBBox
+from dimos.perception.detection.type.detection2d.imageDetections2D import ImageDetections2D
+from dimos.perception.detection.type.detection2d.point import Detection2DPoint
 
 
 class Config(VlModelConfig):
     api_key: str | None = None
 
 
-class MoondreamHostedVlModel(VlModel[Config]):
-    default_config = Config
+class MoondreamHostedVlModel(VlModel):
+    config: Config
 
     @cached_property
     def _client(self) -> md.vl:
@@ -27,7 +44,7 @@ class MoondreamHostedVlModel(VlModel[Config]):
             )
         return md.vl(api_key=api_key)
 
-    def _to_pil_image(self, image: Image | np.ndarray) -> PILImage.Image:  # type: ignore[type-arg]
+    def _to_pil_image(self, image: Image | np.ndarray) -> PILImage.Image:
         if isinstance(image, np.ndarray):
             warnings.warn(
                 "MoondreamHostedVlModel should receive standard dimos Image type, not a numpy array",
@@ -39,13 +56,13 @@ class MoondreamHostedVlModel(VlModel[Config]):
         rgb_image = image.to_rgb()
         return PILImage.fromarray(rgb_image.data)
 
-    def query(self, image: Image | np.ndarray, query: str, **kwargs) -> str:  # type: ignore[no-untyped-def, type-arg]
+    def query(self, image: Image | np.ndarray, query: str, **kwargs) -> str:  # type: ignore[no-untyped-def]
         pil_image = self._to_pil_image(image)
 
         result = self._client.query(pil_image, query)
         return result.get("answer", str(result))  # type: ignore[no-any-return]
 
-    def caption(self, image: Image | np.ndarray, length: str = "normal") -> str:  # type: ignore[type-arg]
+    def caption(self, image: Image | np.ndarray, length: str = "normal") -> str:
         """Generate a caption for the image.
 
         Args:
@@ -56,7 +73,9 @@ class MoondreamHostedVlModel(VlModel[Config]):
         result = self._client.caption(pil_image, length=length)
         return result.get("caption", str(result))  # type: ignore[no-any-return]
 
-    def query_detections(self, image: Image, query: str, **kwargs) -> ImageDetections2D[Detection2DBBox]:  # type: ignore[no-untyped-def]
+    def query_detections(
+        self, image: Image, query: str, **kwargs: Any
+    ) -> ImageDetections2D[Detection2DBBox]:
         """Detect objects using Moondream's hosted detect method.
 
         Args:
@@ -146,4 +165,3 @@ class MoondreamHostedVlModel(VlModel[Config]):
 
     def stop(self) -> None:
         pass
-

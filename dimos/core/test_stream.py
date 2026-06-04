@@ -24,7 +24,7 @@ from dimos.core.module import Module
 from dimos.core.stream import In
 from dimos.core.testing import MockRobotClient
 from dimos.core.transport import LCMTransport, pLCMTransport
-from dimos.msgs.sensor_msgs import PointCloud2
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.robot.unitree.type.odometry import Odometry
 
 
@@ -170,6 +170,7 @@ class SpyLCMTransport(LCMTransport):
 
 @pytest.mark.parametrize("subscriber_class", [ClassicSubscriber, RXPYSubscriber])
 @pytest.mark.slow
+@pytest.mark.skipif_macos_bug
 def test_subscription(dimos, subscriber_class) -> None:
     robot = dimos.deploy(MockRobotClient)
 
@@ -211,6 +212,7 @@ def test_subscription(dimos, subscriber_class) -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.skipif_macos_bug
 def test_get_next(dimos) -> None:
     robot = dimos.deploy(MockRobotClient)
 
@@ -243,6 +245,7 @@ def test_get_next(dimos) -> None:
 
 
 @pytest.mark.slow
+@pytest.mark.skipif_macos_bug
 def test_hot_getter(dimos) -> None:
     robot = dimos.deploy(MockRobotClient)
 

@@ -13,12 +13,12 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from typing import TypeVar
 
 from reactivex.observable import Observable
 
-from dimos.msgs.geometry_msgs import Quaternion, Transform
-from dimos.msgs.sensor_msgs import CameraInfo
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.protocol.service.spec import BaseConfig, Configurable
 
@@ -32,10 +32,9 @@ class CameraConfig(BaseConfig):
     fps: int | float
 
 
-CameraConfigT = TypeVar("CameraConfigT", bound=CameraConfig)
+class CameraHardware(ABC, Configurable):
+    config: CameraConfig
 
-
-class CameraHardware(ABC, Configurable[CameraConfigT]):
     @abstractmethod
     def image_stream(self) -> Observable[Image]:
         pass

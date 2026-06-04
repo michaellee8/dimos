@@ -28,9 +28,11 @@ from reactivex.disposable import Disposable
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
-from dimos.msgs.geometry_msgs import PoseStamped, Twist, TwistStamped
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.nav_msgs.Odometry import Odometry
-from dimos.msgs.std_msgs import Int32
+from dimos.msgs.std_msgs.Int32 import Int32
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.utils.logging_config import setup_logger
 
@@ -55,14 +57,14 @@ class B1ConnectionConfig(ModuleConfig):
     test_mode: bool = False
 
 
-class B1ConnectionModule(Module[B1ConnectionConfig]):
+class B1ConnectionModule(Module):
     """UDP connection module for B1 robot with standard Twist interface.
 
     Accepts standard ROS Twist messages on /cmd_vel and mode changes on /b1/mode,
     internally converts to B1Command format, and sends UDP packets at 50Hz.
     """
 
-    default_config = B1ConnectionConfig
+    config: B1ConnectionConfig
 
     # LCM ports (inter-module communication)
     cmd_vel: In[TwistStamped]
@@ -119,24 +121,24 @@ class B1ConnectionModule(Module[B1ConnectionConfig]):
         # Subscribe to input streams
         if self.cmd_vel:
             unsub = self.cmd_vel.subscribe(self.handle_twist_stamped)
-            self._disposables.add(Disposable(unsub))
+            self.register_disposable(Disposable(unsub))
         if self.mode_cmd:
             unsub = self.mode_cmd.subscribe(self.handle_mode)
-            self._disposables.add(Disposable(unsub))
+            self.register_disposable(Disposable(unsub))
         if self.odom_in:
             unsub = self.odom_in.subscribe(self._publish_odom_pose)
-            self._disposables.add(Disposable(unsub))
+            self.register_disposable(Disposable(unsub))
 
         # Subscribe to ROS In ports
         if self.ros_cmd_vel:
             unsub = self.ros_cmd_vel.subscribe(self.handle_twist_stamped)
-            self._disposables.add(Disposable(unsub))
+            self.register_disposable(Disposable(unsub))
         if self.ros_odom_in:
             unsub = self.ros_odom_in.subscribe(self._publish_odom_pose)
-            self._disposables.add(Disposable(unsub))
+            self.register_disposable(Disposable(unsub))
         if self.ros_tf:
             unsub = self.ros_tf.subscribe(self._on_ros_tf)
-            self._disposables.add(Disposable(unsub))
+            self.register_disposable(Disposable(unsub))
 
         # Start threads
         self.running = True
@@ -390,7 +392,7 @@ class B1ConnectionModule(Module[B1ConnectionConfig]):
 class MockB1ConnectionModule(B1ConnectionModule):
     """Test connection module that prints commands instead of sending UDP."""
 
-    def __init__(self, **kwargs: Any) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, **kwargs: Any) -> None:
         """Initialize test connection without creating socket."""
         kwargs["test_mode"] = True
         super().__init__(**kwargs)

@@ -15,12 +15,14 @@
 import json
 from typing import Any
 
+from reactivex.disposable import Disposable
+
 from dimos.agents.annotation import skill
 from dimos.core.core import rpc
 from dimos.core.module import Module
 from dimos.core.stream import In
 from dimos.mapping.google_maps.google_maps import GoogleMaps
-from dimos.mapping.types import LatLon
+from dimos.mapping.models import LatLon
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -49,7 +51,7 @@ class GoogleMapsSkillContainer(Module):
     @rpc
     def start(self) -> None:
         super().start()
-        self._disposables.add(self.gps_location.subscribe(self._on_gps_location))  # type: ignore[arg-type]
+        self.register_disposable(Disposable(self.gps_location.subscribe(self._on_gps_location)))
 
     @rpc
     def stop(self) -> None:
@@ -124,8 +126,3 @@ class GoogleMapsSkillContainer(Module):
                 results.append(f"no result for {query}")
 
         return json.dumps(results)
-
-
-google_maps_skill = GoogleMapsSkillContainer.blueprint
-
-__all__ = ["GoogleMapsSkillContainer", "google_maps_skill"]

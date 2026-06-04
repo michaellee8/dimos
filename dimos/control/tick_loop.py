@@ -31,6 +31,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, NamedTuple
 
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.control.task import (
     ControlTask,
     CoordinatorState,
@@ -38,7 +39,7 @@ from dimos.control.task import (
     JointStateSnapshot,
     ResourceClaim,
 )
-from dimos.msgs.sensor_msgs import JointState
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:
@@ -144,7 +145,7 @@ class TickLoop:
         """Stop the tick loop."""
         self._stop_event.set()
         if self._tick_thread and self._tick_thread.is_alive():
-            self._tick_thread.join(timeout=2.0)
+            self._tick_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
         logger.info("TickLoop stopped")
 
     def _loop(self) -> None:

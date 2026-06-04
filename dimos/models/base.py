@@ -22,7 +22,7 @@ from typing import Annotated, Any
 import torch
 
 from dimos.core.resource import Resource
-from dimos.protocol.service import BaseConfig, Configurable
+from dimos.protocol.service.spec import BaseConfig, Configurable
 
 # Device string type - 'cuda', 'cpu', 'cuda:0', 'cuda:1', etc.
 DeviceType = Annotated[str, "Device identifier (e.g., 'cuda', 'cpu', 'cuda:0')"]
@@ -35,7 +35,7 @@ class LocalModelConfig(BaseConfig):
     autostart: bool = False
 
 
-class LocalModel(Resource, Configurable[LocalModelConfig]):
+class LocalModel(Resource, Configurable):
     """Base class for all local GPU/CPU models.
 
     Implements Resource interface for lifecycle management.
@@ -48,7 +48,6 @@ class LocalModel(Resource, Configurable[LocalModelConfig]):
         - stop() for custom cleanup logic
     """
 
-    default_config = LocalModelConfig
     config: LocalModelConfig
 
     def __init__(self, **kwargs: object) -> None:
@@ -144,7 +143,6 @@ class HuggingFaceModel(LocalModel):
         - _model: @cached_property for custom model loading
     """
 
-    default_config = HuggingFaceModelConfig
     config: HuggingFaceModelConfig
     _model_class: Any = None  # e.g., AutoModelForCausalLM
 

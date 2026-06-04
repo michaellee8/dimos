@@ -27,28 +27,27 @@ import numpy as np
 from reactivex import Observable, interval, operators as ops
 from reactivex.disposable import Disposable
 
-from dimos import spec
 from dimos.agents_deprecated.memory.image_embedding import ImageEmbeddingProvider
 from dimos.agents_deprecated.memory.spatial_vector_db import SpatialVectorDB
 from dimos.agents_deprecated.memory.visual_memory import VisualMemory
 from dimos.constants import DIMOS_PROJECT_ROOT
+from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.core.module_coordinator import ModuleCoordinator
 from dimos.core.stream import In
-from dimos.msgs.sensor_msgs import Image
+from dimos.msgs.sensor_msgs.Image import Image
+from dimos.spec.perception import Camera
 from dimos.types.robot_location import RobotLocation
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:
-    from dimos.msgs.geometry_msgs import Vector3
+    from dimos.msgs.geometry_msgs.Vector3 import Vector3
 
 _OUTPUT_DIR = DIMOS_PROJECT_ROOT / "assets" / "output"
 _MEMORY_DIR = _OUTPUT_DIR / "memory"
 _SPATIAL_MEMORY_DIR = _MEMORY_DIR / "spatial_memory"
 _DB_PATH = _SPATIAL_MEMORY_DIR / "chromadb_data"
 _VISUAL_MEMORY_PATH = _SPATIAL_MEMORY_DIR / "visual_memory.pkl"
-
 
 logger = setup_logger()
 
@@ -69,7 +68,7 @@ class SpatialConfig(ModuleConfig):
     visual_memory: VisualMemory | None = None  # Optional VisualMemory instance for storing images
 
 
-class SpatialMemory(Module[SpatialConfig]):
+class SpatialMemory(Module):
     """
     A Dimos module for building and querying Robot spatial memory.
 
@@ -79,7 +78,7 @@ class SpatialMemory(Module[SpatialConfig]):
     robot locations that can be queried by name.
     """
 
-    default_config = SpatialConfig
+    config: SpatialConfig
 
     # LCM inputs
     color_image: In[Image]
@@ -177,7 +176,7 @@ class SpatialMemory(Module[SpatialConfig]):
         self.robot_locations: list[RobotLocation] = []
 
         # Track latest data for processing
-        self._latest_video_frame: np.ndarray | None = None  # type: ignore[type-arg]
+        self._latest_video_frame: np.ndarray | None = None
         self._process_interval = 1
 
         logger.info(f"SpatialMemory initialized with model {self.embedding_model}")
@@ -196,10 +195,10 @@ class SpatialMemory(Module[SpatialConfig]):
             else:
                 logger.warning("Received image message without data attribute")
 
-        self._disposables.add(Disposable(self.color_image.subscribe(set_video)))
+        self.register_disposable(Disposable(self.color_image.subscribe(set_video)))
 
         # Start periodic processing using interval
-        self._disposables.add(
+        self.register_disposable(
             interval(self._process_interval).subscribe(lambda _: self._process_frame())
         )
 
@@ -518,7 +517,7 @@ class SpatialMemory(Module[SpatialConfig]):
             timestamp=time.time(),
         )
 
-        return self.add_robot_location(location)  # type: ignore[no-any-return]
+        return self.add_robot_location(location)
 
     @rpc
     def get_robot_locations(self) -> list[RobotLocation]:
@@ -577,14 +576,9 @@ class SpatialMemory(Module[SpatialConfig]):
 
 def deploy(  # type: ignore[no-untyped-def]
     dimos: ModuleCoordinator,
-    camera: spec.Camera,
+    camera: Camera,
 ):
-    spatial_memory = dimos.deploy(SpatialMemory, db_path="/tmp/spatial_memory_db")  # type: ignore[attr-defined]
+    spatial_memory = dimos.deploy(SpatialMemory, db_path="/tmp/spatial_memory_db")
     spatial_memory.color_image.connect(camera.color_image)
     spatial_memory.start()
     return spatial_memory
-
-
-spatial_memory = SpatialMemory.blueprint
-
-__all__ = ["SpatialMemory", "deploy", "spatial_memory"]

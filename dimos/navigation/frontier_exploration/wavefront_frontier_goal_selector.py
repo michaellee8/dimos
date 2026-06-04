@@ -30,12 +30,14 @@ import numpy as np
 from reactivex.disposable import Disposable
 
 from dimos.agents.annotation import skill
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.mapping.occupancy.inflation import simple_inflate
-from dimos.msgs.geometry_msgs import PoseStamped, Vector3
-from dimos.msgs.nav_msgs import CostValues, OccupancyGrid
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.nav_msgs.OccupancyGrid import CostValues, OccupancyGrid
 from dimos.utils.logging_config import setup_logger
 from dimos.utils.transform_utils import get_distance
 
@@ -90,7 +92,7 @@ class WavefrontConfig(ModuleConfig):
     goal_timeout: float = 15.0
 
 
-class WavefrontFrontierExplorer(Module[WavefrontConfig]):
+class WavefrontFrontierExplorer(Module):
     """
     Wavefront frontier exploration algorithm implementation.
 
@@ -105,7 +107,7 @@ class WavefrontFrontierExplorer(Module[WavefrontConfig]):
         - goal_request: Exploration goals sent to the navigator
     """
 
-    default_config = WavefrontConfig
+    config: WavefrontConfig
 
     # LCM inputs
     global_costmap: In[OccupancyGrid]
@@ -152,22 +154,22 @@ class WavefrontFrontierExplorer(Module[WavefrontConfig]):
         super().start()
 
         unsub = self.global_costmap.subscribe(self._on_costmap)
-        self._disposables.add(Disposable(unsub))
+        self.register_disposable(Disposable(unsub))
 
         unsub = self.odom.subscribe(self._on_odometry)
-        self._disposables.add(Disposable(unsub))
+        self.register_disposable(Disposable(unsub))
 
         if self.goal_reached.transport is not None:
             unsub = self.goal_reached.subscribe(self._on_goal_reached)
-            self._disposables.add(Disposable(unsub))
+            self.register_disposable(Disposable(unsub))
 
         if self.explore_cmd.transport is not None:
             unsub = self.explore_cmd.subscribe(self._on_explore_cmd)
-            self._disposables.add(Disposable(unsub))
+            self.register_disposable(Disposable(unsub))
 
         if self.stop_explore_cmd.transport is not None:
             unsub = self.stop_explore_cmd.subscribe(self._on_stop_explore_cmd)
-            self._disposables.add(Disposable(unsub))
+            self.register_disposable(Disposable(unsub))
 
     @rpc
     def stop(self) -> None:
@@ -731,7 +733,7 @@ class WavefrontFrontierExplorer(Module[WavefrontConfig]):
             and self.exploration_thread.is_alive()
             and threading.current_thread() != self.exploration_thread
         ):
-            self.exploration_thread.join(timeout=2.0)
+            self.exploration_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
 
         # Publish current location as goal to stop the robot.
         if self.latest_odometry is not None:
@@ -839,8 +841,3 @@ class WavefrontFrontierExplorer(Module[WavefrontConfig]):
             return "Stopped exploration. The robot has stopped moving."
         else:
             return "Exploration skill was not active, so nothing was stopped."
-
-
-wavefront_frontier_explorer = WavefrontFrontierExplorer.blueprint
-
-__all__ = ["WavefrontFrontierExplorer", "wavefront_frontier_explorer"]

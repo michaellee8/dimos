@@ -37,8 +37,8 @@ from fastapi.staticfiles import StaticFiles
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import Out
-from dimos.msgs.geometry_msgs import PoseStamped
-from dimos.msgs.sensor_msgs import Joy
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.sensor_msgs.Joy import Joy
 from dimos.teleop.quest.quest_types import Buttons, QuestControllerState
 from dimos.teleop.utils.teleop_transforms import webxr_to_robot
 from dimos.utils.logging_config import setup_logger
@@ -78,7 +78,7 @@ class QuestTeleopConfig(ModuleConfig):
 _Config = TypeVar("_Config", bound=QuestTeleopConfig)
 
 
-class QuestTeleopModule(Module[_Config]):
+class QuestTeleopModule(Module):
     """Quest Teleoperation Module for Meta Quest controllers.
 
     Receives controller data from the Quest web app via an embedded WebSocket
@@ -91,7 +91,7 @@ class QuestTeleopModule(Module[_Config]):
         - buttons: Buttons (button states for both controllers)
     """
 
-    default_config = QuestTeleopConfig  # type: ignore[assignment]
+    config: QuestTeleopConfig
 
     # Outputs: delta poses for each controller
     left_controller_output: Out[PoseStamped]
@@ -379,14 +379,3 @@ class QuestTeleopModule(Module[_Config]):
         """
         buttons = Buttons.from_controllers(left, right)
         self.buttons.publish(buttons)
-
-
-quest_teleop_module = QuestTeleopModule.blueprint
-
-__all__ = [
-    "Hand",
-    "QuestTeleopConfig",
-    "QuestTeleopModule",
-    "QuestTeleopStatus",
-    "quest_teleop_module",
-]

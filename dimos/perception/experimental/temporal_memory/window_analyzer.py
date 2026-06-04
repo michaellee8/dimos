@@ -25,11 +25,17 @@ from typing import TYPE_CHECKING, Any
 
 from dimos.utils.logging_config import setup_logger
 
-from . import temporal_utils as tu
+from .temporal_utils.parsers import parse_window_response
+from .temporal_utils.prompts import (
+    build_query_prompt,
+    build_summary_prompt,
+    build_window_prompt,
+    get_structured_output_format,
+)
 
 if TYPE_CHECKING:
     from dimos.models.vl.base import VlModel
-    from dimos.msgs.sensor_msgs import Image
+    from dimos.msgs.sensor_msgs.Image import Image
 
     from .frame_window_accumulator import Frame
 
@@ -68,15 +74,13 @@ class WindowAnalyzer:
     Stateless — caller provides frames, state snapshots, and config.
     """
 
-    def __init__(
-        self, vlm: VlModel[Any], *, max_tokens: int = 900, temperature: float = 0.2
-    ) -> None:
+    def __init__(self, vlm: VlModel, *, max_tokens: int = 900, temperature: float = 0.2) -> None:
         self._vlm = vlm
         self.max_tokens = max_tokens
         self.temperature = temperature
 
     @property
-    def vlm(self) -> VlModel[Any]:
+    def vlm(self) -> VlModel:
         return self._vlm
 
     def analyze_window(
@@ -87,14 +91,14 @@ class WindowAnalyzer:
         w_end: float,
     ) -> AnalysisResult | None:
         """Run VLM window analysis. Returns None on failure."""
-        query = tu.build_window_prompt(
+        query = build_window_prompt(
             w_start=w_start,
             w_end=w_end,
             frame_count=len(frames),
             state=state_dict,
         )
         try:
-            fmt = tu.get_structured_output_format()
+            fmt = get_structured_output_format()
             if len(frames) > 1:
                 responses = self._vlm.query_batch(
                     [f.image for f in frames], query, response_format=fmt
@@ -109,7 +113,7 @@ class WindowAnalyzer:
         if raw is None:
             return None
 
-        parsed = tu.parse_window_response(raw, w_start, w_end, len(frames))
+        parsed = parse_window_response(raw, w_start, w_end, len(frames))
         return AnalysisResult(parsed=parsed, raw_vlm_response=raw, w_start=w_start, w_end=w_end)
 
     # It's called from the orchestrator, not here.
@@ -124,7 +128,7 @@ class WindowAnalyzer:
         if not chunk_buffer or not latest_frame:
             return None
 
-        prompt = tu.build_summary_prompt(
+        prompt = build_summary_prompt(
             rolling_summary=rolling_summary,
             chunk_windows=chunk_buffer,
         )
@@ -143,7 +147,7 @@ class WindowAnalyzer:
         latest_frame: Image,
     ) -> QueryResult | None:
         """Answer a user query. Returns None on failure."""
-        prompt = tu.build_query_prompt(question=question, context=context)
+        prompt = build_query_prompt(question=question, context=context)
         try:
             raw = self._vlm.query(latest_frame, prompt)
             return QueryResult(answer=raw.strip(), raw_vlm_response=raw)
