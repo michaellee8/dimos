@@ -160,6 +160,15 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry, mapping.Glob
     odometry: Out[Odometry]
     global_map: Out[PointCloud2]
 
+    @property
+    def child_frame_id(self) -> str:
+        # Mirror the base `frame_id` property so the child frame gets the same
+        # `frame_id_prefix`; otherwise a prefix would split the TF tree.
+        base = self.config.child_frame_id
+        if self.config.frame_id_prefix:
+            return f"{self.config.frame_id_prefix}/{base}"
+        return base
+
     @rpc
     def start(self) -> None:
         self._validate_network()
@@ -172,7 +181,7 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry, mapping.Glob
         self.tf.publish(
             Transform(
                 frame_id=self.frame_id,
-                child_frame_id=self.config.child_frame_id,
+                child_frame_id=self.child_frame_id,
                 translation=Vector3(
                     msg.pose.position.x,
                     msg.pose.position.y,
