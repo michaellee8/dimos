@@ -176,7 +176,7 @@ jobs:
       - name: Install apt dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install libturbojpeg -y
+          sudo apt-get install libturbojpeg zstd -y
       - name: Install uv
         uses: astral-sh/setup-uv@v6
         with:
