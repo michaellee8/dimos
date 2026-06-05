@@ -43,8 +43,6 @@ unitree_g1_detection = (
     .global_config(n_workers=8)
     .remappings(
         [
-            # Currently only the person tracker's detections feed needs routing
-            # to the renamed 2D output.
             (PersonTracker, "detections", "detections_2d"),
         ]
     )
