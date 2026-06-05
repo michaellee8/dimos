@@ -201,7 +201,7 @@ def process_db(
         try:
             build_rrd(
                 str(db),
-                str(db.parent / f"{db.parent.name}.rrd"),
+                str(db.parent / "main.rrd"),
                 intrinsics,
                 optical_in_base,
                 resolution,
