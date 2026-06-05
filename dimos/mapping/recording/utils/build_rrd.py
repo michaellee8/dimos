@@ -82,12 +82,16 @@ def _pose7(p):
     return list(p)
 
 
+def _voxel_keys(pts: np.ndarray, voxel: float) -> np.ndarray:
+    """One int64 voxel id per point (the cell it falls in at `voxel` resolution)."""
+    cell = np.floor(pts / voxel).astype(np.int64) + (1 << 20)
+    return cell[:, 0] | (cell[:, 1] << 21) | (cell[:, 2] << 42)
+
+
 def _down(pts: np.ndarray, voxel: float) -> np.ndarray:
     if voxel <= 0 or len(pts) == 0:
         return pts
-    k = np.floor(pts / voxel).astype(np.int64) + (1 << 20)
-    key = k[:, 0] | (k[:, 1] << 21) | (k[:, 2] << 42)
-    _, idx = np.unique(key, return_index=True)
+    _, idx = np.unique(_voxel_keys(pts, voxel), return_index=True)
     return pts[idx]
 
 
@@ -118,15 +122,40 @@ def _log_frames(store, stream, entity, stride, voxel, base):
 
 
 def _log_map(store, stream, entity, voxel, base):
+    """Aggregate a lidar stream into one voxel-downsampled map. Streams cloud by
+    cloud, downsampling each and keeping only points in not-yet-seen voxels, so
+    peak memory is bounded by the *final* map size (not the sum of all frames)."""
     if stream not in store.list_streams():
         return
     print(f"   rrd: aggregating {stream} map -> {entity} (this is the slow one) ...", flush=True)
-    chunks = [
-        c for c in (obs.data.points_f32() for obs in store.stream(stream, PointCloud2)) if len(c)
-    ]
-    if not chunks:
+    if voxel <= 0:
+        chunks = [
+            cloud
+            for cloud in (obs.data.points_f32() for obs in store.stream(stream, PointCloud2))
+            if len(cloud)
+        ]
+        if not chunks:
+            return
+        pts = np.concatenate(chunks)
+        rr.log(entity, rr.Points3D(pts, colors=_shaded(pts, base)), static=True)
+        print(f"   rrd: {entity} <- {stream} ({len(pts):,} pts, no voxel)")
         return
-    pts = _down(np.concatenate(chunks), voxel)
+
+    seen: set[int] = set()
+    kept: list[np.ndarray] = []
+    for obs in store.stream(stream, PointCloud2):
+        pts = _down(obs.data.points_f32(), voxel)
+        if len(pts) == 0:
+            continue
+        keys = _voxel_keys(pts, voxel)
+        fresh = np.array([key not in seen for key in keys.tolist()], dtype=bool)
+        if not fresh.any():
+            continue
+        kept.append(pts[fresh])
+        seen.update(keys[fresh].tolist())
+    if not kept:
+        return
+    pts = np.concatenate(kept)
     rr.log(entity, rr.Points3D(pts, colors=_shaded(pts, base)), static=True)
     print(f"   rrd: {entity} <- {stream} ({len(pts):,} pts, voxel {voxel}m)")
 
