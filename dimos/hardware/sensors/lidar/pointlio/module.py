@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Python NativeModule wrapper for the Point-LIO + Livox Mid-360 binary.
+"""Python NativeModule wrapper for the FAST-LIO2 + Livox Mid-360 binary.
 
-Binds Livox SDK2 directly into Point-LIO for real-time LiDAR SLAM.
+Binds Livox SDK2 directly into FAST-LIO-NON-ROS for real-time LiDAR SLAM.
 Outputs registered (world-frame) point clouds and odometry with covariance.
 
 Usage::
 
-    from dimos.hardware.sensors.lidar.pointlio.module import PointLio
+    from dimos.hardware.sensors.lidar.fastlio2.module import PointLio
     from dimos.core.coordination.blueprints import autoconnect
 
     from dimos.core.coordination.module_coordinator import ModuleCoordinator
@@ -61,8 +61,8 @@ from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.navigation.nav_stack.frames import FRAME_ODOM
-from dimos.spec import perception
+from dimos.navigation.nav_stack.frames import FRAME_BODY, FRAME_ODOM
+from dimos.spec import mapping, perception
 from dimos.utils.generic import get_local_ips
 from dimos.utils.logging_config import setup_logger
 
@@ -83,14 +83,11 @@ class PointLioConfig(NativeModuleConfig):
     # Converted to init_pose CLI arg [x, y, z, qx, qy, qz, qw] in model_post_init.
     mount: Pose = Pose()
 
-    # frame_id is the header frame for BOTH the point cloud and the odometry
-    # message (the Mid-360 sensor frame). The TF published by the module is a
-    # separate odom_parent_frame_id -> odom_frame_id transform.
-    frame_id: str = "mid360_link"
-    # TF publish frames (odom -> base_link): the sensor pose expressed as the
-    # base_link pose in the odom frame.
-    odom_parent_frame_id: str = FRAME_ODOM
-    odom_frame_id: str = "base_link"
+    # Frame IDs for output messages.  "odom" reflects that PointLio provides
+    # locally-smooth, continuous odometry (no loop-closure jumps).  PGO
+    # publishes the map→odom correction via TF.
+    frame_id: str = FRAME_ODOM
+    child_frame_id: str = FRAME_BODY
 
     # FAST-LIO internal processing rates
     msr_freq: float = 50.0
@@ -105,11 +102,16 @@ class PointLioConfig(NativeModuleConfig):
     sor_mean_k: int = 50
     sor_stddev: float = 1.0
 
+    # Global voxel map (disabled when map_freq <= 0)
+    map_freq: float = 0.0
+    map_voxel_size: float = 0.1
+    map_max_range: float = 100.0
+
     # FAST-LIO YAML config (relative to config/ dir, or absolute path)
     # C++ binary reads YAML directly via yaml-cpp
     config: Annotated[
         Path, validate_as(...).transform(lambda p: p if p.is_absolute() else _CONFIG_DIR / p)
-    ] = Path("default.yaml")
+    ] = Path("mid360.yaml")
 
     debug: bool = False
 
@@ -128,9 +130,24 @@ class PointLioConfig(NativeModuleConfig):
     # Resolved in __post_init__, passed as --config_path to the binary
     config_path: str | None = None
 
+    # Offline replay. When set, the C++ binary skips SDK init and feeds
+    # packets from this pcap into the same callbacks the SDK would.
+    replay_pcap: Path | None = None
+    # Replay-only: drop pcap records with sensor ts < this.
+    replay_skip_until_ns: int | None = None
+    # Live-only: path where the binary writes the first-callback wall_ns.
+    first_packet_marker: Path | None = None
+    # Drive scan boundaries + publish ts off the sensor packet timestamp
+    # for bit-reproducible offline replay.
+    deterministic_clock: bool = False
+    # Replay-only: feed point and IMU packets on two separate threads to
+    # mimic the live Livox SDK's concurrent delivery. Use with
+    # deterministic_clock=False to reproduce live thread-interleaving.
+    replay_dual_thread: bool = False
+
     # init_pose is computed from mount; config is resolved to config_path
     init_pose: list[float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-    cli_exclude: frozenset[str] = frozenset({"config", "mount", "odom_parent_frame_id"})
+    cli_exclude: frozenset[str] = frozenset({"config", "mount"})
 
     def model_post_init(self, __context: object) -> None:
         """Resolve config_path and compute init_pose from mount."""
@@ -151,15 +168,17 @@ class PointLioConfig(NativeModuleConfig):
         ]
 
 
-class PointLio(NativeModule, perception.Lidar, perception.Odometry):
+class PointLio(NativeModule, perception.Lidar, perception.Odometry, mapping.GlobalPointcloud):
     config: PointLioConfig
 
     lidar: Out[PointCloud2]
     odometry: Out[Odometry]
+    global_map: Out[PointCloud2]
 
     @rpc
     def start(self) -> None:
-        self._validate_network()
+        if self.config.replay_pcap is None:
+            self._validate_network()
         super().start()
         self.register_disposable(
             Disposable(self.odometry.transport.subscribe(self._on_odom_for_tf, self.odometry))
@@ -168,8 +187,8 @@ class PointLio(NativeModule, perception.Lidar, perception.Odometry):
     def _on_odom_for_tf(self, msg: Odometry) -> None:
         self.tf.publish(
             Transform(
-                frame_id=self.config.odom_parent_frame_id,
-                child_frame_id=self.config.odom_frame_id,
+                frame_id=FRAME_ODOM,
+                child_frame_id=FRAME_BODY,
                 translation=Vector3(
                     msg.pose.position.x,
                     msg.pose.position.y,
