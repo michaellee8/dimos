@@ -226,8 +226,7 @@ def make_quadruped_joints(hardware_id: HardwareId) -> list[JointName]:
     """Create joint names for a 12-DOF Unitree-layout quadruped.
 
     Order matches Unitree's LowCmd_.motor_cmd[0..11] indexing (FR, FL, RR, RL,
-    each hip→thigh→calf). Single-source-of-truth so wholebody Modules and the
-    coordinator-side adapter agree on the wire-level name → motor-index mapping.
+    each hip→thigh→calf)
 
     Args:
         hardware_id: The hardware identifier (e.g., "go2")

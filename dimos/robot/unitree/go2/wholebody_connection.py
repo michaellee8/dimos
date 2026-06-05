@@ -18,19 +18,19 @@ Streams: motor_states (Out[JointState]), imu (Out[Imu]),
 motor_command (In[MotorCommandArray]). 12 motors, ordering from
 make_quadruped_joints("go2") (FR → FL → RR → RL, each hip → thigh → calf).
 
-Mirrors G1WholeBodyConnection's contract but speaks the quadruped IDL
-(unitree_go, not unitree_hg). Differences vs G1:
-  - 12 motors / 20 LowCmd_ slots (G1: 29 / 35)
+Quadruped IDL (unitree_go)
+  - 12 motors / 20 LowCmd_ slots
   - No `mode_machine` field (humanoid-only) — not echoed
   - No `mode_pr` field (humanoid-only) — not set
   - `head[0..1] = 0xFE, 0xEF` + `level_flag = 0xFF` defaults required by
     the Go2 motor-controller firmware
-  - Adds a foot_force damped-state precondition in start(): publishing
-    LowCmd_ to a still-standing robot whose sport controller was just
-    killed will cause lurching, so we refuse to start unless the robot
-    is sat / damped (G1 doesn't need this check)
-  - MotionSwitcher release behaves the same way: skip if already
-    released, otherwise loop until empty
+  - MotionSwitcher release: skip if already released, otherwise loop
+    until empty
+
+Operator responsibility: put the robot in a safe pose (sat or laid down)
+BEFORE starting any task that publishes targets. Module start itself does
+not command motors, but a first target published against a standing
+robot at high kp will lurch — the safe pattern is sync-then-arm.
 """
 
 from __future__ import annotations
@@ -70,15 +70,8 @@ _NUM_MOTOR_SLOTS = 20  # Go2 LowCmd has 20 slots; only 12 are used
 _MOTOR_MODE_ENABLE: int = 0x01
 _MOTOR_MODE_DISABLE: int = 0x00
 
-# Sum of |foot_force| (N) above which we consider the robot to be standing.
-# Used by the start()-time damped-state precondition.
-_FOOT_FORCE_DAMPED_THRESHOLD_N: float = 50.0
-_DAMPED_CHECK_TIMEOUT_S: float = 2.0
 _FIRST_LOWSTATE_TIMEOUT_S: float = 3.0
 
-# Joint names sourced from the canonical helper. Order matches the motor index
-# convention above. Single-source-of-truth so any coordinator-side adapter built
-# from make_quadruped_joints("go2") agrees on the wire-level name → motor-index mapping.
 GO2_JOINT_NAMES: list[str] = make_quadruped_joints("go2")
 assert len(GO2_JOINT_NAMES) == _NUM_MOTORS
 
@@ -88,7 +81,6 @@ class Go2WholeBodyConnectionConfig(ModuleConfig):
     release_sport_mode: bool = True
     publish_rate_hz: float = 500.0
     frame_id: str = "go2_base"
-    require_damped_at_start: bool = True
 
 
 class Go2WholeBodyConnection(Module):
@@ -184,14 +176,6 @@ class Go2WholeBodyConnection(Module):
                 f"Timed out after {_FIRST_LOWSTATE_TIMEOUT_S:.1f}s waiting "
                 f"for first LowState — robot offline or wrong DDS domain?"
             )
-
-        if self.config.require_damped_at_start:
-            if not self._verify_robot_damped():
-                raise RuntimeError(
-                    "Go2 is not in a damped/sat state at start — refusing to "
-                    "command motors. Sit the robot down (or set "
-                    "require_damped_at_start=False) and retry."
-                )
 
         logger.info("Go2WholeBodyConnection connected")
 
@@ -384,9 +368,6 @@ class Go2WholeBodyConnection(Module):
         msc.SetTimeout(5.0)
         msc.Init()
 
-        # CheckMode returns (status, None) — or (status, {"name": ""}) on
-        # some firmwares — once nothing is active. Treat both as "already
-        # released" and return without poking ReleaseMode.
         _status, result = msc.CheckMode()
         if not result or not result.get("name"):
             logger.info("Sport mode already released — skipping ReleaseMode")
@@ -398,41 +379,6 @@ class Go2WholeBodyConnection(Module):
             time.sleep(1)
 
         logger.info("Sport mode released — low-level control active")
-
-    def _verify_robot_damped(self) -> bool:
-        """Sample foot_force during start(); refuse if the robot is standing.
-
-        Drains LowState_ for up to _DAMPED_CHECK_TIMEOUT_S, averages the
-        last ~10 samples per foot, returns False if the sum of
-        |avg foot_force| exceeds _FOOT_FORCE_DAMPED_THRESHOLD_N.
-        """
-        deadline = time.time() + _DAMPED_CHECK_TIMEOUT_S
-        samples: list[list[float]] = []
-        while time.time() < deadline:
-            self._drain_low_state()
-            with self._lock:
-                ls = self._low_state
-            if ls is not None:
-                samples.append([float(x) for x in ls.foot_force])
-            time.sleep(0.05)
-
-        if not samples:
-            logger.error("No foot_force samples collected during damped check")
-            return False
-
-        last = samples[-10:] if len(samples) >= 10 else samples
-        avg_per_foot = [sum(s[i] for s in last) / len(last) for i in range(4)]
-        total = sum(abs(f) for f in avg_per_foot)
-
-        if total > _FOOT_FORCE_DAMPED_THRESHOLD_N:
-            logger.error(
-                f"Robot appears to be standing (foot_force sum={total:.1f}N > "
-                f"{_FOOT_FORCE_DAMPED_THRESHOLD_N}N threshold). Sit the robot down."
-            )
-            return False
-
-        logger.info(f"Robot damped (foot_force sum={total:.1f}N)")
-        return True
 
 
 __all__ = [

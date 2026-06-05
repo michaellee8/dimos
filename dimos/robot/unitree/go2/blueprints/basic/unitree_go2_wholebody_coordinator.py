@@ -15,8 +15,7 @@
 
 """Go2 ControlCoordinator: Go2WholeBodyConnection Module + servo task via LCM bridge.
 
-Mirrors `unitree_g1_coordinator.py`. Run with
-`ROBOT_INTERFACE=<nic> dimos run unitree-go2-wholebody-coordinator`.
+Run with `ROBOT_INTERFACE=<nic> dimos run unitree-go2-wholebody-coordinator`.
 """
 
 from __future__ import annotations
