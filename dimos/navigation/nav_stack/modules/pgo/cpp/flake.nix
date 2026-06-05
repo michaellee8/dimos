@@ -13,6 +13,10 @@
       url = "github:dimensionalOS/dimos-lcm/main";
       flake = false;
     };
+    dimos-cpp = {
+      url = "path:../../../../../../native/cpp/dimos-module";
+      flake = false;
+    };
     gtsam-extended = {
       url = "github:jeff-hykin/gtsam-extended";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -20,7 +24,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, lcm-extended, dimos-lcm, gtsam-extended, ... }:
+  outputs = { self, nixpkgs, flake-utils, lcm-extended, dimos-lcm, gtsam-extended, dimos-cpp, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -57,6 +61,7 @@
           cmakeFlags = [
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
             "-DFETCHCONTENT_SOURCE_DIR_DIMOS_LCM=${dimos-lcm}"
+            "-DDIMOS_CPP_DIR=${dimos-cpp}/include"
           ];
 
           # On macOS, libgtsam.4.dylib is referenced via @rpath but the binary

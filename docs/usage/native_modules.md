@@ -178,7 +178,7 @@ Malformed lines fall back to plain text logging.
 
 ## Writing the C++ side
 
-A header-only helper is provided at [`dimos/hardware/sensors/lidar/common/dimos_native_module.hpp`](/dimos/hardware/sensors/lidar/common/dimos_native_module.hpp):
+A header-only helper is provided at [`native/cpp/dimos-module/include/dimos_native_module.hpp`](/native/cpp/dimos-module/include/dimos_native_module.hpp):
 
 ```cpp
 #include "dimos_native_module.hpp"

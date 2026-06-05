@@ -8,6 +8,11 @@
     livox-sdk.inputs.nixpkgs.follows = "nixpkgs";
     livox-sdk.inputs.flake-utils.follows = "flake-utils";
     livox-sdk.inputs.lcm-extended.follows = "lcm-extended";
+    livox-sdk.inputs.dimos-cpp.follows = "dimos-cpp";
+    dimos-cpp = {
+      url = "path:../../../../../../native/cpp/dimos-module";
+      flake = false;
+    };
     dimos-lcm = {
       url = "github:dimensionalOS/dimos-lcm/main";
       flake = false;
@@ -23,7 +28,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, livox-sdk, dimos-lcm, fast-lio, lcm-extended, ... }:
+  outputs = { self, nixpkgs, flake-utils, livox-sdk, dimos-lcm, fast-lio, lcm-extended, dimos-cpp, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         # Overlay fixes for darwin-broken nixpkgs recipes in our transitive
@@ -89,6 +94,7 @@
             "-DFETCHCONTENT_SOURCE_DIR_DIMOS_LCM=${dimos-lcm}"
             "-DFASTLIO_DIR=${fast-lio}"
             "-DLIVOX_COMMON_DIR=${livox-common}"
+            "-DDIMOS_CPP_DIR=${dimos-cpp}/include"
           ];
         };
       in {

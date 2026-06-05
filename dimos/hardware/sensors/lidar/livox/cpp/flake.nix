@@ -8,6 +8,10 @@
       url = "github:dimensionalOS/dimos-lcm/main";
       flake = false;
     };
+    dimos-cpp = {
+      url = "path:../../../../../../native/cpp/dimos-module";
+      flake = false;
+    };
     lcm-extended = {
       url = "github:jeff-hykin/lcm_extended";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -15,7 +19,7 @@
     };
   };
 
-  outputs = { self, nixpkgs, flake-utils, dimos-lcm, lcm-extended, ... }:
+  outputs = { self, nixpkgs, flake-utils, dimos-lcm, lcm-extended, dimos-cpp, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -72,6 +76,7 @@
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
             "-DFETCHCONTENT_SOURCE_DIR_DIMOS_LCM=${dimos-lcm}"
             "-DLIVOX_COMMON_DIR=${livox-common}"
+            "-DDIMOS_CPP_DIR=${dimos-cpp}/include"
           ];
         };
       in {

@@ -1,5 +1,17 @@
 {
   "nodes": {
+    "dimos-cpp": {
+      "flake": false,
+      "locked": {
+        "path": "../../../../../../native/cpp/dimos-module",
+        "type": "path"
+      },
+      "original": {
+        "path": "../../../../../../native/cpp/dimos-module",
+        "type": "path"
+      },
+      "parent": []
+    },
     "dimos-lcm": {
       "flake": false,
       "locked": {
@@ -94,6 +106,9 @@
     },
     "livox-sdk": {
       "inputs": {
+        "dimos-cpp": [
+          "dimos-cpp"
+        ],
         "dimos-lcm": "dimos-lcm_2",
         "flake-utils": [
           "flake-utils"
@@ -133,6 +148,7 @@
     },
     "root": {
       "inputs": {
+        "dimos-cpp": "dimos-cpp",
         "dimos-lcm": "dimos-lcm",
         "fast-lio": "fast-lio",
         "flake-utils": "flake-utils",

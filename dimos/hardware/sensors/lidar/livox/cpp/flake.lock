@@ -1,5 +1,17 @@
 {
   "nodes": {
+    "dimos-cpp": {
+      "flake": false,
+      "locked": {
+        "path": "../../../../../../native/cpp/dimos-module",
+        "type": "path"
+      },
+      "original": {
+        "path": "../../../../../../native/cpp/dimos-module",
+        "type": "path"
+      },
+      "parent": []
+    },
     "dimos-lcm": {
       "flake": false,
       "locked": {
@@ -76,6 +88,7 @@
     },
     "root": {
       "inputs": {
+        "dimos-cpp": "dimos-cpp",
         "dimos-lcm": "dimos-lcm",
         "flake-utils": "flake-utils",
         "lcm-extended": "lcm-extended",

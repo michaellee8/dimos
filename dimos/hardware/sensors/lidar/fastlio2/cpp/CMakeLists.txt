@@ -80,6 +80,11 @@ if(NOT LIVOX_COMMON_DIR)
   set(LIVOX_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../common)
 endif()
 
+# Shared dimos native module helper (dimos_native_module.hpp)
+if(NOT DIMOS_CPP_DIR)
+  set(DIMOS_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../native/cpp/dimos-module/include)
+endif()
+
 target_include_directories(fastlio2_native PRIVATE
   ${FASTLIO_DIR}/include
   ${FASTLIO_DIR}/src
@@ -89,6 +94,7 @@ target_include_directories(fastlio2_native PRIVATE
   ${PCL_INCLUDE_DIRS}
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${LIVOX_COMMON_DIR}
+  ${DIMOS_CPP_DIR}
   ${LIVOX_SDK_INCLUDE_DIR}
 )
 

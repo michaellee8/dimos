@@ -27,8 +27,14 @@ add_executable(pgo
   commons.cpp
 )
 
+# Shared dimos native module helper (dimos_native_module.hpp)
+if(NOT DIMOS_CPP_DIR)
+  set(DIMOS_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../native/cpp/dimos-module/include)
+endif()
+
 target_include_directories(pgo PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}
+  ${DIMOS_CPP_DIR}
   ${dimos_lcm_SOURCE_DIR}/generated/cpp_lcm_msgs
   ${LCM_INCLUDE_DIRS}
   ${EIGEN3_INCLUDE_DIR}
