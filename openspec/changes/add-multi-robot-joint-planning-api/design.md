@@ -139,9 +139,28 @@ Execution should still submit per-robot trajectories to existing coordinator tas
 ### Streams, transports, blueprints, skills/MCP, registries
 
 - Streams/transports: no new streams or transport changes are expected. The existing aggregated `joint_state` stream remains the state source.
-- Blueprints: no new blueprint names are expected. Existing dual-arm blueprints should exercise the new behavior.
+- Blueprints: add a mock dual-arm planner/coordinator blueprint named `dual-xarm6-mock-planner-coordinator` so manual QA can start the planner, coordinator, mock arms, and Meshcat with one command.
 - Skills/MCP: do not expose multi-robot planning as a new skill in this change. Existing single-robot skills remain wrappers over the scalar API path.
-- Generated registries: no generated registry update is expected unless implementation unexpectedly adds a blueprint or module class.
+- Generated registries: because this change adds a blueprint, regenerate the blueprint registry and include the generated update with the implementation.
+
+### Manual verification surface
+
+The implementation should include a runnable mock dual-arm example rather than relying only on unit tests. The intended flow is:
+
+```bash
+dimos run dual-xarm6-mock-planner-coordinator
+python -i -m dimos.manipulation.planning.examples.demo_dual_arm_planning
+```
+
+The REPL example should drive the public RPC/library surface and expose helpers for:
+
+- `robots()` to confirm `left_arm` and `right_arm` are configured.
+- `dual_plan_joints()` to call `plan_to_joints([left_target, right_target], ["left_arm", "right_arm"])`.
+- `dual_preview()` to call `preview_path(duration, ["left_arm", "right_arm"])` and let the user observe synchronized Meshcat motion without hardware execution.
+- `dual_execute()` to call `execute(["left_arm", "right_arm"])` explicitly.
+- `bad_request()` to send a malformed multi-robot request and confirm it fails without replacing the active plan.
+
+The example should be safe for mock-first verification and reusable for hardware only after the operator explicitly chooses execution.
 
 ## Decisions
 
@@ -191,8 +210,9 @@ Rationale: `ControlCoordinator` already arbitrates joint commands per joint and 
 - Existing scalar calls to `plan_to_joints`, `plan_to_pose`, `preview_path`, and `execute` remain compatible.
 - Add tests for scalar behavior to prevent regressions.
 - Add tests for list input validation, deterministic ordering, synchronized trajectory splitting, and atomic plan storage.
+- Add `dual-xarm6-mock-planner-coordinator` as the primary manual QA blueprint for coordinated planning.
 - Update manipulation planning docs only after the API shape is confirmed in implementation.
-- No blueprint registry regeneration is expected.
+- Regenerate `dimos/robot/all_blueprints.py` after adding the manual QA blueprint.
 
 ## Open Questions
 

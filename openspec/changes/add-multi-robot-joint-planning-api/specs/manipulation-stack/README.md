@@ -104,6 +104,25 @@ Passing a string keeps existing single-robot behavior. Passing a list previews o
 
 Execution still submits split per-robot trajectories to existing coordinator trajectory tasks. This preserves coordinator architecture, but exact atomic start across multiple task RPCs is not guaranteed by this change.
 
+## Manual QA blueprint
+
+Add a mock dual-arm planner/coordinator blueprint named `dual-xarm6-mock-planner-coordinator`. It should be the primary no-hardware way to verify the implementation manually:
+
+```bash
+dimos run dual-xarm6-mock-planner-coordinator
+python -i -m dimos.manipulation.planning.examples.demo_dual_arm_planning
+```
+
+The REPL example should call the same public manipulation RPC methods that users call directly:
+
+```python
+plan_to_joints([left_target, right_target], ["left_arm", "right_arm"])
+preview_path(duration, ["left_arm", "right_arm"])
+execute(["left_arm", "right_arm"])
+```
+
+It should also include a malformed-request helper that proves invalid list inputs fail without commanding motion or replacing the active coordinated plan.
+
 ## Non-goals
 
 - No SRDF parsing.

@@ -46,18 +46,25 @@
 - [ ] 6.5 Add world/planner tests proving composite collision checks set all participating robots in one context.
 - [ ] 6.6 Add manipulation module tests for multi-robot joint planning, multi-robot pose planning failure behavior, preview list behavior, and execute list behavior.
 
-## 7. Documentation
+## 7. Manual QA blueprint and example
 
-- [ ] 7.1 Update `dimos/manipulation/planning/README.md` with the timed plan concept and multi-robot joint planning example.
-- [ ] 7.2 Update `docs/capabilities/manipulation/readme.md` with user-facing multi-robot planning usage after implementation confirms final syntax.
-- [ ] 7.3 Update `docs/capabilities/manipulation/openarm_integration.md` if coordinated planning should replace independent left/right examples.
-- [ ] 7.4 Document non-goals: no SRDF parsing, no named planning groups, no true coupled Cartesian IK, and no automatic execution after planning.
+- [ ] 7.1 Add `dual-xarm6-mock-planner-coordinator` that composes the dual mock XArm6 coordinator with the dual XArm6 manipulation planner and Meshcat visualization.
+- [ ] 7.2 Add `dimos.manipulation.planning.examples.demo_dual_arm_planning` with REPL helpers for `dual_plan_joints`, `dual_preview`, `dual_execute`, and one malformed multi-robot request.
+- [ ] 7.3 Keep execution explicit in the example; planning and preview helpers must not command motion.
+- [ ] 7.4 Regenerate `dimos/robot/all_blueprints.py` and update blueprint registry tests for the new blueprint name.
 
-## 8. Verification and manual QA
+## 8. Documentation
 
-- [ ] 8.1 Run `openspec validate add-multi-robot-joint-planning-api`.
-- [ ] 8.2 Run focused manipulation unit tests for changed planning/module code.
-- [ ] 8.3 Run Drake/manipulation integration tests if dependencies are available in the environment.
-- [ ] 8.4 Run docs validation commands for changed markdown docs.
-- [ ] 8.5 Manually QA through the library/RPC surface on a mock dual-arm setup: successful coordinated joint plan, successful preview, explicit execution, and one malformed multi-robot request.
-- [ ] 8.6 Confirm no blueprint registry regeneration is required; if implementation adds or renames blueprints, run `pytest dimos/robot/test_all_blueprints_generation.py`.
+- [ ] 8.1 Update `dimos/manipulation/planning/README.md` with the timed plan concept, the new mock dual-arm blueprint, and the multi-robot joint planning example.
+- [ ] 8.2 Update `docs/capabilities/manipulation/readme.md` with user-facing multi-robot planning usage after implementation confirms final syntax.
+- [ ] 8.3 Update `docs/capabilities/manipulation/openarm_integration.md` if coordinated planning should replace independent left/right examples.
+- [ ] 8.4 Document non-goals: no SRDF parsing, no named planning groups, no true coupled Cartesian IK, and no automatic execution after planning.
+
+## 9. Verification and manual QA
+
+- [ ] 9.1 Run `openspec validate add-multi-robot-joint-planning-api`.
+- [ ] 9.2 Run focused manipulation unit tests for changed planning/module code.
+- [ ] 9.3 Run Drake/manipulation integration tests if dependencies are available in the environment.
+- [ ] 9.4 Run docs validation commands for changed markdown docs.
+- [ ] 9.5 Manually QA through `dimos run dual-xarm6-mock-planner-coordinator` plus the dual-arm planning REPL: successful coordinated joint plan, successful preview, explicit execution, and one malformed multi-robot request.
+- [ ] 9.6 Run `pytest dimos/robot/test_all_blueprints_generation.py` and confirm the generated registry includes `dual-xarm6-mock-planner-coordinator`.

@@ -125,3 +125,19 @@ The manipulation stack SHALL preserve existing single-robot plan, preview, execu
 - **WHEN** the skill is invoked with scalar inputs
 - **THEN** the skill SHALL continue to operate on one robot using the existing explicit `robot_name` behavior
 - **AND** this change SHALL NOT expose a new multi-robot skill unless a later change specifies one
+
+### Requirement: Mock dual-arm manual verification surface
+
+The manipulation stack SHALL provide a no-hardware manual verification surface for coordinated dual-arm planning.
+
+#### Scenario: Run coordinated planning through a mock dual-arm blueprint
+- **GIVEN** the implementation includes the `dual-xarm6-mock-planner-coordinator` blueprint
+- **WHEN** an operator runs that blueprint and connects the dual-arm planning REPL example
+- **THEN** the operator SHALL be able to plan, preview, and explicitly execute a coordinated `left_arm` plus `right_arm` joint-space motion through the public manipulation RPC surface
+- **AND** the preview step SHALL allow visual inspection of both planned arm trajectories before execution
+
+#### Scenario: Manual verification includes a malformed request
+- **GIVEN** the mock dual-arm blueprint is running and an active coordinated plan exists
+- **WHEN** the operator sends a malformed multi-robot planning request through the REPL example
+- **THEN** the request SHALL fail without commanding motion
+- **AND** the previously active coordinated plan SHALL remain available for preview or explicit execution

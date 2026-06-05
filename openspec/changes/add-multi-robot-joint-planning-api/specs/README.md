@@ -53,6 +53,17 @@ List inputs are ordered. That order defines the composite joint-vector layout.
 
 `plan_to_pose` keeps current semantics: solve IK per requested target pose, then perform coordinated joint-space planning. It is not Cartesian path planning.
 
+## Manual verification surface
+
+The implementation should add `dual-xarm6-mock-planner-coordinator` as the no-hardware manual QA blueprint. The expected verification flow is:
+
+```bash
+dimos run dual-xarm6-mock-planner-coordinator
+python -i -m dimos.manipulation.planning.examples.demo_dual_arm_planning
+```
+
+The REPL should expose helpers for successful coordinated joint planning, synchronized preview, explicit execution, and one malformed multi-robot request that fails without replacing the active plan.
+
 ## Spec files
 
 - `manipulation-stack/spec.md`: normative behavior requirements and scenarios.
