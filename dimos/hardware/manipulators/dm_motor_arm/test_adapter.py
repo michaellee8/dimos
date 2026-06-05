@@ -100,6 +100,7 @@ class FakeRobot:
         FakeRobot.last = self
         self.arm = FakeArm(dof)
         self.transport = transport
+        self.config_path: str | None = None
         self.connected = False
         self.enabled = False
         self.tick_count = 0
@@ -199,16 +200,16 @@ def test_canfd_enabled_by_default_for_mock_and_socket_buses() -> None:
     mock_robot = FakeRobot.last
     assert mock_robot is not None
     assert mock_adapter._fd is True
-    assert mock_robot.transport is not None
-    assert getattr(mock_robot.transport, "fd") is True
+    assert isinstance(mock_robot.transport, FakeDMControl.MockCanBus)
+    assert mock_robot.transport.fd is True
 
     socket_adapter = DMMotorArm(use_mock_bus=False)
     assert socket_adapter.connect() is True
     socket_robot = FakeRobot.last
     assert socket_robot is not None
     assert socket_adapter._fd is True
-    assert socket_robot.transport is not None
-    assert getattr(socket_robot.transport, "fd") is True
+    assert isinstance(socket_robot.transport, FakeDMControl.SocketCanBus)
+    assert socket_robot.transport.fd is True
 
 
 def test_canfd_flag_and_legacy_fd_override_can_disable_fd() -> None:
@@ -217,16 +218,16 @@ def test_canfd_flag_and_legacy_fd_override_can_disable_fd() -> None:
     canfd_robot = FakeRobot.last
     assert canfd_robot is not None
     assert canfd_adapter._fd is False
-    assert canfd_robot.transport is not None
-    assert getattr(canfd_robot.transport, "fd") is False
+    assert isinstance(canfd_robot.transport, FakeDMControl.MockCanBus)
+    assert canfd_robot.transport.fd is False
 
     fd_adapter = DMMotorArm(use_mock_bus=True, canfd=True, fd=False)
     assert fd_adapter.connect() is True
     fd_robot = FakeRobot.last
     assert fd_robot is not None
     assert fd_adapter._fd is False
-    assert fd_robot.transport is not None
-    assert getattr(fd_robot.transport, "fd") is False
+    assert isinstance(fd_robot.transport, FakeDMControl.MockCanBus)
+    assert fd_robot.transport.fd is False
 
 
 def test_motor_specs_use_binding_motor_type_values() -> None:
@@ -302,11 +303,13 @@ def test_default_gains_match_openarm_ros2_presets() -> None:
     assert cmd[:, 1].tolist() == pytest.approx([2.75, 2.5, 2.0, 2.0, 0.7, 0.6, 0.5])
 
 
-def test_position_commands_use_in_place_gravity_compensation_by_default() -> None:
+def test_position_commands_use_in_place_gravity_compensation_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     adapter = DMMotorArm(use_mock_bus=True, kp=[10.0] * 7, kd=[0.2] * 7)
     assert adapter.connect() is True
     assert adapter.write_enable(True) is True
-    setattr(adapter, "compute_gravity_torques", lambda q: [1.0] * 7)
+    monkeypatch.setattr(adapter, "compute_gravity_torques", lambda q: [1.0] * 7)
     assert adapter.write_joint_positions([0.1] * 7, velocity=0.5) is True
     robot = FakeRobot.last
     assert robot is not None
@@ -349,11 +352,11 @@ def test_gravity_comp_false_uses_mit_position_without_effort() -> None:
     assert cmd[:, 4].tolist() == pytest.approx([0.0] * 7)
 
 
-def test_gravity_compensation_command_shape() -> None:
+def test_gravity_compensation_command_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     adapter = DMMotorArm(use_mock_bus=True)
     assert adapter.connect() is True
     assert adapter.write_enable(True) is True
-    setattr(adapter, "compute_gravity_torques", lambda q: [1.0] * 7)
+    monkeypatch.setattr(adapter, "compute_gravity_torques", lambda q: [1.0] * 7)
     assert adapter.write_gravity_compensation(damping=0.05) is True
     robot = FakeRobot.last
     assert robot is not None
@@ -362,3 +365,29 @@ def test_gravity_compensation_command_shape() -> None:
     assert cmd[:, 1].tolist() == pytest.approx([0.05] * 7)
     assert cmd[:, 4].tolist() == pytest.approx([1.0] * 7)
     assert adapter.get_control_mode() == ControlMode.TORQUE
+
+
+def test_non_openarm_dof_requires_explicit_motor_specs() -> None:
+    with pytest.raises(ValueError, match="motor_specs is required"):
+        DMMotorArm(dof=2, use_mock_bus=True)
+
+
+def test_custom_non_openarm_dof_uses_explicit_metadata() -> None:
+    adapter = DMMotorArm(
+        dof=2,
+        use_mock_bus=True,
+        motor_specs=[
+            {"name": "shoulder", "type": "DM4310", "send_id": 1, "recv_id": 17},
+            {"name": "elbow", "type": "DM4310", "send_id": 2, "recv_id": 18},
+        ],
+        position_lower=[-0.5, -0.25],
+        position_upper=[0.5, 0.25],
+        velocity_max=[1.0, 2.0],
+        kp=[3.0, 4.0],
+        kd=[0.3, 0.4],
+    )
+    assert adapter.get_dof() == 2
+    assert [motor.name for motor in adapter._motor_specs] == ["shoulder", "elbow"]
+    assert adapter.get_limits().position_lower == [-0.5, -0.25]
+    assert adapter._kp == [3.0, 4.0]
+    assert adapter._kd == [0.3, 0.4]
