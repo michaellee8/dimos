@@ -72,6 +72,8 @@ _MOTOR_MODE_DISABLE: int = 0x00
 
 _FIRST_LOWSTATE_TIMEOUT_S: float = 3.0
 
+_dds_initialized: bool = False
+
 GO2_JOINT_NAMES: list[str] = make_quadruped_joints("go2")
 assert len(GO2_JOINT_NAMES) == _NUM_MOTORS
 
@@ -119,22 +121,25 @@ class Go2WholeBodyConnection(Module):
         from unitree_sdk2py.idl.unitree_go.msg.dds_ import LowCmd_, LowState_
         from unitree_sdk2py.utils.crc import CRC
 
+        global _dds_initialized
         nic = self.config.network_interface
-        logger.info(f"Initializing DDS (Go2 wholebody) interface={nic!r}...")
-        try:
+        if not _dds_initialized:
+            logger.info(f"Initializing DDS (Go2 wholebody) interface={nic!r}...")
             if nic:
                 ChannelFactoryInitialize(0, nic)
             else:
                 ChannelFactoryInitialize(0)
-        except Exception as e:
-            # Idempotent — already initialised by a sibling participant is fine.
-            logger.debug(f"ChannelFactoryInitialize raised (likely already init'd): {e}")
+            _dds_initialized = True
+        else:
+            logger.info(
+                f"DDS already initialized in this process; reusing existing domain (interface={nic!r} ignored)"
+            )
 
         self._publisher = ChannelPublisher("rt/lowcmd", LowCmd_)
         self._publisher.Init()
 
         # Passive subscriber — Read() per tick from the publish loop. Callback
-        # mode is unreliable under cyclonedds on macOS (mirrors G1).
+        # mode is unreliable under cyclonedds on macOS.
         self._subscriber = ChannelSubscriber("rt/lowstate", LowState_)
         self._subscriber.Init(None, 0)
 
@@ -145,13 +150,7 @@ class Go2WholeBodyConnection(Module):
         self._low_cmd.head[1] = 0xEF
         self._low_cmd.level_flag = 0xFF
         self._low_cmd.gpio = 0
-        for i in range(_NUM_MOTOR_SLOTS):
-            self._low_cmd.motor_cmd[i].mode = _MOTOR_MODE_ENABLE
-            self._low_cmd.motor_cmd[i].q = POS_STOP
-            self._low_cmd.motor_cmd[i].dq = VEL_STOP
-            self._low_cmd.motor_cmd[i].kp = 0
-            self._low_cmd.motor_cmd[i].kd = 0
-            self._low_cmd.motor_cmd[i].tau = 0
+        self._reset_motor_cmd_slots(_MOTOR_MODE_ENABLE)
 
         self._crc = CRC()
 
@@ -200,15 +199,10 @@ class Go2WholeBodyConnection(Module):
         if self._publisher is not None and self._low_cmd is not None and self._crc is not None:
             try:
                 with self._lock:
-                    for i in range(_NUM_MOTOR_SLOTS):
-                        self._low_cmd.motor_cmd[i].mode = _MOTOR_MODE_DISABLE
-                        self._low_cmd.motor_cmd[i].q = POS_STOP
-                        self._low_cmd.motor_cmd[i].dq = VEL_STOP
-                        self._low_cmd.motor_cmd[i].kp = 0
-                        self._low_cmd.motor_cmd[i].kd = 0
-                        self._low_cmd.motor_cmd[i].tau = 0
+                    self._reset_motor_cmd_slots(_MOTOR_MODE_DISABLE)
                     self._low_cmd.crc = self._crc.Crc(self._low_cmd)
-                    self._publisher.Write(self._low_cmd)
+                    snapshot = self._low_cmd
+                self._publisher.Write(snapshot)
                 logger.info("Sent safe-stop lowcmd (motors disabled)")
             except (OSError, RuntimeError, AttributeError) as e:
                 logger.warning(f"Safe-stop lowcmd failed: {e}")
@@ -350,7 +344,25 @@ class Go2WholeBodyConnection(Module):
                 self._low_cmd.motor_cmd[i].tau = msg.tau[i]
 
             self._low_cmd.crc = self._crc.Crc(self._low_cmd)
-            self._publisher.Write(self._low_cmd)
+            snapshot = self._low_cmd
+            publisher = self._publisher
+        publisher.Write(snapshot)
+
+    def _reset_motor_cmd_slots(self, mode: int) -> None:
+        """Reset all 20 motor_cmd slots in self._low_cmd to a safe baseline.
+
+        Sets every slot to ``mode`` with POS_STOP/VEL_STOP sentinels and zero
+        gains/torque. Caller is responsible for holding ``self._lock`` and for
+        ensuring ``self._low_cmd is not None``.
+        """
+        assert self._low_cmd is not None
+        for i in range(_NUM_MOTOR_SLOTS):
+            self._low_cmd.motor_cmd[i].mode = mode
+            self._low_cmd.motor_cmd[i].q = POS_STOP
+            self._low_cmd.motor_cmd[i].dq = VEL_STOP
+            self._low_cmd.motor_cmd[i].kp = 0
+            self._low_cmd.motor_cmd[i].kd = 0
+            self._low_cmd.motor_cmd[i].tau = 0
 
     def _release_sport_mode(self) -> None:
         """Loop ReleaseMode until MotionSwitcher reports no active controller.
