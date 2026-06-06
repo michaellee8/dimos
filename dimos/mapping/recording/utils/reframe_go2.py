@@ -14,7 +14,9 @@
 
 """One-off: reframe a go2_mid360 recording into the FAST-LIO (mid360) world.
 
-Given a recording dir, destructively:
+Reads the pristine `mem2_orig.db`, writes a full copy into `mem2.db` (created if
+absent, fully overwritten if present — all streams, not just the reframed ones),
+then on that copy:
 
   1. truncates everything before the first `fastlio_odometry` message,
   2. rebases the Go2 onboard `odom` + `lidar` (which live in the Go2's own odom
@@ -36,6 +38,7 @@ from __future__ import annotations
 import argparse
 import math
 from pathlib import Path
+import shutil
 import sqlite3
 
 import numpy as np
@@ -52,6 +55,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
+ORIG_DB_NAME = "mem2_orig.db"
 DB_NAME = "mem2.db"
 RRD_NAME = "main.rrd"
 ODOM = "odom"
@@ -88,38 +92,23 @@ def _pose7(transform: Transform) -> tuple[float, float, float, float, float, flo
     )
 
 
-def _mat(transform: Transform) -> np.ndarray:
-    matrix = np.eye(4)
-    rot = transform.rotation
-    matrix[:3, :3] = Rotation.from_quat([rot.x, rot.y, rot.z, rot.w]).as_matrix()
-    matrix[:3, 3] = [transform.translation.x, transform.translation.y, transform.translation.z]
-    return matrix
-
-
-def _transform_from_mat(matrix: np.ndarray) -> Transform:
-    quat = Rotation.from_matrix(matrix[:3, :3]).as_quat()
-    return Transform(
-        translation=Vector3(matrix[0, 3], matrix[1, 3], matrix[2, 3]),
-        rotation=Quaternion(quat[0], quat[1], quat[2], quat[3]),
-    )
-
-
-def _level_in_place(align: Transform, start: Transform) -> Transform:
-    """Compose an in-place rotation onto `align` so the go2 `start` pose is flat
-    (zero roll/pitch, yaw kept), pivoting about its own position so it doesn't move.
-    Levels the whole go2 trajectory + lidar even if FAST-LIO's frame is tilted."""
-    position = np.array([start.translation.x, start.translation.y, start.translation.z])
+def _yaw_only(transform: Transform) -> Transform:
+    """Drop roll/pitch (keep yaw + translation). The Go2 odom frame and the FAST-LIO
+    world are both gravity-aligned, so the rigid map between them is yaw + translation;
+    zeroing roll/pitch on both sides keeps the Go2's planar leg odometry planar instead
+    of tilting the whole ~100m path into a several-meter z-climb."""
     rotation = Rotation.from_quat(
-        [start.rotation.x, start.rotation.y, start.rotation.z, start.rotation.w]
+        [transform.rotation.x, transform.rotation.y, transform.rotation.z, transform.rotation.w]
     ).as_matrix()
     forward = rotation @ np.array([1.0, 0.0, 0.0])  # body x-axis in world
     yaw = math.atan2(forward[1], forward[0])
-    level = Rotation.from_euler("z", yaw).as_matrix()
-    correction = level @ rotation.T  # world rotation that levels the start orientation
-    pivot = np.eye(4)
-    pivot[:3, :3] = correction
-    pivot[:3, 3] = position - correction @ position  # rotate about `position`, no translation
-    return _transform_from_mat(pivot @ _mat(align))
+    quat = Rotation.from_euler("z", yaw).as_quat()
+    return Transform(
+        translation=Vector3(
+            transform.translation.x, transform.translation.y, transform.translation.z
+        ),
+        rotation=Quaternion(quat[0], quat[1], quat[2], quat[3]),
+    )
 
 
 def _update_point_pose(
@@ -207,10 +196,12 @@ def reframe(db_path: str, urdf_path: str, rrd_path: str) -> None:
     print(f"   fastlio: normalized {len(fastlio_ids)} '{FASTLIO_ODOM}' poses to mid360")
 
     # --- 2. align Go2 odom + lidar with one rigid transform A ---
+    # Both the Go2 odom frame and the FAST-LIO world are gravity-aligned, so the map
+    # between them is pure yaw + translation. Zero roll/pitch on both anchors (keep
+    # yaw) so the planar leg odometry stays planar instead of ramping up in z.
     target0 = fastlio_pose[_nearest(fastlio_ts, odom_ts[0])] + mid360_to_base
-    align = target0 + odom_pose[0].inverse()  # go2 odom frame -> mid360 world
-    align = _level_in_place(align, target0)  # force the go2 lidar flat with the ground
-    print("   level: go2 frame leveled in place (roll/pitch zeroed at start)")
+    align = _yaw_only(target0) + _yaw_only(odom_pose[0]).inverse()
+    print("   align: yaw-only (go2 odom frame -> mid360 world, gravity-aligned)")
 
     with SqliteStore(path=db_path) as store:
         store.delete_stream(ODOM)
@@ -241,23 +232,39 @@ def reframe(db_path: str, urdf_path: str, rrd_path: str) -> None:
     rebuild_rrd(db_path, Path(rrd_path))
 
 
+def _clone_db(src: Path, dst: Path) -> None:
+    """Overwrite `dst` with a full copy of `src` (all streams, not just the ones
+    reframe touches). Drops any stale wal/shm sidecars on both so the copy is clean."""
+    for sidecar in ("-wal", "-shm"):
+        for base in (src, dst):
+            stale = base.with_name(base.name + sidecar)
+            if stale.exists():
+                stale.unlink()
+    shutil.copyfile(src, dst)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("recording", help="recording dir (or its mem2.db)")
+    parser.add_argument("recording", help="recording dir (or its mem2_orig.db / mem2.db)")
     parser.add_argument("--urdf", default=str(DEFAULT_URDF), help="URDF frame tree")
     args = parser.parse_args()
 
+    # Resolve the pristine source (mem2_orig.db) and the destination (mem2.db). reframe
+    # reads from the source, writes a full copy into the destination, then reframes the
+    # copy in place — mem2_orig.db is never modified.
     target = Path(args.recording)
-    db_path = target if target.suffix == ".db" else target / DB_NAME
-    if not db_path.exists():
-        raise SystemExit(f"no db at {target}")
-    # mem2.db -> main.rrd; any other db (e.g. short.db) -> matching <stem>.rrd
-    rrd_path = db_path.parent / (RRD_NAME if db_path.name == DB_NAME else f"{db_path.stem}.rrd")
+    recording_dir = target.parent if target.suffix == ".db" else target
+    src_db = recording_dir / ORIG_DB_NAME
+    dst_db = recording_dir / DB_NAME
+    if not src_db.exists():
+        raise SystemExit(f"no {ORIG_DB_NAME} at {recording_dir}")
 
-    print(f">> reframing {db_path.parent.name} into the {WORLD_FRAME} world")
-    reframe(str(db_path), args.urdf, str(rrd_path))
+    print(f">> reframing {recording_dir.name} into the {WORLD_FRAME} world")
+    print(f"   clone: {ORIG_DB_NAME} -> {DB_NAME} ({'overwrite' if dst_db.exists() else 'create'})")
+    _clone_db(src_db, dst_db)
+    reframe(str(dst_db), args.urdf, str(recording_dir / RRD_NAME))
     print("done")
 
 

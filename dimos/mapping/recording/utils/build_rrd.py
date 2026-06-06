@@ -324,13 +324,13 @@ def _log_apriltags(store, db_path, cam_xform, intrinsics, resolution, max_views_
         center = np.median(positions, 0)
         rr.log(
             f"world/april_tags/marker_{marker_id}/detections",
-            rr.Points3D(positions, colors=color, radii=0.1),
+            rr.Points3D(positions, colors=color, radii=0.03),
             static=True,
         )
         rr.log(
             f"world/april_tags/marker_{marker_id}",
             rr.Points3D(
-                [center], colors=color, radii=0.5, labels=[f"tag {marker_id}"], show_labels=True
+                [center], colors=color, radii=0.08, labels=[f"tag {marker_id}"], show_labels=True
             ),
             static=True,
         )
