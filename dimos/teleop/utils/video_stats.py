@@ -27,6 +27,7 @@ beside the other teleop helpers in ``teleop/utils`` rather than in
 
 from __future__ import annotations
 
+import math
 import time
 from typing import BinaryIO
 
@@ -181,20 +182,18 @@ class VideoStats(Timestamped):
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, VideoStats):
             return False
-        # Float fields use a float32 tolerance because the LCM carrier is
-        # float32[] — exact equality would fail on values like 2.1 after
-        # roundtrip. Integer fields and frame_id stay exact.
-        eps = 1e-5
         return (
-            abs(self.ts - other.ts) < eps
+            math.isclose(self.ts, other.ts, rel_tol=1e-4, abs_tol=1e-5)
             and self.frame_id == other.frame_id
-            and abs(self.fps - other.fps) < eps
-            and abs(self.kbps - other.kbps) < eps
+            and math.isclose(self.fps, other.fps, rel_tol=1e-4, abs_tol=1e-5)
+            and math.isclose(self.kbps, other.kbps, rel_tol=1e-4, abs_tol=1e-5)
             and self.width == other.width
             and self.height == other.height
-            and abs(self.loss_pct - other.loss_pct) < eps
-            and abs(self.jitter_buffer_ms - other.jitter_buffer_ms) < eps
-            and abs(self.decode_ms - other.decode_ms) < eps
+            and math.isclose(self.loss_pct, other.loss_pct, rel_tol=1e-4, abs_tol=1e-5)
+            and math.isclose(
+                self.jitter_buffer_ms, other.jitter_buffer_ms, rel_tol=1e-4, abs_tol=1e-5
+            )
+            and math.isclose(self.decode_ms, other.decode_ms, rel_tol=1e-4, abs_tol=1e-5)
             and self.frames_dropped == other.frames_dropped
             and self.freezes == other.freezes
         )

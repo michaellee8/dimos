@@ -143,8 +143,8 @@ def _summary(records: list[Any], stall_factor: float = 3.0) -> dict[str, Any]:
     Buttons lacks ``.ts``/``.seq``, so rate/jitter/loss are all ``None``.
     """
     count = len(records)
-    tss = [float(m.ts) for m in records if getattr(m, "ts", 0.0) > 0]
-    seqs = [int(m.seq) for m in records if getattr(m, "seq", 0)]
+    tss = [float(m.ts) for m in records if getattr(m, "ts", None) is not None]
+    seqs = [int(m.seq) for m in records if getattr(m, "seq", None) is not None]
 
     intervals_ms = (np.diff(sorted(tss)) * 1000.0).tolist() if len(tss) >= 2 else []
     span = (tss[-1] - tss[0]) if len(tss) >= 2 else 0.0

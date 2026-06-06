@@ -54,7 +54,7 @@ def loss_pct(seqs: Sequence[int]) -> float | None:
     ``loss = 1 - distinct_received / (max_seq - min_seq + 1)``. Reorders and
     duplicates do not inflate it — only genuinely missing seq values count.
     """
-    valid = [s for s in seqs if s]
+    valid = [s for s in seqs if s is not None]
     if len(valid) < 2:
         return None
     expected = max(valid) - min(valid) + 1
@@ -67,7 +67,7 @@ def reorder_count(seqs: Sequence[int]) -> int:
     count = 0
     running_max = -1
     for s in seqs:
-        if not s:
+        if s is None:
             continue
         if s < running_max:
             count += 1
@@ -116,7 +116,7 @@ class LiveStreamStats:
     def record(self, ts: float | None, seq: int | None) -> None:
         """Note an inbound message's send-stamp + monotonic counter."""
         with self._lock:
-            self._samples.append((time.time(), ts or None, seq or None))
+            self._samples.append((time.time(), ts, seq))
 
     def snapshot(self) -> dict[str, float | None] | None:
         """Median latency/jitter (ms), loss (%), rate (Hz), or None.
@@ -132,8 +132,8 @@ class LiveStreamStats:
 
         arrivals = [w for w, _, _ in samples]
         intervals_ms = [(b - a) * 1000.0 for a, b in pairwise(arrivals)]
-        e2e_ms = [(w - ts) * 1000.0 for w, ts, _ in samples if ts]
-        seqs = [s for _, _, s in samples if s]
+        e2e_ms = [(w - ts) * 1000.0 for w, ts, _ in samples if ts is not None]
+        seqs = [s for _, _, s in samples if s is not None]
 
         e2e = pcts(e2e_ms)
         jit = pcts(intervals_ms)
