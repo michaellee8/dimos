@@ -52,7 +52,12 @@ class MujocoGo2Config:
 
     mjcf_path: Path = _DEFAULT_MJCF
     step_period: float = 0.005  # 200 Hz, matches training sim
-    keyframe_name: str = "home"
+    # Spawn pose. "lie" puts the robot in a folded sit pose on the ground,
+    # mirroring the real-hardware workflow (Unitree _targetPos_2). The RL
+    # policy task's activation ramp drives lie -> standing -> walking when
+    # armed. "home" is the upright spawn used by other consumers of this MJCF
+    # (e.g. mjlab training) and will collapse under gravity without active PD.
+    keyframe_name: str = "lie"
     render: bool = False
 
 
@@ -138,7 +143,7 @@ class MujocoGo2WholeBody(WholeBodyAdapter):
             self._imu_sensor_ids[s] = sid
 
         # Reset to defaults (uses each body's <body pos="..."> for free joints).
-        # Then overlay the "home" keyframe's robot qpos on top, so scene objects
+        # Then overlay the keyframe's robot qpos on top, so scene objects
         # added to the MJCF spawn at their declared positions instead of being
         # zeroed by the keyframe's short qpos vector.
         mujoco.mj_resetData(self._mj_model, self._mj_data)
@@ -152,21 +157,39 @@ class MujocoGo2WholeBody(WholeBodyAdapter):
             # scene objects, which should keep their <body pos> defaults.
             robot_qpos_len = min(19, n)
             self._mj_data.qpos[:robot_qpos_len] = self._mj_model.key_qpos[key_id, :robot_qpos_len]
-            # Also apply the keyframe's ctrl (leg targets) so the standing PD
-            # has a sensible setpoint before the first command arrives.
+            # Seed the PD command with the keyframe's joint targets so the
+            # step loop actively HOLDS the spawn pose from the very first
+            # tick, before any caller has written a real command. Without
+            # this, the robot collapses during the ~1s between connect()
+            # and the first task.compute() emission.
+            #
+            # Gains match Unitree's go2_stand_example.cpp (kp=50, kd=3.5):
+            # high enough to track the held pose against gravity, will be
+            # overridden by the caller's real kp/kd on the first command.
             if (
                 self._mj_model.key_ctrl is not None
                 and self._mj_model.key_ctrl.shape[1] >= self._mj_model.nu
             ):
-                self._mj_data.ctrl[: self._mj_model.nu] = self._mj_model.key_ctrl[
-                    key_id, : self._mj_model.nu
-                ]
+                # key_ctrl is in MJCF actuator order, our _latest_cmd matches
+                # because _actuator_ids was resolved in GO2_ACTUATOR_ORDER.
+                for i, act_id in enumerate(self._actuator_ids):
+                    self._latest_cmd[i] = MotorCommand(
+                        q=float(self._mj_model.key_ctrl[key_id, act_id]),
+                        dq=0.0,
+                        kp=50.0,
+                        kd=3.5,
+                        tau=0.0,
+                    )
         else:
             logger.warning(f"Keyframe {self.config.keyframe_name!r} missing - using default qpos")
 
         # Step once to populate sensors/qfrc_actuator so the first read is valid.
         mujoco.mj_forward(self._mj_model, self._mj_data)
         self._has_states = True
+        logger.info(
+            f"Spawn pose: base_z={float(self._mj_data.qpos[2]):.3f} "
+            f"joints={[round(float(self._mj_data.qpos[7+i]), 2) for i in range(12)]}"
+        )
 
         self._stop_event.clear()
         self._step_thread = threading.Thread(

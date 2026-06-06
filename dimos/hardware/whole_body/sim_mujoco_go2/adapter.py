@@ -37,7 +37,7 @@ def _factory(
     mjcf_path: str | None = None,
     render: bool = True,
     step_period: float = 0.005,
-    keyframe_name: str = "home",
+    keyframe_name: str = "lie",
     **_: Any,
 ) -> WholeBodyAdapter:
     """Construct `MujocoGo2WholeBody` from coordinator-shaped kwargs."""

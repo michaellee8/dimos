@@ -95,6 +95,13 @@ go2_tripod_sim = autoconnect(
                     "inference_period": 0.02,
                     "mask_fr": True,
                     "device": "cpu",
+                    # Sim spawns at the "lie" keyframe (true belly-down,
+                    # base_z=0.105, joints folded at (0, 1.5, -2.7)). Ramp
+                    # from there to the policy's standing target over 2.5s:
+                    # calf swing is ~52deg, thigh swing ~34deg, and the body
+                    # has to physically rise ~20cm. Longer ramp lets gravity
+                    # plus PD do the heavy lift without spiking torque.
+                    "activation_ramp_seconds": 2.5,
                 },
             ),
             # FR-leg teleop. Same TeleopIKTask the manipulator arms use, with
