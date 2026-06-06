@@ -779,6 +779,10 @@ body {
   .sheet {
     transform: none;
     width: var(--rail);
+    /* Sit below the camera bar so the docked rail never covers the
+       Half/Full/Hide buttons when the camera is fullscreen. */
+    top: 64px;
+    height: calc(100% - 64px);
   }
 
   .sheet-group-ultrawide {

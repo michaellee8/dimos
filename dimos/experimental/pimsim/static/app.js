@@ -190,6 +190,9 @@ let navGoalMarker = null;
 let pointGoalMarker = null;
 let spawnMarker = null;
 let latestRootPosition = null;
+// Free-roam camera starts this far from the robot (not fully zoomed out).
+const FREEROAM_START_RADIUS = 18;
+let freeroamFramed = false;
 let sceneDepthEnabled = true;
 let sceneWireEnabled = false;
 let collisionVisible = false;
@@ -1506,6 +1509,16 @@ function browserPhysicsRootMatrixToRef(result) {
 function updateLatestRootPosition(position) {
   if (!latestRootPosition) latestRootPosition = BABYLON.Vector3.Zero();
   latestRootPosition.copyFrom(position);
+  // Frame the free-roam camera a set distance from the robot the first time we
+  // know where it is, instead of leaving it zoomed all the way out to fit the
+  // whole scene.
+  if (!freeroamFramed) {
+    freeroamFramed = true;
+    camera.setTarget(latestRootPosition.clone());
+    camera.alpha = -2.3;
+    camera.beta = 1.15;
+    camera.radius = FREEROAM_START_RADIUS;
+  }
 }
 
 function updatePath(path, pathVersion) {
@@ -2521,6 +2534,14 @@ document.getElementById("toggleRobot").onclick = () => {
   setRobotVisibility(visible);
 };
 document.getElementById("toggleDrive").onclick = () => setDriveEnabled(!driveEnabled);
+
+// Clicking into the robot camera grabs drive control; clicking back out into
+// the 3D world releases it.
+document.getElementById("robotCamView")?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  setDriveEnabled(true);
+});
+canvas.addEventListener("click", () => setDriveEnabled(false));
 document.getElementById("respawnRobot").onclick = () => {
   sendDriveCommand(true);
   sendSocketPayload({ type: "respawn" });
