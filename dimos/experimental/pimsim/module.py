@@ -211,6 +211,11 @@ class BabylonSceneViewerModule(Module):
         self._lcm_subscription: Any = None
         self._lcm_handle_thread: threading.Thread | None = None
         self._lcm_clients: set[WebSocket] = set()
+        # Only one connected browser may publish onto the bus (odom, cmd_vel,
+        # ...). Otherwise two tabs each run their own physics and double-publish
+        # /odom, so the robot visibly jumps between the two poses. The first
+        # /lcm-ws client is the physics authority; the rest are view-only.
+        self._lcm_authority: WebSocket | None = None
         self._lcm_seq: int = 0
         # Per-client latest-packet-per-channel buffer + wake event + drain
         # task. Replaces the previous "schedule one coroutine per LCM
@@ -654,19 +659,34 @@ class BabylonSceneViewerModule(Module):
         self._lcm_wake[websocket] = asyncio.Event()
         self._lcm_last_forward_ts[websocket] = {}
         self._lcm_clients.add(websocket)
+        # Newest connection becomes the physics authority — a freshly opened or
+        # reloaded tab is the one the user is actually driving; older tabs go
+        # view-only. (First-come authority would let a stale/background tab keep
+        # publishing and block the active one.)
+        self._lcm_authority = websocket
         drain_task = asyncio.create_task(self._lcm_drain_loop(websocket))
         self._lcm_drain_tasks[websocket] = drain_task
-        logger.info("BabylonViewer: lcm-ws connected", clients=len(self._lcm_clients))
+        logger.info(
+            "BabylonViewer: lcm-ws connected",
+            clients=len(self._lcm_clients),
+            authority=websocket is self._lcm_authority,
+        )
         try:
             while True:
                 packet = await websocket.receive_bytes()
-                self._publish_lcm_packet(packet)
+                # Only the authority browser publishes onto the bus; others are
+                # view-only so two tabs can't double-publish and fight.
+                if websocket is self._lcm_authority:
+                    self._publish_lcm_packet(packet)
         except WebSocketDisconnect:
             pass
         except Exception:
             logger.exception("BabylonViewer: lcm-ws receive failed")
         finally:
             self._lcm_clients.discard(websocket)
+            if websocket is self._lcm_authority:
+                # Hand physics authority to another live client (if any).
+                self._lcm_authority = next(iter(self._lcm_clients), None)
             self._ws_send_locks.pop(websocket, None)
             self._lcm_pending.pop(websocket, None)
             self._lcm_wake.pop(websocket, None)
