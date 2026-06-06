@@ -19,6 +19,10 @@ Same trick as ``Buttons`` (which rides on ``UInt32`` with bit packing): we
 don't need a new LCM type, we ride on ``sensor_msgs.Joy`` with positional
 ``axes[]`` slots for each metric. That keeps the message wire-compatible with
 the existing dimos_lcm stack while exposing named fields in Python.
+
+This is a teleop-only construct (not a general sensor message), so it lives
+beside the other teleop helpers in ``teleop/utils`` rather than in
+``dimos.msgs.sensor_msgs``.
 """
 
 from __future__ import annotations

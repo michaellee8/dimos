@@ -39,9 +39,9 @@ import numpy as np
 from dimos.memory2.store.sqlite import SqliteStore
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
-from dimos.msgs.sensor_msgs.VideoStats import VideoStats
 from dimos.teleop.quest.quest_types import Buttons
 from dimos.teleop.utils.stream_stats import classify_e2e, loss_pct, pcts, reorder_count
+from dimos.teleop.utils.video_stats import VideoStats
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()

@@ -35,9 +35,9 @@ from dimos.core.stream import In
 from dimos.memory2.module import Recorder, RecorderConfig
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
-from dimos.msgs.sensor_msgs.VideoStats import VideoStats
 from dimos.teleop.quest.quest_types import Buttons
 from dimos.teleop.utils.report import generate_report
+from dimos.teleop.utils.video_stats import VideoStats
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
