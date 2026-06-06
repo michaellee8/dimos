@@ -110,7 +110,7 @@
     if (target.panel) target.panel.dataset.hasFrame = "true";
     if (videoLabel) {
       videoLabel.textContent = "LIVE";
-      videoLabel.className = "active";
+      videoLabel.className = "pip-live";
     }
   }
 
@@ -130,6 +130,51 @@
 
   tickRuntime();
   window.setInterval(tickRuntime, 1000);
+
+  // --- shell chrome that app.js does not own ---
+  // Hover a tab to slide its panel into frame; it stays while the pointer is
+  // over the tab or the panel, and retracts shortly after leaving both.
+  function hoverReveal(trigger, panel) {
+    if (!trigger || !panel) return;
+    let closeTimer = null;
+    const open = () => {
+      window.clearTimeout(closeTimer);
+      panel.dataset.open = "true";
+    };
+    const closeSoon = () => {
+      window.clearTimeout(closeTimer);
+      closeTimer = window.setTimeout(() => {
+        panel.dataset.open = "false";
+      }, 240);
+    };
+    for (const element of [trigger, panel]) {
+      element.addEventListener("mouseenter", open);
+      element.addEventListener("mouseleave", closeSoon);
+    }
+    trigger.addEventListener("click", () => {
+      panel.dataset.open = panel.dataset.open === "true" ? "false" : "true";
+    });
+  }
+
+  const controlSheet = document.getElementById("controlSheet");
+  hoverReveal(document.getElementById("controlsHandle"), controlSheet);
+  hoverReveal(document.getElementById("systemHandle"), document.getElementById("systemPanel"));
+
+  // WASD keycaps highlight on press — cosmetic, never consumes the event.
+  const keyCaps = {};
+  document.querySelectorAll(".key[data-key]").forEach((el) => {
+    keyCaps[el.dataset.key] = el;
+  });
+  const arrowAlias = { arrowup: "w", arrowleft: "a", arrowdown: "s", arrowright: "d" };
+  function capFor(event) {
+    const pressed = event.key.toLowerCase();
+    return keyCaps[pressed] || keyCaps[arrowAlias[pressed]];
+  }
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && controlSheet) controlSheet.dataset.open = "false";
+    capFor(event)?.classList.add("pressed");
+  });
+  window.addEventListener("keyup", (event) => capFor(event)?.classList.remove("pressed"));
 
   window.PimSimUI = {
     appendLog,

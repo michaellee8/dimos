@@ -52,6 +52,53 @@ camera.attachControl(canvas, true);
 window.__pimsimCamera = camera;
 window.__pimsimScene = scene;
 
+// Robot first-person camera, drawn as a small picture-in-picture viewport
+// (the "Robot Cam" panel). It rides the kinematic base each frame and looks
+// down the robot's heading, so the operator sees what the robot sees.
+const fpvCamera = new BABYLON.UniversalCamera("fpv", new BABYLON.Vector3(0, 0, 1), scene);
+fpvCamera.upVector = new BABYLON.Vector3(0, 0, 1);
+fpvCamera.minZ = 0.05;
+fpvCamera.maxZ = 100000;
+fpvCamera.fov = 1.1;
+let fpvEnabled = true;
+const fpvEyeHeight = 0.35;
+const fpvForwardPitch = -0.12;
+scene.activeCameras = [camera, fpvCamera];
+camera.viewport = new BABYLON.Viewport(0, 0, 1, 1);
+window.__pimsimFpvCamera = fpvCamera;
+
+function updateFpvCamera() {
+  if (!fpvEnabled) return;
+  const pose = browserPhysicsPose;
+  const eyeZ = (pose.z || 0) + fpvEyeHeight;
+  fpvCamera.position.set(pose.x, pose.y, eyeZ);
+  fpvCamera.setTarget(
+    new BABYLON.Vector3(
+      pose.x + Math.cos(pose.yaw),
+      pose.y + Math.sin(pose.yaw),
+      eyeZ + fpvForwardPitch,
+    ),
+  );
+}
+
+// Match the Babylon sub-viewport to the on-screen HTML frame so the POV
+// renders exactly inside the panel body (CSS px -> normalized, y from bottom).
+function updateFpvViewport() {
+  if (!fpvEnabled) return;
+  const frame = document.getElementById("robotCamView");
+  if (!frame) return;
+  const rect = frame.getBoundingClientRect();
+  const width = canvas.clientWidth;
+  const height = canvas.clientHeight;
+  if (width <= 0 || height <= 0 || rect.width <= 0) return;
+  fpvCamera.viewport = new BABYLON.Viewport(
+    rect.left / width,
+    (height - rect.bottom) / height,
+    rect.width / width,
+    rect.height / height,
+  );
+}
+
 new BABYLON.HemisphericLight("skyLight", new BABYLON.Vector3(0.2, 0.4, 1), scene);
 const sun = new BABYLON.DirectionalLight("sun", new BABYLON.Vector3(-0.4, -0.6, -1), scene);
 sun.position = new BABYLON.Vector3(20, 30, 40);
@@ -2436,6 +2483,32 @@ document.getElementById("toggleCamera").onclick = () => {
   if (ui.setPanelActive) ui.setPanelActive("cameraPanel", active);
   else document.getElementById("cameraPanel").dataset.active = active ? "true" : "false";
 };
+
+const _robotCamPanel = document.getElementById("robotCamPanel");
+const _robotCamToggle = document.getElementById("toggleRobotCam");
+function setRobotCam(on) {
+  fpvEnabled = on;
+  scene.activeCameras = on ? [camera, fpvCamera] : [camera];
+  if (_robotCamPanel) _robotCamPanel.dataset.active = on ? "true" : "false";
+  if (_robotCamToggle) _robotCamToggle.textContent = on ? "Hide" : "Show";
+}
+if (_robotCamToggle) _robotCamToggle.onclick = () => setRobotCam(!fpvEnabled);
+
+// Camera size modes — the panel resizes via data-size and the POV viewport
+// tracks the panel rect each frame, so no camera math is needed here.
+function setCamSize(size) {
+  if (_robotCamPanel) _robotCamPanel.dataset.size = size;
+  if (!fpvEnabled) setRobotCam(true);
+}
+const _camHalf = document.getElementById("camHalf");
+const _camFull = document.getElementById("camFull");
+if (_camHalf) {
+  _camHalf.onclick = () => setCamSize(_robotCamPanel.dataset.size === "half" ? "pip" : "half");
+}
+if (_camFull) {
+  _camFull.onclick = () => setCamSize(_robotCamPanel.dataset.size === "full" ? "pip" : "full");
+}
+setRobotCam(true);
 document.getElementById("navClick").onclick = () => setClickMode("nav");
 document.getElementById("pointClick").onclick = () => setClickMode("point");
 document.getElementById("spawnClick").onclick = () => setClickMode("spawn");
@@ -2687,6 +2760,8 @@ function renderFrame() {
   applyLatestRobotPose();
   applyQueuedPointcloud();
   updateKeyboardCamera();
+  updateFpvCamera();
+  updateFpvViewport();
   sendDriveCommand(false);
   maybeSendPointcloudDebug();
   scene.render();
