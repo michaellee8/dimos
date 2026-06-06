@@ -21,8 +21,8 @@ Runs the actor inside the 100Hz tick loop, subsampled to its training rate
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import threading
-from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -38,10 +38,10 @@ from dimos.control.task import (
 from dimos.learning.inference.obs_builder import (
     GO2_DEFAULT_POSE,
     GO2_JOINT_ORDER,
-    Go2VelocityObsBuilder,
     MJLAB_TO_WIRE,
-    TwistCommand,
     WIRE_TO_MJLAB,
+    Go2VelocityObsBuilder,
+    TwistCommand,
     projected_gravity_from_quat,
 )
 from dimos.learning.policy.rl_policy import RslRlPolicy
@@ -54,7 +54,9 @@ logger = setup_logger()
 # Joint short-names (no hardware prefix) the held-up FR leg occupies.
 # Uses wire convention - no '_joint' suffix - matching GO2_JOINT_ORDER.
 FR_JOINT_SHORTNAMES: tuple[str, ...] = (
-    "FR_hip", "FR_thigh", "FR_calf",
+    "FR_hip",
+    "FR_thigh",
+    "FR_calf",
 )
 
 # Numpy index arrays for the wire <-> mjlab permutation. Materialized once.
@@ -246,11 +248,7 @@ class RLPolicyTask(BaseControlTask):
 
     def _claimed_joints(self) -> list[str]:
         if self._config.mask_fr:
-            return [
-                self._prefixed_joints[i]
-                for i in range(12)
-                if i not in self._fr_indices
-            ]
+            return [self._prefixed_joints[i] for i in range(12) if i not in self._fr_indices]
         return list(self._prefixed_joints)
 
 

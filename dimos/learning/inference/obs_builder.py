@@ -31,31 +31,46 @@ hips ±0.1 (not 0 as in scene_go2.xml keyframe), thigh 0.9, calf -1.8.
 
 from __future__ import annotations
 
-import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
+import math
 
 import numpy as np
-
 
 # Wire / DimOS canonical joint order: matches make_quadruped_joints("go2") and
 # Unitree's LowCmd_.motor_cmd[0..11] layout. This is what HardwareComponent
 # joint names use and what the WHOLE_BODY adapter publishes/consumes.
 GO2_JOINT_ORDER: tuple[str, ...] = (
-    "FR_hip", "FR_thigh", "FR_calf",
-    "FL_hip", "FL_thigh", "FL_calf",
-    "RR_hip", "RR_thigh", "RR_calf",
-    "RL_hip", "RL_thigh", "RL_calf",
+    "FR_hip",
+    "FR_thigh",
+    "FR_calf",
+    "FL_hip",
+    "FL_thigh",
+    "FL_calf",
+    "RR_hip",
+    "RR_thigh",
+    "RR_calf",
+    "RL_hip",
+    "RL_thigh",
+    "RL_calf",
 )
 
 # mjlab's articulation order (FL, FR, RL, RR) - what the trained actor expects.
 # The obs builder consumes joint vectors in THIS order; the task permutes between
 # wire order (above) and this order at the read/write boundary.
 GO2_MJLAB_JOINT_ORDER: tuple[str, ...] = (
-    "FL_hip", "FL_thigh", "FL_calf",
-    "FR_hip", "FR_thigh", "FR_calf",
-    "RL_hip", "RL_thigh", "RL_calf",
-    "RR_hip", "RR_thigh", "RR_calf",
+    "FL_hip",
+    "FL_thigh",
+    "FL_calf",
+    "FR_hip",
+    "FR_thigh",
+    "FR_calf",
+    "RL_hip",
+    "RL_thigh",
+    "RL_calf",
+    "RR_hip",
+    "RR_thigh",
+    "RR_calf",
 )
 
 # Index permutation: wire index -> mjlab index. Apply with arr[WIRE_TO_MJLAB]
@@ -68,16 +83,25 @@ MJLAB_TO_WIRE: tuple[int, ...] = WIRE_TO_MJLAB  # same permutation, applied twic
 # `joint_pos_rel` reference the actor was trained on. Verified via
 # articulation.data.default_joint_pos: FL/RL hip = -0.1, FR/RR hip = +0.1.
 GO2_DEFAULT_POSE: tuple[float, ...] = (
-    -0.1,  0.9, -1.8,   # FL
-     0.1,  0.9, -1.8,   # FR
-    -0.1,  0.9, -1.8,   # RL
-     0.1,  0.9, -1.8,   # RR
+    -0.1,
+    0.9,
+    -1.8,  # FL
+    0.1,
+    0.9,
+    -1.8,  # FR
+    -0.1,
+    0.9,
+    -1.8,  # RL
+    0.1,
+    0.9,
+    -1.8,  # RR
 )
 
 
 @dataclass
 class TwistCommand:
     """Operator-level command. wz already incorporates heading control."""
+
     vx: float = 0.0
     vy: float = 0.0
     wz: float = 0.0
@@ -98,7 +122,9 @@ class Go2VelocityObsBuilder:
     phase_period: float = 0.6
     last_action: np.ndarray = field(default_factory=lambda: np.zeros(12, dtype=np.float32))
     _phase_t: float = 0.0
-    _default_pose: np.ndarray = field(default_factory=lambda: np.array(GO2_DEFAULT_POSE, dtype=np.float32))
+    _default_pose: np.ndarray = field(
+        default_factory=lambda: np.array(GO2_DEFAULT_POSE, dtype=np.float32)
+    )
 
     @property
     def obs_dim(self) -> int:
@@ -113,10 +139,10 @@ class Go2VelocityObsBuilder:
 
     def build(
         self,
-        joint_positions: np.ndarray,   # (12,)
+        joint_positions: np.ndarray,  # (12,)
         joint_velocities: np.ndarray,  # (12,)
-        base_ang_vel: np.ndarray,      # (3,)
-        projected_gravity: np.ndarray, # (3,)
+        base_ang_vel: np.ndarray,  # (3,)
+        projected_gravity: np.ndarray,  # (3,)
         command: TwistCommand,
     ) -> np.ndarray:
         if joint_positions.shape != (12,):
@@ -126,7 +152,9 @@ class Go2VelocityObsBuilder:
 
         # Phase term matches src.tasks.velocity.mdp.observations.phase:
         # zero when L2 command norm < 0.1, else sin/cos of normalized phase.
-        cmd_l2 = math.sqrt(command.vx * command.vx + command.vy * command.vy + command.wz * command.wz)
+        cmd_l2 = math.sqrt(
+            command.vx * command.vx + command.vy * command.vy + command.wz * command.wz
+        )
         if cmd_l2 < 0.1:
             phase_sin, phase_cos = 0.0, 0.0
         else:
@@ -135,10 +163,10 @@ class Go2VelocityObsBuilder:
             phase_sin, phase_cos = math.sin(theta), math.cos(theta)
 
         out = np.empty(47, dtype=np.float32)
-        out[0:3]   = base_ang_vel
-        out[3:6]   = projected_gravity
-        out[6:9]   = (command.vx, command.vy, command.wz)
-        out[9:11]  = (phase_sin, phase_cos)
+        out[0:3] = base_ang_vel
+        out[3:6] = projected_gravity
+        out[6:9] = (command.vx, command.vy, command.wz)
+        out[9:11] = (phase_sin, phase_cos)
         out[11:23] = joint_positions - self._default_pose
         out[23:35] = joint_velocities  # joint_vel_rel: default vel is 0
         out[35:47] = self.last_action
@@ -170,10 +198,10 @@ __all__ = [
     "GO2_DEFAULT_POSE",
     "GO2_JOINT_ORDER",
     "GO2_MJLAB_JOINT_ORDER",
+    "MJLAB_TO_WIRE",
+    "WIRE_TO_MJLAB",
     "Go2VelocityObsBuilder",
     "HeightScanFn",
-    "MJLAB_TO_WIRE",
     "TwistCommand",
-    "WIRE_TO_MJLAB",
     "projected_gravity_from_quat",
 ]

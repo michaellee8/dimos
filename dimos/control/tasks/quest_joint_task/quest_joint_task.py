@@ -25,9 +25,8 @@ controller motion drives the held-up FR paw in body frame.
 
 from __future__ import annotations
 
-import threading
 from dataclasses import dataclass
-from pathlib import Path
+import threading
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -91,8 +90,7 @@ class QuestJointTask(BaseControlTask):
         self._ik = PinocchioIK.from_model_path(config.model_path, config.ee_joint_id)
         if self._ik.nq != self._n:
             logger.warning(
-                f"QuestJointTask {name}: URDF nq ({self._ik.nq}) != "
-                f"joint_names count ({self._n})"
+                f"QuestJointTask {name}: URDF nq ({self._ik.nq}) != joint_names count ({self._n})"
             )
 
         self._lock = threading.Lock()
@@ -163,8 +161,7 @@ class QuestJointTask(BaseControlTask):
         q_solution, converged, err = self._ik.solve(target_pose, q_current)
         if not converged:
             logger.debug(
-                f"QuestJointTask {self._name}: IK partial (err={err:.4f}), "
-                f"applying anyway"
+                f"QuestJointTask {self._name}: IK partial (err={err:.4f}), applying anyway"
             )
 
         if not check_joint_delta(q_solution, q_current, self._config.max_joint_delta_deg):

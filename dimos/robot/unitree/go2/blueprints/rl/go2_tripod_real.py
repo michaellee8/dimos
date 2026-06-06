@@ -58,83 +58,69 @@ from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.MotorCommandArray import MotorCommandArray
 from dimos.robot.unitree.go2.wholebody_connection import Go2WholeBodyConnection
 
-
 _HW = "go2"
 _DEFAULT_POLICY = "data/2026-05-28_11-42-04/model_1200.pt"
 
 # Training env PD gains (hip=20/1, thigh=20/1, calf=40/2 per leg).
 # Wire order is FR/FL/RR/RL but the pattern is per-leg-symmetric so the
 # tuple is identical regardless of leg ordering.
-_KP = (20.0, 20.0, 40.0,
-       20.0, 20.0, 40.0,
-       20.0, 20.0, 40.0,
-       20.0, 20.0, 40.0)
-_KD = (1.0, 1.0, 2.0,
-       1.0, 1.0, 2.0,
-       1.0, 1.0, 2.0,
-       1.0, 1.0, 2.0)
+_KP = (20.0, 20.0, 40.0, 20.0, 20.0, 40.0, 20.0, 20.0, 40.0, 20.0, 20.0, 40.0)
+_KD = (1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0, 1.0, 1.0, 2.0)
 
 _joints = make_quadruped_joints(_HW)
 
 
-go2_tripod_real = (
-    autoconnect(
-        # DDS connection to the real Go2 - rt/lowstate (sub) + rt/lowcmd (pub).
-        Go2WholeBodyConnection.blueprint(
-            release_sport_mode=True,
-            network_interface=os.getenv("ROBOT_INTERFACE", ""),
-        ),
-        ControlCoordinator.blueprint(
-            tick_rate=500,
-            hardware=[
-                HardwareComponent(
-                    hardware_id=_HW,
-                    hardware_type=HardwareType.WHOLE_BODY,
-                    joints=_joints,
-                    adapter_type="transport_lcm",
-                    wb_config=WholeBodyConfig(kp=_KP, kd=_KD),
-                ),
-            ],
-            tasks=[
-                # RL walking policy. Starts disarmed - arm with
-                # set_activated(True) once the operator confirms safe stance.
-                TaskConfig(
-                    name="rl_walk_go2",
-                    type="rl_policy_go2",
-                    joint_names=_joints,
-                    priority=10,
-                    auto_start=False,
-                    params={
-                        "policy_path": _DEFAULT_POLICY,
-                        "hardware_id": _HW,
-                        "inference_period": 0.02,
-                        "mask_fr": False,
-                        "device": "cpu",
-                        "activation_ramp_seconds": 1.5,
-                    },
-                ),
-            ],
-        ),
-    )
-    .transports(
-        {
-            # DDS bridge ports (Go2WholeBodyConnection <-> coordinator's
-            # transport_lcm adapter).
-            ("motor_states", JointState): LCMTransport("/go2/motor_states", JointState),
-            ("imu", Imu): LCMTransport("/go2/imu", Imu),
-            ("motor_command", MotorCommandArray): LCMTransport(
-                "/go2/motor_command", MotorCommandArray
+go2_tripod_real = autoconnect(
+    # DDS connection to the real Go2 - rt/lowstate (sub) + rt/lowcmd (pub).
+    Go2WholeBodyConnection.blueprint(
+        release_sport_mode=True,
+        network_interface=os.getenv("ROBOT_INTERFACE", ""),
+    ),
+    ControlCoordinator.blueprint(
+        tick_rate=500,
+        hardware=[
+            HardwareComponent(
+                hardware_id=_HW,
+                hardware_type=HardwareType.WHOLE_BODY,
+                joints=_joints,
+                adapter_type="transport_lcm",
+                wb_config=WholeBodyConfig(kp=_KP, kd=_KD),
             ),
-            # Operator twist input.
-            ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-            ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
-            # Coordinator -> downstream consumers.
-            ("joint_state", JointState): LCMTransport(
-                "/coordinator/joint_state", JointState
+        ],
+        tasks=[
+            # RL walking policy. Starts disarmed - arm with
+            # set_activated(True) once the operator confirms safe stance.
+            TaskConfig(
+                name="rl_walk_go2",
+                type="rl_policy_go2",
+                joint_names=_joints,
+                priority=10,
+                auto_start=False,
+                params={
+                    "policy_path": _DEFAULT_POLICY,
+                    "hardware_id": _HW,
+                    "inference_period": 0.02,
+                    "mask_fr": False,
+                    "device": "cpu",
+                    "activation_ramp_seconds": 1.5,
+                },
             ),
-            ("joint_command", JointState): LCMTransport("/go2/joint_command", JointState),
-        }
-    )
+        ],
+    ),
+).transports(
+    {
+        # DDS bridge ports (Go2WholeBodyConnection <-> coordinator's
+        # transport_lcm adapter).
+        ("motor_states", JointState): LCMTransport("/go2/motor_states", JointState),
+        ("imu", Imu): LCMTransport("/go2/imu", Imu),
+        ("motor_command", MotorCommandArray): LCMTransport("/go2/motor_command", MotorCommandArray),
+        # Operator twist input.
+        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
+        ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
+        # Coordinator -> downstream consumers.
+        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+        ("joint_command", JointState): LCMTransport("/go2/joint_command", JointState),
+    }
 )
 
 

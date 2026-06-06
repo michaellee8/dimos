@@ -63,7 +63,7 @@ class RslRlPolicy:
         self,
         actor,  # torch.nn.Module
         obs_mean: np.ndarray,  # (obs_dim,)
-        obs_std: np.ndarray,   # (obs_dim,)
+        obs_std: np.ndarray,  # (obs_dim,)
         cfg: RslRlPolicyConfig,
         device: str,
     ) -> None:
@@ -74,12 +74,13 @@ class RslRlPolicy:
         self._device = device
         # Cache a torch tensor handle to avoid re-importing torch on every act().
         import torch
+
         self._torch = torch
         self._mean_t = torch.from_numpy(obs_mean).to(device)
         self._std_t = torch.from_numpy(obs_std).to(device)
 
     @classmethod
-    def load(cls, path: str | Path, device: str = "cpu") -> "RslRlPolicy":
+    def load(cls, path: str | Path, device: str = "cpu") -> RslRlPolicy:
         import torch
         from torch import nn
 

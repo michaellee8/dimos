@@ -22,10 +22,10 @@ so the same coordinator/task stack works against sim or a future DDS adapter.
 
 from __future__ import annotations
 
-import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
+import threading
+import time
 
 import numpy as np
 
@@ -60,10 +60,18 @@ class MujocoGo2Config:
 # Unitree's LowCmd_.motor_cmd[0..11] indexing. Short names (no '_joint' suffix);
 # connect() appends '_joint' when resolving MJCF joint ids.
 GO2_ACTUATOR_ORDER: tuple[str, ...] = (
-    "FR_hip", "FR_thigh", "FR_calf",
-    "FL_hip", "FL_thigh", "FL_calf",
-    "RR_hip", "RR_thigh", "RR_calf",
-    "RL_hip", "RL_thigh", "RL_calf",
+    "FR_hip",
+    "FR_thigh",
+    "FR_calf",
+    "FL_hip",
+    "FL_thigh",
+    "FL_calf",
+    "RR_hip",
+    "RR_thigh",
+    "RR_calf",
+    "RL_hip",
+    "RL_thigh",
+    "RL_calf",
 )
 
 
@@ -134,7 +142,9 @@ class MujocoGo2WholeBody(WholeBodyAdapter):
         # added to the MJCF spawn at their declared positions instead of being
         # zeroed by the keyframe's short qpos vector.
         mujoco.mj_resetData(self._mj_model, self._mj_data)
-        key_id = mujoco.mj_name2id(self._mj_model, mujoco.mjtObj.mjOBJ_KEY, self.config.keyframe_name)
+        key_id = mujoco.mj_name2id(
+            self._mj_model, mujoco.mjtObj.mjOBJ_KEY, self.config.keyframe_name
+        )
         if key_id >= 0:
             n = int(self._mj_model.key_qpos.shape[1])
             # Keyframe stores the full qpos length; we want only the robot's
@@ -144,8 +154,13 @@ class MujocoGo2WholeBody(WholeBodyAdapter):
             self._mj_data.qpos[:robot_qpos_len] = self._mj_model.key_qpos[key_id, :robot_qpos_len]
             # Also apply the keyframe's ctrl (leg targets) so the standing PD
             # has a sensible setpoint before the first command arrives.
-            if self._mj_model.key_ctrl is not None and self._mj_model.key_ctrl.shape[1] >= self._mj_model.nu:
-                self._mj_data.ctrl[:self._mj_model.nu] = self._mj_model.key_ctrl[key_id, :self._mj_model.nu]
+            if (
+                self._mj_model.key_ctrl is not None
+                and self._mj_model.key_ctrl.shape[1] >= self._mj_model.nu
+            ):
+                self._mj_data.ctrl[: self._mj_model.nu] = self._mj_model.key_ctrl[
+                    key_id, : self._mj_model.nu
+                ]
         else:
             logger.warning(f"Keyframe {self.config.keyframe_name!r} missing - using default qpos")
 
@@ -182,7 +197,11 @@ class MujocoGo2WholeBody(WholeBodyAdapter):
         logger.info("MujocoGo2WholeBody disconnected")
 
     def is_connected(self) -> bool:
-        return self._mj_data is not None and self._step_thread is not None and self._step_thread.is_alive()
+        return (
+            self._mj_data is not None
+            and self._step_thread is not None
+            and self._step_thread.is_alive()
+        )
 
     def read_motor_states(self) -> list[MotorState]:
         with self._lock:
@@ -205,18 +224,38 @@ class MujocoGo2WholeBody(WholeBodyAdapter):
 
     def read_imu(self) -> IMUState:
         import mujoco
+
         with self._lock:
             if self._mj_data is None:
                 return IMUState()
             sdata = self._mj_data.sensordata
             adr = self._mj_model.sensor_adr
-            quat = tuple(float(x) for x in sdata[adr[self._imu_sensor_ids["imu_quat"]]:adr[self._imu_sensor_ids["imu_quat"]] + 4])
-            gyro = tuple(float(x) for x in sdata[adr[self._imu_sensor_ids["imu_gyro"]]:adr[self._imu_sensor_ids["imu_gyro"]] + 3])
-            acc = tuple(float(x) for x in sdata[adr[self._imu_sensor_ids["imu_acc"]]:adr[self._imu_sensor_ids["imu_acc"]] + 3])
+            quat = tuple(
+                float(x)
+                for x in sdata[
+                    adr[self._imu_sensor_ids["imu_quat"]] : adr[self._imu_sensor_ids["imu_quat"]]
+                    + 4
+                ]
+            )
+            gyro = tuple(
+                float(x)
+                for x in sdata[
+                    adr[self._imu_sensor_ids["imu_gyro"]] : adr[self._imu_sensor_ids["imu_gyro"]]
+                    + 3
+                ]
+            )
+            acc = tuple(
+                float(x)
+                for x in sdata[
+                    adr[self._imu_sensor_ids["imu_acc"]] : adr[self._imu_sensor_ids["imu_acc"]] + 3
+                ]
+            )
             rpy = np.zeros(3)
-            mujoco.mju_quat2Vel(rpy, np.array(quat, dtype=np.float64), 1.0)  # quat -> rotvec, not RPY; fall through
+            mujoco.mju_quat2Vel(
+                rpy, np.array(quat, dtype=np.float64), 1.0
+            )  # quat -> rotvec, not RPY; fall through
         return IMUState(
-            quaternion=quat,        # (w, x, y, z)
+            quaternion=quat,  # (w, x, y, z)
             gyroscope=gyro,
             accelerometer=acc,
             rpy=(float(rpy[0]), float(rpy[1]), float(rpy[2])),
@@ -244,6 +283,7 @@ class MujocoGo2WholeBody(WholeBodyAdapter):
                 # Apply PD: tau = kp*(q_des - q) + kd*(dq_des - dq) + tau_ff.
                 # POS_STOP/VEL_STOP sentinels mean "no command" -> ctrl=0.
                 from dimos.hardware.whole_body.spec import POS_STOP, VEL_STOP
+
                 for i, cmd in enumerate(self._latest_cmd):
                     if cmd.q == POS_STOP and cmd.dq == VEL_STOP and cmd.tau == 0.0:
                         self._mj_data.ctrl[self._actuator_ids[i]] = 0.0
@@ -266,6 +306,7 @@ class MujocoGo2WholeBody(WholeBodyAdapter):
 
     def _viewer_loop(self) -> None:
         from mujoco import viewer
+
         with viewer.launch_passive(self._mj_model, self._mj_data) as v:
             while not self._stop_event.is_set() and v.is_running():
                 with self._lock:
