@@ -36,7 +36,7 @@ from dimos.core.stream import In, Out
 from dimos.core.transport import LCMTransport
 from dimos.memory2.fanio import Bundle
 from dimos.memory2.module import StreamModule
-from dimos.memory2.stream import Stream
+from dimos.memory2.stream import Stream, _pair_class
 from dimos.memory2.transform import QualityWindow, Transformer
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -144,10 +144,9 @@ class Detection3DModule(StreamModule[Image, Bundle]):
             .map_data(self._fuse)
         )
 
-    def _fuse(self, obs: Observation[Any]) -> FusedDetections:
-        # obs.data is the AlignedPair; its fields are named after the backing
-        # streams (the In ports), so color_image/pointcloud regardless of how the
-        # primary payload changed through Detect2D.
+    def _fuse(
+        self, obs: Observation[_pair_class("color_image", "pointcloud")]
+    ) -> FusedDetections:
         pair = obs.data
         detections_2d: ImageDetections2D = pair.color_image.data
         pointcloud: PointCloud2 = pair.pointcloud.data

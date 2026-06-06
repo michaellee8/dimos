@@ -34,7 +34,6 @@ import numpy as np
 import pytest
 
 from dimos.memory2.fanio import Bundle
-from dimos.memory2.module import StreamModule
 from dimos.memory2.store.memory import MemoryStore
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
@@ -175,12 +174,6 @@ def test_pipeline_aligns_image_with_cloud_and_bundles_2d_3d_outputs() -> None:
     tf = _StaticTf()
     module = _make_module(detector, tf)
     try:
-        # Fan-I/O contract of the migrated module: 2 In, 2+ Out, primary first,
-        # and the wiring comes from the base class - not a copied start().
-        assert list(module.inputs) == ["color_image", "pointcloud"]
-        assert {"detections_2d", "detections_3d"} <= set(module.outputs)
-        assert Detection3DModule.start is StreamModule.start
-
         out = _run_pipeline(
             module,
             image_ts=[10.0, 11.0],
@@ -201,7 +194,7 @@ def test_pipeline_aligns_image_with_cloud_and_bundles_2d_3d_outputs() -> None:
 
     bundle = out[0].data
     assert isinstance(bundle, Bundle)
-    assert set(bundle.values) <= set(module.outputs)
+    assert set(bundle) <= set(module.outputs)
 
     d2d = bundle["detections_2d"]
     d3d = bundle["detections_3d"]

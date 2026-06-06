@@ -32,10 +32,9 @@ pipeline.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
+
+from frozendict import frozendict
 
 from dimos.utils.logging_config import setup_logger
 
@@ -49,39 +48,8 @@ if TYPE_CHECKING:
 logger = setup_logger()
 
 
-@dataclass(frozen=True)
-class Bundle:
-    """Per-tick mapping from ``Out`` port name to that port's payload.
-
-    A multi-output ``pipeline()`` ends in a transform that yields a ``Bundle``
-    per observation; :func:`scatter_to_ports` publishes each value to the ``Out``
-    whose name matches the key. Keys **must** equal declared ``Out`` port names.
-
-    A key may be omitted (or mapped to ``None``) to publish nothing on that port
-    this tick; an empty-but-present payload (e.g. an empty ``Detection2DArray``)
-    is still published - "no detections this frame" is distinct from "this port
-    is idle". ``with_`` returns a new ``Bundle`` rather than mutating in place:
-    the mapping is copied into a read-only view at construction, so neither
-    ``bundle.values = ...`` (frozen dataclass) nor ``bundle.values["a"] = ...``
-    (mapping proxy) can alter an existing bundle. The payload objects themselves
-    are shared by reference - only the key->payload structure is immutable.
-    """
-
-    values: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        # Shallow-copy, then read-only proxy; __setattr__ because frozen=True.
-        object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
-
-    def __getitem__(self, key: str) -> Any:
-        return self.values[key]
-
-    def get(self, key: str, default: Any = None) -> Any:
-        return self.values.get(key, default)
-
-    def with_(self, **updates: Any) -> Bundle:
-        """Return a new ``Bundle`` with *updates* layered over the current values."""
-        return Bundle({**self.values, **updates})
+class Bundle(frozendict[str, Any]):
+    """Immutable port-name -> payload map per tick."""
 
 
 def normalize_to_bundle(stream: Stream[Any], ports: dict[str, Out[Any]]) -> Stream[Any]:
@@ -137,7 +105,7 @@ def scatter_to_ports(stream: Stream[Any], ports: dict[str, Out[Any]]) -> Disposa
     """
 
     def _on_error(e: Exception) -> None:
-        logger.error("scatter_to_ports() pipeline error: %s", e, exc_info=True)
+        logger.error("scatter_to_ports() pipeline error: %s", e, exc_info=e)
 
     def _emit(obs: Observation[Any]) -> None:
         bundle = obs.data

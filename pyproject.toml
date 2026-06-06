@@ -134,6 +134,7 @@ dependencies = [
     "lz4>=4.4.5",
     "bleak>=3.0.2",
     "cryptography>=46.0.5",
+    "frozendict>=2.4.7",
 ]
 
 
