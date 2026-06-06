@@ -45,6 +45,9 @@ _ALIASES = {
     "lowpoly-tdm": "lowpoly-tdm",
     "lowpoly_tdm": "lowpoly-tdm",
     "tdm": "lowpoly-tdm",
+    "city": "cyberpunk-city",
+    "cyberpunk-city": "cyberpunk-city",
+    "cyberpunk_city": "cyberpunk-city",
 }
 _PACKAGE_DIRS = {
     DEFAULT_SCENE: "dimos_office",
@@ -53,6 +56,12 @@ _PACKAGE_DIRS = {
     "mall-babylon-nolights": "mall_babylon_nolights",
     "mall-proxy": "mall_proxy",
     "lowpoly-tdm": "lowpoly_tdm",
+    # Sketchfab "Cyberpunk City" (golukumar). The 20MB source GLB is not shipped;
+    # cook it once (scale 10 gives realistic robot-to-building proportions):
+    #   python -m dimos.simulation.scene_assets.cook <city.glb> \
+    #     --output-dir ~/.cache/dimos/scene_packages/cyberpunk_city \
+    #     --scale 10 --no-mujoco --visual-optimizer copy
+    "cyberpunk-city": "cyberpunk_city",
 }
 
 
