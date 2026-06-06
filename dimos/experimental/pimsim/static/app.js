@@ -108,6 +108,12 @@ try {
     "https://assets.babylonjs.com/environments/environmentSpecular.env",
     scene,
   );
+  // Generic skybox so the world isn't an empty void behind the scene.
+  const skybox = scene.createDefaultSkybox(scene.environmentTexture, true, 12000, 0.4, false);
+  if (skybox) {
+    skybox.isPickable = false;
+    skybox.infiniteDistance = true;
+  }
 } catch (error) {
   console.warn("environment map unavailable", error);
 }
@@ -619,8 +625,17 @@ function placeMarker(existingMarker, name, position, material, diameter) {
 }
 
 function updateKeyboardCamera() {
-  if (driveEnabled) return;
   const deltaSeconds = Math.min(engine.getDeltaTime() / 1000, 0.05);
+
+  // IJKL orbits the view (works while driving too). J/L = left/right,
+  // I/K = up/down.
+  const lookRate = 1.7 * deltaSeconds;
+  if (pressedKeys.has("j")) camera.alpha += lookRate;
+  if (pressedKeys.has("l")) camera.alpha -= lookRate;
+  if (pressedKeys.has("i")) camera.beta = Math.max(0.05, camera.beta - lookRate);
+  if (pressedKeys.has("k")) camera.beta = Math.min(Math.PI - 0.05, camera.beta + lookRate);
+
+  if (driveEnabled) return;
   const speed = (pressedKeys.has("shift") ? 8.0 : 2.7) * deltaSeconds;
   const up = new BABYLON.Vector3(0, 0, 1);
   const forward = camera.getForwardRay().direction;
@@ -1224,6 +1239,24 @@ async function loadRobot() {
     mesh.rotationQuaternion = quatWxyz(geom.wxyz);
     mesh.isPickable = false;
     robotMeshes.push(mesh);
+  }
+
+  // Rest the proxy on the ground. The kinematic base reference sits
+  // vehicle_height above the floor (a legged robot's hip), but a legless box
+  // proxy should sit on the floor, not float at hip height. Only when every
+  // geom shares one body (the single-body proxy), so a uniform drop is valid.
+  const sharedBody = robotMeshes.length ? robotMeshes[0].parent : null;
+  const singleBody = sharedBody && robotMeshes.every((mesh) => mesh.parent === sharedBody);
+  if (browserPhysicsEnabled && browserVehicleHeight > 0 && singleBody) {
+    let minZ = Infinity;
+    for (const mesh of robotMeshes) {
+      mesh.refreshBoundingInfo();
+      minZ = Math.min(minZ, mesh.getBoundingInfo().boundingBox.minimum.z + mesh.position.z);
+    }
+    if (Number.isFinite(minZ)) {
+      const drop = -(browserVehicleHeight + minZ);
+      for (const mesh of robotMeshes) mesh.position.z += drop;
+    }
   }
 }
 
@@ -2928,7 +2961,7 @@ window.addEventListener("keydown", (event) => {
     event.preventDefault();
     return;
   }
-  if (!["w", "a", "s", "d", "q", "e"].includes(key)) return;
+  if (!["w", "a", "s", "d", "q", "e", "i", "j", "k", "l"].includes(key)) return;
   pressedKeys.add(key);
   event.preventDefault();
 });

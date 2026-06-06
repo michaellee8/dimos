@@ -79,7 +79,8 @@ _RERUN_TARGET = os.getenv("DIMOS_RERUN_TARGET", "1.0,2.0,0.2")
 # open road facing down a street instead. Override any scene with
 # DIMOS_PIMSIM_SPAWN="x,y[,yaw]".
 _SCENE_SPAWNS = {
-    "cyberpunk_city": (60.0, 45.0, 0.0),
+    # "main_start" marker placed by the operator (markers.json export).
+    "cyberpunk_city": (45.308, 89.9873, 0.0),
 }
 
 
