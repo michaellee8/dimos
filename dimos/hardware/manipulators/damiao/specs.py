@@ -30,6 +30,8 @@ class DamiaoMotorSpec:
 
     @property
     def effective_recv_id(self) -> int:
+        """Return the explicit receive CAN ID, or Damiao's default response ID."""
+
         return self.recv_id if self.recv_id is not None else (self.send_id | 0x10)
 
 
@@ -56,10 +58,14 @@ class DamiaoArmSpec:
 
     @property
     def dof(self) -> int:
+        """Return the number of joints described by this arm spec."""
+
         return len(self.motors)
 
     @property
     def joint_names(self) -> tuple[str, ...]:
+        """Return joint names in adapter and command-vector order."""
+
         return tuple(motor.name for motor in self.motors)
 
     @classmethod
@@ -83,6 +89,8 @@ class DamiaoArmSpec:
         fd: bool = False,
         supports_velocity: bool = False,
     ) -> DamiaoArmSpec:
+        """Build a typed arm spec from list/tuple metadata values."""
+
         return cls(
             name=name,
             vendor=vendor,
@@ -107,6 +115,8 @@ class DamiaoArmSpec:
         )
 
     def validate(self) -> None:
+        """Validate CAN ID uniqueness and per-joint metadata lengths."""
+
         if not self.motors:
             raise ValueError("DamiaoArmSpec requires at least one motor")
         send_ids = [motor.send_id for motor in self.motors]
@@ -132,6 +142,8 @@ def coerce_motor_specs(
     motor_specs: Sequence[Mapping[str, object] | DamiaoMotorSpec],
     dof: int,
 ) -> tuple[DamiaoMotorSpec, ...]:
+    """Normalize mapping or dataclass motor metadata into typed motor specs."""
+
     specs: list[DamiaoMotorSpec] = []
     for spec in motor_specs:
         if isinstance(spec, DamiaoMotorSpec):

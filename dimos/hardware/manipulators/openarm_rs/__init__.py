@@ -13,6 +13,6 @@
 # limitations under the License.
 
 
-from dimos.hardware.manipulators.dm_motor_arm.adapter import DMMotorArm
+from dimos.hardware.manipulators.openarm_rs.adapter import OpenArmRSAdapter
 
-__all__ = ["DMMotorArm"]
+__all__ = ["OpenArmRSAdapter"]

@@ -32,10 +32,10 @@ if TYPE_CHECKING:
 
 logger = setup_logger()
 
-DMMotorSpecConfig = DamiaoMotorSpec
+OpenArmRSMotorSpecConfig = DamiaoMotorSpec
 
 
-class DMMotorBindingUnavailableError(RuntimeError):
+class OpenArmRSBindingUnavailableError(RuntimeError):
     pass
 
 
@@ -44,10 +44,10 @@ def _load_can_motor_control() -> tuple[ModuleType, ModuleType]:
         can_motor_control = importlib.import_module("can_motor_control")
         damiao = importlib.import_module("can_motor_control.damiao")
     except ImportError as exc:
-        raise DMMotorBindingUnavailableError(
-            "The selected 'dm_motor_arm' adapter requires the Rust-backed "
+        raise OpenArmRSBindingUnavailableError(
+            "The selected 'openarm_rs' adapter requires the Rust-backed "
             "can-motor-control Python binding in the active environment. Install "
-            "dimos[manipulation] before selecting adapter_type='dm_motor_arm'."
+            "dimos[manipulation] before selecting adapter_type='openarm_rs'."
         ) from exc
     return can_motor_control, damiao
 
@@ -73,7 +73,7 @@ def _resolve_motor_type(damiao: ModuleType, motor_type: str | int | Any) -> Any:
     raise ValueError(f"Unknown Damiao motor type value {motor_type!r}")
 
 
-class DMMotorArm(DamiaoArmAdapterBase):
+class OpenArmRSAdapter(DamiaoArmAdapterBase):
     _DEFAULT_OPENARM_MOTORS: tuple[DamiaoMotorSpec, ...] = (
         DamiaoMotorSpec("joint1", "DM8006", 0x01, 0x11),
         DamiaoMotorSpec("joint2", "DM8006", 0x02, 0x12),
@@ -114,21 +114,21 @@ class DMMotorArm(DamiaoArmAdapterBase):
         gravity_torque_limits: list[float] | None = None,
         **_: Any,
     ) -> None:
-        specs = self._coerce_motor_specs(motor_specs, dof)
+        specs = self._openarm_motor_specs(
+            dof=dof,
+            motor_specs=motor_specs,
+            position_lower=position_lower,
+            position_upper=position_upper,
+            velocity_max=velocity_max,
+        )
         arm_spec = DamiaoArmSpec.from_values(
-            name="dm_motor_arm",
-            vendor="Damiao",
-            model="DMMotorArm",
+            name="openarm_rs",
+            vendor="Enactic",
+            model="OpenArm RS v10",
             motors=tuple(specs),
-            position_lower=position_lower
-            if position_lower is not None
-            else self._DEFAULT_POSITION_LOWER[:dof],
-            position_upper=position_upper
-            if position_upper is not None
-            else self._DEFAULT_POSITION_UPPER[:dof],
-            velocity_max=velocity_max
-            if velocity_max is not None
-            else self._DEFAULT_VELOCITY_MAX[:dof],
+            position_lower=self._DEFAULT_POSITION_LOWER,
+            position_upper=self._DEFAULT_POSITION_UPPER,
+            velocity_max=self._DEFAULT_VELOCITY_MAX,
             kp=kp if kp is not None else self._DEFAULT_KP[:dof],
             kd=kd if kd is not None else self._DEFAULT_KD[:dof],
             gravity_model_path=gravity_model_path,
@@ -165,27 +165,24 @@ class DMMotorArm(DamiaoArmAdapterBase):
         self._state_cache_time = 0.0
 
     @classmethod
-    def _coerce_motor_specs(
+    def _openarm_motor_specs(
         cls,
-        motor_specs: list[dict[str, Any] | DamiaoMotorSpec] | None,
+        *,
         dof: int,
+        motor_specs: list[dict[str, Any] | DamiaoMotorSpec] | None,
+        position_lower: list[float] | None,
+        position_upper: list[float] | None,
+        velocity_max: list[float] | None,
     ) -> list[DamiaoMotorSpec]:
-        if motor_specs is None:
-            if dof != len(cls._DEFAULT_OPENARM_MOTORS):
-                raise ValueError(
-                    "motor_specs is required when constructing a dm_motor_arm with "
-                    f"{dof} DOF; the built-in default only describes OpenArm-style 7 DOF"
-                )
-            return list(cls._DEFAULT_OPENARM_MOTORS)
-        specs: list[DamiaoMotorSpec] = []
-        for spec in motor_specs:
-            if isinstance(spec, DamiaoMotorSpec):
-                specs.append(spec)
-            else:
-                specs.append(DamiaoMotorSpec(**spec))
-        if len(specs) != dof:
-            raise ValueError(f"motor_specs length {len(specs)} does not match dof {dof}")
-        return specs
+        if dof != len(cls._DEFAULT_OPENARM_MOTORS):
+            raise ValueError(f"OpenArmRSAdapter only supports 7 DOF (got {dof})")
+        if motor_specs is not None:
+            raise ValueError("openarm_rs is OpenArm-only and does not accept custom motor_specs")
+        if position_lower is not None or position_upper is not None or velocity_max is not None:
+            raise ValueError(
+                "openarm_rs uses fixed OpenArm limits; custom limits require a separate adapter"
+            )
+        return list(cls._DEFAULT_OPENARM_MOTORS)
 
     def connect(self) -> bool:
         try:
@@ -201,10 +198,12 @@ class DMMotorArm(DamiaoArmAdapterBase):
             self._load_gravity_model()
             self._connected = True
             self.refresh_state(force=True)
-        except DMMotorBindingUnavailableError:
+        except OpenArmRSBindingUnavailableError:
             raise
         except Exception as exc:
-            logger.error(f"DMMotorArm {self._hardware_id}@{self._address} connect failed: {exc}")
+            logger.error(
+                f"OpenArmRSAdapter {self._hardware_id}@{self._address} connect failed: {exc}"
+            )
             self._robot = None
             self._arm = None
             self._connected = False
@@ -247,7 +246,7 @@ class DMMotorArm(DamiaoArmAdapterBase):
                 self._robot.disable()
             except Exception as exc:
                 logger.warning(
-                    f"DMMotorArm {self._hardware_id} disable on disconnect failed: {exc}"
+                    f"OpenArmRSAdapter {self._hardware_id} disable on disconnect failed: {exc}"
                 )
         self._enabled = False
         self._connected = False
@@ -260,7 +259,7 @@ class DMMotorArm(DamiaoArmAdapterBase):
 
     def refresh_state(self, *, force: bool = False) -> tuple[list[float], list[float], list[float]]:
         if self._robot is None or self._arm is None:
-            raise RuntimeError("DMMotorArm is not connected")
+            raise RuntimeError("OpenArmRSAdapter is not connected")
         now = time.monotonic()
         if (
             not force
@@ -358,7 +357,7 @@ class DMMotorArm(DamiaoArmAdapterBase):
             q, dq, _ = self.refresh_state(force=True)
             tau = self.compute_gravity_torques(q)
         except Exception as exc:
-            logger.warning(f"Skipping DMMotor gravity compensation due to invalid state: {exc}")
+            logger.warning(f"Skipping OpenArm RS gravity compensation due to invalid state: {exc}")
             return False
         kd = [float(damping)] * self._dof if isinstance(damping, int | float) else list(damping)
         return self.write_mit_commands(q=q, dq=dq, kp=self._zero_vector(), kd=kd, tau=tau)
@@ -406,7 +405,7 @@ class DMMotorArm(DamiaoArmAdapterBase):
         try:
             self._robot.disable()
         except Exception as exc:
-            logger.warning(f"DMMotorArm {self._hardware_id} stop disable failed: {exc}")
+            logger.warning(f"OpenArmRSAdapter {self._hardware_id} stop disable failed: {exc}")
             return False
         self._enabled = False
         return True
@@ -420,7 +419,7 @@ class DMMotorArm(DamiaoArmAdapterBase):
             else:
                 self._robot.disable()
         except Exception as exc:
-            logger.error(f"DMMotorArm {self._hardware_id} enable={enable} failed: {exc}")
+            logger.error(f"OpenArmRSAdapter {self._hardware_id} enable={enable} failed: {exc}")
             return False
         self._enabled = enable
         return True
@@ -432,14 +431,19 @@ class DMMotorArm(DamiaoArmAdapterBase):
             self._robot.disable()
             self._robot.enable()
         except Exception as exc:
-            logger.error(f"DMMotorArm {self._hardware_id} clear errors failed: {exc}")
+            logger.error(f"OpenArmRSAdapter {self._hardware_id} clear errors failed: {exc}")
             return False
         self._enabled = True
         return True
 
 
 def register(registry: AdapterRegistry) -> None:
-    registry.register("dm_motor_arm", DMMotorArm)
+    registry.register("openarm_rs", OpenArmRSAdapter)
 
 
-__all__ = ["DMMotorArm", "DMMotorBindingUnavailableError", "DMMotorSpecConfig", "register"]
+__all__ = [
+    "OpenArmRSAdapter",
+    "OpenArmRSBindingUnavailableError",
+    "OpenArmRSMotorSpecConfig",
+    "register",
+]

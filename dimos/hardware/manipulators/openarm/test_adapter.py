@@ -18,7 +18,6 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from dimos.hardware.manipulators.damiao.base_adapter import DamiaoArmAdapterBase
 from dimos.hardware.manipulators.openarm.adapter import OpenArmAdapter, register
 from dimos.hardware.manipulators.spec import ControlMode, ManipulatorAdapter
 
@@ -74,7 +73,6 @@ class FakeOpenArmBus:
 
 def test_implements_manipulator_adapter() -> None:
     assert isinstance(OpenArmAdapter(gravity_comp=False), ManipulatorAdapter)
-    assert isinstance(OpenArmAdapter(gravity_comp=False), DamiaoArmAdapterBase)
 
 
 def test_register_preserves_openarm_key() -> None:
@@ -88,9 +86,9 @@ def test_constructor_validates_dof_side_and_gain_lengths() -> None:
         OpenArmAdapter(dof=6, gravity_comp=False)
     with pytest.raises(ValueError, match="side must be 'left' or 'right'"):
         OpenArmAdapter(side="middle", gravity_comp=False)
-    with pytest.raises(ValueError, match="kp length 1 does not match dof 7"):
+    with pytest.raises(ValueError, match="kp/kd must be length 7"):
         OpenArmAdapter(kp=[1.0], gravity_comp=False)
-    with pytest.raises(ValueError, match="kd length 1 does not match dof 7"):
+    with pytest.raises(ValueError, match="kp/kd must be length 7"):
         OpenArmAdapter(kd=[1.0], gravity_comp=False)
 
 

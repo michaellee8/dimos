@@ -60,7 +60,7 @@ RIGHT_CAN = "can0"
 AUTO_SET_MIT_MODE = True
 
 _ADAPTER_KWARGS = {"auto_set_mit_mode": AUTO_SET_MIT_MODE}
-_DM_MOTOR_ADAPTER_KWARGS = {
+_OPENARM_RS_ADAPTER_KWARGS = {
     "gravity_model_path": OPENARM_V10_RIGHT_MODEL,
     "gravity_comp": True,
     "canfd": True,
@@ -77,13 +77,16 @@ _right_hw = _openarm(
     adapter_type="openarm",
     adapter_kwargs=_ADAPTER_KWARGS,
 )
-_dm_motor_hw = _openarm(
+_openarm_rs_hw = _openarm(
     side="right",
     name="arm",
-    adapter_type="dm_motor_arm",
+    adapter_type="openarm_rs",
     address=RIGHT_CAN,
-    adapter_kwargs=_DM_MOTOR_ADAPTER_KWARGS,
+    adapter_kwargs=_OPENARM_RS_ADAPTER_KWARGS,
 )
+_openarm_rs_joint_names = _openarm_rs_hw.joint_names
+if _openarm_rs_joint_names is None:
+    raise ValueError("OpenArm RS hardware config requires joint names")
 
 coordinator_openarm_left = ControlCoordinator.blueprint(
     hardware=[_left_hw.to_hardware_component()],
@@ -116,9 +119,9 @@ coordinator_openarm_bimanual = ControlCoordinator.blueprint(
     }
 )
 
-coordinator_dm_motor_openarm = ControlCoordinator.blueprint(
-    hardware=[_dm_motor_hw.to_hardware_component()],
-    tasks=[_dm_motor_hw.to_task_config(task_name="traj_dm_motor_openarm")],
+coordinator_openarm_rs = ControlCoordinator.blueprint(
+    hardware=[_openarm_rs_hw.to_hardware_component()],
+    tasks=[_openarm_rs_hw.to_task_config(task_name="traj_openarm_rs")],
 ).transports(
     {
         ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
@@ -126,15 +129,15 @@ coordinator_dm_motor_openarm = ControlCoordinator.blueprint(
 )
 
 # Hardware bring-up test: immediately writes current-position SERVO_POSITION
-# commands so the dm_motor_arm adapter emits MIT hold frames with gravity
+# commands so the openarm_rs adapter emits MIT hold frames with gravity
 # feed-forward. Use cautiously; this is an active write-path test.
-coordinator_dm_motor_openarm_hold_test = ControlCoordinator.blueprint(
-    hardware=[_dm_motor_hw.to_hardware_component()],
+coordinator_openarm_rs_hold_test = ControlCoordinator.blueprint(
+    hardware=[_openarm_rs_hw.to_hardware_component()],
     tasks=[
         TaskConfig(
-            name="hold_dm_motor_openarm",
+            name="hold_openarm_rs",
             type="current_position_hold",
-            joint_names=_dm_motor_hw.joint_names,
+            joint_names=_openarm_rs_joint_names,
             priority=5,
             auto_start=True,
         ),
@@ -251,11 +254,12 @@ keyboard_teleop_openarm = autoconnect(
 
 
 __all__ = [
-    "coordinator_dm_motor_openarm",
     "coordinator_openarm_bimanual",
     "coordinator_openarm_left",
     "coordinator_openarm_mock",
     "coordinator_openarm_right",
+    "coordinator_openarm_rs",
+    "coordinator_openarm_rs_hold_test",
     "keyboard_teleop_openarm",
     "keyboard_teleop_openarm_mock",
     "openarm_mock_planner_coordinator",
