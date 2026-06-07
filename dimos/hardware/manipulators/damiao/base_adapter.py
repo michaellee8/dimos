@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import time
-from typing import Protocol, cast
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -29,136 +29,56 @@ logger = setup_logger()
 
 FloatArray = NDArray[np.float64]
 
+_can_motor_control: Any | None
+_damiao: Any | None
 
-class _SupportsInt(Protocol):
-    def __int__(self) -> int: ...
-
-
-class _PinocchioModel(Protocol):
-    def createData(self) -> object: ...
-
-
-class _PinocchioModule(Protocol):
-    def buildModelFromUrdf(self, filename: str) -> _PinocchioModel: ...
-
-    def computeGeneralizedGravity(
-        self, model: _PinocchioModel, data: object, q: FloatArray
-    ) -> FloatArray: ...
-
-
-class _Motor(Protocol):
-    fault: int | None
-
-
-class _Arm(Protocol):
-    def __len__(self) -> int: ...
-
-    def __getitem__(self, name: str) -> _Motor: ...
-
-    def refresh(self) -> None: ...
-
-    def positions(self) -> FloatArray: ...
-
-    def velocities(self) -> FloatArray: ...
-
-    def torques(self) -> FloatArray: ...
-
-    def mit_control(self, cmds: FloatArray) -> None: ...
-
-
-class _Robot(Protocol):
-    def __getitem__(self, name: str) -> _Arm: ...
-
-    def connect(self) -> None: ...
-
-    def enable(self) -> None: ...
-
-    def disable(self) -> None: ...
-
-    def tick(self, per_bus_deadline_us: int) -> None: ...
-
-
-class _RobotBuilder(Protocol):
-    def add_bus(self, name: str, transport: object, codec: object) -> _RobotBuilder: ...
-
-    def add_arm(self, name: str, *, bus: str, motors: list[object]) -> _RobotBuilder: ...
-
-    def build(self) -> _Robot: ...
-
-
-class _RobotFactory(Protocol):
-    def builder(self) -> _RobotBuilder: ...
-
-    def from_config(self, path: str) -> _Robot: ...
-
-
-class _MotorSpecFactory(Protocol):
-    def __call__(self, name: str, type: object, send_id: int, recv_id: int) -> object: ...
-
-
-class _MockCanBusFactory(Protocol):
-    def __call__(self, name: str, fd: bool = False) -> object: ...
-
-    def new_fd(self, name: str) -> object: ...
-
-
-class _SocketCanBusFactory(Protocol):
-    def __call__(self, interface: str, fd: bool = False) -> object: ...
-
-
-class _CanMotorControlModule(Protocol):
-    Robot: _RobotFactory
-    MotorSpec: _MotorSpecFactory
-    MockCanBus: _MockCanBusFactory
-    SocketCanBus: _SocketCanBusFactory
-
-
-class _DamiaoModule(Protocol):
-    MotorType: object
-    DamiaoCodec: type[object]
+try:
+    import can_motor_control as _can_motor_control
+    from can_motor_control import damiao as _damiao
+except ImportError as exc:
+    _can_motor_control = None
+    _damiao = None
+    _can_motor_control_import_error: ImportError | None = exc
+else:
+    _can_motor_control_import_error = None
 
 
 class DamiaoBindingUnavailableError(RuntimeError):
     pass
 
 
-def _as_object(value: object) -> object:
-    return value
-
-
-def _load_can_motor_control(
+def _ensure_can_motor_control(
     *,
     adapter_type: str,
     error_type: type[RuntimeError] = DamiaoBindingUnavailableError,
-) -> tuple[_CanMotorControlModule, _DamiaoModule]:
-    try:
-        import can_motor_control
-        from can_motor_control import damiao
-    except ImportError as exc:
+) -> None:
+    if _can_motor_control_import_error is not None:
         raise error_type(
             f"The selected '{adapter_type}' adapter requires the Rust-backed "
             "can-motor-control Python binding in the active environment. Install "
             f"dimos[manipulation] before selecting adapter_type='{adapter_type}'."
-        ) from exc
-    return cast("_CanMotorControlModule", _as_object(can_motor_control)), cast(
-        "_DamiaoModule", _as_object(damiao)
-    )
+        ) from _can_motor_control_import_error
 
 
-def _resolve_motor_type(damiao: _DamiaoModule, motor_type: object) -> object:
+def _dynamic_attr(value: object, name: str) -> Any:
+    return getattr(value, name)
+
+
+def _resolve_motor_type(motor_type: object) -> object:
+    assert _damiao is not None
     if isinstance(motor_type, str):
         try:
-            return cast("object", getattr(damiao.MotorType, motor_type))
+            return getattr(_damiao.MotorType, motor_type)
         except AttributeError as exc:
             raise ValueError(f"Unknown Damiao motor type {motor_type!r}") from exc
     if not isinstance(motor_type, int):
         return motor_type
-    for name in dir(damiao.MotorType):
+    for name in dir(_damiao.MotorType):
         if name.startswith("_"):
             continue
-        candidate = cast("object", getattr(damiao.MotorType, name))
+        candidate = getattr(_damiao.MotorType, name)
         try:
-            candidate_value = int(cast("_SupportsInt", candidate))
+            candidate_value = int(candidate)
         except (TypeError, ValueError):
             continue
         if candidate_value == motor_type:
@@ -234,7 +154,7 @@ class DamiaoArmAdapterBase:
         self._control_mode = ControlMode.POSITION
         self._enabled = False
         self._last_positions: list[float] | None = None
-        self._pin_model: _PinocchioModel | None = None
+        self._pin_model = None
         self._pin_data: object | None = None
         self._address = str(address) if address is not None else "can0"
         self._config_path = str(config_path) if config_path is not None else None
@@ -244,10 +164,8 @@ class DamiaoArmAdapterBase:
         self._use_mock_bus = use_mock_bus
         self._tick_deadline_us = tick_deadline_us
         self._state_cache_ttl_s = state_cache_ttl_s
-        self._can_motor_control: _CanMotorControlModule | None = None
-        self._damiao: _DamiaoModule | None = None
-        self._robot: _Robot | None = None
-        self._arm: _Arm | None = None
+        self._robot: Any | None = None
+        self._arm: Any | None = None
         self._connected = False
         self._state_cache: tuple[list[float], list[float], list[float]] | None = None
         self._state_cache_time = 0.0
@@ -323,18 +241,20 @@ class DamiaoArmAdapterBase:
 
     def connect(self) -> bool:
         try:
-            self._can_motor_control, self._damiao = _load_can_motor_control(
+            _ensure_can_motor_control(
                 adapter_type=self._adapter_type,
                 error_type=self._binding_error_type,
             )
-            self._robot = self._build_robot()
-            self._robot.connect()
-            self._arm = self._robot[self._arm_name]
-            if len(self._arm) != self._dof:
+            robot = self._build_robot()
+            robot.connect()
+            arm = robot[self._arm_name]
+            if len(arm) != self._dof:
                 raise RuntimeError(
-                    f"can_motor_control arm group {self._arm_name!r} has {len(self._arm)} joints, "
+                    f"can_motor_control arm group {self._arm_name!r} has {len(arm)} joints, "
                     f"expected {self._dof}"
                 )
+            self._robot = robot
+            self._arm = arm
             self._load_gravity_model()
             self._connected = True
             self.refresh_state(force=True)
@@ -350,30 +270,30 @@ class DamiaoArmAdapterBase:
             return False
         return True
 
-    def _build_robot(self) -> _Robot:
-        assert self._can_motor_control is not None
-        assert self._damiao is not None
+    def _build_robot(self) -> Any:
+        assert _can_motor_control is not None
+        assert _damiao is not None
         if self._config_path is not None:
-            return self._can_motor_control.Robot.from_config(self._config_path)
+            return _can_motor_control.Robot.from_config(self._config_path)
         transport = (
-            self._can_motor_control.MockCanBus.new_fd(self._address)
+            _can_motor_control.MockCanBus.new_fd(self._address)
             if self._use_mock_bus and self._fd
-            else self._can_motor_control.MockCanBus(self._address)
+            else _can_motor_control.MockCanBus(self._address)
             if self._use_mock_bus
-            else self._can_motor_control.SocketCanBus(self._address, fd=self._fd)
+            else _can_motor_control.SocketCanBus(self._address, fd=self._fd)
         )
-        codec = self._damiao.DamiaoCodec()
+        codec = _damiao.DamiaoCodec()
         binding_specs = [
-            self._can_motor_control.MotorSpec(
+            _can_motor_control.MotorSpec(
                 spec.name,
-                _resolve_motor_type(self._damiao, spec.type),
+                cast("int", _resolve_motor_type(spec.type)),
                 spec.send_id,
                 spec.effective_recv_id,
             )
             for spec in self._motor_specs
         ]
         return (
-            self._can_motor_control.Robot.builder()
+            _can_motor_control.Robot.builder()
             .add_bus(self._bus_name, transport, codec)
             .add_arm(self._arm_name, bus=self._bus_name, motors=binding_specs)
             .build()
@@ -569,10 +489,9 @@ class DamiaoArmAdapterBase:
             return
         import pinocchio
 
-        pinocchio_module = cast("_PinocchioModule", _as_object(pinocchio))
-
-        self._pin_model = pinocchio_module.buildModelFromUrdf(self._gravity_model_path)
-        self._pin_data = self._pin_model.createData()
+        build_model_from_urdf = _dynamic_attr(pinocchio, "buildModelFromUrdf")
+        self._pin_model = build_model_from_urdf(self._gravity_model_path)
+        self._pin_data = _dynamic_attr(self._pin_model, "createData")()
 
     def compute_gravity_torques(self, q: list[float]) -> list[float]:
         self._validate_length("q", q)
@@ -580,9 +499,8 @@ class DamiaoArmAdapterBase:
             return [0.0] * self._dof
         import pinocchio
 
-        pinocchio_module = cast("_PinocchioModule", _as_object(pinocchio))
-
-        tau = pinocchio_module.computeGeneralizedGravity(
+        compute_generalized_gravity = _dynamic_attr(pinocchio, "computeGeneralizedGravity")
+        tau = compute_generalized_gravity(
             self._pin_model,
             self._pin_data,
             np.array(q, dtype=np.float64),
