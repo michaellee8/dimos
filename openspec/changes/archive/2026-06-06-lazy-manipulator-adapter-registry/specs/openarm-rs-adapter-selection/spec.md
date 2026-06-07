@@ -1,8 +1,4 @@
-## Purpose
-
-Define the explicit user-facing selection and safety staging surface for the OpenArm RS adapter.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Explicit OpenArm RS adapter selection
 

@@ -1,8 +1,4 @@
-## Purpose
-
-Define the narrowed binding-backed OpenArm adapter behavior for the Rust-backed OpenArm RS path.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Binding-backed OpenArm adapter scope
 
