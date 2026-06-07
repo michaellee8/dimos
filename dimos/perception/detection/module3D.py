@@ -145,7 +145,8 @@ class Detection3DModule(StreamModule[Image, Bundle]):
         )
 
     def _fuse(
-        self, obs: Observation[_pair_class("color_image", "pointcloud")]
+        self,
+        obs: Observation[_pair_class("color_image", "pointcloud")],  # type: ignore[valid-type]
     ) -> FusedDetections:
         pair = obs.data
         detections_2d: ImageDetections2D = pair.color_image.data

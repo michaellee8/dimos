@@ -120,7 +120,6 @@ def _reset_thread_pool() -> None:
     tp.scheduler = ThreadPoolScheduler(max_workers=tp.get_max_workers())
 
 
-@pytest.mark.tool
 @pytest.mark.parametrize("module_cls", module_cases)
 def test_e2e_runtime_wiring(module_cls: type[StreamModule]) -> None:
     """Push data into In port, assert doubled data arrives on Out port."""
@@ -166,7 +165,6 @@ class SingleOutBundleModule(StreamModule):
         return stream.transform(_to_bundle)
 
 
-@pytest.mark.tool
 def test_single_out_bundle_tail_publishes_field_not_whole_bundle_e2e() -> None:
     """With one ``Out`` and a Bundle-tail pipeline, the port receives the matching
     bundle field (M-agnostic scatter), never the whole ``Bundle`` - so a 1->1
@@ -224,13 +222,13 @@ class ChainedFusion(StreamModule):
 def _wire_inputs(
     module: StreamModule, store: MemoryStore, dtype: type = int, **points: list
 ) -> dict[str, Stream]:
-    """Populate ``module._in_streams`` from ``name=[(ts, value), ...]`` point lists.
+    """Seed backing streams and set ``module._in_streams`` for fusion unit tests.
 
-    Mirrors what ``StreamModule.start()`` assembles, so ``pipeline()`` can reach
-    siblings through ``self.streams.<port>`` without standing up the live
-    transport machinery. Each secondary's last ts must reach the primary's last
-    ts so the two-pointer merge never blocks waiting on a (never-arriving) later
-    live sample.
+    Lets ``pipeline()`` reach siblings through ``self.streams.<port>`` while
+    exercising align / interpolator logic directly via ``pipeline(...).to_list()``
+    - not through ``StreamModule.start()`` or live transport. Each secondary's
+    last ts must reach the primary's last ts so the two-pointer merge never
+    blocks waiting on a (never-arriving) later sample.
     """
     streams: dict[str, Stream] = {}
     for name, pts in points.items():
@@ -608,7 +606,6 @@ class TestFanOutScatter:
     """A multi-output pipeline yields a :class:`Bundle` per tick and
     :func:`scatter_to_ports` fans it to the matching ports in one subscribe."""
 
-    @pytest.mark.tool
     def test_multi_output_scatter_runs_pipeline_once_per_tick(self) -> None:
         """Two Out ports fed from one fused pipeline must compute once per
         observation, not once per port: scatter subscribes a single time, so a
@@ -644,7 +641,6 @@ class TestFanOutScatter:
         assert low.published == [0, 1, 2, 3, 4]
         assert high.published == [0, 10, 20, 30, 40]
 
-    @pytest.mark.tool
     def test_scatter_skips_none_valued_keys(self) -> None:
         """A bundle key mapped to None publishes nothing on that port for the
         tick, while a sibling key with a real payload still publishes."""
@@ -663,7 +659,6 @@ class TestFanOutScatter:
         assert present.published == ["x"]
         assert absent.published == []  # None is a skip, not a publish
 
-    @pytest.mark.tool
     def test_scatter_publishes_empty_but_present_payloads(self) -> None:
         """An empty-but-present payload (e.g. an empty detection array) still
         publishes - 'nothing detected this frame' differs from 'port idle' - so
@@ -683,7 +678,6 @@ class TestFanOutScatter:
         assert empty_out.published == [[]]  # the empty list was published, not skipped
         assert value_out.published == ["v"]
 
-    @pytest.mark.tool
     def test_single_output_bundle_tail_publishes_field_not_whole_bundle(self) -> None:
         """A single ``Out`` whose pipeline ends in a ``Bundle`` publishes the
         field named after the port, not the whole bundle, and silently drops
@@ -707,7 +701,6 @@ class TestFanOutScatter:
         # bundle["detections_3d"] only; the unrouted detections_2d field is dropped.
         assert detections.published == ["d3d"]
 
-    @pytest.mark.tool
     def test_single_output_raw_payload_is_wrapped_then_published(self) -> None:
         """A 1:1 pipeline that yields a raw payload (not a ``Bundle``) is
         normalized into a one-key bundle at the start boundary, so the same

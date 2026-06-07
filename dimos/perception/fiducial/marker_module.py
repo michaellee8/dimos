@@ -137,7 +137,6 @@ class MarkerModule(StreamModule[Image, Bundle]):
     def _append_image_with_pose(self, stream: Stream[Image], image: Image) -> None:
         info = self.config.camera_info
         if info is None:
-            logger.debug("MarkerModule: no CameraInfo yet; skipping frame")
             return
 
         ts = getattr(image, "ts", None) or time.time()
@@ -149,12 +148,6 @@ class MarkerModule(StreamModule[Image, Bundle]):
             time_tolerance=self.config.tf_lookup_tolerance,
         )
         if t_world_optical is None:
-            logger.debug(
-                "MarkerModule: no TF %s -> %s at ts=%s",
-                self.config.world_frame,
-                optical,
-                ts,
-            )
             return
 
         stream.append(

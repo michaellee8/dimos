@@ -1106,7 +1106,7 @@ def _two_streams(
 
 class TestAlignNearestNeighbor:
     """`.align(other, tolerance=)` pairs each primary observation with the
-    nearest-in-time secondary within tolerance (PR #2306 nearest-neighbor)."""
+    nearest-in-time secondary within tolerance."""
 
     def test_pairs_closer_of_the_two_bracketing_secondaries(self, session):
         """Each primary takes the nearer of the secondaries bracketing it -

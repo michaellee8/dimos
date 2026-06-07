@@ -38,6 +38,7 @@ import numpy as np
 
 from dimos.memory2.fanio import Bundle
 from dimos.memory2.transform import Transformer
+from dimos.memory2.type.observation import PoseTuple
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -378,7 +379,7 @@ def _frame_image(
 def _frame_pose(
     obs: Observation[Detection3DMarker | None],
     detections: list[Detection3DMarker],
-) -> Any | None:
+) -> PoseTuple | None:
     if detections and detections[0].transform is not None:
         transform = detections[0].transform
         return (
@@ -390,7 +391,7 @@ def _frame_pose(
             transform.rotation.z,
             transform.rotation.w,
         )
-    return obs.pose
+    return obs.pose_tuple
 
 
 class MarkersToBundle(Transformer[Detection3DMarker | None, Bundle]):
