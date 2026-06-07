@@ -71,7 +71,7 @@ class SceneAsset:
             rotation_zyx_deg=package.alignment.rotation_zyx_deg,
             y_up=package.alignment.y_up,
             browser_collision_path=package.browser_collision_path,
-            mujoco_path=package.mujoco_model_path,
+            mujoco_path=package.mujoco_scene_path,
             metadata_path=package.metadata_path,
         )
 

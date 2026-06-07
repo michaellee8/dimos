@@ -55,11 +55,14 @@ _PACKAGE_DIRS = {
 
 def resolve_scene_package(
     scene: str | Path | None = None,
-    *,
-    robot_mjcf_path: str | Path | None = None,
-    meshdir: str | Path | None = None,
+    **_legacy: Any,
 ) -> ScenePackage | None:
-    """Resolve a scene name, metadata path, or package directory."""
+    """Resolve a scene name, metadata path, or package directory.
+
+    ``robot_mjcf_path`` and ``meshdir`` are accepted as legacy keyword
+    arguments and ignored; scene packages are now robot-agnostic and the
+    runtime composer attaches the robot via ``MjSpec.attach()``.
+    """
     if scene is None:
         scene = DEFAULT_SCENE
 
@@ -88,7 +91,7 @@ def resolve_scene_package(
         raise ValueError(f"unknown scene '{scene_text}'. Known scenes: {known}")
 
     if name == DEFAULT_SCENE:
-        return _resolve_dimos_office(robot_mjcf_path=robot_mjcf_path, meshdir=meshdir)
+        return _resolve_dimos_office()
 
     metadata_path = SCENE_PACKAGE_CACHE_DIR / _PACKAGE_DIRS[name] / "scene.meta.json"
     if not metadata_path.exists():
@@ -96,11 +99,7 @@ def resolve_scene_package(
     return load_scene_package(metadata_path)
 
 
-def _resolve_dimos_office(
-    *,
-    robot_mjcf_path: str | Path | None,
-    meshdir: str | Path | None,
-) -> ScenePackage:
+def _resolve_dimos_office() -> ScenePackage:
     office = get_dimos_office()
     metadata_path = SCENE_PACKAGE_CACHE_DIR / _PACKAGE_DIRS[DEFAULT_SCENE] / "scene.meta.json"
     expected_alignment = SceneMeshAlignment(
@@ -121,7 +120,6 @@ def _resolve_dimos_office(
         and _alignment_matches(package.alignment, expected_alignment)
         and package.visual_path is not None
         and package.browser_collision_path is not None
-        and (robot_mjcf_path is None or package.mujoco_model_path is not None)
     ):
         return package
 

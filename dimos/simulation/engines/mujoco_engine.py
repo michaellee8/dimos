@@ -98,8 +98,8 @@ class MujocoEngine(SimulationEngine):
 
     def __init__(
         self,
-        config_path: Path,
-        headless: bool,
+        config_path: Path | None = None,
+        headless: bool = True,
         cameras: list[CameraConfig] | None = None,
         meshdir: str | Path | None = None,
         on_before_step: StepHook | None = None,
@@ -109,8 +109,18 @@ class MujocoEngine(SimulationEngine):
         spawn_z: float | None = None,
         spawn_yaw: float | None = None,
         reset_joint_positions: list[float] | None = None,
+        model: mujoco.MjModel | None = None,
     ) -> None:
-        super().__init__(config_path=config_path, headless=headless)
+        """Either ``config_path`` (legacy: load an MJCF/MJB from disk) or
+        ``model`` (preferred: a model already compiled by the caller, e.g.
+        via ``MjSpec.attach`` at sim-module start) must be supplied. When
+        ``model`` is provided, ``config_path`` becomes the metadata-only
+        ``self.config_path`` and the joint-mapping fallback (model-only) is
+        used in place of XML actuator parsing.
+        """
+        if model is None and config_path is None:
+            raise ValueError("MujocoEngine: either model or config_path must be provided")
+        super().__init__(config_path=config_path or Path("/dev/null"), headless=headless)
         self._on_before_step: StepHook | None = on_before_step
         self._on_after_step: StepHook | None = on_after_step
         self._spawn_xy = spawn_xy
@@ -118,9 +128,13 @@ class MujocoEngine(SimulationEngine):
         self._spawn_yaw = spawn_yaw
         self._reset_joint_positions = reset_joint_positions
 
-        xml_path = self._resolve_xml_path(config_path)
-        self._model = self._load_model(xml_path, meshdir=meshdir, assets=assets)
-        self._xml_path = xml_path
+        if model is not None:
+            self._model = model
+            self._xml_path = None
+        else:
+            xml_path = self._resolve_xml_path(config_path)
+            self._model = self._load_model(xml_path, meshdir=meshdir, assets=assets)
+            self._xml_path = xml_path
 
         self._data = mujoco.MjData(self._model)
         self._lock = threading.Lock()

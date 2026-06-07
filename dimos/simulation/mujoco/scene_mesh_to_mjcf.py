@@ -60,7 +60,6 @@ recommended entry point -- it handles a three-tier cache:
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
 import hashlib
@@ -68,7 +67,7 @@ import multiprocessing
 import os
 from pathlib import Path
 import time
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import open3d as o3d  # type: ignore[import-untyped]
@@ -89,17 +88,12 @@ logger = setup_logger()
 
 
 CACHE_DIR = Path.home() / ".cache" / "dimos" / "scene_meshes"
-_MUJOCO_FROM_BINARY_PATH = "from_binary_path"
-_MUJOCO_SAVE_MODEL = "mj_saveModel"
 
 
-# ``<include>`` comes BEFORE ``<compiler>`` so the wrapper's absolute
-# meshdir is the *last* compiler block in the merged spec -- MuJoCo's
-# "last compiler wins" rule then routes the robot MJCF's
-# ``<mesh file="X.STL"/>`` entries to ``<wrapper meshdir>/X.STL``.  If
-# the order is reversed the robot's own ``<compiler meshdir="assets"/>``
-# overrides the absolute path with a relative one that resolves against
-# the wrapper's cache directory and the include's meshes can't be found.
+# Scene-only wrapper -- no robot include. Robots are attached at runtime
+# via ``MjSpec.attach()`` (see ``MujocoSimModule.start``), keeping the
+# cooked package robot-agnostic. ``meshdir="."`` resolves the cooked
+# scene OBJs that sit alongside this file.
 #
 # The dummy ``<inertial>`` on dimos_scene bypasses MuJoCo's auto-
 # computation of body inertia from geom volumes -- the body is static
@@ -108,8 +102,7 @@ _MUJOCO_SAVE_MODEL = "mj_saveModel"
 # triggers ``Error: mesh volume is too small`` at compile time.
 _WRAPPER_TEMPLATE = """\
 <mujoco model="{model_name}">
-  <include file="{robot_mjcf_abs}"/>
-  <compiler angle="radian" meshdir="{meshdir}" texturedir="{meshdir}"/>
+  <compiler angle="radian" meshdir="." texturedir="."/>
   <statistic center="{statistic_center}" extent="{statistic_extent}"/>
   <visual>
     <map znear="0.01" zfar="{visual_zfar}"/>
@@ -180,7 +173,7 @@ _CACHE_KEY_LEN = 12
 # affect MJCF emission (new geom kinds, rewritten visual policy, etc.).
 # This is only a local cache salt; it is not a persisted file format
 # contract and old cache directories can safely stay on disk.
-_CACHE_SCHEMA_VERSION = "dispatcher-v9"
+_CACHE_SCHEMA_VERSION = "scene-only-v10"
 
 
 @dataclass
@@ -209,27 +202,23 @@ def _resolve_existing_file(path: str | Path, label: str) -> Path:
 
 def bake_scene_mjcf(
     scene_mesh_path: str | Path,
-    robot_mjcf_path: str | Path,
     alignment: SceneMeshAlignment | None = None,
-    meshdir: str | Path | None = None,
     cache_root: Path | None = None,
     collision_spec: CollisionSpec | None = None,
     include_visual_mesh: bool = False,
     rebake: bool = False,
 ) -> Path:
-    """Convert ``scene_mesh_path`` to OBJs + MJCF wrapper around the robot.
+    """Convert ``scene_mesh_path`` to OBJs + scene-only MJCF wrapper.
+
+    The wrapper is robot-agnostic: it declares the cooked scene as the
+    ``dimos_scene`` static body and nothing else. Robots are attached at
+    runtime via ``MjSpec.attach()`` inside ``MujocoSimModule.start``.
 
     Args:
         scene_mesh_path: ``.usdz`` / ``.usda`` / ``.glb`` / ``.obj`` /
             etc.  Anything ``mesh_scene.load_scene_prims`` accepts.
-        robot_mjcf_path: the base robot MJCF the wrapper will
-            ``<include>``.
         alignment: scale / translation / rotation / y-up swap to bake
             into world frame before any geom is emitted.
-        meshdir: directory MuJoCo resolves the *robot's* unqualified
-            mesh filenames against.  Defaults to ``robot_mjcf_path.parent``.
-            Override when the robot ships its assets in a sibling
-            ``assets/`` folder (typical for menagerie robots).
         cache_root: override the cache root (defaults to
             ``~/.cache/dimos/scene_meshes``).
         collision_spec: per-prim policy.  ``None`` auto-discovers a
@@ -246,22 +235,16 @@ def bake_scene_mjcf(
             directory and regenerate the scene collision geometry.
 
     Returns:
-        Path to the wrapper MJCF.  Pass to ``MujocoSimModule`` instead of
-        the raw robot MJCF, or use :func:`load_or_bake` to also get an
-        ``.mjb`` cache.
+        Path to the scene-only wrapper MJCF. Load with
+        ``mujoco.MjSpec.from_file`` and attach a robot via ``attach()``.
     """
     scene_mesh_path = _resolve_existing_file(scene_mesh_path, "scene mesh")
-    robot_mjcf_path = _resolve_existing_file(robot_mjcf_path, "robot MJCF")
     align = alignment or SceneMeshAlignment()
     spec = collision_spec or CollisionSpec.auto_discover(scene_mesh_path)
 
-    meshdir = Path(meshdir).expanduser().resolve() if meshdir else robot_mjcf_path.parent
-
     cache_key = _cache_key(
         scene_mesh_path,
-        robot_mjcf_path,
         align,
-        meshdir,
         spec=spec,
         include_visual_mesh=include_visual_mesh,
     )
@@ -335,8 +318,6 @@ def bake_scene_mjcf(
     _write_wrapper(
         wrapper_path=wrapper_path,
         cache_key=cache_key,
-        meshdir=meshdir,
-        robot_mjcf_path=robot_mjcf_path,
         asset_lines=artifacts.asset_lines,
         geom_lines=artifacts.geom_lines,
         statistic_center=scene_center,
@@ -347,109 +328,27 @@ def bake_scene_mjcf(
 
 def load_or_bake(
     scene_mesh_path: str | Path,
-    robot_mjcf_path: str | Path,
     alignment: SceneMeshAlignment | None = None,
-    meshdir: str | Path | None = None,
     cache_root: Path | None = None,
     collision_spec: CollisionSpec | None = None,
     include_visual_mesh: bool = False,
     rebake: bool = False,
-) -> tuple[Any, Path]:
-    """Three-tier cache: ``.mjb`` -> ``wrapper.xml`` -> full bake.
+) -> Path:
+    """Return the cached or freshly baked scene-only wrapper MJCF.
 
-    Returns ``(MjModel, wrapper_path)``.
-
-    1. If ``compiled.mjb`` exists in the bake's cache dir -> load it
-       directly (~1 s for a 5k-prim mall).
-    2. Else if ``wrapper.xml`` exists -> compile XML, save the ``.mjb``
-       beside it, return the model.
-    3. Else -> run the full bake, compile the resulting wrapper, save
-       ``.mjb``, return the model.
-
-    Set ``rebake=True`` to force step 3 even when caches exist.
-
-    The cache key incorporates source-mesh signature, robot MJCF,
-    alignment, sidecar spec and the schema version -- change any of
-    those and a fresh cache directory is created automatically (the
-    old one stays on disk until you clean it).
+    Robots are attached at runtime via ``MjSpec``; no ``compiled.mjb`` is
+    produced at cook time. The cache key is over the source mesh,
+    alignment, collision spec, and schema version -- robot-agnostic.
     """
-    import mujoco  # type: ignore[import-untyped]
-
     scene_mesh_path = _resolve_existing_file(scene_mesh_path, "scene mesh")
-    robot_mjcf_path = _resolve_existing_file(robot_mjcf_path, "robot MJCF")
-    load_binary_model = cast(
-        "Callable[[str], Any]",
-        getattr(mujoco.MjModel, _MUJOCO_FROM_BINARY_PATH),
-    )
-    save_model = cast(
-        "Callable[[Any, str], None]",
-        getattr(mujoco, _MUJOCO_SAVE_MODEL),
-    )
-
-    if not rebake:
-        # Compute the cache key without baking, so we can probe for an
-        # existing .mjb / wrapper.xml without doing any work.
-        sp = scene_mesh_path
-        rp = robot_mjcf_path
-        al = alignment or SceneMeshAlignment()
-        sd = collision_spec or CollisionSpec.auto_discover(sp)
-        md = Path(meshdir).expanduser().resolve() if meshdir else rp.parent
-        key = _cache_key(sp, rp, al, md, spec=sd, include_visual_mesh=include_visual_mesh)
-        root = (cache_root or CACHE_DIR).expanduser()
-        cache_dir = root / key
-        mjb = cache_dir / "compiled.mjb"
-        wrapper = cache_dir / "wrapper.xml"
-
-        wrapper_is_current = _cache_hit(wrapper)
-
-        if (
-            mjb.exists()
-            and wrapper_is_current
-            and mjb.stat().st_mtime_ns >= wrapper.stat().st_mtime_ns
-        ):
-            logger.info(f"load_or_bake: loading compiled binary {mjb}")
-            t0 = time.time()
-            model = load_binary_model(str(mjb))
-            logger.info(
-                f"  loaded in {time.time() - t0:.1f}s "
-                f"(nbody={model.nbody} ngeom={model.ngeom} nmesh={model.nmesh})"
-            )
-            return model, wrapper
-
-        if wrapper_is_current and any(cache_dir.glob("*.obj")):
-            logger.info(f"load_or_bake: wrapper cached, compiling XML -> .mjb at {wrapper}")
-            t0 = time.time()
-            model = mujoco.MjModel.from_xml_path(str(wrapper))
-            logger.info(
-                f"  compiled in {time.time() - t0:.1f}s "
-                f"(nbody={model.nbody} ngeom={model.ngeom} nmesh={model.nmesh})"
-            )
-            save_model(model, str(mjb))
-            logger.info(f"  saved compiled binary: {mjb} ({mjb.stat().st_size / 1e6:.1f} MB)")
-            return model, wrapper
-
-    # Full bake path.
-    wrapper = bake_scene_mjcf(
+    return bake_scene_mjcf(
         scene_mesh_path=scene_mesh_path,
-        robot_mjcf_path=robot_mjcf_path,
         alignment=alignment,
-        meshdir=meshdir,
         cache_root=cache_root,
         collision_spec=collision_spec,
         include_visual_mesh=include_visual_mesh,
         rebake=rebake,
     )
-    logger.info(f"load_or_bake: compiling baked wrapper {wrapper}")
-    t0 = time.time()
-    model = mujoco.MjModel.from_xml_path(str(wrapper))
-    logger.info(
-        f"  compiled in {time.time() - t0:.1f}s "
-        f"(nbody={model.nbody} ngeom={model.ngeom} nmesh={model.nmesh})"
-    )
-    mjb = wrapper.with_name("compiled.mjb")
-    save_model(model, str(mjb))
-    logger.info(f"  saved compiled binary: {mjb} ({mjb.stat().st_size / 1e6:.1f} MB)")
-    return model, wrapper
 
 
 # --------------------------------------------------------------------------- #
@@ -459,20 +358,15 @@ def load_or_bake(
 
 def _cache_key(
     scene_mesh_path: Path,
-    robot_mjcf_path: Path,
     alignment: SceneMeshAlignment,
-    meshdir: Path,
     *,
     spec: CollisionSpec,
     include_visual_mesh: bool,
 ) -> str:
     """SHA256-12 over every input that affects bake output.
 
-    Source-mesh signature is ``(path, size, mtime_ns)`` -- much faster
-    than reading the whole file (a mall scene's USDA + Assets is a few
-    hundred MB) and reliably invalidates when the artist re-exports.
-    Sidecar spec is hashed by its JSON encoding so any field change
-    (new override pattern, tuned threshold) invalidates correctly.
+    Robot-agnostic: the cooked scene wrapper is the same regardless of
+    which robot will eventually be attached at runtime via ``MjSpec``.
     """
     import json
 
@@ -483,9 +377,7 @@ def _cache_key(
     h = hashlib.sha256()
     h.update(_CACHE_SCHEMA_VERSION.encode())
     h.update(_file_signature(scene_mesh_path).encode())
-    h.update(_file_signature(robot_mjcf_path).encode())
     h.update(repr(sorted(asdict(alignment).items())).encode())
-    h.update(str(meshdir).encode())
     h.update(json.dumps(asdict(spec), sort_keys=True).encode())
     h.update(b"visual=" + (b"1" if include_visual_mesh else b"0"))
     return h.hexdigest()[:_CACHE_KEY_LEN]
@@ -1002,41 +894,18 @@ def _write_wrapper(
     *,
     wrapper_path: Path,
     cache_key: str,
-    meshdir: Path,
-    robot_mjcf_path: Path,
     asset_lines: list[str],
     geom_lines: list[str],
     statistic_center: np.ndarray,
     statistic_extent: float,
 ) -> None:
-    """Emit a self-contained wrapper.xml — robot MJCF and mesh assets are
-    bundled into ``wrapper_path.parent`` so the directory can be moved
-    between machines without invalidating any path inside the wrapper.
-
-    Layout written:
-        <wrapper_dir>/
-          wrapper.xml                      <- this file (paths all relative)
-          robot/<robot_mjcf_name>          <- copy of robot MJCF + its sibling
-                                              files (so its own <include>s work)
-          <robot stem files>.STL/.png      <- robot meshes/textures, symlinked
-                                              by default into the wrapper dir
-                                              so the wrapper's compiler-meshdir
-                                              ('.') resolves both robot meshes
-                                              and the cooked scene OBJs.
-          <hashed scene OBJs>              <- written by the bake earlier
-
-    Set DIMOS_PACKAGE_COPY_ASSETS=1 to copy instead of symlink (slower,
-    but produces a tar-portable package without -h dereferencing).
+    """Emit the scene-only wrapper.xml. Robots attach at runtime via
+    ``MjSpec``; the wrapper directory holds only this file plus the
+    cooked scene OBJs that it references with relative paths.
     """
-    cache_dir = wrapper_path.parent
-    robot_dir = cache_dir / "robot"
-    _bundle_robot_tree(robot_mjcf_path, meshdir, cache_dir, robot_dir)
-
     visual_zfar = max(float(statistic_extent) * 20.0, 10000.0)
     wrapper_xml = _WRAPPER_TEMPLATE.format(
-        model_name=f"robot_with_scene_{cache_key}",
-        meshdir=".",
-        robot_mjcf_abs=f"robot/{robot_mjcf_path.name}",
+        model_name=f"scene_{cache_key}",
         statistic_center=_fmt_vec(statistic_center),
         statistic_extent=f"{float(statistic_extent):.9g}",
         visual_zfar=f"{visual_zfar:.9g}",
@@ -1047,79 +916,6 @@ def _write_wrapper(
     logger.info(f"_write_wrapper: wrote {wrapper_path}")
 
 
-def _bundle_robot_tree(
-    robot_mjcf_path: Path,
-    meshdir: Path,
-    cache_dir: Path,
-    robot_dir: Path,
-) -> None:
-    """Materialise the robot MJCF + its mesh/texture assets inside cache_dir
-    so the wrapper.xml can reference everything by relative paths.
-
-    Robot MJCF and its sibling files (siblings, not full tree — enough for
-    a typical setup where `<include>` references siblings) are copied into
-    ``robot/``. Mesh/texture files from ``meshdir`` are linked or copied
-    directly into ``cache_dir`` so the wrapper's ``meshdir="."`` resolves
-    both robot meshes and cooked scene OBJs without any meshdir override
-    inside the robot MJCF taking effect (the wrapper's compiler block sits
-    after the include, so MuJoCo's last-compiler-wins rule applies).
-    """
-    copy_assets = os.environ.get("DIMOS_PACKAGE_COPY_ASSETS", "0") == "1"
-
-    # Robot MJCF + sibling include files -> robot/
-    robot_dir.mkdir(parents=True, exist_ok=True)
-    _copy_or_link(robot_mjcf_path, robot_dir / robot_mjcf_path.name, copy=True)
-    for sibling in robot_mjcf_path.parent.iterdir():
-        if sibling == robot_mjcf_path or not sibling.is_file():
-            continue
-        if sibling.suffix.lower() in {".xml", ".mjcf"}:
-            _copy_or_link(sibling, robot_dir / sibling.name, copy=True)
-
-    # Robot mesh/texture assets -> wrapper dir (siblings of cooked OBJs)
-    if meshdir.exists() and meshdir.is_dir():
-        for entry in meshdir.iterdir():
-            if not entry.is_file():
-                continue
-            if entry.suffix.lower() in {
-                ".stl",
-                ".obj",
-                ".ply",
-                ".msh",
-                ".png",
-                ".jpg",
-                ".jpeg",
-                ".bmp",
-                ".tga",
-            }:
-                target = cache_dir / entry.name
-                if target.exists() or target.is_symlink():
-                    continue  # don't clobber cooked OBJs
-                _copy_or_link(entry, target, copy=copy_assets)
-
-
-def _copy_or_link(src: Path, dst: Path, *, copy: bool) -> None:
-    """Materialise src at dst, either as a symlink (default) or a copy.
-
-    Existing dst is left alone — caller is responsible for invalidation.
-    """
-    if dst.exists() or dst.is_symlink():
-        return
-    src = src.resolve()
-    if copy:
-        import shutil
-
-        shutil.copy2(src, dst)
-    else:
-        try:
-            dst.symlink_to(src)
-        except OSError:
-            # Filesystem doesn't support symlinks (Windows without dev mode,
-            # some network mounts) — fall back to copy.
-            import shutil
-
-            shutil.copy2(src, dst)
-
-
 def cli_main() -> None:
     """``python -m dimos.simulation.mujoco.scene_mesh_to_mjcf <scene> <robot> [opts]``.
 
@@ -1127,10 +923,9 @@ def cli_main() -> None:
     """
     p = argparse.ArgumentParser(
         prog="python -m dimos.simulation.mujoco.scene_mesh_to_mjcf",
-        description="Bake a USD/GLB/OBJ scene into an MJCF wrapping a robot MJCF.",
+        description="Bake a USD/GLB/OBJ scene into a robot-agnostic scene-only MJCF wrapper.",
     )
     p.add_argument("scene", type=Path, help="scene mesh path (.usda, .usdz, .glb, ...)")
-    p.add_argument("robot", type=Path, help="robot MJCF path")
     p.add_argument(
         "--scale",
         type=float,
@@ -1151,13 +946,6 @@ def cli_main() -> None:
         "``<scene>.collision.json`` next to the source.",
     )
     p.add_argument(
-        "--meshdir",
-        type=Path,
-        default=None,
-        help="override meshdir for the robot's relative <mesh file=...> "
-        "lookups.  Default: robot MJCF's parent directory.",
-    )
-    p.add_argument(
         "--visual",
         action="store_true",
         help="emit visual passthrough meshes (group 2).  Off by default -- "
@@ -1167,18 +955,17 @@ def cli_main() -> None:
     p.add_argument(
         "--rebake",
         action="store_true",
-        help="ignore cached .mjb and wrapper.xml; do a full re-bake.",
+        help="ignore cached wrapper.xml and OBJs; do a full re-bake.",
     )
     p.add_argument(
         "--view",
         action="store_true",
-        help="launch the MuJoCo native viewer after baking (blocks).",
+        help="launch the MuJoCo native viewer after baking (blocks, scene only — no robot).",
     )
     args = p.parse_args()
 
     try:
         scene_path = _resolve_existing_file(args.scene, "scene mesh")
-        robot_path = _resolve_existing_file(args.robot, "robot MJCF")
     except (FileNotFoundError, ValueError) as exc:
         p.error(str(exc))
 
@@ -1189,30 +976,23 @@ def cli_main() -> None:
         else CollisionSpec.auto_discover(scene_path)
     )
 
-    model, wrapper = load_or_bake(
+    wrapper = bake_scene_mjcf(
         scene_mesh_path=scene_path,
-        robot_mjcf_path=robot_path,
         alignment=align,
-        meshdir=args.meshdir,
         collision_spec=spec,
         include_visual_mesh=args.visual,
         rebake=args.rebake,
     )
     print(f"wrapper: {wrapper}")
-    print(f"loaded:  {model.nbody} bodies, {model.ngeom} geoms, {model.nmesh} meshes")
-    print(f"joints:  {model.njnt}, dof:  {model.nv}")
 
     if args.view:
+        import mujoco  # type: ignore[import-untyped]
         import mujoco.viewer  # type: ignore[import-untyped]
 
         viewer: Any = mujoco.viewer
-        # ``launch`` runs MuJoCo's interactive viewer with its own
-        # internal physics loop.  Blocks until the user closes it.
-        # Press F1 in the viewer for the keyboard cheatsheet; ``Tab``
-        # toggles the rendering panel where you can switch geom groups
-        # (group 3 = scene collision, group 2 = visual passthrough,
-        # group 1 = robot visual, group 0 = robot collision).
-        print("\nlaunching MuJoCo viewer (press Esc / close window to exit)")
+        model = mujoco.MjModel.from_xml_path(str(wrapper))
+        print(f"loaded:  {model.nbody} bodies, {model.ngeom} geoms, {model.nmesh} meshes")
+        print("\nlaunching MuJoCo viewer (scene only — no robot attached)")
         viewer.launch(model)
 
 

@@ -49,7 +49,7 @@ logger = setup_logger()
 
 SCENE_PACKAGE_CACHE_DIR = Path.home() / ".cache" / "dimos" / "scene_packages"
 _CACHE_KEY_LEN = 12
-_COOK_VERSION = 3
+_COOK_VERSION = 4
 
 
 def cook_scene_package(
@@ -57,8 +57,6 @@ def cook_scene_package(
     *,
     output_dir: str | Path | None = None,
     alignment: SceneMeshAlignment | None = None,
-    robot_mjcf_path: str | Path | None = None,
-    meshdir: str | Path | None = None,
     collision_spec: CollisionSpec | None = None,
     cook_sidecar: SceneCookSidecar | None = None,
     visual_spec: BrowserVisualSpec | None = None,
@@ -66,7 +64,13 @@ def cook_scene_package(
     mujoco_spec: MujocoSceneSpec | None = None,
     rebake: bool = False,
 ) -> ScenePackage:
-    """Cook one source scene into browser and optional MuJoCo artifacts."""
+    """Cook one source scene into a robot-agnostic package.
+
+    The package contains browser artifacts (visual + collision GLBs,
+    semantic ``objects.json``), per-entity GLBs, and a scene-only MuJoCo
+    wrapper. Robots are attached at runtime via ``MjSpec.attach()`` inside
+    ``MujocoSimModule.start``; the cooker never touches robot MJCFs.
+    """
     source = Path(source_path).expanduser().resolve()
     if not source.exists():
         raise FileNotFoundError(f"scene source not found: {source}")
@@ -74,7 +78,7 @@ def cook_scene_package(
     align = alignment or SceneMeshAlignment()
     visual = visual_spec or BrowserVisualSpec()
     browser_collision = browser_collision_spec or BrowserCollisionSpec()
-    mujoco = mujoco_spec or MujocoSceneSpec(enabled=robot_mjcf_path is not None)
+    mujoco = mujoco_spec or MujocoSceneSpec()
     cook_spec = SceneCookSpec(
         source_path=source,
         alignment=align,
@@ -87,7 +91,7 @@ def cook_scene_package(
     package_dir = (
         Path(output_dir).expanduser().resolve()
         if output_dir is not None
-        else SCENE_PACKAGE_CACHE_DIR / _cache_key(cook_spec, robot_mjcf_path, meshdir, sidecar)
+        else SCENE_PACKAGE_CACHE_DIR / _cache_key(cook_spec, sidecar)
     )
     browser_dir = package_dir / "browser"
     mujoco_dir = package_dir / "mujoco"
@@ -155,29 +159,17 @@ def cook_scene_package(
     if browser_collision_result is not None:
         stats["browser_collision"] = browser_collision_result.stats
 
-    mujoco_model_path: Path | None = None
-    mujoco_wrapper_path: Path | None = None
+    mujoco_scene_path: Path | None = None
     if mujoco.enabled:
-        if robot_mjcf_path is None:
-            raise ValueError("mujoco cook enabled but robot_mjcf_path was not provided")
-        model, wrapper = load_or_bake(
+        mujoco_scene_path = load_or_bake(
             scene_mesh_path=source,
-            robot_mjcf_path=robot_mjcf_path,
             alignment=align,
-            meshdir=meshdir,
             cache_root=mujoco_dir,
             collision_spec=plan.collision_spec,
             include_visual_mesh=mujoco.include_visual_mesh,
             rebake=rebake,
         )
-        del model
-        compiled = wrapper.with_name("compiled.mjb")
-        mujoco_model_path = compiled if compiled.exists() else wrapper
-        mujoco_wrapper_path = wrapper
-        stats["mujoco"] = {
-            "model_path": str(mujoco_model_path),
-            "wrapper_path": str(mujoco_wrapper_path),
-        }
+        stats["mujoco"] = {"scene_path": str(mujoco_scene_path)}
 
     package = ScenePackage(
         package_dir=package_dir,
@@ -186,8 +178,7 @@ def cook_scene_package(
         visual_path=visual_result.path if visual_result else None,
         browser_collision_path=browser_collision_result.path if browser_collision_result else None,
         objects_path=browser_collision_result.objects_path if browser_collision_result else None,
-        mujoco_model_path=mujoco_model_path,
-        mujoco_wrapper_path=mujoco_wrapper_path,
+        mujoco_scene_path=mujoco_scene_path,
         metadata_path=package_dir / "scene.meta.json",
         entities=entities,
         stats=stats,
@@ -199,8 +190,6 @@ def cook_scene_package(
 
 def _cache_key(
     cook_spec: SceneCookSpec,
-    robot_mjcf_path: str | Path | None,
-    meshdir: str | Path | None,
     sidecar: SceneCookSidecar,
 ) -> str:
     h = hashlib.sha256()
@@ -208,11 +197,6 @@ def _cache_key(
     h.update(str(_COOK_VERSION).encode())
     h.update(json.dumps(_cook_spec_json(cook_spec), sort_keys=True).encode())
     h.update(json.dumps(sidecar.to_json_dict(), sort_keys=True).encode())
-    if robot_mjcf_path is not None:
-        robot_path = Path(robot_mjcf_path).expanduser().resolve()
-        h.update(robot_path.read_bytes())
-    if meshdir is not None:
-        h.update(str(Path(meshdir).expanduser().resolve()).encode())
     return h.hexdigest()[:_CACHE_KEY_LEN]
 
 
@@ -230,11 +214,11 @@ def _parse_xyz(value: str) -> tuple[float, float, float]:
 
 
 def cli_main() -> None:
-    parser = argparse.ArgumentParser(description="Cook a scene asset for DimOS simulators.")
+    parser = argparse.ArgumentParser(
+        description="Cook a scene asset into a robot-agnostic DimOS scene package.",
+    )
     parser.add_argument("source", type=Path)
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--robot-mjcf", type=Path)
-    parser.add_argument("--meshdir", type=Path)
     parser.add_argument("--cook-spec", type=Path)
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--translation", type=_parse_xyz, default=(0.0, 0.0, 0.0))
@@ -270,8 +254,6 @@ def cli_main() -> None:
             rotation_zyx_deg=args.rotation_zyx_deg,
             y_up=not args.no_y_up,
         ),
-        robot_mjcf_path=None if args.no_mujoco else args.robot_mjcf,
-        meshdir=args.meshdir,
         cook_sidecar=SceneCookSidecar.from_json(args.cook_spec) if args.cook_spec else None,
         visual_spec=BrowserVisualSpec(
             enabled=not args.no_visual,
@@ -288,7 +270,7 @@ def cli_main() -> None:
             target_faces=args.browser_collision_target_faces,
         ),
         mujoco_spec=MujocoSceneSpec(
-            enabled=not args.no_mujoco and args.robot_mjcf is not None,
+            enabled=not args.no_mujoco,
             include_visual_mesh=args.include_mujoco_visual,
         ),
         rebake=args.rebake,

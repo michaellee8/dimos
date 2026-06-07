@@ -1,10 +1,12 @@
 # Scene packages
 
-A **scene package** is a self-contained directory holding everything any
-DimOS simulator needs to load a 3D scene: visual mesh, collision mesh,
-per-object semantic table, MuJoCo wrapper, and a list of dynamic
-interactables. One source asset → one package → consumed by both
-**pimsim** (browser Havok) and **MuJoCo** with the same metadata.
+A **scene package** is a robot-agnostic, self-contained directory holding
+everything any DimOS simulator needs to load a 3D scene: visual mesh,
+collision mesh, per-object semantic table, scene-only MuJoCo wrapper, and
+a list of dynamic interactables. One source asset → one package → consumed
+by **pimsim** (browser Havok) and **MuJoCo** with the same metadata. The
+robot is attached at runtime via `MjSpec.attach()` inside
+`MujocoSimModule.start`, so the package itself never carries the robot.
 
 ```text
 ~/.cache/dimos/scene_packages/<name>/
@@ -17,18 +19,13 @@ interactables. One source asset → one package → consumed by both
 │   └── <safe_id>/visual.glb       per-entity GLB in entity-local frame
 └── mujoco/
     └── <key>/
-        ├── wrapper.xml            self-contained MJCF (all paths relative)
-        ├── compiled.mjb           mj_saveModel binary, fast load
-        ├── robot/                 copy of robot MJCF + sibling includes
-        ├── *.STL / *.png          robot mesh + texture assets (symlinked
-        │                          by default; copies with
-        │                          DIMOS_PACKAGE_COPY_ASSETS=1)
+        ├── wrapper.xml            scene-only MJCF (no robot include)
         └── *.obj                  cooked scene collision meshes
 ```
 
-Packages are content-hash keyed: change the source mesh, the sidecar,
-or the robot MJCF and you get a new package. Existing packages are
-preserved.
+Packages are content-hash keyed on source mesh + alignment + sidecar +
+schema. They do **not** depend on any specific robot; the same cooked
+package binds to any robot the runtime attaches.
 
 ## Authoring a scene
 
@@ -148,48 +145,51 @@ for the full reference.
 ```bash
 python -m dimos.simulation.scene_assets.cook \
     path/to/my_scene.glb \
-    --robot-mjcf=data/mujoco_sim/g1_gear_wbc.xml \
-    --meshdir=path/to/menagerie/unitree_g1/assets \
     --output-dir=~/.cache/dimos/scene_packages/my_scene
 ```
 
-Without `--robot-mjcf` you get a browser-only package (no MuJoCo
-artifacts). `--rebake` ignores all caches and rebuilds from scratch.
-
-The cooker auto-discovers `<scene>.cook.json` next to the source. It's
-content-hash cached on source-bytes + sidecar JSON + robot MJCF bytes
-+ meshdir — bumping any of those gives a new cache key without
-clobbering the previous one.
+The cooker is **strictly robot-agnostic** — no `--robot-mjcf` flag, no
+robot bundled into the package. `--rebake` ignores caches and rebuilds
+from scratch. The cooker auto-discovers `<scene>.cook.json` next to the
+source. Content-hash cached on source bytes + sidecar JSON + alignment
++ schema version — change any of those and a fresh cache directory is
+created automatically.
 
 ## Dropping in a new robot
 
-To make a scene package work with a robot other than G1:
+There is no "drop in a new robot" step for the cooker — every cooked
+scene package already supports every robot. The runtime composer
+attaches the robot when the sim module starts:
 
-1. Have a self-contained robot MJCF and its mesh/asset directory. Most
-   `mujoco_menagerie` robots fit: `<robot>.xml` + `assets/*.STL`.
-2. Cook with the right `--robot-mjcf` and `--meshdir`:
+```python
+from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
+from dimos.simulation.scenes.catalog import resolve_scene_package
 
-   ```bash
-   python -m dimos.simulation.scene_assets.cook \
-       my_scene.glb \
-       --robot-mjcf=path/to/go2.xml \
-       --meshdir=path/to/go2/assets
-   ```
+pkg = resolve_scene_package("dimos-office")
 
-3. The cooker bundles the robot MJCF, every XML sibling next to it
-   (so any `<include>`s resolve), and every `.STL` / `.png` /
-   `.jpg` / etc. from `meshdir` into the package under
-   `mujoco/<key>/`. The emitted `wrapper.xml` uses **only relative
-   paths** — the package is movable across machines (`tar -h …` will
-   dereference the symlinks if you want one tarball).
-4. To produce a tarball-portable package without dereferencing,
-   pre-set `DIMOS_PACKAGE_COPY_ASSETS=1` and the cooker will copy
-   the asset files instead of symlinking them.
-5. At runtime, point your blueprint at the cooked package via
-   `--scene <name>` (if you've added it to
-   `dimos/simulation/scenes/catalog.py`) or by pointing
-   `resolve_scene_package(...)` at an absolute path to the
-   package directory or its `scene.meta.json`.
+MujocoSimModule.blueprint(
+    scene_xml=str(pkg.mujoco_scene_path),    # cooked scene-only wrapper
+    robot_mjcf="path/to/go2.xml",            # any robot MJCF
+    robot_meshdir="path/to/go2/assets",      # robot's mesh directory
+    robot_id="",                             # body-name prefix (empty for single-robot)
+    scene_entities=pkg.entities,             # chairs, props, etc.
+    spawn_xy=(0.0, 0.0),
+    spawn_z=0.06,
+)
+```
+
+At start time `MujocoSimModule._compose_model` does:
+
+1. Load the cooked scene wrapper into an `MjSpec`.
+2. Add scene-package entities as bodies on `spec.worldbody` (entities
+   with `kind="dynamic"` get a freejoint; static ones are welded).
+3. Load the robot's MJCF into a separate `MjSpec`, setting its
+   `meshdir` so menagerie robots find their STLs.
+4. `spec_scene.attach(spec_robot, prefix=robot_id, frame=spawn_frame)`.
+5. `spec_scene.compile()` → one `MjModel` with scene + robot + entities.
+
+For multi-robot scenes, call `attach()` once per robot with distinct
+`prefix` values to namespace body / joint / actuator / sensor names.
 
 ### What the robot MJCF must not have
 
@@ -198,22 +198,16 @@ To make a scene package work with a robot other than G1:
 - **No manipulation rigs.** No hardcoded `manip_*` bodies or tables.
   Author those as synthetic interactables in the scene's `cook.json`
   instead — they then spawn into pimsim and MuJoCo from one source.
-- **No external `<include>`s.** Everything the robot needs must live
-  inside the same directory as the robot MJCF (so the cooker can copy
-  the sibling tree and the include resolves locally).
+- **No external `<include>`s outside its own directory tree.** `MjSpec`
+  resolves the robot's includes relative to its own location.
 
 ## Consuming a package at runtime
 
-### From Python (G1 blueprint, MuJoCo backend)
+### From a Python blueprint (MuJoCo backend)
 
-```python
-from dimos.simulation.scenes.catalog import resolve_scene_package
-from dimos.simulation.mujoco.entity_scene import compose_entity_model
-
-pkg = resolve_scene_package("dimos-office", robot_mjcf_path=...)
-# pkg.entities is the list MuJoCoSimModule + BabylonSceneViewerModule consume.
-mjb_path = compose_entity_model(pkg)  # static wrapper.mjb extended with entities
-```
+See the snippet above. The cooker hands you a `ScenePackage` whose
+`mujoco_scene_path` is a robot-free wrapper XML; everything else
+(`entities`, `objects_path`, `visual_path`, …) is robot-agnostic too.
 
 ### Topics published by either simulator
 

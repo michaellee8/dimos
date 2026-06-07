@@ -218,17 +218,19 @@ def _select_backend() -> _BackendSelection:
 
     scene_package = _scene_package_config()
     scene_entities: list[dict[str, Any]] = []
-    if scene_package is not None and scene_package.mujoco_model_path is not None:
+    scene_xml: str | None = None
+    if scene_package is not None and scene_package.mujoco_scene_path is not None:
         # Scene-package entities (chairs, props) become MuJoCo bodies so the
         # robot can physically interact with them; their poses publish on
         # /entity_state_batch (MuJoCo is the entity authority in this mode).
-        from dimos.simulation.mujoco.entity_scene import compose_entity_model
-
-        sim_mjcf_path = compose_entity_model(scene_package) or scene_package.mujoco_model_path
-        viewer_mjcf_path = scene_package.mujoco_wrapper_path or _MJCF_PATH
+        # The robot is attached to the scene at runtime via MjSpec.attach()
+        # inside MujocoSimModule.start — the cooked scene wrapper is
+        # robot-agnostic.
+        scene_xml = str(scene_package.mujoco_scene_path)
         scene_entities = scene_package.entities
+        viewer_mjcf_path = scene_package.mujoco_scene_path
     else:
-        sim_mjcf_path, viewer_mjcf_path = _MJCF_PATH, _MJCF_PATH
+        viewer_mjcf_path = _MJCF_PATH
     lidar_disabled = _env_bool("DIMOS_DISABLE_LIDAR", False)
     depth_cloud_enabled = _env_bool("DIMOS_ENABLE_DEPTH_CLOUD", False)
     native_scene_lidar_enabled = _native_scene_lidar_enabled(scene_package, lidar_disabled)
@@ -236,8 +238,9 @@ def _select_backend() -> _BackendSelection:
     from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
 
     backend = MujocoSimModule.blueprint(
-        address=sim_mjcf_path,
-        meshdir=str(_G1_MESH_DIR),
+        scene_xml=scene_xml,
+        robot_mjcf=str(_MJCF_PATH),
+        robot_meshdir=str(_G1_MESH_DIR),
         headless=_env_bool("DIMOS_MUJOCO_HEADLESS", True),
         dof=_SIM_DOF,
         camera_name=os.environ.get("DIMOS_MUJOCO_CAMERA", "head_color"),
@@ -272,7 +275,9 @@ def _select_backend() -> _BackendSelection:
     return _BackendSelection(
         blueprint=backend,
         adapter_type="sim_mujoco_g1",
-        adapter_address=sim_mjcf_path,
+        # SHM adapter key: use the robot MJCF path. Matches MujocoSimModule's
+        # shm_key_source so the adapter attaches to the right SHM buffer.
+        adapter_address=str(_MJCF_PATH),
         viewer_mjcf_path=viewer_mjcf_path,
         tick_rate=_SIM_TICK_RATE_HZ,
         auto_arm=True,

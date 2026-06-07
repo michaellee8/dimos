@@ -41,8 +41,7 @@ def _metadata(tmp_path: Path) -> dict[str, object]:
             "browser_visual": str(tmp_path / "visual.glb"),
             "browser_collision": str(tmp_path / "collision.glb"),
             "objects": str(tmp_path / "objects.json"),
-            "mujoco_model": str(tmp_path / "compiled.mjb"),
-            "mujoco_wrapper": str(tmp_path / "wrapper.xml"),
+            "mujoco_scene": str(tmp_path / "wrapper.xml"),
         },
         "stats": {},
     }
@@ -81,7 +80,7 @@ def test_load_scene_package_accepts_expected_artifact_frames(tmp_path: Path) -> 
     assert package.visual_path == tmp_path / "visual.glb"
     assert package.browser_collision_path == tmp_path / "collision.glb"
     assert package.objects_path == tmp_path / "objects.json"
-    assert package.mujoco_model_path == tmp_path / "compiled.mjb"
+    assert package.mujoco_scene_path == tmp_path / "wrapper.xml"
 
 
 def test_scene_package_metadata_uses_package_relative_paths(tmp_path: Path) -> None:
@@ -92,8 +91,7 @@ def test_scene_package_metadata_uses_package_relative_paths(tmp_path: Path) -> N
         visual_path=tmp_path / "browser" / "visual.glb",
         browser_collision_path=tmp_path / "browser" / "collision.glb",
         objects_path=tmp_path / "browser" / "objects.json",
-        mujoco_model_path=tmp_path / "mujoco" / "abc123" / "compiled.mjb",
-        mujoco_wrapper_path=tmp_path / "mujoco" / "abc123" / "wrapper.xml",
+        mujoco_scene_path=tmp_path / "mujoco" / "abc123" / "wrapper.xml",
         entities=[
             {
                 "id": "chair_001",
@@ -109,14 +107,13 @@ def test_scene_package_metadata_uses_package_relative_paths(tmp_path: Path) -> N
     assert raw["artifacts"]["browser_visual"] == "browser/visual.glb"
     assert raw["artifacts"]["browser_collision"] == "browser/collision.glb"
     assert raw["artifacts"]["objects"] == "browser/objects.json"
-    assert raw["artifacts"]["mujoco_model"] == "mujoco/abc123/compiled.mjb"
-    assert raw["artifacts"]["mujoco_wrapper"] == "mujoco/abc123/wrapper.xml"
+    assert raw["artifacts"]["mujoco_scene"] == "mujoco/abc123/wrapper.xml"
     assert raw["entities"][0]["visual_path"] == "entities/chair_001/visual.glb"
 
     loaded = load_scene_package(metadata_path)
     assert loaded.package_dir == tmp_path
     assert loaded.visual_path == tmp_path / "browser" / "visual.glb"
-    assert loaded.mujoco_model_path == tmp_path / "mujoco" / "abc123" / "compiled.mjb"
+    assert loaded.mujoco_scene_path == tmp_path / "mujoco" / "abc123" / "wrapper.xml"
     assert loaded.entities[0]["visual_path"] == str(
         tmp_path / "entities" / "chair_001" / "visual.glb"
     )

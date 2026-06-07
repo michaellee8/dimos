@@ -81,33 +81,16 @@ def _scene_package_config() -> Any | None:
 
 
 @lru_cache(maxsize=1)
-def _x2_mujoco_scene_paths() -> tuple[Path, Path] | None:
+def _x2_mujoco_scene_xml() -> Path | None:
+    """Path to the scene-only MuJoCo wrapper, or None if no scene is set.
+
+    The robot is attached at runtime via ``MjSpec.attach()`` inside
+    ``MujocoSimModule.start``; this only needs the scene wrapper.
+    """
     scene_package = _scene_package_config()
-    if scene_package is None:
+    if scene_package is None or scene_package.mujoco_scene_path is None:
         return None
-
-    from dimos.simulation.mujoco.scene_mesh_to_mjcf import load_or_bake
-    from dimos.simulation.scene_assets.plan import build_scene_cook_plan
-    from dimos.simulation.scene_assets.sidecar import SceneCookSidecar
-
-    sidecar = SceneCookSidecar.auto_discover(scene_package.source_path)
-    plan = build_scene_cook_plan(
-        scene_package.source_path,
-        sidecar=sidecar,
-        alignment=scene_package.alignment,
-        output_dir=scene_package.package_dir,
-    )
-    _, wrapper_path = load_or_bake(
-        scene_mesh_path=scene_package.source_path,
-        robot_mjcf_path=_X2_ROBOT_MJCF_PATH,
-        alignment=scene_package.alignment,
-        meshdir=_X2_MESH_DIR,
-        collision_spec=plan.collision_spec,
-        include_visual_mesh=False,
-        rebake=False,
-    )
-    compiled_path = wrapper_path.with_name("compiled.mjb")
-    return (compiled_path if compiled_path.exists() else wrapper_path, wrapper_path)
+    return Path(scene_package.mujoco_scene_path)
 
 
 def _flat_world_mjcf() -> Path:
@@ -145,8 +128,7 @@ def _flat_world_mjcf() -> Path:
 
 
 _scene_package = _scene_package_config()
-_x2_mujoco_scene = _x2_mujoco_scene_paths()
-_X2_SIM_MJCF_PATH = _x2_mujoco_scene[0] if _x2_mujoco_scene is not None else _flat_world_mjcf()
+_x2_scene_xml = _x2_mujoco_scene_xml()
 _viewer_kwargs: dict[str, Any] = {
     "mjcf_path": str(_X2_ROBOT_MJCF_PATH),
     "camera_name": "rgbd_head_front",
@@ -173,8 +155,10 @@ if _scene_package is not None and _scene_package.visual_path is not None:
 agibot_x2_policy_sim = (
     autoconnect(
         MujocoSimModule.blueprint(
-            address=str(_X2_SIM_MJCF_PATH),
-            meshdir=str(_X2_MESH_DIR),
+            scene_xml=(str(_x2_scene_xml) if _x2_scene_xml is not None else None),
+            robot_mjcf=str(_X2_ROBOT_MJCF_PATH),
+            robot_meshdir=str(_X2_MESH_DIR),
+            scene_entities=_scene_package.entities if _scene_package else [],
             headless=True,
             dof=len(X2_JOINTS),
             enable_color=False,
@@ -196,7 +180,8 @@ agibot_x2_policy_sim = (
                     hardware_type=HardwareType.WHOLE_BODY,
                     joints=X2_JOINTS,
                     adapter_type="sim_mujoco_x2",
-                    address=_X2_SIM_MJCF_PATH,
+                    # SHM key matches MujocoSimModule's robot_mjcf source.
+                    address=str(_X2_ROBOT_MJCF_PATH),
                     auto_enable=True,
                     wb_config=WholeBodyConfig(kp=tuple(X2_KP), kd=tuple(X2_KD)),
                 ),

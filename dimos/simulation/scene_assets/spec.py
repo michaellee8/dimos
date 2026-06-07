@@ -91,8 +91,7 @@ class ScenePackage:
     visual_path: Path | None = None
     browser_collision_path: Path | None = None
     objects_path: Path | None = None
-    mujoco_model_path: Path | None = None
-    mujoco_wrapper_path: Path | None = None
+    mujoco_scene_path: Path | None = None
     metadata_path: Path | None = None
     entities: list[dict[str, Any]] = field(default_factory=list)
     stats: dict[str, Any] = field(default_factory=dict)
@@ -112,8 +111,7 @@ class ScenePackage:
                     package_dir,
                 ),
                 "objects": _serialize_package_path(self.objects_path, package_dir),
-                "mujoco_model": _serialize_package_path(self.mujoco_model_path, package_dir),
-                "mujoco_wrapper": _serialize_package_path(self.mujoco_wrapper_path, package_dir),
+                "mujoco_scene": _serialize_package_path(self.mujoco_scene_path, package_dir),
             },
             "entities": _serialize_entity_paths(self.entities, package_dir),
             "stats": self.stats,
@@ -143,8 +141,7 @@ def load_scene_package(path: str | Path) -> ScenePackage:
             _resolve_package_path(artifacts.get("browser_collision"), package_dir)
         ),
         objects_path=_resolve_package_path(artifacts.get("objects"), package_dir),
-        mujoco_model_path=_resolve_package_path(artifacts.get("mujoco_model"), package_dir),
-        mujoco_wrapper_path=_resolve_package_path(artifacts.get("mujoco_wrapper"), package_dir),
+        mujoco_scene_path=_resolve_package_path(artifacts.get("mujoco_scene"), package_dir),
         metadata_path=metadata_path,
         entities=_resolve_entity_paths(raw.get("entities", []), package_dir),
         stats=raw.get("stats", {}),
@@ -163,7 +160,7 @@ def _validate_artifact_frames(raw: dict[str, Any], metadata_path: Path) -> None:
     required = {
         "browser_visual": "browser_visual",
         "browser_collision": "browser_collision",
-        "mujoco_model": "mujoco",
+        "mujoco_scene": "mujoco",
     }
     for artifact_name, frame_name in required.items():
         if artifacts.get(artifact_name) and frames.get(frame_name) != ARTIFACT_FRAMES[frame_name]:

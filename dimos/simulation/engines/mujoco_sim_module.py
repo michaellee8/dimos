@@ -101,9 +101,26 @@ def _default_identity_transform() -> Transform:
 
 
 class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
-    """Configuration for the unified MuJoCo simulation module."""
+    """Configuration for the unified MuJoCo simulation module.
+
+    Two ways to specify the model:
+
+    * ``address`` (legacy): path to a pre-built MJCF/MJB containing both
+      scene and robot. Used by blueprints that pre-cooked a wrapper at
+      build time. The address is loaded as-is.
+    * ``robot_mjcf`` + ``scene_xml`` (preferred): robot-agnostic scene
+      package + a separately-specified robot MJCF. The module composes
+      ``MjSpec(scene) + MjSpec(robot) + entities`` at start time, so the
+      same scene package works with any robot. ``scene_xml`` may be
+      omitted for "robot only on a flat floor" runs.
+    """
 
     address: str | Path = ""
+    # New compose-at-start path.
+    scene_xml: str | Path | None = None
+    robot_mjcf: str | Path | None = None
+    robot_meshdir: str | Path | None = None
+    robot_id: str = ""
     meshdir: str | None = None
     headless: bool = False
     dof: int = 7
@@ -266,10 +283,15 @@ class MujocoSimModule(
     @rpc
     def start(self) -> None:
         super().start()
-        if not self.config.address:
-            raise RuntimeError("MujocoSimModule: config.address (MJCF path) is required")
+        if not self.config.address and not self.config.robot_mjcf:
+            raise RuntimeError(
+                "MujocoSimModule: either config.robot_mjcf (preferred) "
+                "or config.address (legacy MJCF path) is required"
+            )
 
-        shm_key = shm_key_from_path(self.config.address)
+        # SHM discovery key — robot_mjcf wins when set, address otherwise.
+        shm_key_source = str(self.config.robot_mjcf or self.config.address)
+        shm_key = shm_key_from_path(shm_key_source)
         if self.config.engine_mode == "subprocess":
             self._start_subprocess(shm_key)
             return
@@ -283,8 +305,7 @@ class MujocoSimModule(
 
             engine_assets = get_assets()
 
-        self._engine = MujocoEngine(
-            config_path=Path(self.config.address),
+        engine_kwargs: dict[str, Any] = dict(
             headless=self.config.headless,
             cameras=camera_configs,
             meshdir=self.config.meshdir,
@@ -296,6 +317,12 @@ class MujocoSimModule(
             spawn_yaw=self.config.spawn_yaw,
             reset_joint_positions=self.config.reset_joint_positions,
         )
+        if self.config.robot_mjcf:
+            engine_kwargs["model"] = self._compose_model()
+            engine_kwargs["config_path"] = Path(self.config.robot_mjcf)
+        else:
+            engine_kwargs["config_path"] = Path(self.config.address)
+        self._engine = MujocoEngine(**engine_kwargs)
 
         dof = self.config.dof
         joint_names = list(self._engine.joint_names)
@@ -321,6 +348,37 @@ class MujocoSimModule(
             camera_enabled=self._camera_enabled,
             shm_key=shm_key,
         )
+
+    def _compose_model(self) -> mujoco.MjModel:
+        """Compose scene (optional) + entities + robot into one ``MjModel``.
+
+        This is the runtime side of "scene packages are robot-agnostic":
+        the cooked scene wrapper has no robot, the robot MJCF has no
+        scene, and ``MjSpec.attach`` stitches them together with optional
+        body-name prefixing keyed on ``robot_id`` (empty prefix by
+        default — single-robot scenes don't need renaming).
+        """
+        from dimos.simulation.mujoco.entity_scene import add_entities_to_spec
+
+        if self.config.scene_xml:
+            spec_scene = mujoco.MjSpec.from_file(str(self.config.scene_xml))
+        else:
+            spec_scene = mujoco.MjSpec()
+        if self.config.scene_entities:
+            add_entities_to_spec(spec_scene, self.config.scene_entities)
+
+        spec_robot = mujoco.MjSpec.from_file(str(self.config.robot_mjcf))
+        if self.config.robot_meshdir:
+            spec_robot.meshdir = str(self.config.robot_meshdir)
+
+        spawn_xy = self.config.spawn_xy or (0.0, 0.0)
+        spawn_z = self.config.spawn_z if self.config.spawn_z is not None else 0.0
+        frame = spec_scene.worldbody.add_frame(
+            pos=[float(spawn_xy[0]), float(spawn_xy[1]), float(spawn_z)],
+        )
+        prefix = f"{self.config.robot_id}-" if self.config.robot_id else None
+        spec_scene.attach(spec_robot, prefix=prefix, frame=frame)
+        return spec_scene.compile()
 
     def _resolve_entity_bodies(self) -> None:
         """Map configured scene entities to ``entity:<id>`` bodies in the model."""
