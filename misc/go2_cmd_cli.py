@@ -210,6 +210,12 @@ class CommanderCLI:
         _HEARTBEAT_HZ. Each tick, each joint moves at most
         _RAMP_RAD_PER_S * period rad. Once we're within that step of the
         goal, the published value snaps to the goal and stays there.
+
+        The ramp origin (_published) is re-anchored to the robot's
+        ACTUAL pose by `_publish_with_clamp_report` whenever the user
+        issues a new command, so each new command's ramp starts from
+        where the robot truly is - not from where we last wished it was.
+
         Only publishes after the user has armed."""
         period = 1.0 / _HEARTBEAT_HZ
         max_step = _RAMP_RAD_PER_S * period  # rad per heartbeat
@@ -218,8 +224,7 @@ class CommanderCLI:
                 if not self._armed or self._target is None:
                     continue
                 if self._published is None:
-                    # First tick after arm — start from the goal so we don't
-                    # ramp from a stale value.
+                    # Fallback: no anchor was set (shouldn't normally happen).
                     self._published = list(self._target)
                 goal = self._target
                 pub = self._published
@@ -393,12 +398,32 @@ class CommanderCLI:
             raise ValueError(f"joint index {idx} out of range [0, {_NUM_MOTORS})")
 
     def _publish_with_clamp_report(self, note: str) -> None:
+        """Update the goal target AND re-anchor the ramp origin.
+
+        Reads the robot's actual joint positions right now and sets
+        _published to that. The heartbeat then ramps from the robot's
+        true current pose toward the new goal - never from a stale
+        previous-target value. This is what stops the "snap up to
+        last commanded target before ramping down" bug when PD has
+        undershot the previous command.
+        """
         assert self._target is not None
+        # Read actual joint positions outside the lock (RPC could be slow).
+        try:
+            positions = self._app.ControlCoordinator.get_joint_positions()
+        except Exception as e:
+            positions = None
+            print(f"  warning: could not read current pose for ramp anchor ({e})")
         with self._lock:
             requested = list(self._target)
             clamped_target, clamped_idx = _clamp(self._target)
-            self._target = clamped_target  # keep local in sync with what was published
-            self._armed = True  # enable heartbeat republishing
+            self._target = clamped_target  # remember the clamped value as the goal
+            self._armed = True  # let heartbeat start publishing
+            if positions:
+                # Anchor the ramp at the robot's real current pose.
+                self._published = [float(positions.get(name, 0.0)) for name in _JOINT_NAMES]
+            # If RPC failed, leave _published alone - heartbeat falls back to
+            # the last value (or to the goal on first ever tick).
         if clamped_idx:
             print(f"  {note}; clamped {len(clamped_idx)} joint(s):")
             for i in clamped_idx:
@@ -409,7 +434,6 @@ class CommanderCLI:
                 )
         else:
             print(f"  {note}")
-        self._publish_target(clamped_target)
 
     @staticmethod
     def _print_target(target: list[float]) -> None:
