@@ -122,7 +122,8 @@ The register is persistent across power cycles, so you only need this once per m
 | `coordinator-openarm-bimanual` | Both arms, real hardware, no planner. |
 | `openarm-planner-coordinator` | **Main usable blueprint** — Drake planner + both arms on real hardware. |
 | `keyboard-teleop-openarm-mock` / `keyboard-teleop-openarm` | Single-arm Cartesian IK + pygame keyboard, mock / real. |
-| `coordinator-openarm-rs` | Opt-in single-arm coordinator path using `adapter_type="openarm_rs"`; gravity feed-forward is enabled in the adapter by default. |
+| `coordinator-openarm-rs` | Opt-in single-arm coordinator path using the new `adapter_type="openarm_rs"` driver, without the planner. |
+| `openarm-rs-planner-coordinator` | **New driver usable blueprint** — `ManipulationModule` + `ControlCoordinator` + `openarm_rs` on one arm. |
 
 **Safety before hot-plugging hardware:** hold the arms before starting. On connect, the adapter enables all motors and sends gravity-comp holds — the arms go slightly stiff but don't leap. Ctrl-C to cleanly disable and exit.
 
@@ -139,28 +140,26 @@ dimos run coordinator-openarm-left
 dimos run openarm-planner-coordinator
 ```
 
-For the `openarm_rs` binding path, stage validation before trajectory control: binding mock or vcan, one motor enable/read, one motor low-rate hold, full-arm state monitor, adapter gravity compensation, then trajectory-control validation.
+For the `openarm_rs` binding path, stage validation before trajectory control: binding mock or vcan, one motor enable/read, full-arm state monitor, adapter gravity compensation, then trajectory-control validation.
 
 ```bash
 # requires the can-motor-control binding from dimos[manipulation]
 sudo MODE=fd ./dimos/robot/manipulators/openarm/scripts/openarm_can_up.sh can0
 
-# read/trajectory coordinator: writes only after a task receives a command
+# low-level coordinator: enables the arm and sends one current-position hold frame
 dimos run coordinator-openarm-rs
 
-# active write-path test: immediately holds current q with MIT + gravity feed-forward
-dimos run coordinator-openarm-rs-hold-test
+# manipulation workflow: startup hold, then plan, preview, and execute through the new driver
+dimos run openarm-rs-planner-coordinator
 ```
-
-The hold-test blueprint auto-starts a current-position hold task. It reads the current joints and writes those same positions every coordinator tick so `OpenArmRSAdapter` emits MIT position frames with gravity feed-forward. Use it only when the arm is supported and you intentionally want an active hardware write-path test.
 
 `OpenArmRSAdapter` opens CAN-FD by default (`canfd=True`) and computes model gravity feed-forward in-place when `gravity_comp=True` (the OpenArm blueprint default). It intentionally supports position and effort semantics only: position commands are sent as MIT commands with preset `kp/kd` gains and optional gravity feed-forward, while effort/gravity-only commands use `kp=0` so the arm does not hold a target pose. Velocity commands are rejected because nonzero gains make MIT commands maintain the supplied `q`. Set `gravity_comp=False` in adapter kwargs to keep position MIT commands but omit model feed-forward torque.
 
 Meshcat will appear at http://localhost:7000.
 
-### 5. Drive the arms from the manipulation client
+### 5. Drive the new driver from the manipulation client
 
-With `openarm-planner-coordinator` running in one terminal, open a second terminal and start the REPL client:
+With `openarm-rs-planner-coordinator` running in one terminal, open a second terminal and start the REPL client:
 
 ```bash
 python -i -m dimos.manipulation.planning.examples.manipulation_client
@@ -170,7 +169,7 @@ This gives you an interactive Python prompt with these functions:
 
 | Function | Purpose |
 |---|---|
-| `robots()` | List configured robots (here: `["left_arm", "right_arm"]`) |
+| `robots()` | List configured robots (for `openarm-rs-planner-coordinator`: `["arm"]`) |
 | `joints(robot_name)` | Read current joint positions (7 floats) |
 | `ee(robot_name)` | Read current end-effector pose |
 | `state()` | Module state: `IDLE`, `PLANNING`, `EXECUTING`, `FAULT`, etc. |
@@ -185,16 +184,16 @@ This gives you an interactive Python prompt with these functions:
 
 ```python skip
 >>> robots()
-['left_arm', 'right_arm']
+['arm']
 
->>> joints(robot_name="left_arm")
+>>> joints()
 [0.02, -0.01, -0.13, 0.15, 0.17, -0.07, 0.10]
 
 >>> # One-liner: plan → preview in Meshcat → execute on hardware
->>> plan([0.3, 0, 0, 0, 0, 0, 0], robot_name="left_arm") and preview(robot_name="left_arm") and execute(robot_name="left_arm")
+>>> plan([0.3, 0, 0, 0, 0, 0, 0]) and preview() and execute()
 True
 
->>> joints(robot_name="left_arm")
+>>> joints()
 [0.30, 0.00, 0.00, 0.00, 0.00, 0.00, 0.00]   # arm is now at the commanded pose
 ```
 
@@ -207,7 +206,9 @@ If you ever get stuck in a `FAULT` state (e.g. an invalid plan was sent), reset 
 'Reset to IDLE — ready for new commands'
 ```
 
-#### Example session — bimanual
+#### Example session — bimanual legacy `openarm` blueprint
+
+Use this pattern with `openarm-planner-coordinator`, which configures `left_arm` and `right_arm`. The new `openarm-rs-planner-coordinator` blueprint is intentionally single-arm while the binding-backed driver path is being validated.
 
 ```python skip
 >>> # Move both arms to mirrored poses
@@ -222,10 +223,10 @@ Each arm plans and executes independently — the coordinator runs both trajecto
 #### Example session — Cartesian target
 
 ```python skip
->>> ee(robot_name="left_arm")           # see where the EE currently is
->>> plan_pose(0.1, 0.3, 0.5, robot_name="left_arm") and preview(robot_name="left_arm")
+>>> ee()           # see where the EE currently is
+>>> plan_pose(0.1, 0.3, 0.5) and preview()
 True
->>> execute(robot_name="left_arm")
+>>> execute()
 True
 ```
 
@@ -253,7 +254,7 @@ LEFT_CAN = "can1"
 RIGHT_CAN = "can0"
 ```
 
-No other code changes are needed. The `coordinator-openarm-rs` blueprint currently targets `RIGHT_CAN` (`can0`) and passes `canfd=True`; use `sudo MODE=fd ... openarm_can_up.sh can0` before running it.
+No other code changes are needed. The `coordinator-openarm-rs` and `openarm-rs-planner-coordinator` blueprints currently target `RIGHT_CAN` (`can0`) and pass `canfd=True`; use `sudo MODE=fd ... openarm_can_up.sh can0` before running either one.
 
 ### Gain tuning (MIT kp/kd)
 

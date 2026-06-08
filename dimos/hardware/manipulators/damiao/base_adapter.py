@@ -470,6 +470,11 @@ class DamiaoArmAdapterBase:
             logger.error(f"{type(self).__name__} {self._hardware_id} enable={enable} failed: {exc}")
             return False
         self._enabled = enable
+        if enable:
+            positions = self.read_joint_positions()
+            if not self.write_joint_positions(positions):
+                logger.error(f"{type(self).__name__} {self._hardware_id} startup hold failed")
+                return False
         return True
 
     def write_clear_errors(self) -> bool:

@@ -18,22 +18,20 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
 
-from dimos.control.components import HardwareComponent, HardwareType, make_joints
+from dimos.control.components import HardwareComponent, HardwareType, TaskName, make_joints
 from dimos.control.hardware_interface import ConnectedHardware
 from dimos.control.task import (
     ControlMode,
+    ControlTask,
     CoordinatorState,
     JointCommandOutput,
     JointStateSnapshot,
     ResourceClaim,
-)
-from dimos.control.tasks.current_position_hold_task.current_position_hold_task import (
-    CurrentPositionHoldTask,
-    CurrentPositionHoldTaskConfig,
 )
 from dimos.control.tasks.trajectory_task.trajectory_task import (
     JointTrajectoryTask,
@@ -407,7 +405,7 @@ class TestTickLoop:
         )
         hw = ConnectedHardware(mock_adapter, component)
         hardware = {"arm": hw}
-        tasks: dict = {}
+        tasks: dict[TaskName, ControlTask] = {}
         joint_to_hardware = {f"arm/joint{i + 1}": "arm" for i in range(6)}
 
         tick_loop = TickLoop(
@@ -450,7 +448,7 @@ class TestTickLoop:
             mode=ControlMode.POSITION,
         )
 
-        tasks = {"test_task": mock_task}
+        tasks: dict[TaskName, ControlTask] = {"test_task": cast("ControlTask", mock_task)}
         joint_to_hardware = {f"arm/joint{i + 1}": "arm" for i in range(6)}
 
         tick_loop = TickLoop(
@@ -484,7 +482,7 @@ class TestIntegration:
             priority=10,
         )
         traj_task = JointTrajectoryTask(name="traj_arm", config=config)
-        tasks = {"traj_arm": traj_task}
+        tasks: dict[TaskName, ControlTask] = {"traj_arm": traj_task}
 
         joint_to_hardware = {f"arm/joint{i + 1}": "arm" for i in range(6)}
 
@@ -521,57 +519,3 @@ class TestIntegration:
 
         assert traj_task.get_state() == TrajectoryState.COMPLETED
         assert mock_adapter.write_joint_positions.call_count > 0
-
-
-class TestCurrentPositionHoldTask:
-    def test_initial_state(self) -> None:
-        task = CurrentPositionHoldTask(
-            name="hold",
-            config=CurrentPositionHoldTaskConfig(
-                joint_names=["arm/joint1", "arm/joint2"],
-                priority=5,
-            ),
-        )
-        assert not task.is_active()
-        claim = task.claim()
-        assert claim.joints == frozenset({"arm/joint1", "arm/joint2"})
-        assert claim.priority == 5
-        assert claim.mode == ControlMode.SERVO_POSITION
-
-    def test_outputs_current_positions_when_started(self) -> None:
-        task = CurrentPositionHoldTask(
-            name="hold",
-            config=CurrentPositionHoldTaskConfig(
-                joint_names=["arm/joint1", "arm/joint2"],
-                priority=5,
-            ),
-        )
-        task.start()
-        state = CoordinatorState(
-            joints=JointStateSnapshot(
-                joint_positions={"arm/joint1": 0.1, "arm/joint2": -0.2},
-            ),
-            t_now=1.0,
-            dt=0.01,
-        )
-        output = task.compute(state)
-        assert output is not None
-        assert output.mode == ControlMode.SERVO_POSITION
-        assert output.joint_names == ["arm/joint1", "arm/joint2"]
-        assert output.positions == pytest.approx([0.1, -0.2])
-
-    def test_skips_output_until_all_positions_exist(self) -> None:
-        task = CurrentPositionHoldTask(
-            name="hold",
-            config=CurrentPositionHoldTaskConfig(
-                joint_names=["arm/joint1", "arm/joint2"],
-                priority=5,
-            ),
-        )
-        task.start()
-        state = CoordinatorState(
-            joints=JointStateSnapshot(joint_positions={"arm/joint1": 0.1}),
-            t_now=1.0,
-            dt=0.01,
-        )
-        assert task.compute(state) is None

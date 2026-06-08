@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from dimos.control.coordinator import ControlCoordinator, TaskConfig
+from dimos.control.coordinator import ControlCoordinator
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.transport import LCMTransport
 from dimos.manipulation.manipulation_module import ManipulationModule
@@ -84,9 +84,6 @@ _openarm_rs_hw = _openarm(
     address=RIGHT_CAN,
     adapter_kwargs=_OPENARM_RS_ADAPTER_KWARGS,
 )
-_openarm_rs_joint_names = _openarm_rs_hw.joint_names
-if _openarm_rs_joint_names is None:
-    raise ValueError("OpenArm RS hardware config requires joint names")
 
 coordinator_openarm_left = ControlCoordinator.blueprint(
     hardware=[_left_hw.to_hardware_component()],
@@ -121,27 +118,23 @@ coordinator_openarm_bimanual = ControlCoordinator.blueprint(
 
 coordinator_openarm_rs = ControlCoordinator.blueprint(
     hardware=[_openarm_rs_hw.to_hardware_component()],
-    tasks=[_openarm_rs_hw.to_task_config(task_name="traj_openarm_rs")],
+    tasks=[_openarm_rs_hw.to_task_config()],
 ).transports(
     {
         ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
     }
 )
 
-# Hardware bring-up test: immediately writes current-position SERVO_POSITION
-# commands so the openarm_rs adapter emits MIT hold frames with gravity
-# feed-forward. Use cautiously; this is an active write-path test.
-coordinator_openarm_rs_hold_test = ControlCoordinator.blueprint(
-    hardware=[_openarm_rs_hw.to_hardware_component()],
-    tasks=[
-        TaskConfig(
-            name="hold_openarm_rs",
-            type="current_position_hold",
-            joint_names=_openarm_rs_joint_names,
-            priority=5,
-            auto_start=True,
-        ),
-    ],
+openarm_rs_planner_coordinator = autoconnect(
+    ManipulationModule.blueprint(
+        robots=[_openarm_rs_hw.to_robot_model_config()],
+        planning_timeout=10.0,
+        enable_viz=True,
+    ),
+    ControlCoordinator.blueprint(
+        hardware=[_openarm_rs_hw.to_hardware_component()],
+        tasks=[_openarm_rs_hw.to_task_config()],
+    ),
 ).transports(
     {
         ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
@@ -259,9 +252,9 @@ __all__ = [
     "coordinator_openarm_mock",
     "coordinator_openarm_right",
     "coordinator_openarm_rs",
-    "coordinator_openarm_rs_hold_test",
     "keyboard_teleop_openarm",
     "keyboard_teleop_openarm_mock",
     "openarm_mock_planner_coordinator",
     "openarm_planner_coordinator",
+    "openarm_rs_planner_coordinator",
 ]

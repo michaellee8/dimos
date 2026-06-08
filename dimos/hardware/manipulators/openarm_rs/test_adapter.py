@@ -274,10 +274,14 @@ def test_lifecycle_read_write_disable() -> None:
     assert adapter.connect() is True
     assert adapter.write_enable(True) is True
     assert adapter.read_enabled() is True
-    assert adapter.read_joint_positions() == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-    assert adapter.write_joint_positions([0.1] * 7, velocity=0.5) is True
     robot = FakeRobot.last
     assert robot is not None
+    startup_cmd = robot.arm.mit_commands[-1]
+    assert startup_cmd[:, 2].tolist() == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    assert startup_cmd[:, 3].tolist() == pytest.approx([0.0] * 7)
+    assert startup_cmd[:, 4].tolist() == pytest.approx([0.0] * 7)
+    assert adapter.read_joint_positions() == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
+    assert adapter.write_joint_positions([0.1] * 7, velocity=0.5) is True
     assert robot.arm.position_commands == []
     assert robot.arm.velocity_commands == []
     cmd = robot.arm.mit_commands[-1]
@@ -359,7 +363,7 @@ def test_velocity_mode_and_commands_are_unsupported() -> None:
     assert adapter.write_joint_velocities([0.2] * 7) is False
     robot = FakeRobot.last
     assert robot is not None
-    assert robot.arm.mit_commands == []
+    assert len(robot.arm.mit_commands) == 1
     assert robot.arm.velocity_commands == []
     assert adapter.get_control_mode() == ControlMode.POSITION
 
