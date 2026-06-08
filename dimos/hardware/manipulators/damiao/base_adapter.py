@@ -494,6 +494,8 @@ class DamiaoArmAdapterBase:
     def _load_gravity_model(self) -> None:
         if not self._gravity_comp or self._gravity_model_path is None:
             return
+        # Lazy import: pinocchio is a heavy optional dep only needed when
+        # gravity compensation is enabled, so keep it out of module import.
         import pinocchio
 
         build_model_from_urdf = _dynamic_attr(pinocchio, "buildModelFromUrdf")
@@ -504,6 +506,8 @@ class DamiaoArmAdapterBase:
         self._validate_length("q", q)
         if self._pin_model is None or self._pin_data is None:
             return [0.0] * self._dof
+        # Lazy import: pinocchio is a heavy optional dep only needed when
+        # gravity compensation is enabled, so keep it out of module import.
         import pinocchio
 
         compute_generalized_gravity = _dynamic_attr(pinocchio, "computeGeneralizedGravity")
