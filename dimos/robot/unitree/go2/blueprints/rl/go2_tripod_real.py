@@ -77,7 +77,14 @@ go2_tripod_real = autoconnect(
         network_interface=os.getenv("ROBOT_INTERFACE", ""),
     ),
     ControlCoordinator.blueprint(
-        tick_rate=500,
+        # SLOW BRING-UP: 1 Hz tick = one full policy output per second.
+        # Gives the operator a clear window to abort if a commanded pose
+        # looks dangerous. The Go2WholeBodyConnection still publishes the
+        # held target at 500 Hz via its own publish loop, so PD tracking
+        # stays tight between coordinator ticks - the robot just holds
+        # the last commanded pose for ~1s before the next policy update.
+        # Bump back to 500 once you trust the policy on this robot.
+        tick_rate=1,
         hardware=[
             HardwareComponent(
                 hardware_id=_HW,
@@ -99,20 +106,23 @@ go2_tripod_real = autoconnect(
                 params={
                     "policy_path": _DEFAULT_POLICY,
                     "hardware_id": _HW,
-                    "inference_period": 0.02,
+                    # At tick_rate=1 the policy runs once per tick (once per
+                    # second). inference_period >= tick_period means every
+                    # tick produces a fresh action.
+                    "inference_period": 1.0,
                     "mask_fr": False,
                     "device": "cpu",
-                    # Hardware bring-up timing - long pauses between phases
-                    # let the operator observe each transition and abort if
-                    # something looks wrong. Tighten once the sequence is
-                    # well-understood on this specific robot.
-                    #   pre_ramp_hold: hold whatever pose at arm time (2s)
-                    #   activation_ramp: blend to policy target (3s)
-                    #   post_ramp_hold: hold at policy target (2s)
-                    #   then: live policy execution each tick
-                    "pre_ramp_hold_seconds": 2.0,
-                    "activation_ramp_seconds": 3.0,
-                    "post_ramp_hold_seconds": 2.0,
+                    # SLOW BRING-UP TIMING. At tick_rate=1, each ramp tick is
+                    # 1s, so we want enough ticks for the interpolation to
+                    # feel like a smooth glide (not 3 visible jumps). 10s
+                    # gives 10 discrete steps from arm-pose to policy target.
+                    #   pre_ramp_hold:  hold whatever pose at arm time (3s)
+                    #   activation_ramp: blend to policy target (10s)
+                    #   post_ramp_hold:  hold at policy target (3s)
+                    #   then: live policy execution at 1Hz
+                    "pre_ramp_hold_seconds": 3.0,
+                    "activation_ramp_seconds": 10.0,
+                    "post_ramp_hold_seconds": 3.0,
                 },
             ),
         ],
