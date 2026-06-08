@@ -31,6 +31,8 @@ logger = setup_logger()
 # subclasses can't drift apart.
 _DEFAULT_TICK_DEADLINE_US = 1_000
 _DEFAULT_STATE_CACHE_TTL_S = 0.002
+# Conventional first SocketCAN interface; used when no address is configured.
+_DEFAULT_ADDRESS = "can0"
 
 _can_motor_control: Any | None
 _damiao: Any | None
@@ -112,7 +114,7 @@ class DamiaoArmAdapterBase:
         gravity_model_path: str | Path | None = None,
         gravity_torque_limits: list[float] | tuple[float, ...] | None = None,
         supported_control_modes: tuple[ControlMode, ...] | None = None,
-        address: str | Path | None = "can0",
+        address: str | Path | None = _DEFAULT_ADDRESS,
         config_path: str | Path | None = None,
         use_mock_bus: bool = False,
         tick_deadline_us: int = _DEFAULT_TICK_DEADLINE_US,
@@ -159,7 +161,7 @@ class DamiaoArmAdapterBase:
         self._last_positions: list[float] | None = None
         self._pin_model = None
         self._pin_data: object | None = None
-        self._address = str(address) if address is not None else "can0"
+        self._address = str(address) if address is not None else _DEFAULT_ADDRESS
         self._config_path = str(config_path) if config_path is not None else None
         self._arm_name = arm_spec.arm_name
         self._bus_name = arm_spec.bus_name

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from dimos.hardware.manipulators.damiao.base_adapter import (
+    _DEFAULT_ADDRESS,
     _DEFAULT_STATE_CACHE_TTL_S,
     _DEFAULT_TICK_DEADLINE_US,
     DamiaoArmAdapterBase,
@@ -55,7 +56,7 @@ class OpenArmRSAdapter(DamiaoArmAdapterBase):
 
     def __init__(
         self,
-        address: str | Path | None = "can0",
+        address: str | Path | None = _DEFAULT_ADDRESS,
         dof: int = 7,
         *,
         hardware_id: str = "arm",
