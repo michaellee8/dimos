@@ -255,9 +255,12 @@ class DamiaoArmAdapterBase:
             self.refresh_state(force=True)
         except self._binding_error_type:
             raise
-        except Exception as exc:
-            logger.error(
-                f"{type(self).__name__} {self._hardware_id}@{self._address} connect failed: {exc}"
+        except Exception:
+            logger.exception(
+                "damiao adapter connect failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+                address=self._address,
             )
             self._robot = None
             self._arm = None
@@ -298,9 +301,12 @@ class DamiaoArmAdapterBase:
         if self._robot is not None:
             try:
                 self._robot.disable()
-            except Exception as exc:
+            except Exception:
                 logger.warning(
-                    f"{type(self).__name__} {self._hardware_id} disable on disconnect failed: {exc}"
+                    "damiao adapter disable on disconnect failed",
+                    adapter=type(self).__name__,
+                    hardware_id=self._hardware_id,
+                    exc_info=True,
                 )
         self._enabled = False
         self._connected = False
@@ -449,8 +455,13 @@ class DamiaoArmAdapterBase:
             )
         try:
             self._robot.disable()
-        except Exception as exc:
-            logger.warning(f"{type(self).__name__} {self._hardware_id} stop disable failed: {exc}")
+        except Exception:
+            logger.warning(
+                "damiao adapter stop disable failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+                exc_info=True,
+            )
             return False
         self._enabled = False
         return True
@@ -460,14 +471,23 @@ class DamiaoArmAdapterBase:
             return False
         try:
             self._robot.enable() if enable else self._robot.disable()
-        except Exception as exc:
-            logger.error(f"{type(self).__name__} {self._hardware_id} enable={enable} failed: {exc}")
+        except Exception:
+            logger.exception(
+                "damiao adapter enable failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+                enable=enable,
+            )
             return False
         self._enabled = enable
         if enable:
             positions = self.read_joint_positions()
             if not self.write_joint_positions(positions):
-                logger.error(f"{type(self).__name__} {self._hardware_id} startup hold failed")
+                logger.error(
+                    "damiao adapter startup hold failed",
+                    adapter=type(self).__name__,
+                    hardware_id=self._hardware_id,
+                )
                 return False
         return True
 
@@ -477,13 +497,21 @@ class DamiaoArmAdapterBase:
         try:
             self._robot.disable()
             self._robot.enable()
-        except Exception as exc:
-            logger.error(f"{type(self).__name__} {self._hardware_id} clear errors failed: {exc}")
+        except Exception:
+            logger.exception(
+                "damiao adapter clear errors failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+            )
             return False
         self._enabled = True
         positions = self.read_joint_positions()
         if not self.write_joint_positions(positions):
-            logger.error(f"{type(self).__name__} {self._hardware_id} clear-error hold failed")
+            logger.error(
+                "damiao adapter clear-error hold failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+            )
             return False
         return True
 
