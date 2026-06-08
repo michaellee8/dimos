@@ -78,7 +78,6 @@ class OpenArmRSAdapter(DamiaoArmAdapterBase):
         state_cache_ttl_s: float = _DEFAULT_STATE_CACHE_TTL_S,
         gravity_model_path: str | Path | None = None,
         gravity_torque_limits: list[float] | None = None,
-        **_: object,
     ) -> None:
         if dof != len(self._DEFAULT_OPENARM_MOTORS):
             raise ValueError(f"OpenArmRSAdapter only supports 7 DOF (got {dof})")
