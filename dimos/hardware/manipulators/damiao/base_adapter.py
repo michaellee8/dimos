@@ -379,6 +379,14 @@ class DamiaoArmAdapterBase:
             try:
                 tau = self.compute_gravity_torques(self.read_joint_positions())
             except RuntimeError:
+                # State read failed: fall back to zero feed-forward torque, but
+                # surface it so the dropped gravity term isn't silent.
+                logger.warning(
+                    "damiao adapter dropping gravity feed-forward; state read failed",
+                    adapter=type(self).__name__,
+                    hardware_id=self._hardware_id,
+                    exc_info=True,
+                )
                 tau = self._zero_vector()
         else:
             tau = self._zero_vector()
