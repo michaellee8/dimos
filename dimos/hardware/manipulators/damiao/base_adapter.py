@@ -20,7 +20,6 @@ import time
 from typing import Any, cast
 
 import numpy as np
-from numpy.typing import NDArray
 
 from dimos.hardware.manipulators.damiao.specs import DamiaoArmSpec
 from dimos.hardware.manipulators.spec import ControlMode, JointLimits, ManipulatorInfo
@@ -28,7 +27,14 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-FloatArray = NDArray[np.float64]
+# Shared adapter defaults. Subclasses reference these so the base and its
+# subclasses can't drift apart.
+_DEFAULT_TICK_DEADLINE_US = 1_000
+_DEFAULT_STATE_CACHE_TTL_S = 0.002
+# Conventional first SocketCAN interface; used when no address is configured.
+_DEFAULT_ADDRESS = "can0"
+# Position of each control mode in declaration order, reported by read_state().
+_CONTROL_MODE_INDEX = {mode: index for index, mode in enumerate(ControlMode)}
 
 _can_motor_control: Any | None
 _damiao: Any | None
@@ -110,11 +116,11 @@ class DamiaoArmAdapterBase:
         gravity_model_path: str | Path | None = None,
         gravity_torque_limits: list[float] | tuple[float, ...] | None = None,
         supported_control_modes: tuple[ControlMode, ...] | None = None,
-        address: str | Path | None = "can0",
+        address: str | Path | None = _DEFAULT_ADDRESS,
         config_path: str | Path | None = None,
         use_mock_bus: bool = False,
-        tick_deadline_us: int = 1_000,
-        state_cache_ttl_s: float = 0.002,
+        tick_deadline_us: int = _DEFAULT_TICK_DEADLINE_US,
+        state_cache_ttl_s: float = _DEFAULT_STATE_CACHE_TTL_S,
     ) -> None:
         arm_spec.validate()
         if dof is not None and dof != arm_spec.dof:
@@ -157,7 +163,7 @@ class DamiaoArmAdapterBase:
         self._last_positions: list[float] | None = None
         self._pin_model = None
         self._pin_data: object | None = None
-        self._address = str(address) if address is not None else "can0"
+        self._address = str(address) if address is not None else _DEFAULT_ADDRESS
         self._config_path = str(config_path) if config_path is not None else None
         self._arm_name = arm_spec.arm_name
         self._bus_name = arm_spec.bus_name
@@ -181,18 +187,6 @@ class DamiaoArmAdapterBase:
 
     def _zero_vector(self) -> list[float]:
         return [0.0] * self._dof
-
-    def _mit_command_rows(
-        self,
-        *,
-        q: list[float],
-        dq: list[float],
-        kp: list[float],
-        kd: list[float],
-        tau: list[float],
-    ) -> list[tuple[float, float, float, float, float]]:
-        self._validate_command_lengths(q=q, dq=dq, kp=kp, kd=kd, tau=tau)
-        return list(zip(q, dq, kp, kd, tau, strict=True))
 
     def get_info(self) -> ManipulatorInfo:
         return ManipulatorInfo(
@@ -261,9 +255,12 @@ class DamiaoArmAdapterBase:
             self.refresh_state(force=True)
         except self._binding_error_type:
             raise
-        except Exception as exc:
-            logger.error(
-                f"{type(self).__name__} {self._hardware_id}@{self._address} connect failed: {exc}"
+        except Exception:
+            logger.exception(
+                "damiao adapter connect failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+                address=self._address,
             )
             self._robot = None
             self._arm = None
@@ -304,9 +301,12 @@ class DamiaoArmAdapterBase:
         if self._robot is not None:
             try:
                 self._robot.disable()
-            except Exception as exc:
+            except Exception:
                 logger.warning(
-                    f"{type(self).__name__} {self._hardware_id} disable on disconnect failed: {exc}"
+                    "damiao adapter disable on disconnect failed",
+                    adapter=type(self).__name__,
+                    hardware_id=self._hardware_id,
+                    exc_info=True,
                 )
         self._enabled = False
         self._connected = False
@@ -330,9 +330,9 @@ class DamiaoArmAdapterBase:
         self._arm.refresh()
         self._robot.tick(self._tick_deadline_us)
         state = (
-            [float(value) for value in self._arm.positions().astype(np.float64)],
-            [float(value) for value in self._arm.velocities().astype(np.float64)],
-            [float(value) for value in self._arm.torques().astype(np.float64)],
+            self._arm.positions().astype(np.float64).tolist(),
+            self._arm.velocities().astype(np.float64).tolist(),
+            self._arm.torques().astype(np.float64).tolist(),
         )
         if any(len(values) != self._dof for values in state):
             raise RuntimeError("can_motor_control state length does not match configured DOF")
@@ -353,7 +353,7 @@ class DamiaoArmAdapterBase:
     def read_state(self) -> dict[str, int]:
         return {
             "state": 1 if self._enabled else 0,
-            "mode": list(ControlMode).index(self._control_mode),
+            "mode": _CONTROL_MODE_INDEX[self._control_mode],
         }
 
     def read_error(self) -> tuple[int, str]:
@@ -379,6 +379,14 @@ class DamiaoArmAdapterBase:
             try:
                 tau = self.compute_gravity_torques(self.read_joint_positions())
             except RuntimeError:
+                # State read failed: fall back to zero feed-forward torque, but
+                # surface it so the dropped gravity term isn't silent.
+                logger.warning(
+                    "damiao adapter dropping gravity feed-forward; state read failed",
+                    adapter=type(self).__name__,
+                    hardware_id=self._hardware_id,
+                    exc_info=True,
+                )
                 tau = self._zero_vector()
         else:
             tau = self._zero_vector()
@@ -413,12 +421,15 @@ class DamiaoArmAdapterBase:
     def write_gravity_compensation(self, damping: float | list[float] = 0.0) -> bool:
         try:
             q, dq, _ = self.refresh_state(force=True)
-            tau = self.compute_gravity_torques(q)
-        except Exception as exc:
+        except RuntimeError:
             logger.warning(
-                f"Skipping {type(self).__name__} gravity compensation due to invalid state: {exc}"
+                "skipping damiao gravity compensation; state read failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+                exc_info=True,
             )
             return False
+        tau = self.compute_gravity_torques(q)
         kd = [float(damping)] * self._dof if isinstance(damping, int | float) else list(damping)
         return self.write_mit_commands(q=q, dq=dq, kp=self._zero_vector(), kd=kd, tau=tau)
 
@@ -427,10 +438,9 @@ class DamiaoArmAdapterBase:
     ) -> bool:
         if self._arm is None or self._robot is None or not self._enabled:
             return False
-        rows = self._mit_command_rows(q=q, dq=dq, kp=kp, kd=kd, tau=tau)
-        self._arm.mit_control(
-            np.array([(row[2], row[3], row[0], row[1], row[4]) for row in rows], dtype=np.float64)
-        )
+        self._validate_command_lengths(q=q, dq=dq, kp=kp, kd=kd, tau=tau)
+        # MIT command columns are (kp, kd, q, dq, tau) per joint.
+        self._arm.mit_control(np.column_stack([kp, kd, q, dq, tau]).astype(np.float64))
         self._robot.tick(self._tick_deadline_us)
         self._state_cache = None
         self._last_positions = list(q)
@@ -456,8 +466,13 @@ class DamiaoArmAdapterBase:
             )
         try:
             self._robot.disable()
-        except Exception as exc:
-            logger.warning(f"{type(self).__name__} {self._hardware_id} stop disable failed: {exc}")
+        except Exception:
+            logger.warning(
+                "damiao adapter stop disable failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+                exc_info=True,
+            )
             return False
         self._enabled = False
         return True
@@ -467,14 +482,23 @@ class DamiaoArmAdapterBase:
             return False
         try:
             self._robot.enable() if enable else self._robot.disable()
-        except Exception as exc:
-            logger.error(f"{type(self).__name__} {self._hardware_id} enable={enable} failed: {exc}")
+        except Exception:
+            logger.exception(
+                "damiao adapter enable failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+                enable=enable,
+            )
             return False
         self._enabled = enable
         if enable:
             positions = self.read_joint_positions()
             if not self.write_joint_positions(positions):
-                logger.error(f"{type(self).__name__} {self._hardware_id} startup hold failed")
+                logger.error(
+                    "damiao adapter startup hold failed",
+                    adapter=type(self).__name__,
+                    hardware_id=self._hardware_id,
+                )
                 return False
         return True
 
@@ -484,19 +508,29 @@ class DamiaoArmAdapterBase:
         try:
             self._robot.disable()
             self._robot.enable()
-        except Exception as exc:
-            logger.error(f"{type(self).__name__} {self._hardware_id} clear errors failed: {exc}")
+        except Exception:
+            logger.exception(
+                "damiao adapter clear errors failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+            )
             return False
         self._enabled = True
         positions = self.read_joint_positions()
         if not self.write_joint_positions(positions):
-            logger.error(f"{type(self).__name__} {self._hardware_id} clear-error hold failed")
+            logger.error(
+                "damiao adapter clear-error hold failed",
+                adapter=type(self).__name__,
+                hardware_id=self._hardware_id,
+            )
             return False
         return True
 
     def _load_gravity_model(self) -> None:
         if not self._gravity_comp or self._gravity_model_path is None:
             return
+        # Lazy import: pinocchio is a heavy optional dep only needed when
+        # gravity compensation is enabled, so keep it out of module import.
         import pinocchio
 
         build_model_from_urdf = _dynamic_attr(pinocchio, "buildModelFromUrdf")
@@ -507,6 +541,8 @@ class DamiaoArmAdapterBase:
         self._validate_length("q", q)
         if self._pin_model is None or self._pin_data is None:
             return [0.0] * self._dof
+        # Lazy import: pinocchio is a heavy optional dep only needed when
+        # gravity compensation is enabled, so keep it out of module import.
         import pinocchio
 
         compute_generalized_gravity = _dynamic_attr(pinocchio, "computeGeneralizedGravity")
