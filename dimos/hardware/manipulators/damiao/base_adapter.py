@@ -20,15 +20,12 @@ import time
 from typing import Any, cast
 
 import numpy as np
-from numpy.typing import NDArray
 
 from dimos.hardware.manipulators.damiao.specs import DamiaoArmSpec
 from dimos.hardware.manipulators.spec import ControlMode, JointLimits, ManipulatorInfo
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
-
-FloatArray = NDArray[np.float64]
 
 _can_motor_control: Any | None
 _damiao: Any | None
