@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from dimos.hardware.manipulators.damiao.base_adapter import (
+    _DEFAULT_STATE_CACHE_TTL_S,
+    _DEFAULT_TICK_DEADLINE_US,
     DamiaoArmAdapterBase,
     DamiaoBindingUnavailableError,
 )
@@ -71,8 +73,8 @@ class OpenArmRSAdapter(DamiaoArmAdapterBase):
         kp: list[float] | None = None,
         kd: list[float] | None = None,
         gravity_comp: bool = True,
-        tick_deadline_us: int = 1_000,
-        state_cache_ttl_s: float = 0.002,
+        tick_deadline_us: int = _DEFAULT_TICK_DEADLINE_US,
+        state_cache_ttl_s: float = _DEFAULT_STATE_CACHE_TTL_S,
         gravity_model_path: str | Path | None = None,
         gravity_torque_limits: list[float] | None = None,
         **_: object,

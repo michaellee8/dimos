@@ -27,6 +27,11 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
+# Shared adapter defaults. Subclasses reference these so the base and its
+# subclasses can't drift apart.
+_DEFAULT_TICK_DEADLINE_US = 1_000
+_DEFAULT_STATE_CACHE_TTL_S = 0.002
+
 _can_motor_control: Any | None
 _damiao: Any | None
 
@@ -110,8 +115,8 @@ class DamiaoArmAdapterBase:
         address: str | Path | None = "can0",
         config_path: str | Path | None = None,
         use_mock_bus: bool = False,
-        tick_deadline_us: int = 1_000,
-        state_cache_ttl_s: float = 0.002,
+        tick_deadline_us: int = _DEFAULT_TICK_DEADLINE_US,
+        state_cache_ttl_s: float = _DEFAULT_STATE_CACHE_TTL_S,
     ) -> None:
         arm_spec.validate()
         if dof is not None and dof != arm_spec.dof:
