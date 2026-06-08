@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# Copyright 2025-2026 Dimensional Inc.
+# Copyright 2026 Dimensional Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,17 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Basic G1 stack: base sensors plus real robot connection and ROS nav."""
+"""Python interface to the Rust voxel ray-tracing mapper."""
 
-from dimos.core.coordination.blueprints import autoconnect
-from dimos.robot.unitree.g1.blueprints.primitive.unitree_g1_primitive_no_nav import (
-    unitree_g1_primitive_no_nav,
-)
-from dimos.robot.unitree.g1.connection import G1Connection
+from __future__ import annotations
 
-unitree_g1_basic = autoconnect(
-    unitree_g1_primitive_no_nav,
-    G1Connection.blueprint(),
-)
+try:
+    from dimos_voxel_ray_tracing import VoxelRayMapper
+except ImportError as e:
+    raise ImportError(
+        "dimos_voxel_ray_tracing is not built. Run: "
+        "uv run maturin develop --uv -m dimos/mapping/ray_tracing/rust/Cargo.toml"
+    ) from e
 
-__all__ = ["unitree_g1_basic"]
+__all__ = ["VoxelRayMapper"]
