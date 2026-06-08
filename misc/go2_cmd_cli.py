@@ -25,9 +25,11 @@ read terminal input. Running this script in your own shell sidesteps
 that entirely.
 
 Commands at the prompt:
-    sync               read current actual positions via RPC, set as
-                       local target (use BEFORE 'arm' so first publish
-                       has zero error → no motion, no torque)
+    sync               read current actual joint positions and print
+                       them. READ-ONLY - does not modify the local
+                       target. Use this to observe where the robot
+                       really is during/after motion (e.g. check how
+                       well PD is tracking after `stand`).
     arm                publish the current local target ONCE
     show               print the current local target (no publish)
     bounds             print the per-joint envelope (sit ↔ stand + margin)
@@ -325,7 +327,7 @@ class CommanderCLI:
     def _help(self) -> None:
         print(
             "Commands:\n"
-            "  sync             read live joint positions, set as local target\n"
+            "  sync             read live joint positions (READ-ONLY, no target change)\n"
             "  arm              publish current local target ONCE\n"
             "  show             print local target (no publish)\n"
             "  bounds           print sit↔stand envelope per joint\n"
@@ -339,19 +341,28 @@ class CommanderCLI:
         )
 
     def _sync(self) -> None:
+        """Print the robot's current actual joint positions.
+
+        READ-ONLY. Does NOT modify the local target. Use this to observe
+        where the robot is during/after motion - it lets you check how
+        well PD tracking matched the commanded target without disrupting
+        the active motion (e.g. ``stand`` then ``sync`` to see if the
+        robot reached the standing pose).
+
+        Previously this command also set the local target to the read
+        value, which caused the robot to "freeze" at its current pose
+        any time you ran ``sync`` mid-motion. That was an unsafe surprise.
+        Now ``sync`` is purely observational; the local target stays
+        wherever you last commanded it via ``stand`` / ``sit`` / ``lerp`` /
+        ``pose`` / ``set`` / ``nudge``.
+        """
         positions = self._app.ControlCoordinator.get_joint_positions()
         if not positions:
             print("  no joints reported — is the coordinator running?")
             return
-        # Build a 12-value list in canonical order.
-        with self._lock:
-            self._target = [float(positions.get(name, 0.0)) for name in _JOINT_NAMES]
-            # Drop the stale ramp state so the next heartbeat re-seeds from
-            # this fresh target (avoids ramping from a half-stepped value
-            # that no longer matches the robot's actual pose).
-            self._published = None
-        print("  synced local target to current actual pose")
-        self._print_target(self._target)
+        actual = [float(positions.get(name, 0.0)) for name in _JOINT_NAMES]
+        print("  actual robot pose right now (local target unchanged):")
+        self._print_target(actual)
 
     def _show(self) -> None:
         if self._target is None:
