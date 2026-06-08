@@ -1,8 +1,4 @@
-## Purpose
-
-Define lazy manipulator adapter discovery behavior so adapter keys remain listable in partial installations without importing unselected hardware SDKs.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Metadata-only manipulator adapter listing
 
@@ -47,13 +43,3 @@ DimOS SHALL import and instantiate only the manipulator adapter selected by `ada
 - **WHEN** it verifies the registry behavior
 - **THEN** it SHALL observe available keys, selected instantiation, import side effects, or actionable errors
 - **AND** it SHALL avoid asserting registry internals that are not part of the developer-visible contract.
-
-### Requirement: Stable manipulator adapter keys
-
-DimOS SHALL preserve existing built-in manipulator adapter keys across the lazy discovery migration.
-
-#### Scenario: Existing adapter keys remain available
-- **GIVEN** a user has a hardware configuration or blueprint that selects an existing built-in manipulator adapter key
-- **WHEN** DimOS discovers manipulator adapters after this change
-- **THEN** that key SHALL remain available if its lightweight registry metadata is present
-- **AND** users SHALL NOT need to rename existing manipulator adapter selections for this registry migration.

@@ -1,24 +1,4 @@
-## Purpose
-
-Define the narrowed binding-backed OpenArm adapter behavior for the Rust-backed OpenArm RS path.
-
-## Requirements
-
-### Requirement: Binding-backed OpenArm adapter scope
-
-DimOS SHALL narrow the current binding-backed DMMotor/OpenArm behavior into an explicit OpenArm RS adapter path rather than presenting it as a generic DMMotor arm adapter.
-
-#### Scenario: Selecting the renamed binding-backed adapter
-- **GIVEN** a hardware configuration needs the Rust-backed OpenArm binding path
-- **WHEN** the configuration selects an adapter type
-- **THEN** it SHALL use `openarm_rs` for the binding-backed OpenArm adapter
-- **AND** it SHALL NOT rely on `dm_motor_arm` as the documented OpenArm binding-backed adapter key.
-
-#### Scenario: Avoiding generic Damiao defaults
-- **GIVEN** a non-OpenArm Damiao arm needs support in the future
-- **WHEN** a developer evaluates the OpenArm RS adapter
-- **THEN** DimOS SHALL make clear that OpenArm RS metadata and defaults are OpenArm-specific
-- **AND** DimOS MUST require a separate explicit adapter or change before treating those defaults as generic Damiao behavior.
+## MODIFIED Requirements
 
 ### Requirement: Binding-backed adapter safety behavior
 

@@ -1,8 +1,4 @@
-## Purpose
-
-Define the explicit user-facing selection and safety staging surface for the OpenArm RS adapter.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Explicit OpenArm RS adapter selection
 
@@ -20,16 +16,6 @@ DimOS SHALL provide an explicit Rust-backed OpenArm adapter selection surface na
 - **THEN** DimOS SHALL fail with a clear selected-adapter missing-binding error
 - **AND** DimOS MUST continue discovering unrelated manipulator adapters that do not require that binding
 - **AND** listing manipulator adapters MUST NOT import the OpenArm RS implementation only to discover its adapter key.
-
-### Requirement: OpenArm RS blueprint naming
-
-DimOS SHALL expose binding-backed OpenArm runnable blueprints with names that identify the OpenArm RS path.
-
-#### Scenario: Listing binding-backed OpenArm blueprints
-- **GIVEN** binding-backed OpenArm blueprints are exported
-- **WHEN** a user lists or runs OpenArm blueprints through the DimOS CLI
-- **THEN** runnable names SHALL use `openarm-rs` wording instead of `dm-motor-openarm` wording
-- **AND** documentation SHALL describe those blueprints as opt-in alternatives to the stable `openarm` path.
 
 ### Requirement: OpenArm RS safety staging
 

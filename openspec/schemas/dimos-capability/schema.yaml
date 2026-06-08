@@ -105,6 +105,8 @@ artifacts:
       - Include docs and validation tasks from docs.md.
       - Include generated registry tasks when blueprints or module registry inputs change.
       - Include manual QA through the actual user surface: CLI, TUI, HTTP API, MCP tool, simulation/replay blueprint, hardware procedure, or library driver.
+      - When adding or revising tests, include tasks that make tests behavior-focused: setup the test, execute the functionality, and check the desired result. Avoid tasks that only construct objects and assert private fields, full metadata snapshots, default tables, or fake backend internals.
+      - For hardware or adapter tests, prefer public surfaces and observable effects. Do not require fake control-library hardware classes unless the fake is the only meaningful user-surface substitute; if a safety-critical backend detail must be asserted, name the safety behavior and keep the assertion minimal.
 
       Typical DimOS validation tasks:
       - Run `openspec validate <change-name>`.
@@ -125,4 +127,5 @@ apply:
   instruction: |
     Read proposal.md, specs, design.md, docs.md, and tasks.md before editing code.
     Work through pending tasks, mark checkboxes complete as they finish, and keep artifacts current when implementation changes the plan.
+    When implementing tests, keep them behavior-focused: set up the test, execute functionality, and check the desired result. Do not add low-value tests that only construct objects and assert incidental details.
     Verify with OpenSpec validation, focused tests, docs checks, and manual QA through the relevant DimOS surface.

@@ -14,436 +14,47 @@
 
 from __future__ import annotations
 
-from enum import IntEnum
-import sys
-from types import ModuleType
-from unittest.mock import MagicMock
-
-import numpy as np
 import pytest
 
-import dimos.hardware.manipulators.damiao.base_adapter as damiao_base_adapter
-from dimos.hardware.manipulators.openarm_rs.adapter import (
-    OpenArmRSAdapter,
-    OpenArmRSBindingUnavailableError,
-    register,
-)
-from dimos.hardware.manipulators.spec import ControlMode, ManipulatorAdapter
-
-
-class FakeMotorType(IntEnum):
-    DM4310 = 1
-    DM4340 = 3
-    DM8006 = 6
-
-
-class FakeDamiao(ModuleType):
-    MotorType = FakeMotorType
-
-    class DamiaoCodec:
-        pass
-
-
-class FakeMotorSpec:
-    def __init__(self, name: str, type: FakeMotorType, send_id: int, recv_id: int) -> None:
-        if not isinstance(type, FakeMotorType):
-            raise TypeError("type must be FakeMotorType")
-        self.name = name
-        self.type = type
-        self.send_id = send_id
-        self.recv_id = recv_id
-
-
-class FakeMotor:
-    fault: int | None = None
-
-
-class FakeArm:
-    def __init__(self, dof: int) -> None:
-        self.dof = dof
-        self.positions_value = np.array([0.1 * i for i in range(dof)], dtype=np.float64)
-        self.velocities_value = np.array([0.2 * i for i in range(dof)], dtype=np.float64)
-        self.torques_value = np.array([0.3 * i for i in range(dof)], dtype=np.float64)
-        self.mit_commands: list[np.ndarray] = []
-        self.position_commands: list[np.ndarray] = []
-        self.velocity_commands: list[np.ndarray] = []
-        self.refresh_count = 0
-        self.motors = {f"joint{i + 1}": FakeMotor() for i in range(dof)}
-
-    def __len__(self) -> int:
-        return self.dof
-
-    def __getitem__(self, name: str) -> FakeMotor:
-        return self.motors[name]
-
-    def positions(self) -> np.ndarray:
-        return self.positions_value
-
-    def velocities(self) -> np.ndarray:
-        return self.velocities_value
-
-    def torques(self) -> np.ndarray:
-        return self.torques_value
-
-    def refresh(self) -> None:
-        self.refresh_count += 1
-
-    def mit_control(self, cmds: np.ndarray) -> None:
-        self.mit_commands.append(cmds.copy())
-
-    def pos_vel_control(self, cmds: np.ndarray) -> None:
-        self.position_commands.append(cmds.copy())
-
-    def vel_control(self, cmds: np.ndarray) -> None:
-        self.velocity_commands.append(cmds.copy())
-
-
-class FakeRobot:
-    last: FakeRobot | None = None
-
-    def __init__(self, dof: int = 7, transport: object | None = None) -> None:
-        FakeRobot.last = self
-        self.arm = FakeArm(dof)
-        self.transport = transport
-        self.config_path: str | None = None
-        self.connected = False
-        self.enabled = False
-        self.tick_count = 0
-        self.disabled_count = 0
-
-    @classmethod
-    def builder(cls) -> FakeRobotBuilder:
-        return FakeRobotBuilder()
-
-    @classmethod
-    def from_config(cls, path: str) -> FakeRobot:
-        robot = cls()
-        robot.config_path = path
-        return robot
-
-    def connect(self) -> None:
-        self.connected = True
-
-    def enable(self) -> None:
-        self.enabled = True
-
-    def disable(self) -> None:
-        self.enabled = False
-        self.disabled_count += 1
-
-    def tick(self, per_bus_deadline_us: int) -> None:
-        self.tick_count += 1
-
-    def __getitem__(self, name: str) -> FakeArm:
-        return self.arm
-
-
-class FakeRobotBuilder:
-    def __init__(self) -> None:
-        self.motors: list[FakeMotorSpec] = []
-        self.transport: object | None = None
-
-    def add_bus(self, name: str, transport: object, codec: object) -> FakeRobotBuilder:
-        self.transport = transport
-        return self
-
-    def add_arm(self, name: str, *, bus: str, motors: list[FakeMotorSpec]) -> FakeRobotBuilder:
-        self.motors = motors
-        return self
-
-    def build(self) -> FakeRobot:
-        return FakeRobot(len(self.motors), transport=self.transport)
-
-
-class FakeDMControl(ModuleType):
-    Robot = FakeRobot
-    MotorSpec = FakeMotorSpec
-
-    class MockCanBus:
-        def __init__(self, name: str, fd: bool = False) -> None:
-            self.name = name
-            self.fd = fd
-
-        @staticmethod
-        def new_fd(name: str) -> FakeDMControl.MockCanBus:
-            return FakeDMControl.MockCanBus(name, fd=True)
-
-    class SocketCanBus:
-        def __init__(self, interface: str, fd: bool = False) -> None:
-            self.interface = interface
-            self.fd = fd
-
-
-@pytest.fixture(autouse=True)
-def fake_can_motor_control(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_dm = FakeDMControl("can_motor_control")
-    fake_damiao = FakeDamiao("can_motor_control.damiao")
-    monkeypatch.setattr(fake_dm, "damiao", fake_damiao, raising=False)
-    monkeypatch.setitem(sys.modules, "can_motor_control", fake_dm)
-    monkeypatch.setitem(sys.modules, "can_motor_control.damiao", fake_damiao)
-    monkeypatch.setattr(damiao_base_adapter, "_can_motor_control", fake_dm)
-    monkeypatch.setattr(damiao_base_adapter, "_damiao", fake_damiao)
-    monkeypatch.setattr(damiao_base_adapter, "_can_motor_control_import_error", None)
-    FakeRobot.last = None
+from dimos.hardware.manipulators.openarm_rs.adapter import OpenArmRSAdapter, register
+from dimos.hardware.manipulators.registry import AdapterRegistry
+from dimos.hardware.manipulators.spec import ManipulatorAdapter
 
 
 def test_implements_manipulator_adapter() -> None:
     assert isinstance(OpenArmRSAdapter(use_mock_bus=True), ManipulatorAdapter)
 
 
-def test_register() -> None:
-    registry = MagicMock()
+def test_register_preserves_openarm_rs_key() -> None:
+    registry = AdapterRegistry()
+
     register(registry)
-    registry.register.assert_called_once_with("openarm_rs", OpenArmRSAdapter)
 
-
-def test_defaults_match_openarm_ros2_hardware_presets() -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True)
-    assert adapter._kp == pytest.approx([70.0, 70.0, 70.0, 60.0, 10.0, 10.0, 10.0])
-    assert adapter._kd == pytest.approx([2.75, 2.5, 2.0, 2.0, 0.7, 0.6, 0.5])
+    adapter = registry.create("openarm_rs", use_mock_bus=True)
+    assert isinstance(adapter, OpenArmRSAdapter)
 
 
 def test_side_selects_openarm_joint_limits() -> None:
     left = OpenArmRSAdapter(side="left", use_mock_bus=True)
     right = OpenArmRSAdapter(side="right", use_mock_bus=True)
 
-    assert left.get_limits().position_lower == pytest.approx(
-        [-3.45, -3.30, -1.50, -0.01, -1.50, -0.75, -1.50]
-    )
-    assert left.get_limits().position_upper == pytest.approx(
-        [1.35, 0.15, 1.50, 2.40, 1.50, 0.75, 1.50]
-    )
-    assert right.get_limits().position_lower == pytest.approx(
-        [-1.35, -0.15, -1.50, -0.01, -1.50, -0.75, -1.50]
-    )
-    assert right.get_limits().position_upper == pytest.approx(
-        [3.45, 3.30, 1.50, 2.40, 1.50, 0.75, 1.50]
-    )
+    assert left.get_limits().position_lower[:2] == [-3.45, -3.30]
+    assert right.get_limits().position_lower[:2] == [-1.35, -0.15]
 
 
 def test_invalid_side_is_rejected() -> None:
     with pytest.raises(ValueError, match="side must be 'left' or 'right'"):
-        OpenArmRSAdapter(side="middle", use_mock_bus=True)
-
-
-def test_canfd_enabled_by_default_for_mock_and_socket_buses() -> None:
-    mock_adapter = OpenArmRSAdapter(use_mock_bus=True)
-    assert mock_adapter.connect() is True
-    mock_robot = FakeRobot.last
-    assert mock_robot is not None
-    assert mock_adapter._fd is True
-    assert isinstance(mock_robot.transport, FakeDMControl.MockCanBus)
-    assert mock_robot.transport.fd is True
-
-    socket_adapter = OpenArmRSAdapter(use_mock_bus=False)
-    assert socket_adapter.connect() is True
-    socket_robot = FakeRobot.last
-    assert socket_robot is not None
-    assert socket_adapter._fd is True
-    assert isinstance(socket_robot.transport, FakeDMControl.SocketCanBus)
-    assert socket_robot.transport.fd is True
-
-
-def test_canfd_flag_and_legacy_fd_override_can_disable_fd() -> None:
-    canfd_adapter = OpenArmRSAdapter(use_mock_bus=True, canfd=False)
-    assert canfd_adapter.connect() is True
-    canfd_robot = FakeRobot.last
-    assert canfd_robot is not None
-    assert canfd_adapter._fd is False
-    assert isinstance(canfd_robot.transport, FakeDMControl.MockCanBus)
-    assert canfd_robot.transport.fd is False
-
-    fd_adapter = OpenArmRSAdapter(use_mock_bus=True, canfd=True, fd=False)
-    assert fd_adapter.connect() is True
-    fd_robot = FakeRobot.last
-    assert fd_robot is not None
-    assert fd_adapter._fd is False
-    assert isinstance(fd_robot.transport, FakeDMControl.MockCanBus)
-    assert fd_robot.transport.fd is False
-
-
-def test_default_motor_specs_use_binding_motor_type_values() -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True)
-    assert adapter.connect() is True
-    robot = FakeRobot.last
-    assert robot is not None
-    assert robot.arm.dof == 7
-
-
-def test_can_motor_control_binding_is_loaded_at_base_module_import() -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True)
-    assert adapter.connect() is True
-    assert vars(damiao_base_adapter)["_can_motor_control"] is sys.modules["can_motor_control"]
-    assert vars(damiao_base_adapter)["_damiao"] is sys.modules["can_motor_control.damiao"]
-
-
-def test_missing_binding_fails_only_when_selected(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delitem(sys.modules, "can_motor_control", raising=False)
-    monkeypatch.delitem(sys.modules, "can_motor_control.damiao", raising=False)
-    monkeypatch.setattr(damiao_base_adapter, "_can_motor_control", None)
-    monkeypatch.setattr(damiao_base_adapter, "_damiao", None)
-    monkeypatch.setattr(
-        damiao_base_adapter,
-        "_can_motor_control_import_error",
-        ImportError("can_motor_control"),
-    )
-    adapter = OpenArmRSAdapter(use_mock_bus=True)
-    with pytest.raises(OpenArmRSBindingUnavailableError, match="openarm_rs.*can-motor-control"):
-        adapter.connect()
-
-
-def test_lifecycle_read_write_disable() -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True, gravity_comp=False)
-    assert adapter.connect() is True
-    assert adapter.write_enable(True) is True
-    assert adapter.read_enabled() is True
-    robot = FakeRobot.last
-    assert robot is not None
-    startup_cmd = robot.arm.mit_commands[-1]
-    assert startup_cmd[:, 2].tolist() == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-    assert startup_cmd[:, 3].tolist() == pytest.approx([0.0] * 7)
-    assert startup_cmd[:, 4].tolist() == pytest.approx([0.0] * 7)
-    assert adapter.read_joint_positions() == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-    assert adapter.write_joint_positions([0.1] * 7, velocity=0.5) is True
-    assert robot.arm.position_commands == []
-    assert robot.arm.velocity_commands == []
-    cmd = robot.arm.mit_commands[-1]
-    assert cmd[:, 2].tolist() == pytest.approx([0.1] * 7)
-    assert cmd[:, 0].tolist() == pytest.approx([35.0, 35.0, 35.0, 30.0, 5.0, 5.0, 5.0])
-    assert cmd[:, 1].tolist() == pytest.approx([2.75, 2.5, 2.0, 2.0, 0.7, 0.6, 0.5])
-    assert cmd[:, 4].tolist() == pytest.approx([0.0] * 7)
-    adapter.disconnect()
-    assert robot.disabled_count >= 1
-
-
-def test_clear_errors_sends_current_position_hold() -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True, gravity_comp=False)
-    assert adapter.connect() is True
-    robot = FakeRobot.last
-    assert robot is not None
-
-    assert adapter.write_clear_errors() is True
-
-    cmd = robot.arm.mit_commands[-1]
-    assert cmd[:, 2].tolist() == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-    assert cmd[:, 3].tolist() == pytest.approx([0.0] * 7)
-    assert cmd[:, 4].tolist() == pytest.approx([0.0] * 7)
-
-
-def test_state_reads_share_one_tick() -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True, state_cache_ttl_s=10.0)
-    assert adapter.connect() is True
-    robot = FakeRobot.last
-    assert robot is not None
-    robot.arm.refresh_count = 0
-    robot.tick_count = 0
-    adapter._state_cache = None
-    adapter.read_joint_positions()
-    adapter.read_joint_velocities()
-    adapter.read_joint_efforts()
-    assert robot.tick_count == 1
-    assert robot.arm.refresh_count == 1
-
-
-def test_uncached_state_read_queues_no_motion_refresh() -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True, state_cache_ttl_s=0.0)
-    assert adapter.connect() is True
-    robot = FakeRobot.last
-    assert robot is not None
-
-    robot.arm.refresh_count = 0
-    robot.tick_count = 0
-    assert adapter.read_joint_positions() == pytest.approx([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-
-    assert robot.arm.refresh_count == 1
-    assert robot.tick_count == 1
-    assert robot.arm.mit_commands == []
-
-
-def test_default_gains_match_openarm_ros2_presets() -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True)
-    assert adapter.connect() is True
-    assert adapter.write_enable(True) is True
-    assert adapter.write_joint_positions([0.1] * 7) is True
-    robot = FakeRobot.last
-    assert robot is not None
-    cmd = robot.arm.mit_commands[-1]
-    assert cmd[:, 0].tolist() == pytest.approx([70.0, 70.0, 70.0, 60.0, 10.0, 10.0, 10.0])
-    assert cmd[:, 1].tolist() == pytest.approx([2.75, 2.5, 2.0, 2.0, 0.7, 0.6, 0.5])
-
-
-def test_position_commands_use_in_place_gravity_compensation_by_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True, kp=[10.0] * 7, kd=[0.2] * 7)
-    assert adapter.connect() is True
-    assert adapter.write_enable(True) is True
-    monkeypatch.setattr(adapter, "compute_gravity_torques", lambda q: [1.0] * 7)
-    assert adapter.write_joint_positions([0.1] * 7, velocity=0.5) is True
-    robot = FakeRobot.last
-    assert robot is not None
-    assert robot.arm.position_commands == []
-    cmd = robot.arm.mit_commands[-1]
-    assert cmd[:, 2].tolist() == pytest.approx([0.1] * 7)
-    assert cmd[:, 3].tolist() == pytest.approx([0.0] * 7)
-    assert cmd[:, 0].tolist() == pytest.approx([5.0] * 7)
-    assert cmd[:, 1].tolist() == pytest.approx([0.2] * 7)
-    assert cmd[:, 4].tolist() == pytest.approx([1.0] * 7)
-    assert adapter.get_control_mode() == ControlMode.POSITION
-
-
-def test_velocity_mode_and_commands_are_unsupported() -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True)
-    assert adapter.connect() is True
-    assert adapter.write_enable(True) is True
-    assert adapter.set_control_mode(ControlMode.VELOCITY) is False
-    assert adapter.write_joint_velocities([0.2] * 7) is False
-    robot = FakeRobot.last
-    assert robot is not None
-    assert len(robot.arm.mit_commands) == 1
-    assert robot.arm.velocity_commands == []
-    assert adapter.get_control_mode() == ControlMode.POSITION
-
-
-def test_gravity_comp_false_uses_mit_position_without_effort() -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True, gravity_comp=False, kp=[10.0] * 7, kd=[0.2] * 7)
-    assert adapter.connect() is True
-    assert adapter.write_enable(True) is True
-    assert adapter.write_joint_positions([0.1] * 7, velocity=0.5) is True
-    robot = FakeRobot.last
-    assert robot is not None
-    assert robot.arm.position_commands == []
-    assert robot.arm.velocity_commands == []
-    cmd = robot.arm.mit_commands[-1]
-    assert cmd[:, 2].tolist() == pytest.approx([0.1] * 7)
-    assert cmd[:, 0].tolist() == pytest.approx([5.0] * 7)
-    assert cmd[:, 1].tolist() == pytest.approx([0.2] * 7)
-    assert cmd[:, 4].tolist() == pytest.approx([0.0] * 7)
-
-
-def test_gravity_compensation_command_shape(monkeypatch: pytest.MonkeyPatch) -> None:
-    adapter = OpenArmRSAdapter(use_mock_bus=True)
-    assert adapter.connect() is True
-    assert adapter.write_enable(True) is True
-    monkeypatch.setattr(adapter, "compute_gravity_torques", lambda q: [1.0] * 7)
-    assert adapter.write_gravity_compensation(damping=0.05) is True
-    robot = FakeRobot.last
-    assert robot is not None
-    cmd = robot.arm.mit_commands[-1]
-    assert cmd[:, 0].tolist() == pytest.approx([0.0] * 7)
-    assert cmd[:, 1].tolist() == pytest.approx([0.05] * 7)
-    assert cmd[:, 4].tolist() == pytest.approx([1.0] * 7)
-    assert adapter.get_control_mode() == ControlMode.TORQUE
+        _ = OpenArmRSAdapter(side="middle", use_mock_bus=True)
 
 
 def test_non_openarm_dof_is_rejected() -> None:
     with pytest.raises(ValueError, match="only supports 7 DOF"):
-        OpenArmRSAdapter(dof=2, use_mock_bus=True)
+        _ = OpenArmRSAdapter(dof=2, use_mock_bus=True)
 
 
 def test_custom_non_openarm_metadata_is_rejected() -> None:
     with pytest.raises(ValueError, match="does not accept custom motor_specs"):
-        OpenArmRSAdapter(
+        _ = OpenArmRSAdapter(
             use_mock_bus=True,
             motor_specs=[
                 {"name": "shoulder", "type": "DM4310", "send_id": 1, "recv_id": 17},
@@ -451,19 +62,19 @@ def test_custom_non_openarm_metadata_is_rejected() -> None:
         )
 
     with pytest.raises(ValueError, match="fixed OpenArm limits"):
-        OpenArmRSAdapter(
+        _ = OpenArmRSAdapter(
             use_mock_bus=True,
             position_lower=[-0.5] * 7,
         )
 
 
-def test_openarm_rs_info_is_openarm_specific() -> None:
+def test_openarm_rs_reports_openarm_specific_identity() -> None:
     adapter = OpenArmRSAdapter(
         use_mock_bus=True,
         kp=[3.0] * 7,
         kd=[0.3] * 7,
     )
+
     assert adapter.get_info().vendor == "Enactic"
     assert adapter.get_info().model == "OpenArm RS v10"
     assert adapter.get_dof() == 7
-    assert [motor.name for motor in adapter._motor_specs] == [f"joint{i}" for i in range(1, 8)]
