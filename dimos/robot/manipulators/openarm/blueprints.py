@@ -59,12 +59,10 @@ RIGHT_CAN = "can0"
 # replaced / factory-reset).
 AUTO_SET_MIT_MODE = True
 
+# gravity_comp and canfd are already True by default on OpenArmRSAdapter, so
+# the blueprint only overrides the gravity model path.
 _ADAPTER_KWARGS = {"auto_set_mit_mode": AUTO_SET_MIT_MODE}
-_OPENARM_RS_ADAPTER_KWARGS = {
-    "gravity_model_path": OPENARM_V10_RIGHT_MODEL,
-    "gravity_comp": True,
-    "canfd": True,
-}
+_OPENARM_RS_ADAPTER_KWARGS = {"gravity_model_path": OPENARM_V10_RIGHT_MODEL}
 _left_hw = _openarm(
     side="left",
     address=LEFT_CAN,
