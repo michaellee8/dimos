@@ -328,6 +328,26 @@ class Go2WholeBodyConnection(Module):
                     accel=accel,
                 )
 
+            # Publish the current _low_cmd to rt/lowcmd every tick. Without
+            # this, motors only receive commands when the coordinator pushes
+            # a new motor_command - during the disarmed window the firmware
+            # sees no commands, decides the master is dead, and disables
+            # motors (robot droops). The startup hold seed populates _low_cmd
+            # at boot, _on_motor_command overwrites it when the coordinator
+            # sends new targets, but BOTH need this thread to actually push
+            # the bytes onto the wire continuously.
+            if (
+                self._publisher is not None
+                and self._low_cmd is not None
+                and self._crc is not None
+            ):
+                try:
+                    with self._lock:
+                        self._low_cmd.crc = self._crc.Crc(self._low_cmd)
+                        self._publisher.Write(self._low_cmd)
+                except (OSError, RuntimeError, AttributeError) as e:
+                    logger.warning(f"lowcmd publish failed: {e}")
+
             next_tick += period
             sleep_for = next_tick - time.perf_counter()
             if sleep_for > 0:
