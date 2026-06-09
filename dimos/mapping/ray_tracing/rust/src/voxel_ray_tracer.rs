@@ -560,6 +560,311 @@ mod tests {
         );
     }
 
+    /// Write an SVG of the x-z plane: kept voxels blue, cleared voxels red,
+    /// ray-hit voxels green, the dense true-surface points, each ray from the
+    /// sensor to its surface hit, and the sensor.
+    #[allow(clippy::too_many_arguments)]
+    fn write_stair_svg(
+        path: &std::path::Path,
+        stairs: &[VoxelKey],
+        map: &VoxelMap,
+        lidar_points: &[(f32, f32, f32)],
+        origin: (f32, f32, f32),
+        hits: &[(f32, f32, f32)],
+        voxel_size: f32,
+        shadow_depth: f32,
+        grace_depth: f32,
+    ) {
+        use svg::node::element::{Circle, Line, Rectangle};
+        use svg::Document;
+
+        let inv = 1.0 / voxel_size;
+        let origin_v = world_to_voxel(origin.0, origin.1, origin.2, inv);
+        let hit_voxels: AHashSet<VoxelKey> = hits
+            .iter()
+            .map(|&(x, y, z)| world_to_voxel(x, y, z, inv))
+            .collect();
+
+        let mut keys: Vec<VoxelKey> = stairs.to_vec();
+        keys.push(origin_v);
+        keys.extend(hit_voxels.iter().copied());
+        let xmin = keys.iter().map(|k| k.0).min().unwrap() - 2;
+        let xmax = keys.iter().map(|k| k.0).max().unwrap() + 2;
+        let zmin = keys.iter().map(|k| k.2).min().unwrap() - 2;
+        let zmax = keys.iter().map(|k| k.2).max().unwrap() + 2;
+
+        let s = 70.0_f32;
+        let w = (xmax - xmin + 1) as f32 * s;
+        let h = (zmax - zmin + 1) as f32 * s;
+        let sx = |xi: f32| (xi - xmin as f32) * s;
+        let sz = |zi: f32| (zmax as f32 + 1.0 - zi) * s;
+
+        let mut doc = Document::new()
+            .set("viewBox", (0.0, 0.0, w, h))
+            .set("width", w)
+            .set("height", h)
+            .add(
+                Rectangle::new()
+                    .set("width", w)
+                    .set("height", h)
+                    .set("fill", "white"),
+            );
+
+        for xi in xmin..=xmax + 1 {
+            let x = sx(xi as f32);
+            doc = doc.add(
+                Line::new()
+                    .set("x1", x)
+                    .set("y1", 0)
+                    .set("x2", x)
+                    .set("y2", h)
+                    .set("stroke", "#eee"),
+            );
+        }
+        for zi in zmin..=zmax + 1 {
+            let y = sz(zi as f32);
+            doc = doc.add(
+                Line::new()
+                    .set("x1", 0)
+                    .set("y1", y)
+                    .set("x2", w)
+                    .set("y2", y)
+                    .set("stroke", "#eee"),
+            );
+        }
+        for &v in stairs {
+            let fill = if hit_voxels.contains(&v) {
+                "#2ca02c"
+            } else if map.voxels.contains_key(&v) {
+                "#4a78b0"
+            } else {
+                "#d62728"
+            };
+            doc = doc.add(
+                Rectangle::new()
+                    .set("x", sx(v.0 as f32))
+                    .set("y", sz((v.2 + 1) as f32))
+                    .set("width", s)
+                    .set("height", s)
+                    .set("fill", fill)
+                    .set("stroke", "black"),
+            );
+        }
+
+        for &(px, _, pz) in lidar_points {
+            doc = doc.add(
+                Circle::new()
+                    .set("cx", sx(px * inv))
+                    .set("cy", sz(pz * inv))
+                    .set("r", 2.0)
+                    .set("fill", "#111")
+                    .set("fill-opacity", 0.85),
+            );
+        }
+
+        let oc = (origin.0 * inv, origin.2 * inv);
+        let shadow_idx = shadow_depth * inv;
+        let grace_px = grace_depth * inv * s;
+        for &(hx, _, hz) in hits {
+            let hc = (hx * inv, hz * inv);
+            let dir = (hc.0 - oc.0, hc.1 - oc.1);
+            let dlen = (dir.0 * dir.0 + dir.1 * dir.1).sqrt().max(f32::EPSILON);
+            let sh = (
+                hc.0 + dir.0 / dlen * shadow_idx,
+                hc.1 + dir.1 / dlen * shadow_idx,
+            );
+            doc = doc
+                .add(
+                    Line::new()
+                        .set("x1", sx(oc.0))
+                        .set("y1", sz(oc.1))
+                        .set("x2", sx(hc.0))
+                        .set("y2", sz(hc.1))
+                        .set("stroke", "orange")
+                        .set("stroke-width", 2),
+                )
+                .add(
+                    Line::new()
+                        .set("x1", sx(hc.0))
+                        .set("y1", sz(hc.1))
+                        .set("x2", sx(sh.0))
+                        .set("y2", sz(sh.1))
+                        .set("stroke", "purple")
+                        .set("stroke-width", 2)
+                        .set("stroke-dasharray", "5"),
+                )
+                .add(
+                    Circle::new()
+                        .set("cx", sx(hc.0))
+                        .set("cy", sz(hc.1))
+                        .set("r", grace_px)
+                        .set("fill", "none")
+                        .set("stroke", "green")
+                        .set("stroke-dasharray", "4"),
+                )
+                .add(
+                    Circle::new()
+                        .set("cx", sx(hc.0))
+                        .set("cy", sz(hc.1))
+                        .set("r", 4)
+                        .set("fill", "darkgreen"),
+                );
+        }
+        doc = doc.add(
+            Circle::new()
+                .set("cx", sx(oc.0))
+                .set("cy", sz(oc.1))
+                .set("r", 6)
+                .set("fill", "darkorange"),
+        );
+
+        svg::save(path, &doc).expect("write stair_clip.svg");
+    }
+
+    /// A fan of lidar rays from a sensor at the foot of a staircase. Each ray
+    /// direction is intersected with the true continuous surface to find its
+    /// hit point, then the whole frame is fed to the mapper. Rays that reach an
+    /// upper step graze the voxels of the lower steps they pass over, and the
+    /// thin-ray DDA clears that real geometry. A correct clearing pass must
+    /// leave every stair voxel intact.
+    ///
+    /// Run it with `cargo test stair_clipping_ray_fan -- --nocapture`.
+    #[test]
+    fn stair_clipping_ray_fan() {
+        let voxel_size = 0.1_f32;
+        let inv = 1.0 / voxel_size;
+        let half = voxel_size * 0.5;
+        let cfg = Config {
+            voxel_size,
+            max_range: 50.0,
+            ray_subsample: 1,
+            shadow_depth: 0.2,
+            grace_depth: 0.2,
+            min_health: 0,
+            max_health: 1,
+        };
+
+        // True continuous staircase in the x-z plane (single y row): household
+        // slope, run = 0.3 m, rise = 0.2 m. Each step is a vertical riser face
+        // and a horizontal tread top, stored as axis-aligned segments
+        // (vertical?, fixed, lo, hi) in world meters.
+        const N: i32 = 5;
+        let run = 3.0 * voxel_size;
+        let rise = 2.0 * voxel_size;
+        let first_riser_x = 3.0 * voxel_size + half;
+        let base_z = half;
+        let mut segments: Vec<(bool, f32, f32, f32)> = Vec::new();
+        for k in 1..=N {
+            let rx = first_riser_x + (k - 1) as f32 * run;
+            let zb = base_z + (k - 1) as f32 * rise;
+            let zt = base_z + k as f32 * rise;
+            segments.push((true, rx, zb, zt));
+            segments.push((false, zt, rx, rx + run));
+        }
+
+        // Dense surface samples: the true lidar-visible geometry. Voxelize them
+        // to build the occupancy the clearing pass operates on.
+        let mut lidar: Vec<(f32, f32, f32)> = Vec::new();
+        let ds = voxel_size / 6.0;
+        for &(vertical, fixed, lo, hi) in &segments {
+            let n = ((hi - lo) / ds).round().max(1.0) as i32;
+            for i in 0..=n {
+                let t = lo + (hi - lo) * (i as f32 / n as f32);
+                lidar.push(if vertical {
+                    (fixed, half, t)
+                } else {
+                    (t, half, fixed)
+                });
+            }
+        }
+
+        let mut map = VoxelMap::default();
+        for &(x, y, z) in &lidar {
+            map.voxels
+                .insert(world_to_voxel(x, y, z, inv), cfg.max_health);
+        }
+        let mut all_stairs: Vec<VoxelKey> = lidar
+            .iter()
+            .map(|&(x, y, z)| world_to_voxel(x, y, z, inv))
+            .collect();
+        all_stairs.sort();
+        all_stairs.dedup();
+
+        // Sensor at the foot of the stairs, 0.2 m off the ground.
+        let origin = (half, half, base_z + 0.23);
+
+        // Five rays evenly spaced in elevation, sweeping the staircase. Each
+        // ray's hit is the nearest forward intersection with a surface segment.
+        const N_RAYS: usize = 6;
+        let (lo_deg, hi_deg) = (0.0_f32, 27.0_f32);
+        let mut hits: Vec<(f32, f32, f32)> = Vec::new();
+        for i in 0..N_RAYS {
+            let frac = i as f32 / (N_RAYS - 1) as f32;
+            let theta = (lo_deg + (hi_deg - lo_deg) * frac).to_radians();
+            let d = (theta.cos(), theta.sin());
+            let mut best: Option<(f32, (f32, f32))> = None;
+            for &(vertical, fixed, lo, hi) in &segments {
+                let hit = if vertical {
+                    if d.0.abs() < 1e-9 {
+                        continue;
+                    }
+                    let t = (fixed - origin.0) / d.0;
+                    let z = origin.2 + t * d.1;
+                    (t > 1e-4 && z >= lo && z <= hi).then_some((t, (fixed, z)))
+                } else {
+                    if d.1.abs() < 1e-9 {
+                        continue;
+                    }
+                    let t = (fixed - origin.2) / d.1;
+                    let x = origin.0 + t * d.0;
+                    (t > 1e-4 && x >= lo && x <= hi).then_some((t, (x, fixed)))
+                };
+                if let Some(cand) = hit {
+                    if best.is_none_or(|b| cand.0 < b.0) {
+                        best = Some(cand);
+                    }
+                }
+            }
+            if let Some((_, (hx, hz))) = best {
+                hits.push((hx, half, hz));
+            }
+        }
+
+        update_map(&mut map, origin, &hits, &cfg);
+
+        let svg_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stair_clip.svg");
+        write_stair_svg(
+            &svg_path,
+            &all_stairs,
+            &map,
+            &lidar,
+            origin,
+            &hits,
+            voxel_size,
+            cfg.shadow_depth,
+            cfg.grace_depth,
+        );
+        eprintln!("wrote {}", svg_path.display());
+
+        // No real stair voxel may be cleared: every ray that grazes a step's
+        // voxels en route to its true hit must leave them intact.
+        let cleared: Vec<VoxelKey> = all_stairs
+            .iter()
+            .copied()
+            .filter(|v| !map.voxels.contains_key(v))
+            .collect();
+        eprintln!(
+            "{} rays hit, cleared {} stair voxel(s): {cleared:?}",
+            hits.len(),
+            cleared.len()
+        );
+        assert!(
+            cleared.is_empty(),
+            "ray fan cleared {} real stair voxel(s): {cleared:?}",
+            cleared.len()
+        );
+    }
+
     #[test]
     fn two_misses_needed_when_max_health_is_two() {
         let cfg = Config {
