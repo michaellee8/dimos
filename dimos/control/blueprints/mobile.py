@@ -150,13 +150,19 @@ coordinator_flowbase_keyboard_teleop = autoconnect(
     ControlCoordinator.blueprint(
         hardware=[_flowbase_twist_base()],
         tasks=[
-            # task go inactive so control hands back to the path follower.
+            # Pure teleop: zero_on_timeout=True so a stalled/lost command stream
+            # actively BRAKES instead of coasting (Mode-A runaway fix; see
+            # flowbase-teleop-runaway investigation). Safe here because
+            # path_follower is dormant (only the benchmark tool RPCs it).
+            # NOTE: BENCHMARKING through this coordinator needs this flipped back
+            # to False — vel_base (pri 20) would otherwise preempt path_follower
+            # (pri 10). Does NOT cover Mode B (stuck key) or Mode C (PC death).
             TaskConfig(
                 name="vel_base",
                 type="velocity",
                 joint_names=_base_joints,
                 priority=20,
-                params={"zero_on_timeout": False},
+                params={"zero_on_timeout": True},
             ),
             # Closed-loop path follower used by the benchmark tool. Inactive
             # until the tool RPCs configure(...) + start_path(...).
