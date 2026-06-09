@@ -49,6 +49,8 @@ class MLSPlan(Transformer[PointCloud2, Path]):
         node_spacing_m: float = 1.0,
         node_wall_buffer_m: float = 0.3,
         node_step_threshold_m: float = 0.25,
+        robot_radius_m: float = 0.2,
+        wall_penalty_weight: float = 4.0,
     ) -> None:
         self.goal = goal
         self.voxel_size = voxel_size
@@ -58,6 +60,8 @@ class MLSPlan(Transformer[PointCloud2, Path]):
         self.node_spacing_m = node_spacing_m
         self.node_wall_buffer_m = node_wall_buffer_m
         self.node_step_threshold_m = node_step_threshold_m
+        self.robot_radius_m = robot_radius_m
+        self.wall_penalty_weight = wall_penalty_weight
 
     def _path_from_waypoints(self, waypoints: NDArray[np.float32] | None, ts: float) -> Path:
         poses: list[PoseStamped] = []
@@ -85,6 +89,8 @@ class MLSPlan(Transformer[PointCloud2, Path]):
             node_spacing_m=self.node_spacing_m,
             node_wall_buffer_m=self.node_wall_buffer_m,
             node_step_threshold_m=self.node_step_threshold_m,
+            robot_radius_m=self.robot_radius_m,
+            wall_penalty_weight=self.wall_penalty_weight,
         )
         for obs in upstream:
             if obs.pose_tuple is None:
@@ -113,7 +119,7 @@ class MLSPlan(Transformer[PointCloud2, Path]):
                 tags={
                     **obs.tags,
                     "voxel_map": planner.voxel_map(),
-                    "surface_map": planner.surface_map(),
+                    "surface_clearance": planner.surface_clearance_map(),
                     "nodes": planner.nodes(),
                     "node_edges": planner.node_edges(),
                     "start": start,
