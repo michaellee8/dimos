@@ -21,6 +21,18 @@ from dimos.hardware.manipulators.damiao.specs import DamiaoArmSpec, DamiaoMotorS
 from dimos.hardware.manipulators.spec import ControlMode
 
 
+class _FakeRobot:
+    def __init__(self) -> None:
+        self.enable_calls: int = 0
+        self.disable_calls: int = 0
+
+    def enable(self) -> None:
+        self.enable_calls += 1
+
+    def disable(self) -> None:
+        self.disable_calls += 1
+
+
 def _arm_spec() -> DamiaoArmSpec:
     return DamiaoArmSpec(
         name="test_damiao",
@@ -37,6 +49,20 @@ def _arm_spec() -> DamiaoArmSpec:
         kd=(0.1, 0.2),
         gravity_torque_limits=(7.0, 8.0),
     )
+
+
+def _attach_robot(
+    adapter: DamiaoArmAdapterBase,
+    robot: _FakeRobot,
+    *,
+    arm: object | None = None,
+    enabled: bool | None = None,
+) -> None:
+    adapter._robot = robot
+    if arm is not None:
+        adapter._arm = arm
+    if enabled is not None:
+        adapter._enabled = enabled
 
 
 def test_arm_spec_exposes_joint_order_for_backend_commands() -> None:
@@ -92,3 +118,71 @@ def test_base_adapter_reports_limits_and_accepts_supported_mode() -> None:
     assert adapter.set_control_mode(ControlMode.TORQUE) is True
     assert adapter.get_control_mode() == ControlMode.TORQUE
     assert adapter.set_control_mode(ControlMode.VELOCITY) is False
+
+
+def test_write_stop_gravity_comp_holds_current_position(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = DamiaoArmAdapterBase(arm_spec=_arm_spec(), gravity_comp=True)
+    robot = _FakeRobot()
+    _attach_robot(adapter, robot, arm=object(), enabled=True)
+    captured_commands: dict[str, list[float]] = {}
+
+    def read_positions() -> list[float]:
+        return [0.1, -0.2]
+
+    def write_mit_commands(
+        *, q: list[float], dq: list[float], kp: list[float], kd: list[float], tau: list[float]
+    ) -> bool:
+        captured_commands.update(q=q, dq=dq, kp=kp, kd=kd, tau=tau)
+        return True
+
+    monkeypatch.setattr(adapter, "read_joint_positions", read_positions)
+    monkeypatch.setattr(adapter, "write_mit_commands", write_mit_commands)
+
+    assert adapter.write_stop() is True
+    assert captured_commands == {
+        "q": [0.1, -0.2],
+        "dq": [0.0, 0.0],
+        "kp": [5.0, 6.0],
+        "kd": [0.1, 0.2],
+        "tau": [0.0, 0.0],
+    }
+    assert robot.disable_calls == 0
+
+
+def test_write_stop_gravity_comp_read_failure_disables_robot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = DamiaoArmAdapterBase(arm_spec=_arm_spec(), gravity_comp=True)
+    robot = _FakeRobot()
+    _attach_robot(adapter, robot, arm=object(), enabled=True)
+
+    def read_positions() -> list[float]:
+        raise RuntimeError("state unavailable")
+
+    monkeypatch.setattr(adapter, "read_joint_positions", read_positions)
+
+    assert adapter.write_stop() is False
+    assert robot.disable_calls == 1
+    assert adapter.read_enabled() is False
+
+
+def test_write_enable_startup_hold_failure_disables_robot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = DamiaoArmAdapterBase(arm_spec=_arm_spec(), gravity_comp=True)
+    robot = _FakeRobot()
+    _attach_robot(adapter, robot)
+
+    def read_positions() -> list[float]:
+        return [0.1, -0.2]
+
+    def reject_hold(_positions: list[float], _velocity: float = 1.0) -> bool:
+        return False
+
+    monkeypatch.setattr(adapter, "read_joint_positions", read_positions)
+    monkeypatch.setattr(adapter, "write_joint_positions", reject_hold)
+
+    assert adapter.write_enable(True) is False
+    assert robot.enable_calls == 1
+    assert robot.disable_calls == 1
+    assert adapter.read_enabled() is False

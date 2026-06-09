@@ -456,6 +456,17 @@ class DamiaoArmAdapterBase:
             try:
                 q_now = self.read_joint_positions()
             except RuntimeError:
+                try:
+                    self._robot.disable()
+                except Exception:
+                    logger.warning(
+                        "damiao adapter stop disable failed",
+                        adapter=type(self).__name__,
+                        hardware_id=self._hardware_id,
+                        exc_info=True,
+                    )
+                else:
+                    self._enabled = False
                 return False
             return self.write_mit_commands(
                 q=q_now,
@@ -499,6 +510,16 @@ class DamiaoArmAdapterBase:
                     adapter=type(self).__name__,
                     hardware_id=self._hardware_id,
                 )
+                self._enabled = False
+                try:
+                    self._robot.disable()
+                except Exception:
+                    logger.warning(
+                        "damiao adapter startup hold disable failed",
+                        adapter=type(self).__name__,
+                        hardware_id=self._hardware_id,
+                        exc_info=True,
+                    )
                 return False
         return True
 
