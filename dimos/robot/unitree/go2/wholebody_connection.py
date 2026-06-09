@@ -596,43 +596,36 @@ class Go2WholeBodyConnection(Module):
             msc.SetTimeout(_MSC_RPC_TIMEOUT_S)
             msc.Init()
 
-            # Re-acquire sport mode. We released it at startup; it's been
-            # off the whole session. SelectMode brings it back.
-            _status, result = msc.CheckMode()
-            current = result.get("name") if result else None
-
-            if not current:
-                logger.info("Re-acquiring sport mode for graceful shutdown...")
-                # Mode name varies by firmware. 'mcf' is the modern Go2 sport
-            # controller; 'normal' was older. Try mcf first, fall back to
-            # normal. The non-zero code 7004 ("function not registered")
-            # we see sometimes during shutdown means the firmware refuses
-            # MotionSwitcher calls while low-level control is active -
-            # in that case there's nothing we can do, fall through.
+            # ALWAYS issue SelectMode unconditionally - we don't trust the
+            # CheckMode result (it sometimes returns '' even when we need to
+            # re-acquire). Goal is "be in mcf", not "switch from current".
+            # 'mcf' = modern Go2 sport controller, 'normal' = older firmware.
+            logger.info("Re-acquiring sport mode for graceful shutdown...")
             code, _ = msc.SelectMode("mcf")
             if code != 0:
                 code, _ = msc.SelectMode("normal")
-                if code != 0:
-                    logger.warning(
-                        f"SelectMode('normal') returned non-zero code {code} "
-                        f"during shutdown; cannot StandDown via sport - "
-                        f"will fall through to safe-stop (robot will go limp)."
-                    )
-                    return
-                # Give the firmware time to bring sport mode up. This step
-                # can be slow because we're transferring authority back to
-                # the sport controller while our publish loop is still
-                # sending low-level commands at 500 Hz.
-                time.sleep(2.0)
-                _status, result = msc.CheckMode()
-                current = result.get("name") if result else None
-                if not current:
-                    logger.warning(
-                        "Sport mode did not come back after SelectMode; "
-                        "skipping StandDown(). Robot will fall through to "
-                        "safe-stop (limp from current pose)."
-                    )
-                    return
+            if code != 0:
+                logger.warning(
+                    f"SelectMode failed (last code {code}) during shutdown; "
+                    f"cannot StandDown via sport - will fall through to "
+                    f"safe-stop (robot will go limp)."
+                )
+                return
+
+            # Give the firmware time to bring sport mode up. This step can be
+            # slow because we're transferring authority back to the sport
+            # controller while our publish loop is still sending low-level
+            # commands at 500 Hz.
+            time.sleep(2.0)
+            _status, result = msc.CheckMode()
+            current = result.get("name") if result else None
+            if not current:
+                logger.warning(
+                    "Sport mode did not come back after SelectMode; "
+                    "skipping StandDown(). Robot will fall through to "
+                    "safe-stop (limp from current pose)."
+                )
+                return
 
             logger.info(f"Sport mode '{current}' active - sending StandDown()")
             client = SportClient()

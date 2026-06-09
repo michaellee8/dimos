@@ -86,6 +86,11 @@ class RLPolicyTaskConfig:
     pre_ramp_hold_seconds: float = 0.0
     activation_ramp_seconds: float = 0.0
     post_ramp_hold_seconds: float = 0.0
+    # Per-joint rate limit (rad/tick) clamped against ACTUAL current q.
+    # If the policy commands a delta bigger than this, we clip toward the
+    # target instead of executing the full step - protects the robot from
+    # a sudden out-of-distribution policy output. 0.0 disables the clamp.
+    max_joint_delta_rad: float = 0.0
 
 
 class RLPolicyTask(BaseControlTask):
@@ -240,6 +245,25 @@ class RLPolicyTask(BaseControlTask):
         if self._ramp_origin_wire is not None and alpha < 1.0:
             target_q_wire = (1.0 - alpha) * self._ramp_origin_wire + alpha * target_q_wire
 
+        # Per-joint safety clamp: limit the step size from CURRENT actual q
+        # to commanded target. Protects against out-of-distribution policy
+        # bursts that would snap a leg in one tick. Clipped against q_wire
+        # (ground truth, not last command) so a stalled tracker doesn't get
+        # bypassed. 0.0 disables the clamp.
+        max_step = self._config.max_joint_delta_rad
+        if max_step > 0.0:
+            delta = target_q_wire - q_wire
+            abs_delta = np.abs(delta)
+            if abs_delta.max() > max_step:
+                worst = int(np.argmax(abs_delta))
+                logger.warning(
+                    f"RLPolicyTask {self._name}: clamp engaged - "
+                    f"joint {worst} ({self._prefixed_joints[worst]}) wanted "
+                    f"Δ={delta[worst]:+.3f}, capped at ±{max_step:.3f}"
+                )
+            np.clip(delta, -max_step, max_step, out=delta)
+            target_q_wire = q_wire + delta
+
         # Mask FR if requested. _fr_indices is computed in wire order.
         if self._config.mask_fr:
             keep = [i for i in range(12) if i not in self._fr_indices]
@@ -309,6 +333,7 @@ class RLPolicyTaskParams(BaseConfig):
     pre_ramp_hold_seconds: float = 0.0
     activation_ramp_seconds: float = 0.0
     post_ramp_hold_seconds: float = 0.0
+    max_joint_delta_rad: float = 0.0
 
 
 def create_task(cfg: Any, hardware: Any) -> RLPolicyTask:
@@ -326,6 +351,7 @@ def create_task(cfg: Any, hardware: Any) -> RLPolicyTask:
             pre_ramp_hold_seconds=params.pre_ramp_hold_seconds,
             activation_ramp_seconds=params.activation_ramp_seconds,
             post_ramp_hold_seconds=params.post_ramp_hold_seconds,
+            max_joint_delta_rad=params.max_joint_delta_rad,
         ),
     )
     # auto_start is handled by the coordinator: it calls task.start() iff
