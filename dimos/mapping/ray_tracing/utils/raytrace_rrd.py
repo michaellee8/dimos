@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import rerun as rr
 import typer
 
@@ -87,6 +88,12 @@ def main(
     render_voxel: float = typer.Option(
         0.05, "--render-voxel", help="Voxel size for rerun rendering (m)"
     ),
+    normals: bool = typer.Option(
+        True, "--normals/--no-normals", help="Draw a surface-normal arrow on each voxel"
+    ),
+    normal_scale: float = typer.Option(
+        0.1, "--normal-scale", help="Length of the normal arrows (m)"
+    ),
 ) -> None:
     db_path = resolve_named_path(dataset, ".db")
 
@@ -124,6 +131,7 @@ def main(
                 min_health=min_health,
                 max_health=max_health,
                 emit_every=emit_every,
+                emit_normals=normals,
             )
         )
 
@@ -131,6 +139,26 @@ def main(
         for obs in pipeline:
             rr.set_time(TIMELINE, timestamp=obs.ts)
             rr.log("world/raytrace_map", obs.data.to_rerun(voxel_size=render_voxel))
+
+            voxel_normals = obs.tags.get("voxel_normals")
+            if voxel_normals is not None:
+                centers = obs.data.points_f32()
+                keep = np.any(voxel_normals != 0.0, axis=1)
+                origins = centers[keep]
+                vectors = voxel_normals[keep]
+                # PCA normals are sign-ambiguous; orient them toward the robot.
+                if obs.pose_tuple is not None:
+                    to_robot = np.asarray(obs.pose_tuple[:3], np.float32) - origins
+                    flip = np.sum(vectors * to_robot, axis=1) < 0
+                    vectors = np.where(flip[:, None], -vectors, vectors)
+                rr.log(
+                    "world/raytrace_map/normals",
+                    rr.Arrows3D(
+                        origins=origins,
+                        vectors=vectors * normal_scale,
+                        colors=[[123, 44, 191]],
+                    ),
+                )
 
             if obs.pose_tuple is not None:
                 x, y, z, qx, qy, qz, qw = obs.pose_tuple

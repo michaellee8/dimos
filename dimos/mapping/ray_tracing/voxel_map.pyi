@@ -41,6 +41,14 @@ class VoxelRayMapper:
         """Return the centers of all healthy voxels as (M, 3) float32."""
         ...
 
+    def global_map_normals(self) -> tuple[NDArray[np.float32], NDArray[np.float32]]:
+        """Return healthy voxel centers and their surface normals, both (M, 3) float32.
+
+        The two arrays are in matching order. The normal is the zero vector where
+        the voxel has no confident planar normal.
+        """
+        ...
+
     def local_map(
         self,
         origin: tuple[float, float, float],

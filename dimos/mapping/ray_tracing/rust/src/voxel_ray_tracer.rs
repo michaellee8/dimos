@@ -71,7 +71,7 @@ impl VoxelMap {
 }
 
 /// Minimum points before a voxel's surface normal is trusted.
-const NORMAL_MIN_POINTS: u32 = 6;
+const NORMAL_MIN_POINTS: u32 = 3;
 /// A voxel is planar when its smallest covariance eigenvalue is below this
 /// fraction of the next-smallest.
 const NORMAL_PLANAR_RATIO: f32 = 0.15;
@@ -184,6 +184,27 @@ pub fn iter_global_points(
                 ky as f32 * voxel_size + half,
                 kz as f32 * voxel_size + half,
             )
+        })
+}
+
+/// Healthy voxel centers paired with their estimated surface normal. The normal
+/// is the zero vector where the voxel has no confident planar normal.
+pub fn iter_global_normals(
+    map: &VoxelMap,
+    voxel_size: f32,
+) -> impl Iterator<Item = ((f32, f32, f32), [f32; 3])> + '_ {
+    let half = voxel_size * 0.5;
+    map.voxels
+        .iter()
+        .filter(|(_, c)| c.health > 0)
+        .map(move |(&(kx, ky, kz), c)| {
+            let pos = (
+                kx as f32 * voxel_size + half,
+                ky as f32 * voxel_size + half,
+                kz as f32 * voxel_size + half,
+            );
+            let normal = c.planar_normal().map_or([0.0; 3], |n| [n[0], n[1], n[2]]);
+            (pos, normal)
         })
 }
 
