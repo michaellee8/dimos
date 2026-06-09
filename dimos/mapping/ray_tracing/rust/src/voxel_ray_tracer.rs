@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use ahash::{AHashMap, AHashSet};
+use nalgebra::{Matrix3, Vector3};
 use serde::Deserialize;
 use validator::{Validate, ValidationError};
 
@@ -36,12 +37,117 @@ fn validate_health_range(cfg: &Config) -> Result<(), ValidationError> {
 
 #[derive(Default)]
 pub struct VoxelMap {
-    pub voxels: AHashMap<VoxelKey, VoxelHealth>,
+    pub voxels: AHashMap<VoxelKey, Voxel>,
 }
 
 impl VoxelMap {
     pub fn healthy_count(&self) -> usize {
-        self.voxels.values().filter(|h| **h > 0).count()
+        self.voxels.values().filter(|c| c.health > 0).count()
+    }
+
+    /// Fold a return into its voxel's covariance, relative to the voxel center.
+    fn accumulate(&mut self, point: (f32, f32, f32), voxel_size: f32) {
+        let key = world_to_voxel(point.0, point.1, point.2, 1.0 / voxel_size);
+        let center = Vector3::new(
+            (key.0 as f32 + 0.5) * voxel_size,
+            (key.1 as f32 + 0.5) * voxel_size,
+            (key.2 as f32 + 0.5) * voxel_size,
+        );
+        self.voxels
+            .entry(key)
+            .or_default()
+            .observe(Vector3::new(point.0, point.1, point.2) - center);
+    }
+
+    #[cfg(test)]
+    fn set(&mut self, key: VoxelKey, health: VoxelHealth) {
+        self.voxels.insert(key, Voxel::with_health(health));
+    }
+
+    #[cfg(test)]
+    fn health(&self, key: VoxelKey) -> Option<VoxelHealth> {
+        self.voxels.get(&key).map(|c| c.health)
+    }
+}
+
+/// Minimum points before a voxel's surface normal is trusted.
+const NORMAL_MIN_POINTS: u32 = 6;
+/// A voxel is planar when its smallest covariance eigenvalue is below this
+/// fraction of the next-smallest.
+const NORMAL_PLANAR_RATIO: f32 = 0.15;
+/// Spare a clearing miss when |ray · normal| is below this (grazing incidence).
+const GRAZE_COS: f32 = 0.5;
+
+/// One voxel: occupancy health plus a running point covariance used to estimate
+/// the local surface normal. Points are accumulated relative to the voxel center
+/// to keep the moments small and f32-stable. The covariance lives and dies with
+/// the voxel entry.
+#[derive(Clone)]
+pub struct Voxel {
+    pub health: VoxelHealth,
+    num_pts: u32,
+    sum: Vector3<f32>,
+    m2: Matrix3<f32>,
+}
+
+impl Default for Voxel {
+    fn default() -> Self {
+        Self {
+            health: 0,
+            num_pts: 0,
+            sum: Vector3::zeros(),
+            m2: Matrix3::zeros(),
+        }
+    }
+}
+
+impl Voxel {
+    pub fn with_health(health: VoxelHealth) -> Self {
+        Self {
+            health,
+            ..Default::default()
+        }
+    }
+
+    fn observe(&mut self, q: Vector3<f32>) {
+        self.num_pts += 1;
+        self.sum += q;
+        self.m2 += q * q.transpose();
+    }
+
+    /// Unit surface normal if the voxel holds enough confidently-planar points,
+    /// else None (too sparse, or an edge/corner where the normal is ill-defined).
+    fn planar_normal(&self) -> Option<Vector3<f32>> {
+        if self.num_pts < NORMAL_MIN_POINTS {
+            return None;
+        }
+        let n = self.num_pts as f32;
+        let mean = self.sum / n;
+        let cov = self.m2 / n - mean * mean.transpose();
+        let eig = cov.symmetric_eigen();
+        let i0 = (0usize..3).min_by(|&a, &b| eig.eigenvalues[a].total_cmp(&eig.eigenvalues[b]))?;
+        let e0 = eig.eigenvalues[i0].max(0.0);
+        let e1 = (0usize..3)
+            .filter(|&i| i != i0)
+            .map(|i| eig.eigenvalues[i].max(0.0))
+            .fold(f32::INFINITY, f32::min);
+        if e0 > NORMAL_PLANAR_RATIO * e1.max(1e-9) {
+            return None;
+        }
+        Some(eig.eigenvectors.column(i0).into_owned())
+    }
+}
+
+/// Whether to spare an occupied voxel from a clearing miss: spare if a grazing
+/// ray skims its surface, or if it is a confident edge/corner. Voxels with too
+/// few points (no normal yet) are not spared, preserving the unguarded behavior.
+fn should_spare(voxels: &AHashMap<VoxelKey, Voxel>, key: VoxelKey, ray_unit: Vector3<f32>) -> bool {
+    let Some(c) = voxels.get(&key) else {
+        return false;
+    };
+    match c.planar_normal() {
+        Some(n) => ray_unit.dot(&n).abs() < GRAZE_COS,
+        None => c.num_pts >= NORMAL_MIN_POINTS,
     }
 }
 
@@ -71,7 +177,7 @@ pub fn iter_global_points(
     let half = voxel_size * 0.5;
     map.voxels
         .iter()
-        .filter(|(_, &h)| h > 0)
+        .filter(|(_, c)| c.health > 0)
         .map(move |(&(kx, ky, kz), _)| {
             (
                 kx as f32 * voxel_size + half,
@@ -134,15 +240,23 @@ pub fn update_map(
 
     // add new hits
     for v in &hits {
-        let h = map.voxels.entry(*v).or_insert(cfg.min_health);
-        *h = (*h + 1).min(cfg.max_health);
+        let c = map.voxels.entry(*v).or_insert_with(|| Voxel {
+            health: cfg.min_health,
+            ..Default::default()
+        });
+        c.health = (c.health + 1).min(cfg.max_health);
     }
 
-    // each miss is only checked once
+    // accumulate each return into its voxel's covariance
+    for &p in points {
+        map.accumulate(p, cfg.voxel_size);
+    }
+
+    // each miss is only checked once; removal drops the covariance with it
     for v in misses.difference(&hits) {
-        if let Some(h) = map.voxels.get_mut(v) {
-            *h -= 1;
-            if *h <= cfg.min_health {
+        if let Some(c) = map.voxels.get_mut(v) {
+            c.health -= 1;
+            if c.health <= cfg.min_health {
                 map.voxels.remove(v);
             }
         }
@@ -165,7 +279,7 @@ fn world_to_voxel(x: f32, y: f32, z: f32, inv: f32) -> VoxelKey {
 #[allow(clippy::too_many_arguments)]
 fn find_misses_along_ray(
     misses: &mut AHashSet<VoxelKey>,
-    map_voxels: &AHashMap<VoxelKey, VoxelHealth>,
+    map_voxels: &AHashMap<VoxelKey, Voxel>,
     origin: (f32, f32, f32),
     end: (f32, f32, f32),
     voxel_size: f32,
@@ -232,6 +346,7 @@ fn find_misses_along_ray(
 
     let ray_len = (dx * dx + dy * dy + dz * dz).sqrt();
     let t_max = 1.0 + shadow_depth / ray_len.max(f32::EPSILON);
+    let ray_unit = Vector3::new(dx, dy, dz) / ray_len.max(f32::EPSILON);
 
     let mut past_endpoint = false;
     loop {
@@ -288,7 +403,7 @@ fn find_misses_along_ray(
             continue;
         }
 
-        if map_voxels.contains_key(&(x, y, z)) {
+        if map_voxels.contains_key(&(x, y, z)) && !should_spare(map_voxels, (x, y, z), ray_unit) {
             misses.insert((x, y, z));
         }
     }
@@ -330,9 +445,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let mut map_voxels: AHashMap<VoxelKey, VoxelHealth> = AHashMap::new();
+        let mut map_voxels: AHashMap<VoxelKey, Voxel> = AHashMap::new();
         for v in &expected {
-            map_voxels.insert(*v, 1);
+            map_voxels.insert(*v, Voxel::with_health(1));
         }
 
         let mut misses: AHashSet<VoxelKey> = AHashSet::new();
@@ -373,9 +488,9 @@ mod tests {
         ]
         .into_iter()
         .collect();
-        let mut map_voxels: AHashMap<VoxelKey, VoxelHealth> = AHashMap::new();
+        let mut map_voxels: AHashMap<VoxelKey, Voxel> = AHashMap::new();
         for v in &walked {
-            map_voxels.insert(*v, 1);
+            map_voxels.insert(*v, Voxel::with_health(1));
         }
 
         let mut misses: AHashSet<VoxelKey> = AHashSet::new();
@@ -411,8 +526,8 @@ mod tests {
             &[(5.5, 0.5, 0.5), (0.5, 5.5, 0.5)],
             &cfg,
         );
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
-        assert_eq!(map.voxels.get(&(0, 5, 0)), Some(&1));
+        assert_eq!(map.health((5, 0, 0)), Some(1));
+        assert_eq!(map.health((0, 5, 0)), Some(1));
         assert_eq!(map.voxels.len(), 2);
     }
 
@@ -420,42 +535,42 @@ mod tests {
     fn voxels_on_ray_are_removed() {
         let cfg = basic_config();
         let mut map = VoxelMap::default();
-        map.voxels.insert((3, 0, 0), 1);
+        map.set((3, 0, 0), 1);
         update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
         // make sure the initial point got cleared by the new update
         assert!(!map.voxels.contains_key(&(3, 0, 0)));
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        assert_eq!(map.health((5, 0, 0)), Some(1));
     }
 
     #[test]
     fn voxels_not_on_ray_survive() {
         let cfg = basic_config();
         let mut map = VoxelMap::default();
-        map.voxels.insert((3, 5, 0), 1);
+        map.set((3, 5, 0), 1);
         update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(3, 5, 0)), Some(&1));
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        assert_eq!(map.health((3, 5, 0)), Some(1));
+        assert_eq!(map.health((5, 0, 0)), Some(1));
     }
 
     #[test]
     fn voxels_within_shadow_region_are_removed() {
         let cfg = basic_config();
         let mut map = VoxelMap::default();
-        map.voxels.insert((6, 0, 0), 1);
+        map.set((6, 0, 0), 1);
         update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
         // point within the shadow is no longer included, new point is included
         assert!(!map.voxels.contains_key(&(6, 0, 0)));
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        assert_eq!(map.health((5, 0, 0)), Some(1));
     }
 
     #[test]
     fn voxels_beyond_shadow_region_survive() {
         let cfg = basic_config();
         let mut map = VoxelMap::default();
-        map.voxels.insert((8, 0, 0), 1);
+        map.set((8, 0, 0), 1);
         update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(8, 0, 0)), Some(&1));
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        assert_eq!(map.health((8, 0, 0)), Some(1));
+        assert_eq!(map.health((5, 0, 0)), Some(1));
     }
 
     #[test]
@@ -468,8 +583,8 @@ mod tests {
             &[(3.5, 0.5, 0.5), (5.5, 0.5, 0.5)],
             &cfg,
         );
-        assert_eq!(map.voxels.get(&(3, 0, 0)), Some(&1));
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        assert_eq!(map.health((3, 0, 0)), Some(1));
+        assert_eq!(map.health((5, 0, 0)), Some(1));
     }
 
     #[test]
@@ -479,9 +594,9 @@ mod tests {
             ..basic_config()
         };
         let mut map = VoxelMap::default();
-        map.voxels.insert((3, 0, 0), 1);
+        map.set((3, 0, 0), 1);
         update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(3, 0, 0)), Some(&1));
+        assert_eq!(map.health((3, 0, 0)), Some(1));
     }
 
     #[test]
@@ -492,10 +607,10 @@ mod tests {
         };
         let mut map = VoxelMap::default();
         update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&0));
+        assert_eq!(map.health((5, 0, 0)), Some(0));
 
         update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(5, 0, 0)), Some(&1));
+        assert_eq!(map.health((5, 0, 0)), Some(1));
     }
 
     /// Test how bad the planar ray clipping is.
@@ -531,7 +646,7 @@ mod tests {
             for i in 0..n_ground {
                 let x = (i as f32) * voxel_size + voxel_size * 0.5;
                 let key = world_to_voxel(x, 0.0, 0.0, inv);
-                map.voxels.insert(key, cfg.max_health);
+                map.set(key, cfg.max_health);
             }
             let n_before = map.voxels.len();
 
@@ -575,7 +690,7 @@ mod tests {
         shadow_depth: f32,
         grace_depth: f32,
     ) {
-        use svg::node::element::{Circle, Line, Rectangle};
+        use svg::node::element::{Circle, Definitions, Line, Marker, Path, Rectangle};
         use svg::Document;
 
         let inv = 1.0 / voxel_size;
@@ -608,6 +723,23 @@ mod tests {
                     .set("width", w)
                     .set("height", h)
                     .set("fill", "white"),
+            )
+            .add(
+                Definitions::new().add(
+                    Marker::new()
+                        .set("id", "nrm")
+                        .set("viewBox", "0 0 10 10")
+                        .set("refX", 9)
+                        .set("refY", 5)
+                        .set("markerWidth", 5)
+                        .set("markerHeight", 5)
+                        .set("orient", "auto")
+                        .add(
+                            Path::new()
+                                .set("d", "M0,0 L10,5 L0,10 z")
+                                .set("fill", "#7b2cbf"),
+                        ),
+                ),
             );
 
         for xi in xmin..=xmax + 1 {
@@ -648,6 +780,37 @@ mod tests {
                     .set("height", s)
                     .set("fill", fill)
                     .set("stroke", "black"),
+            );
+        }
+
+        // Per-voxel surface normal, projected into the x-z plane and oriented
+        // toward the sensor. Voxels with no confident planar normal get none.
+        for &v in stairs {
+            let Some(normal) = map.voxels.get(&v).and_then(Voxel::planar_normal) else {
+                continue;
+            };
+            let (mut nx, mut nz) = (normal[0], normal[2]);
+            let mag = (nx * nx + nz * nz).sqrt();
+            if mag < 1e-3 {
+                continue;
+            }
+            nx /= mag;
+            nz /= mag;
+            let (cx, cz) = (v.0 as f32 + 0.5, v.2 as f32 + 0.5);
+            if nx * (origin.0 * inv - cx) + nz * (origin.2 * inv - cz) < 0.0 {
+                nx = -nx;
+                nz = -nz;
+            }
+            let len = 0.6;
+            doc = doc.add(
+                Line::new()
+                    .set("x1", sx(cx))
+                    .set("y1", sz(cz))
+                    .set("x2", sx(cx + nx * len))
+                    .set("y2", sz(cz + nz * len))
+                    .set("stroke", "#7b2cbf")
+                    .set("stroke-width", 3)
+                    .set("marker-end", "url(#nrm)"),
             );
         }
 
@@ -762,26 +925,30 @@ mod tests {
             segments.push((false, zt, rx, rx + run));
         }
 
-        // Dense surface samples: the true lidar-visible geometry. Voxelize them
-        // to build the occupancy the clearing pass operates on.
+        // Dense surface samples: the true lidar-visible geometry. Each segment
+        // is swept across a band of y as well so the per-voxel covariance is a
+        // genuine 2d patch (planar), not a degenerate line in the x-z slice.
         let mut lidar: Vec<(f32, f32, f32)> = Vec::new();
         let ds = voxel_size / 6.0;
+        let ny = 5;
         for &(vertical, fixed, lo, hi) in &segments {
             let n = ((hi - lo) / ds).round().max(1.0) as i32;
             for i in 0..=n {
                 let t = lo + (hi - lo) * (i as f32 / n as f32);
-                lidar.push(if vertical {
-                    (fixed, half, t)
-                } else {
-                    (t, half, fixed)
-                });
+                for j in 0..ny {
+                    let yy = voxel_size * (0.15 + 0.7 * j as f32 / (ny - 1) as f32);
+                    lidar.push(if vertical {
+                        (fixed, yy, t)
+                    } else {
+                        (t, yy, fixed)
+                    });
+                }
             }
         }
 
         let mut map = VoxelMap::default();
-        for &(x, y, z) in &lidar {
-            map.voxels
-                .insert(world_to_voxel(x, y, z, inv), cfg.max_health);
+        for &p in &lidar {
+            map.accumulate(p, voxel_size);
         }
         let mut all_stairs: Vec<VoxelKey> = lidar
             .iter()
@@ -789,6 +956,9 @@ mod tests {
             .collect();
         all_stairs.sort();
         all_stairs.dedup();
+        for &k in &all_stairs {
+            map.voxels.get_mut(&k).unwrap().health = cfg.max_health;
+        }
 
         // Sensor at the foot of the stairs, 0.2 m off the ground.
         let origin = (half, half, base_z + 0.23);
@@ -874,10 +1044,10 @@ mod tests {
         let mut map = VoxelMap::default();
         update_map(&mut map, (0.0, 0.0, 0.0), &[(3.5, 0.5, 0.5)], &cfg);
         update_map(&mut map, (0.0, 0.0, 0.0), &[(3.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(3, 0, 0)), Some(&2));
+        assert_eq!(map.health((3, 0, 0)), Some(2));
 
         update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
-        assert_eq!(map.voxels.get(&(3, 0, 0)), Some(&1));
+        assert_eq!(map.health((3, 0, 0)), Some(1));
 
         update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
         assert!(!map.voxels.contains_key(&(3, 0, 0)));
