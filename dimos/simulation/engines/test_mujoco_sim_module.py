@@ -24,6 +24,7 @@ mujoco = pytest.importorskip("mujoco")
 from dimos.simulation.engines.mujoco_sim_module import (
     MujocoSimModule,
     MujocoSimModuleConfig,
+    _find_sensor_slice,
 )
 
 pytestmark = pytest.mark.mujoco
@@ -51,8 +52,13 @@ def _write_robot_xml(path: Path) -> None:
     <body name="pelvis" pos="0 0 0">
       <freejoint name="floating_base_joint"/>
       <geom name="body" type="sphere" size="0.05" mass="1.0"/>
+      <site name="imu_site" pos="0 0 0"/>
     </body>
   </worldbody>
+  <sensor>
+    <gyro name="body-angular-velocity" site="imu_site"/>
+    <velocimeter name="body-linear-vel" site="imu_site"/>
+  </sensor>
 </mujoco>
 """.strip()
     )
@@ -119,3 +125,17 @@ def test_compose_model_keeps_robot_contract_before_scene_entities(tmp_path: Path
     entity_free = next(item for item in free_joints if item[0] == "entity:chair_000:free")
     assert robot_free[1] == 0
     assert entity_free[1] > robot_free[1]
+
+
+def test_composed_robot_sensor_lookup_handles_attached_names(tmp_path: Path) -> None:
+    robot_xml = tmp_path / "robot.xml"
+    _write_robot_xml(robot_xml)
+
+    module = object.__new__(MujocoSimModule)
+    module.config = MujocoSimModuleConfig(robot_mjcf=robot_xml)
+
+    model = MujocoSimModule._compose_model(module)
+
+    assert mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, "/body-angular-velocity") >= 0
+    assert _find_sensor_slice(model, "body-angular-velocity", dim=3) == slice(0, 3)
+    assert _find_sensor_slice(model, "body-linear-vel", dim=3) == slice(3, 6)

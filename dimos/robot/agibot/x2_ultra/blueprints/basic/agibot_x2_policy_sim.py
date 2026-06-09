@@ -35,6 +35,10 @@ from dimos.robot.agibot.x2_ultra.policy_constants import (
     X2_JOINTS,
     X2_KD,
     X2_KP,
+    X2_LEG_JOINTS,
+    X2_POLICY_JOINTS,
+    X2_UPPER_BODY_DEFAULT_POSITIONS,
+    X2_UPPER_BODY_JOINTS,
 )
 from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
 from dimos.utils.data import LfsPath
@@ -45,7 +49,8 @@ _X2_MESH_DIR = LfsPath("agibot_x2_ultra/meshes")
 _DEFAULT_POLICY_ONNX = LfsPath("mujoco_sim/agibot_x2_policy.onnx")
 
 _X2_SIM_TICK_RATE_HZ = 250.0
-_CMD_VEL_TOPIC = "/x2/cmd_vel"
+_X2_POLICY_DECIMATION = 5
+_CMD_VEL_TOPIC = "/cmd_vel"
 _JOINT_STATE_TOPIC = "/x2/coordinator/joint_state"
 _ODOM_TOPIC = "/x2/odom"
 
@@ -154,16 +159,25 @@ agibot_x2_policy_sim = (
                 TaskConfig(
                     name="x2_rsl_rl_wbc",
                     type="x2_rsl_rl_wbc",
-                    joint_names=X2_JOINTS,
+                    joint_names=X2_LEG_JOINTS,
                     priority=50,
                     auto_start=True,
                     params={
                         "policy_onnx": _policy_onnx_path(),
                         "hardware_id": "x2",
+                        "all_joint_names": X2_POLICY_JOINTS,
                         "auto_arm": True,
                         "auto_dry_run": False,
-                        "decimation": 1,
+                        "decimation": _X2_POLICY_DECIMATION,
                     },
+                ),
+                TaskConfig(
+                    name="servo_upper_body",
+                    type="servo",
+                    joint_names=X2_UPPER_BODY_JOINTS,
+                    priority=10,
+                    auto_start=True,
+                    params={"default_positions": X2_UPPER_BODY_DEFAULT_POSITIONS},
                 ),
             ],
         ),

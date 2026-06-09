@@ -79,6 +79,29 @@ def _find_sensor_slice(model: mujoco.MjModel, *names: str, dim: int = 3) -> slic
         if sensor_id >= 0:
             address = int(model.sensor_adr[sensor_id])
             return slice(address, address + dim)
+        attached_name = f"/{name.lstrip('/')}"
+        sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, attached_name)
+        if sensor_id >= 0:
+            address = int(model.sensor_adr[sensor_id])
+            return slice(address, address + dim)
+
+        suffix = f"/{name.lstrip('/')}"
+        matches: list[int] = []
+        for candidate_id in range(model.nsensor):
+            candidate = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, candidate_id)
+            if candidate is not None and candidate.endswith(suffix):
+                matches.append(candidate_id)
+        if len(matches) == 1:
+            address = int(model.sensor_adr[matches[0]])
+            return slice(address, address + dim)
+        if len(matches) > 1:
+            logger.warning(
+                "Ambiguous attached MuJoCo sensor name",
+                requested=name,
+                matches=[
+                    mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, match) for match in matches
+                ],
+            )
     return None
 
 

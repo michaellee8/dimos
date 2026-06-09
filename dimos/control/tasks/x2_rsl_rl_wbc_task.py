@@ -33,9 +33,12 @@ from dimos.control.task import (
 )
 from dimos.protocol.service.spec import BaseConfig
 from dimos.robot.agibot.x2_ultra.policy_constants import (
-    X2_ACTION_SCALE,
     X2_DEFAULT_POSITIONS,
     X2_JOINTS,
+    X2_LEG_JOINTS,
+    X2_POLICY_ACTION_SCALE,
+    X2_POLICY_DEFAULT_POSITIONS,
+    X2_POLICY_JOINTS,
 )
 from dimos.utils.logging_config import setup_logger
 
@@ -46,7 +49,9 @@ if TYPE_CHECKING:
 logger = setup_logger()
 
 _NUM_ACTIONS = 31
+_NUM_POLICY_JOINTS = 12
 _OBS_DIM = 105
+_DEFAULT_DECIMATION = 5
 
 
 @dataclass
@@ -55,10 +60,13 @@ class X2RslRlWBCTaskConfig:
 
     policy_onnx: str | Path
     joint_names: list[str]
-    default_positions: list[float] = field(default_factory=lambda: list(X2_DEFAULT_POSITIONS))
-    action_scale: list[float] = field(default_factory=lambda: list(X2_ACTION_SCALE))
+    all_joint_names: list[str]
+    default_positions: list[float] = field(
+        default_factory=lambda: list(X2_POLICY_DEFAULT_POSITIONS)
+    )
+    action_scale: list[float] = field(default_factory=lambda: list(X2_POLICY_ACTION_SCALE))
     priority: int = 50
-    decimation: int = 1
+    decimation: int = _DEFAULT_DECIMATION
     timeout: float = 1.0
     auto_arm: bool = False
     auto_dry_run: bool = False
@@ -70,7 +78,11 @@ class X2RslRlWBCTask(BaseControlTask):
     Observation layout matches the MJLab/RSL-RL export:
     ``[base_lin_vel, base_ang_vel, projected_gravity, q-default, dq,
     last_action, cmd]`` → 105 floats.  The policy outputs 31 joint-position
-    actions, scaled per joint and offset by the trained default pose.
+    actions, but the deployed decoupled controller owns only the 12 leg
+    joints.  Waist, arms, and head are held/commanded by a separate servo
+    task; their policy output dimensions are retained only for observation
+    history compatibility.  ``all_joint_names`` must be in policy order, not
+    the X2 adapter's actuator order.
     """
 
     def __init__(
@@ -79,10 +91,21 @@ class X2RslRlWBCTask(BaseControlTask):
         config: X2RslRlWBCTaskConfig,
         adapter: WholeBodyAdapter,
     ) -> None:
-        if len(config.joint_names) != _NUM_ACTIONS:
+        if len(config.joint_names) != _NUM_POLICY_JOINTS:
             raise ValueError(
-                f"X2RslRlWBCTask '{name}' requires {_NUM_ACTIONS} joints, "
+                f"X2RslRlWBCTask '{name}' requires {_NUM_POLICY_JOINTS} policy joints, "
                 f"got {len(config.joint_names)}"
+            )
+        if len(config.all_joint_names) != _NUM_ACTIONS:
+            raise ValueError(
+                f"X2RslRlWBCTask '{name}' requires {_NUM_ACTIONS} all_joint_names, "
+                f"got {len(config.all_joint_names)}"
+            )
+        if list(config.joint_names) != list(config.all_joint_names[:_NUM_POLICY_JOINTS]):
+            raise ValueError(
+                f"X2RslRlWBCTask '{name}' joint_names must match the first "
+                f"{_NUM_POLICY_JOINTS} entries of all_joint_names. The X2 policy "
+                "action order is legs first, then decoupled waist, arms, and head."
             )
         if len(config.default_positions) != _NUM_ACTIONS:
             raise ValueError(
@@ -106,10 +129,13 @@ class X2RslRlWBCTask(BaseControlTask):
         self._adapter = adapter
         self._joint_names_list = list(config.joint_names)
         self._joint_names_set = frozenset(config.joint_names)
+        self._all_joint_names = list(config.all_joint_names)
         self._default = np.asarray(config.default_positions, dtype=np.float32)
         self._action_scale = np.asarray(config.action_scale, dtype=np.float32)
 
-        self._session = ort.InferenceSession(str(policy_path), providers=["CPUExecutionProvider"])
+        providers = ort.get_available_providers()
+        self._session = ort.InferenceSession(str(policy_path), providers=providers)
+        self._validate_policy_metadata()
         self._input_name = self._session.get_inputs()[0].name
         self._output_name = self._session.get_outputs()[0].name
         input_shape = self._session.get_inputs()[0].shape
@@ -122,6 +148,7 @@ class X2RslRlWBCTask(BaseControlTask):
             input_shape=input_shape,
             output_name=self._output_name,
             output_shape=output_shape,
+            providers=providers,
         )
 
         self._last_action = np.zeros(_NUM_ACTIONS, dtype=np.float32)
@@ -161,8 +188,10 @@ class X2RslRlWBCTask(BaseControlTask):
         if not self._state_seen and not fresh:
             return None
 
+        current_policy_q = self._cached_q[:_NUM_POLICY_JOINTS].copy()
+
         if not self._armed:
-            self._last_targets = self._cached_q.tolist()
+            self._last_targets = current_policy_q.tolist()
             return JointCommandOutput(
                 joint_names=self._joint_names_list,
                 positions=self._last_targets,
@@ -202,11 +231,12 @@ class X2RslRlWBCTask(BaseControlTask):
         self._last_action[:] = action
 
         target_q = action * self._action_scale + self._default
-        self._last_targets = target_q.tolist()
+        target_policy_q = target_q[:_NUM_POLICY_JOINTS]
+        self._last_targets = target_policy_q.tolist()
 
         if self._dry_run:
             if (state.t_now - self._last_dry_run_log_t) >= 1.0:
-                max_delta = float(np.max(np.abs(target_q - self._cached_q)))
+                max_delta = float(np.max(np.abs(target_policy_q - current_policy_q)))
                 logger.info(
                     f"X2RslRlWBCTask '{self._name}' DRY-RUN (|delta q|max={max_delta:.3f} rad)"
                 )
@@ -291,7 +321,7 @@ class X2RslRlWBCTask(BaseControlTask):
 
     def _refresh_state_caches(self, state: CoordinatorState) -> bool:
         all_present = True
-        for i, jname in enumerate(self._joint_names_list):
+        for i, jname in enumerate(self._all_joint_names):
             pos = state.joints.get_position(jname)
             vel = state.joints.get_velocity(jname)
             if pos is None or vel is None:
@@ -322,6 +352,33 @@ class X2RslRlWBCTask(BaseControlTask):
         obs[102:105] = cmd
         return obs
 
+    def _validate_policy_metadata(self) -> None:
+        get_modelmeta = getattr(self._session, "get_modelmeta", None)
+        if get_modelmeta is None:
+            return
+        meta = getattr(get_modelmeta(), "custom_metadata_map", {}) or {}
+        joint_names_raw = meta.get("joint_names")
+        if joint_names_raw:
+            expected = ",".join(
+                _to_policy_export_joint_name(name) for name in self._all_joint_names
+            )
+            if joint_names_raw != expected:
+                raise ValueError(
+                    "X2 policy ONNX joint_names metadata does not match configured "
+                    "all_joint_names order. The ONNX policy expects "
+                    f"{joint_names_raw!r}, configured {expected!r}."
+                )
+        _validate_metadata_vector(
+            meta.get("default_joint_pos"),
+            self._default,
+            "default_joint_pos",
+        )
+        _validate_metadata_vector(
+            meta.get("action_scale"),
+            self._action_scale,
+            "action_scale",
+        )
+
     @staticmethod
     def _projected_gravity(quaternion: tuple[float, ...]) -> np.ndarray:
         w, x, y, z = quaternion
@@ -334,9 +391,29 @@ class X2RslRlWBCTask(BaseControlTask):
 class X2RslRlWBCTaskParams(BaseConfig):
     policy_onnx: str | Path
     hardware_id: str
+    all_joint_names: list[str]
     auto_arm: bool = False
     auto_dry_run: bool = False
     decimation: int | None = None
+
+
+def _to_policy_export_joint_name(joint_name: str) -> str:
+    short = joint_name.split("/", 1)[-1]
+    return f"{short}_joint"
+
+
+def _validate_metadata_vector(
+    raw: str | None,
+    expected: np.ndarray,
+    field_name: str,
+) -> None:
+    if not raw:
+        return
+    actual = np.asarray([float(value) for value in raw.split(",")], dtype=np.float32)
+    if actual.shape != expected.shape or not np.allclose(actual, expected, atol=1e-4):
+        raise ValueError(
+            f"X2 policy ONNX {field_name} metadata does not match configured {field_name}"
+        )
 
 
 def create_task(cfg: Any, hardware: Any) -> X2RslRlWBCTask:
@@ -358,6 +435,7 @@ def create_task(cfg: Any, hardware: Any) -> X2RslRlWBCTask:
     kwargs: dict[str, Any] = dict(
         policy_onnx=params.policy_onnx,
         joint_names=cfg.joint_names,
+        all_joint_names=params.all_joint_names,
         priority=cfg.priority,
         auto_arm=params.auto_arm,
         auto_dry_run=params.auto_dry_run,
@@ -372,9 +450,12 @@ def create_task(cfg: Any, hardware: Any) -> X2RslRlWBCTask:
 
 
 __all__ = [
-    "X2_ACTION_SCALE",
     "X2_DEFAULT_POSITIONS",
     "X2_JOINTS",
+    "X2_LEG_JOINTS",
+    "X2_POLICY_ACTION_SCALE",
+    "X2_POLICY_DEFAULT_POSITIONS",
+    "X2_POLICY_JOINTS",
     "X2RslRlWBCTask",
     "X2RslRlWBCTaskConfig",
     "create_task",
