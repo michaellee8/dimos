@@ -109,15 +109,13 @@ go2_tripod_real = autoconnect(
                 type="rl_policy_go2",
                 joint_names=_joints,
                 priority=10,
-                # AUTO-START: the policy task arms as soon as the
-                # coordinator is up. No manual set_activated(True) needed.
-                # The pre_ramp_hold (3s) holds the boot-time pose, giving
-                # the operator a window to Ctrl-C if something looks wrong
-                # before the ramp starts. Necessary because the connection's
-                # startup-hold has been unreliable - having the policy
-                # immediately publish "hold current pose" commands at
-                # 1Hz is more reliable than relying on the held _low_cmd
-                # to keep the motors energized during a disarmed window.
+                # auto_start=True is safe now because Go2WholeBodyConnection
+                # gates _on_motor_command on _low_cmd_ready - early commands
+                # from the coordinator are dropped on the floor until the
+                # startup hold seed has run. So even if the policy starts
+                # emitting before "Sport mode released", the publish loop
+                # keeps holding the seeded pose and the policy's commands
+                # only take effect once the connection is fully booted.
                 auto_start=True,
                 params={
                     "policy_path": _DEFAULT_POLICY,

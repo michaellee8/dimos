@@ -151,6 +151,13 @@ class Go2WholeBodyConnection(Module):
         # Guards _low_cmd / _low_state across DDS, publish, and motor_command threads.
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        # Flips True after the startup hold seed has populated _low_cmd
+        # with the boot-time pose. Until then, _on_motor_command drops
+        # incoming motor_command messages on the floor - the coordinator
+        # may start emitting before our connection finishes booting
+        # (sport-mode StandUp + release takes ~7s), and we don't want
+        # those early commands to overwrite the seed before it runs.
+        self._low_cmd_ready = threading.Event()
         self._publish_thread: Thread | None = None
 
     @rpc
@@ -267,6 +274,13 @@ class Go2WholeBodyConnection(Module):
                 f"calf kp/kd={kp_per_type[2]}/{kd_per_type[2]})"
             )
 
+        # Now safe for the coordinator's motor_command callbacks to overwrite
+        # _low_cmd. Until this flag is set, _on_motor_command drops messages
+        # so the seed-then-overwrite ordering is preserved even when the
+        # coordinator + RLPolicyTask started early in a parallel worker and
+        # were already publishing commands.
+        self._low_cmd_ready.set()
+
         logger.info("Go2WholeBodyConnection connected")
 
         self.register_disposable(Disposable(self.motor_command.subscribe(self._on_motor_command)))
@@ -288,6 +302,7 @@ class Go2WholeBodyConnection(Module):
             self._sit_down_via_sport_mode()
 
         self._stop_event.set()
+        self._low_cmd_ready.clear()
         if self._publish_thread is not None and self._publish_thread.is_alive():
             self._publish_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
             self._publish_thread = None
@@ -445,6 +460,12 @@ class Go2WholeBodyConnection(Module):
             logger.warning(f"Expected {_NUM_MOTORS} motor commands, got {msg.num_joints}; ignoring")
             return
 
+        if not self._low_cmd_ready.is_set():
+            # Connection still booting (sport StandUp + ReleaseMode + seed).
+            # Drop early commands so the startup-hold seed wins the race —
+            # publish loop keeps holding the seeded pose meanwhile.
+            return
+
         with self._lock:
             if self._low_cmd is None or self._crc is None or self._publisher is None:
                 # Pre-start or post-stop — drop silently.
@@ -507,7 +528,15 @@ class Go2WholeBodyConnection(Module):
             # without re-acquiring on shutdown). Bring it back so StandUp
             # has authority to drive the motors.
             logger.info("No sport mode active - acquiring 'normal' mode...")
-            code, _ = msc.SelectMode("normal")
+            # Mode name varies by firmware. 'mcf' is the modern Go2 sport
+            # controller; 'normal' was older. Try mcf first, fall back to
+            # normal. The non-zero code 7004 ("function not registered")
+            # we see sometimes during shutdown means the firmware refuses
+            # MotionSwitcher calls while low-level control is active -
+            # in that case there's nothing we can do, fall through.
+            code, _ = msc.SelectMode("mcf")
+            if code != 0:
+                code, _ = msc.SelectMode("normal")
             if code != 0:
                 logger.warning(
                     f"SelectMode('normal') returned non-zero code {code}; "
@@ -574,6 +603,14 @@ class Go2WholeBodyConnection(Module):
 
             if not current:
                 logger.info("Re-acquiring sport mode for graceful shutdown...")
+                # Mode name varies by firmware. 'mcf' is the modern Go2 sport
+            # controller; 'normal' was older. Try mcf first, fall back to
+            # normal. The non-zero code 7004 ("function not registered")
+            # we see sometimes during shutdown means the firmware refuses
+            # MotionSwitcher calls while low-level control is active -
+            # in that case there's nothing we can do, fall through.
+            code, _ = msc.SelectMode("mcf")
+            if code != 0:
                 code, _ = msc.SelectMode("normal")
                 if code != 0:
                     logger.warning(
