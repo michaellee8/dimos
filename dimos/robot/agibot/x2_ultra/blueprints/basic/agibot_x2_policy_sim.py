@@ -41,6 +41,10 @@ from dimos.robot.agibot.x2_ultra.policy_constants import (
     X2_UPPER_BODY_JOINTS,
 )
 from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
+from dimos.simulation.engines.robot_sim_binding import (
+    RobotSimSpec,
+    mjcf_joint_names_from_hardware,
+)
 from dimos.utils.data import LfsPath
 from dimos.visualization.babylon_scene_viewer import BabylonSceneViewerModule
 
@@ -53,6 +57,22 @@ _X2_POLICY_DECIMATION = 5
 _CMD_VEL_TOPIC = "/cmd_vel"
 _JOINT_STATE_TOPIC = "/x2/coordinator/joint_state"
 _ODOM_TOPIC = "/x2/odom"
+_X2_MODEL_JOINTS = mjcf_joint_names_from_hardware(tuple(X2_JOINTS))
+_X2_MODEL_ACTUATORS = tuple(f"motor_{joint_name}" for joint_name in _X2_MODEL_JOINTS)
+_X2_SIM_SPEC = RobotSimSpec(
+    robot_id="x2",
+    hardware_joints=tuple(X2_JOINTS),
+    root_body_names=("pelvis",),
+    root_joint_names=("floating_base_joint",),
+    require_floating_base=True,
+    model_joint_names=_X2_MODEL_JOINTS,
+    model_actuator_names=_X2_MODEL_ACTUATORS,
+    imu_quat_names=("body-orientation",),
+    imu_gyro_names=("body-angular-velocity",),
+    imu_accel_names=("body-linear-acceleration",),
+    imu_linvel_names=("body-linear-vel",),
+    require_imu=True,
+)
 
 
 def _env_float(name: str, default: float) -> float:
@@ -135,6 +155,7 @@ agibot_x2_policy_sim = (
             support_floor_z=_env_float("DIMOS_SCENE_SUPPORT_FLOOR_Z", 0.0),
             spawn_z=_X2_SPAWN_Z_M,
             reset_joint_positions=X2_DEFAULT_POSITIONS,
+            robot_sim_spec=_X2_SIM_SPEC,
             imu_gyro_sensor_names=["body-angular-velocity"],
             imu_accel_sensor_names=["body-linear-acceleration"],
             imu_linvel_sensor_names=["body-linear-vel"],

@@ -67,6 +67,7 @@ from dimos.simulation.engines.mujoco_shm import (
     ManipShmWriter,
     shm_key_from_path,
 )
+from dimos.simulation.engines.robot_sim_binding import RobotSimSpec
 from dimos.spec import perception
 from dimos.utils.logging_config import setup_logger
 
@@ -177,6 +178,7 @@ class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     spawn_z: float | None = None
     spawn_yaw: float | None = None
     reset_joint_positions: list[float] | None = None
+    robot_sim_spec: RobotSimSpec | None = None
     # Scene-package entity metadata (scene.meta.json ``entities`` entries).
     # When the loaded model contains matching ``entity:<id>`` bodies (see
     # dimos.simulation.mujoco.entity_scene), their world poses are published
@@ -254,6 +256,7 @@ class MujocoSimModule(
         self._last_cmd_vel_time = 0.0
         self._kinematic_base_z: float | None = None
         self._shm_ready_signaled = False
+        self._imu_quat_slice: slice | None = None
         self._imu_gyro_slice: slice | None = None
         self._imu_accel_slice: slice | None = None
         self._imu_linvel_slice: slice | None = None
@@ -343,6 +346,7 @@ class MujocoSimModule(
             spawn_z=self.config.spawn_z,
             spawn_yaw=self.config.spawn_yaw,
             reset_joint_positions=self.config.reset_joint_positions,
+            robot_sim_spec=self.config.robot_sim_spec,
         )
         if self.config.robot_mjcf:
             engine_kwargs["model"] = self._compose_model()
@@ -510,6 +514,20 @@ class MujocoSimModule(
 
     def _resolve_imu_slices(self) -> None:
         assert self._engine is not None
+        binding = self._engine.robot_binding
+        if binding is not None:
+            self._imu_quat_slice = binding.imu_quat_slice
+            self._imu_gyro_slice = binding.imu_gyro_slice
+            self._imu_accel_slice = binding.imu_accel_slice
+            self._imu_linvel_slice = binding.imu_linvel_slice
+            self._imu_base_qpos_slice = (
+                slice(binding.root_qpos_adr + 3, binding.root_qpos_adr + 7)
+                if binding.root_qpos_adr is not None
+                else None
+            )
+            return
+
+        self._imu_quat_slice = None
         self._imu_gyro_slice = _find_sensor_slice(
             self._engine.model, *self.config.imu_gyro_sensor_names, dim=3
         )
@@ -764,9 +782,6 @@ class MujocoSimModule(
             return
         if self._sim_hooks is not None:
             self._sim_hooks.post_step(engine)
-        if not self._shm_ready_signaled:
-            shm.signal_ready(num_joints=len(engine.joint_names))
-            self._shm_ready_signaled = True
 
         root_pose = engine.get_root_pose()
         if root_pose is not None:
@@ -781,6 +796,9 @@ class MujocoSimModule(
             )
         self._publish_entity_states(engine)
         self._publish_imu(engine)
+        if not self._shm_ready_signaled:
+            shm.signal_ready(num_joints=len(engine.joint_names))
+            self._shm_ready_signaled = True
 
     def _publish_entity_states(self, engine: MujocoEngine) -> None:
         """Publish the EntityStateBatch snapshot (throttled — display/lidar
@@ -808,7 +826,8 @@ class MujocoSimModule(
         if shm is None:
             return
         if (
-            self._imu_gyro_slice is None
+            self._imu_quat_slice is None
+            and self._imu_gyro_slice is None
             and self._imu_accel_slice is None
             and self._imu_linvel_slice is None
             and self._imu_base_qpos_slice is None
@@ -816,7 +835,10 @@ class MujocoSimModule(
             return
 
         data = engine.data
-        if self._imu_base_qpos_slice is not None:
+        if self._imu_quat_slice is not None:
+            q = data.sensordata[self._imu_quat_slice]
+            quat = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
+        elif self._imu_base_qpos_slice is not None:
             q = data.qpos[self._imu_base_qpos_slice]
             quat = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
         else:

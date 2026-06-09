@@ -21,6 +21,7 @@ make_humanoid_joints("g1") (left leg → right leg → waist → left arm → ri
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import threading
 from threading import Thread
 import time
@@ -63,6 +64,21 @@ _MODE_MACHINE_G1: int = 5
 # from make_humanoid_joints("g1") agrees on the wire-level name → motor-index mapping.
 G1_JOINT_NAMES: list[str] = make_humanoid_joints("g1")
 assert len(G1_JOINT_NAMES) == _NUM_MOTORS
+
+
+@dataclass(frozen=True)
+class G1LowStateSnapshot:
+    """Motor and IMU values copied from one G1 LowState frame.
+
+    ``quat`` keeps the Unitree IMU order: ``(w, x, y, z)``.
+    """
+
+    positions: list[float]
+    velocities: list[float]
+    efforts: list[float]
+    quat: tuple[float, float, float, float]
+    gyro: tuple[float, float, float]
+    accel: tuple[float, float, float]
 
 
 class G1WholeBodyConnectionConfig(ModuleConfig):
@@ -257,52 +273,38 @@ class G1WholeBodyConnection(Module):
                 f"by firmware — set _MODE_MACHINE_G1 to {actual} for this variant."
             )
 
-    def _snapshot_motor_imu(
-        self,
-    ) -> (
-        tuple[
-            list[float],
-            list[float],
-            list[float],
-            tuple[float, float, float, float],
-            tuple[float, float, float],
-            tuple[float, float, float],
-        ]
-        | None
-    ):
+    def _snapshot_motor_imu(self) -> G1LowStateSnapshot | None:
         """Return the latest real motor/IMU sample, or None before first LowState."""
         with self._lock:
             ls = self._low_state
             if ls is None:
                 return None
-            return (
-                [ls.motor_state[i].q for i in range(_NUM_MOTORS)],
-                [ls.motor_state[i].dq for i in range(_NUM_MOTORS)],
-                [ls.motor_state[i].tau_est for i in range(_NUM_MOTORS)],
-                tuple(ls.imu_state.quaternion),
-                tuple(ls.imu_state.gyroscope),
-                tuple(ls.imu_state.accelerometer),
+            quat = ls.imu_state.quaternion
+            gyro = ls.imu_state.gyroscope
+            accel = ls.imu_state.accelerometer
+            return G1LowStateSnapshot(
+                positions=[float(ls.motor_state[i].q) for i in range(_NUM_MOTORS)],
+                velocities=[float(ls.motor_state[i].dq) for i in range(_NUM_MOTORS)],
+                efforts=[float(ls.motor_state[i].tau_est) for i in range(_NUM_MOTORS)],
+                quat=(float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])),
+                gyro=(float(gyro[0]), float(gyro[1]), float(gyro[2])),
+                accel=(float(accel[0]), float(accel[1]), float(accel[2])),
             )
 
     def _publish_motor_state_and_imu(
         self,
         now: float,
         frame_id: str,
-        positions: list[float],
-        velocities: list[float],
-        efforts: list[float],
-        quat: tuple[float, float, float, float],
-        gyro: tuple[float, float, float],
-        accel: tuple[float, float, float],
+        sample: G1LowStateSnapshot,
     ) -> None:
         self.motor_states.publish(
             JointState(
                 ts=now,
                 frame_id=frame_id,
                 name=G1_JOINT_NAMES,
-                position=positions,
-                velocity=velocities,
-                effort=efforts,
+                position=sample.positions,
+                velocity=sample.velocities,
+                effort=sample.efforts,
             )
         )
         # Unitree quat is (w,x,y,z); dimos Quaternion is (x,y,z,w).
@@ -310,9 +312,11 @@ class G1WholeBodyConnection(Module):
             Imu(
                 ts=now,
                 frame_id=frame_id,
-                orientation=Quaternion(quat[1], quat[2], quat[3], quat[0]),
-                angular_velocity=Vector3(gyro[0], gyro[1], gyro[2]),
-                linear_acceleration=Vector3(accel[0], accel[1], accel[2]),
+                orientation=Quaternion(
+                    sample.quat[1], sample.quat[2], sample.quat[3], sample.quat[0]
+                ),
+                angular_velocity=Vector3(sample.gyro[0], sample.gyro[1], sample.gyro[2]),
+                linear_acceleration=Vector3(sample.accel[0], sample.accel[1], sample.accel[2]),
             )
         )
 
@@ -325,16 +329,10 @@ class G1WholeBodyConnection(Module):
             self._drain_low_state()
             sample = self._snapshot_motor_imu()
             if sample is not None:
-                positions, velocities, efforts, quat, gyro, accel = sample
                 self._publish_motor_state_and_imu(
                     now=time.time(),
                     frame_id=frame_id,
-                    positions=positions,
-                    velocities=velocities,
-                    efforts=efforts,
-                    quat=quat,
-                    gyro=gyro,
-                    accel=accel,
+                    sample=sample,
                 )
 
             next_tick += period
@@ -407,4 +405,9 @@ class G1WholeBodyConnection(Module):
         logger.info("Sport mode released — low-level control active")
 
 
-__all__ = ["G1_JOINT_NAMES", "G1WholeBodyConnection", "G1WholeBodyConnectionConfig"]
+__all__ = [
+    "G1_JOINT_NAMES",
+    "G1LowStateSnapshot",
+    "G1WholeBodyConnection",
+    "G1WholeBodyConnectionConfig",
+]

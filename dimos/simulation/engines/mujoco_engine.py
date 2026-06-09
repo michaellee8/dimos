@@ -39,6 +39,11 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.simulation.engines.base import SimulationEngine
 from dimos.simulation.engines.mujoco_shm import ManipShmWriter
+from dimos.simulation.engines.robot_sim_binding import (
+    RobotSimBinding,
+    RobotSimSpec,
+    resolve_robot_sim_binding,
+)
 from dimos.simulation.engines.wholebody_sim_hooks import WholeBodySimHooks
 from dimos.simulation.utils.xml_parser import JointMapping, build_joint_mappings
 from dimos.utils.logging_config import setup_logger
@@ -110,6 +115,7 @@ class MujocoEngine(SimulationEngine):
         spawn_yaw: float | None = None,
         reset_joint_positions: list[float] | None = None,
         model: mujoco.MjModel | None = None,
+        robot_sim_spec: RobotSimSpec | None = None,
     ) -> None:
         """Either ``config_path`` (legacy: load an MJCF/MJB from disk) or
         ``model`` (preferred: a model already compiled by the caller, e.g.
@@ -141,6 +147,12 @@ class MujocoEngine(SimulationEngine):
         self._reset_requested = threading.Event()
         self._reset_done_event: threading.Event | None = None
         self._joint_mappings = build_joint_mappings(self._xml_path, self._model)
+        self._robot_binding: RobotSimBinding | None = None
+        if robot_sim_spec is not None:
+            self._robot_binding = resolve_robot_sim_binding(
+                self._model, robot_sim_spec, self._joint_mappings
+            )
+            self._joint_mappings = list(self._robot_binding.joint_mappings)
         self._joint_names = [mapping.name for mapping in self._joint_mappings]
         self._num_joints = len(self._joint_names)
         timestep = float(self._model.opt.timestep)
@@ -149,12 +161,16 @@ class MujocoEngine(SimulationEngine):
         self._root_free_qvel_adr: int | None = None
         self._root_kinematic_pose: tuple[float, float, float] | None = None
         self._scene_body_ids = self._collect_body_ids("dimos_scene")
-        free_joint = int(mujoco.mjtJoint.mjJNT_FREE)  # type: ignore[attr-defined]
-        for joint_id in range(self._model.njnt):
-            if self._model.jnt_type[joint_id] == free_joint:
-                self._root_free_qpos_adr = int(self._model.jnt_qposadr[joint_id])
-                self._root_free_qvel_adr = int(self._model.jnt_dofadr[joint_id])
-                break
+        if self._robot_binding is not None:
+            self._root_free_qpos_adr = self._robot_binding.root_qpos_adr
+            self._root_free_qvel_adr = self._robot_binding.root_qvel_adr
+        else:
+            free_joint = int(mujoco.mjtJoint.mjJNT_FREE)  # type: ignore[attr-defined]
+            for joint_id in range(self._model.njnt):
+                if self._model.jnt_type[joint_id] == free_joint:
+                    self._root_free_qpos_adr = int(self._model.jnt_qposadr[joint_id])
+                    self._root_free_qvel_adr = int(self._model.jnt_dofadr[joint_id])
+                    break
 
         self._connected = False
         self._stop_event = threading.Event()
@@ -597,6 +613,10 @@ class MujocoEngine(SimulationEngine):
         return list(self._joint_names)
 
     @property
+    def robot_binding(self) -> RobotSimBinding | None:
+        return self._robot_binding
+
+    @property
     def model(self) -> mujoco.MjModel:
         return self._model
 
@@ -783,7 +803,7 @@ class MujocoEngine(SimulationEngine):
         *,
         fixed_z: float | None = None,
     ) -> bool:
-        """Integrate planar velocity onto the first freejoint root.
+        """Integrate planar velocity onto the configured freejoint root.
 
         The root is treated as kinematic once this method is used: we
         maintain an internal desired x/y/yaw and write it back every tick.

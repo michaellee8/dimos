@@ -202,7 +202,7 @@ def _native_scene_lidar_enabled(scene_package: Any | None, lidar_disabled: bool)
 
 
 def _select_backend() -> _BackendSelection:
-    if not global_config.simulation:
+    if global_config.simulation != "mujoco":
         return _BackendSelection(
             blueprint=G1WholeBodyConnection.blueprint(release_sport_mode=True),
             adapter_type="transport_lcm",
@@ -234,6 +234,24 @@ def _select_backend() -> _BackendSelection:
     native_scene_lidar_enabled = _native_scene_lidar_enabled(scene_package, lidar_disabled)
 
     from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
+    from dimos.simulation.engines.robot_sim_binding import (
+        RobotSimSpec,
+        mjcf_joint_names_from_hardware,
+    )
+
+    g1_model_joints = mjcf_joint_names_from_hardware(tuple(g1_joints))
+    g1_sim_spec = RobotSimSpec(
+        robot_id="g1",
+        hardware_joints=tuple(g1_joints),
+        root_body_names=("pelvis",),
+        root_joint_names=("floating_base_joint",),
+        require_floating_base=True,
+        model_joint_names=g1_model_joints,
+        model_actuator_names=g1_model_joints,
+        imu_gyro_names=("imu-pelvis-angular-velocity", "imu-torso-angular-velocity"),
+        imu_accel_names=("imu-pelvis-linear-acceleration", "imu-torso-linear-acceleration"),
+        require_imu=True,
+    )
 
     backend = MujocoSimModule.blueprint(
         scene_xml=scene_xml,
@@ -263,6 +281,7 @@ def _select_backend() -> _BackendSelection:
         spawn_xy=global_config.mujoco_start_pos_float,
         spawn_z=_env_float("DIMOS_MUJOCO_START_Z", _DEFAULT_G1_SPAWN_Z_M),
         reset_joint_positions=G1_GROOT_DEFAULT_POSITIONS,
+        robot_sim_spec=g1_sim_spec,
         scene_entities=scene_entities,
     ).transports(
         {
