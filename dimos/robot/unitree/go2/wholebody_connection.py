@@ -88,6 +88,15 @@ class Go2WholeBodyConnectionConfig(ModuleConfig):
     release_sport_mode: bool = True
     publish_rate_hz: float = 500.0
     frame_id: str = "go2_base"
+    # PD gains used to "hold the startup pose" during the gap between sport
+    # mode release and the first real motor_command from the coordinator.
+    # After the first LowState arrives, the connection seeds _low_cmd with
+    # the current joint positions and these PD gains so the robot doesn't
+    # slump under gravity while the coordinator boots / the policy task is
+    # disarmed. Set to 0 to keep the original "limp until first command"
+    # behavior. Defaults match the training env's lighter joints.
+    startup_hold_kp: float = 20.0
+    startup_hold_kd: float = 1.0
 
 
 class Go2WholeBodyConnection(Module):
@@ -179,6 +188,29 @@ class Go2WholeBodyConnection(Module):
             raise RuntimeError(
                 f"Timed out after {_FIRST_LOWSTATE_TIMEOUT_S:.1f}s waiting "
                 f"for first LowState — robot offline or wrong DDS domain?"
+            )
+
+        # Seed _low_cmd to "hold the startup pose" so motors actively support
+        # the robot during the gap between sport-mode release and the first
+        # real motor_command from the coordinator. Without this, motors are
+        # enabled but kp=kd=0 -> no holding torque -> robot slumps under
+        # gravity. Reads current joint positions from the first LowState.
+        if self.config.startup_hold_kp > 0.0:
+            with self._lock:
+                assert self._low_state is not None
+                assert self._low_cmd is not None
+                kp = float(self.config.startup_hold_kp)
+                kd = float(self.config.startup_hold_kd)
+                for i in range(_NUM_MOTORS):
+                    self._low_cmd.motor_cmd[i].mode = _MOTOR_MODE_ENABLE
+                    self._low_cmd.motor_cmd[i].q = float(self._low_state.motor_state[i].q)
+                    self._low_cmd.motor_cmd[i].dq = 0.0
+                    self._low_cmd.motor_cmd[i].kp = kp
+                    self._low_cmd.motor_cmd[i].kd = kd
+                    self._low_cmd.motor_cmd[i].tau = 0.0
+            logger.info(
+                f"Startup hold seeded at current joint positions "
+                f"(kp={self.config.startup_hold_kp}, kd={self.config.startup_hold_kd})"
             )
 
         logger.info("Go2WholeBodyConnection connected")
