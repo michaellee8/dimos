@@ -84,7 +84,14 @@ go2_tripod_real = autoconnect(
         # stays tight between coordinator ticks - the robot just holds
         # the last commanded pose for ~1s before the next policy update.
         # Bump back to 500 once you trust the policy on this robot.
-        tick_rate=1,
+        # Tick rate ladder for hardware bring-up:
+        #   1   Hz - first life: see every commanded pose, 1s abort window
+        #   5   Hz - smoother gait, can still observe per tick
+        #   10  Hz - real-time feel, hard to abort visually
+        #   50  Hz - training rate; full policy speed
+        # Start at the bottom of the ladder you've verified, bump up after
+        # observing the robot is stable + self-balancing at the current rate.
+        tick_rate=5,
         hardware=[
             HardwareComponent(
                 hardware_id=_HW,
@@ -115,23 +122,23 @@ go2_tripod_real = autoconnect(
                 params={
                     "policy_path": _DEFAULT_POLICY,
                     "hardware_id": _HW,
-                    # At tick_rate=1 the policy runs once per tick (once per
-                    # second). inference_period >= tick_period means every
-                    # tick produces a fresh action.
-                    "inference_period": 1.0,
+                    # inference_period <= 1/tick_rate means the policy runs
+                    # every tick. 0.02 is the training rate (50 Hz); using
+                    # the smaller value here means "always run".
+                    "inference_period": 0.02,
                     "mask_fr": False,
                     "device": "cpu",
-                    # SLOW BRING-UP TIMING. At tick_rate=1, each ramp tick is
-                    # 1s, so we want enough ticks for the interpolation to
-                    # feel like a smooth glide (not 3 visible jumps). 10s
-                    # gives 10 discrete steps from arm-pose to policy target.
-                    #   pre_ramp_hold:  hold whatever pose at arm time (3s)
-                    #   activation_ramp: blend to policy target (10s)
-                    #   post_ramp_hold:  hold at policy target (3s)
-                    #   then: live policy execution at 1Hz
-                    "pre_ramp_hold_seconds": 3.0,
-                    "activation_ramp_seconds": 10.0,
-                    "post_ramp_hold_seconds": 3.0,
+                    # Lifecycle timing in WALL-CLOCK seconds (independent of
+                    # tick_rate). At 5+ Hz the ramp is naturally smooth so we
+                    # don't need it long - just enough for the body to settle
+                    # from sport-stand pose to the policy's expected default.
+                    #   pre_ramp_hold:  observation window before motion (2s)
+                    #   activation_ramp: blend to policy target (3s)
+                    #   post_ramp_hold:  observe at policy target (2s)
+                    #   then: live policy
+                    "pre_ramp_hold_seconds": 2.0,
+                    "activation_ramp_seconds": 3.0,
+                    "post_ramp_hold_seconds": 2.0,
                 },
             ),
         ],

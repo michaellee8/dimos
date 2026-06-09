@@ -120,6 +120,15 @@ class Go2WholeBodyConnectionConfig(ModuleConfig):
     startup_hold_kd_hip: float = 1.0
     startup_hold_kd_thigh: float = 1.5
     startup_hold_kd_calf: float = 2.0
+    # Graceful shutdown: on stop(), re-acquire sport mode and call
+    # SportClient.StandDown() to lie the robot down via Unitree's tested
+    # onboard controller before sending the safe-stop LowCmd. Without this
+    # the robot just goes limp and falls from wherever it was standing.
+    sit_down_on_stop: bool = True
+    # Seconds to wait for the StandDown motion to complete before sending
+    # safe-stop. ~3-4s is typical; bump if the robot is still moving when
+    # safe-stop kicks in (motors would then disable mid-motion).
+    sit_down_settle_seconds: float = 4.0
 
 
 class Go2WholeBodyConnection(Module):
@@ -269,6 +278,15 @@ class Go2WholeBodyConnection(Module):
 
     @rpc
     def stop(self) -> None:
+        # Graceful sit-down via sport mode BEFORE we stop the publish loop.
+        # Order matters: we need the publish loop still running so the
+        # firmware sees continuous LowCmd while we re-acquire sport mode
+        # (otherwise it may decide we're dead and disable motors itself).
+        # The actual sit motion is driven by sport mode, not us - we just
+        # release authority back to it for the duration.
+        if self.config.sit_down_on_stop:
+            self._sit_down_via_sport_mode()
+
         self._stop_event.set()
         if self._publish_thread is not None and self._publish_thread.is_alive():
             self._publish_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
@@ -525,6 +543,82 @@ class Go2WholeBodyConnection(Module):
         # Block while the firmware executes the stand motion. Empirically
         # ~3-4s is enough to lift from lie to a stable standing pose.
         time.sleep(float(self.config.stand_up_settle_seconds))
+
+    def _sit_down_via_sport_mode(self) -> None:
+        """Re-acquire sport mode and command StandDown() before safe-stop.
+
+        Mirror of `_stand_up_via_sport_mode` for shutdown: we're handing
+        authority BACK from our low-level publisher to Unitree's sport
+        controller, then calling its StandDown() to lay the robot in
+        a known-good sit pose. After this, the caller continues to the
+        safe-stop LowCmd which disables motors - the robot is already
+        on the ground, so the limp transition is gentle.
+
+        Best-effort: any RPC failure is logged but doesn't raise; the
+        caller still proceeds to safe-stop and tears down DDS.
+        """
+        from unitree_sdk2py.comm.motion_switcher.motion_switcher_client import (
+            MotionSwitcherClient,
+        )
+        from unitree_sdk2py.go2.sport.sport_client import SportClient
+
+        try:
+            msc = MotionSwitcherClient()
+            msc.SetTimeout(_MSC_RPC_TIMEOUT_S)
+            msc.Init()
+
+            # Re-acquire sport mode. We released it at startup; it's been
+            # off the whole session. SelectMode brings it back.
+            _status, result = msc.CheckMode()
+            current = result.get("name") if result else None
+
+            if not current:
+                logger.info("Re-acquiring sport mode for graceful shutdown...")
+                code, _ = msc.SelectMode("normal")
+                if code != 0:
+                    logger.warning(
+                        f"SelectMode('normal') returned non-zero code {code} "
+                        f"during shutdown; cannot StandDown via sport - "
+                        f"will fall through to safe-stop (robot will go limp)."
+                    )
+                    return
+                # Give the firmware time to bring sport mode up. This step
+                # can be slow because we're transferring authority back to
+                # the sport controller while our publish loop is still
+                # sending low-level commands at 500 Hz.
+                time.sleep(2.0)
+                _status, result = msc.CheckMode()
+                current = result.get("name") if result else None
+                if not current:
+                    logger.warning(
+                        "Sport mode did not come back after SelectMode; "
+                        "skipping StandDown(). Robot will fall through to "
+                        "safe-stop (limp from current pose)."
+                    )
+                    return
+
+            logger.info(f"Sport mode '{current}' active - sending StandDown()")
+            client = SportClient()
+            client.SetTimeout(_MSC_RPC_TIMEOUT_S)
+            client.Init()
+            code = client.StandDown()
+            if code != 0:
+                logger.warning(
+                    f"SportClient.StandDown() returned non-zero code {code}; "
+                    f"robot may not have sat down. Continuing to safe-stop."
+                )
+            else:
+                logger.info(
+                    f"StandDown() accepted; waiting "
+                    f"{self.config.sit_down_settle_seconds:.1f}s for sit motion"
+                )
+            # Block while sport mode lays the robot down. By the end of
+            # this sleep the robot should be at the sit/lie pose.
+            time.sleep(float(self.config.sit_down_settle_seconds))
+        except Exception as e:
+            # Don't let shutdown failures take down the whole stop sequence.
+            # The caller will still send safe-stop LowCmd to disable motors.
+            logger.warning(f"Graceful sit-down failed: {e}")
 
     def _release_sport_mode(self) -> None:
         """Loop ReleaseMode until MotionSwitcher reports no active controller.
