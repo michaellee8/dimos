@@ -124,7 +124,10 @@ class Go2WholeBodyConnectionConfig(ModuleConfig):
     # SportClient.StandDown() to lie the robot down via Unitree's tested
     # onboard controller before sending the safe-stop LowCmd. Without this
     # the robot just goes limp and falls from wherever it was standing.
-    sit_down_on_stop: bool = True
+    # Disabled by default during bring-up: the sport-mode handoff has been
+    # unreliable (transient stand-ups, mode lockouts). Operator catches
+    # the robot manually on Ctrl+C until we trust the handoff.
+    sit_down_on_stop: bool = False
     # Seconds to wait for the StandDown motion to complete before sending
     # safe-stop. ~3-4s is typical; bump if the robot is still moving when
     # safe-stop kicks in (motors would then disable mid-motion).
@@ -292,26 +295,20 @@ class Go2WholeBodyConnection(Module):
 
     @rpc
     def stop(self) -> None:
-        # Stop publish loop FIRST, then re-acquire sport mode. Earlier we
-        # tried the reverse (keep publishing through the handoff so motors
-        # wouldn't go limp), but MotionSwitcher.SelectMode returns code
-        # 7002 ("function not registered" / refused) while low-level
-        # control is still publishing - firmware won't allow sport to
-        # take over while we're competing for the same bus. So: stop our
-        # publisher, give firmware a moment to detect the silence and
-        # release low-level lock, then SelectMode + StandDown via sport.
-        # During the silent window (~500ms) motors stay where they are
-        # under their last lowcmd's PD gains; sport StandUp/Down resumes
-        # smooth motion immediately after.
+        # Graceful sit-down via sport mode BEFORE we stop the publish loop.
+        # Order matters: we need the publish loop still running so the
+        # firmware sees continuous LowCmd while we re-acquire sport mode
+        # (otherwise it may decide we're dead and disable motors itself).
+        # The actual sit motion is driven by sport mode, not us - we just
+        # release authority back to it for the duration.
+        if self.config.sit_down_on_stop:
+            self._sit_down_via_sport_mode()
+
         self._stop_event.set()
         self._low_cmd_ready.clear()
         if self._publish_thread is not None and self._publish_thread.is_alive():
             self._publish_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
             self._publish_thread = None
-
-        if self.config.sit_down_on_stop:
-            time.sleep(0.5)  # firmware detects low-level released
-            self._sit_down_via_sport_mode()
 
         # Final safe-stop lowcmd: disable every motor (mode=0x00, kp=kd=0,
         # tau=0). Without this, the motors freeze stiffly at whatever the

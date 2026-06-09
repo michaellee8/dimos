@@ -109,13 +109,10 @@ go2_tripod_real = autoconnect(
                 type="rl_policy_go2",
                 joint_names=_joints,
                 priority=10,
-                # auto_start=True is safe now because Go2WholeBodyConnection
-                # gates _on_motor_command on _low_cmd_ready - early commands
-                # from the coordinator are dropped on the floor until the
-                # startup hold seed has run. So even if the policy starts
-                # emitting before "Sport mode released", the publish loop
-                # keeps holding the seeded pose and the policy's commands
-                # only take effect once the connection is fully booted.
+                # auto_start=True. Gated at the connection so early
+                # commands during the StandUp/Release window get dropped;
+                # ramp timing aligns with sport-release the same way the
+                # first successful run did.
                 auto_start=True,
                 params={
                     "policy_path": _DEFAULT_POLICY,
