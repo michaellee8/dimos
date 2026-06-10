@@ -158,9 +158,10 @@ impl Voxel {
     }
 }
 
-/// Whether to spare an occupied voxel from a clearing miss: spare if a grazing
-/// ray skims its surface, or if it is a confident edge/corner. Voxels with too
-/// few points (no normal yet) are not spared, preserving the unguarded behavior.
+/// Whether to spare an occupied voxel from a clearing miss. The only reason to
+/// spare is a grazing ray skimming a real planar surface, which a near-tangent
+/// ray would otherwise erode. Everything else is left to the health hysteresis,
+/// which alone decides persistence.
 fn should_spare(
     voxels: &AHashMap<VoxelKey, Voxel>,
     key: VoxelKey,
@@ -172,7 +173,7 @@ fn should_spare(
     };
     match c.planar_normal() {
         Some(n) => ray_unit.dot(&n).abs() < graze_cos,
-        None => c.num_pts >= NORMAL_MIN_POINTS,
+        None => false,
     }
 }
 
