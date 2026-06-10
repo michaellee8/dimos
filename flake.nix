@@ -210,16 +210,31 @@
           shopt -s nullglob 2>/dev/null || setopt +o nomatch 2>/dev/null || true # allow globs to be empty without throwing an error
           if [ "$OSTYPE" = "linux-gnu" ]; then
             export CC="cc-no-usr-include" # basically patching for nix
-            # Create nvidia-only lib symlinks to avoid glibc conflicts
+            # Create nvidia-only lib symlinks to avoid glibc conflicts.
+            # Includes the glvnd VENDOR libs (libEGL_nvidia/libGLX_nvidia) so the
+            # nix glvnd can dispatch EGL to the GPU instead of falling back to
+            # Mesa/llvmpipe (software) — this is what lets MuJoCo render the
+            # camera on the A10 (~33x faster: 72ms -> 2.2ms/frame).
             NVIDIA_LIBS_DIR="/tmp/nix-nvidia-libs"
             mkdir -p "$NVIDIA_LIBS_DIR"
-            for lib in /usr/lib/libcuda.so* /usr/lib/libnvidia*.so* /usr/lib/x86_64-linux-gnu/libnvidia*.so*; do
+            for lib in /usr/lib/libcuda.so* /usr/lib/x86_64-linux-gnu/libcuda.so* /usr/lib/libnvidia*.so* /usr/lib/x86_64-linux-gnu/libnvidia*.so* /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so* /usr/lib/x86_64-linux-gnu/libGLX_nvidia.so*; do
               [ -e "$lib" ] && ln -sf "$lib" "$NVIDIA_LIBS_DIR/" 2>/dev/null
             done
           fi
           export LD_LIBRARY_PATH="$NVIDIA_LIBS_DIR:${pkgs.lib.makeLibraryPath ldLibraryPackages}:$LD_LIBRARY_PATH"
           export LIBRARY_PATH="$LD_LIBRARY_PATH" # fixes python find_library for pyaudio
-          export DISPLAY=:0
+          # Default to the TurboVNC display (:1) on this box; respect an existing
+          # DISPLAY if one is already exported (e.g. SSH X-forwarding).
+          export DISPLAY="''${DISPLAY:-:1}"
+          # GPU offscreen rendering for MuJoCo on a headless NVIDIA box. The glvnd
+          # nvidia vendor libs are bridged above; force the nvidia EGL ICD so glvnd
+          # does not fall back to Mesa software, and select the GPU EGL device.
+          # Guarded so non-GPU machines keep MuJoCo's default (GLFW) backend.
+          if [ -e /usr/lib/x86_64-linux-gnu/libEGL_nvidia.so.0 ] && [ -e /dev/dri/renderD128 ]; then
+            export MUJOCO_GL=egl
+            export MUJOCO_EGL_DEVICE_ID=0
+            export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+          fi
           export GI_TYPELIB_PATH="${giTypelibPackagesString}:$GI_TYPELIB_PATH"
           export PKG_CONFIG_PATH=${lib.escapeShellArg packageConfPackagesString}
           export PYTHONPATH="$PYTHONPATH:"${lib.escapeShellArg manualPythonPackages}
