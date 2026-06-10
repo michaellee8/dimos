@@ -156,7 +156,7 @@ impl Voxel {
 }
 
 /// The surface normal of a covariance, or None unless planarity dominates the
-/// linear and scatter dimensionality features (an edge or blob has no normal).
+/// linear and scatter dimensionality features. An edge or blob has no normal.
 fn fit_normal(cov: Matrix3<f32>) -> Option<Vector3<f32>> {
     let eig = cov.symmetric_eigen();
     let mut idx = [0usize, 1, 2];
@@ -1239,7 +1239,6 @@ mod tests {
             cfg.shadow_depth,
             cfg.grace_depth,
         );
-        eprintln!("wrote {}", svg_path.display());
 
         // The grazing gate must spare every planar surface voxel: a ray skimming
         // a tread or riser en route to a higher step may not erode it.
@@ -1248,16 +1247,6 @@ mod tests {
             .copied()
             .filter(|v| !map.voxels.contains_key(v))
             .collect();
-        let cleared_total = all_stairs
-            .iter()
-            .filter(|v| !map.voxels.contains_key(v))
-            .count();
-        eprintln!(
-            "{} rays hit; {} junction voxel(s) cleared, {} planar surface voxel(s) cleared",
-            hits.len(),
-            cleared_total - cleared_planar.len(),
-            cleared_planar.len()
-        );
         assert!(
             cleared_planar.is_empty(),
             "grazing rays eroded {} planar surface voxel(s): {cleared_planar:?}",
@@ -1298,15 +1287,8 @@ mod tests {
         const SENSOR_HEIGHT: f32 = 0.3;
         let origin = (half, half, floor_z + SENSOR_HEIGHT);
 
-        // Floor voxels and their normals, sampled before any clearing.
+        // Floor voxels captured before any clearing.
         let floor: Vec<VoxelKey> = all_surf.iter().copied().filter(|k| k.2 == 0).collect();
-        for &k in floor.iter().step_by(floor.len().max(6) / 6) {
-            let normal = map.voxels.get(&k).and_then(Voxel::planar_normal);
-            eprintln!(
-                "  floor {k:?} normal {:?}",
-                normal.map(|n| [n[0], n[1], n[2]])
-            );
-        }
 
         // Fan sweeping from steep-down at the near floor up to the wall.
         const N_RAYS: usize = 16;
@@ -1334,19 +1316,12 @@ mod tests {
             cfg.shadow_depth,
             cfg.grace_depth,
         );
-        eprintln!("wrote {}", svg_path.display());
 
         let cleared: Vec<VoxelKey> = floor
             .iter()
             .copied()
             .filter(|v| !map.voxels.contains_key(v))
             .collect();
-        eprintln!(
-            "{} rays hit, {} floor voxels, cleared {}: {cleared:?}",
-            hits.len(),
-            floor.len(),
-            cleared.len()
-        );
         assert!(
             cleared.is_empty(),
             "ray fan cleared {} floor voxel(s): {cleared:?}",
@@ -1418,18 +1393,15 @@ mod tests {
         write_stair_svg(
             &svg, &surf, &map, &lidar, origin, &hits, voxel_size, 0.2, 0.2,
         );
-        eprintln!("wrote {}", svg.display());
 
         // When the robot can see the landing, it hits the surface directly and
         // the grazed voxels share the hit's z-row, so the z-slab guard protects
-        // them. The landing must survive this view. (Real-data landing loss is a
-        // multi-frame occlusion effect, not a single grazing frame.)
+        // them. The landing must survive this view.
         let cleared: Vec<VoxelKey> = surf
             .iter()
             .copied()
             .filter(|k| k.2 == landing_row && !map.voxels.contains_key(k))
             .collect();
-        eprintln!("landing voxels cleared: {} {cleared:?}", cleared.len());
         assert!(
             cleared.is_empty(),
             "landing must survive when the robot can see over it; cleared {cleared:?}"

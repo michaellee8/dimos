@@ -12,36 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Render a ray-traced voxel map from a recorded lidar stream into rerun.
+"""Replay a lidar+odometry .db through several voxel-mapper variants at once.
 
-Lidar and odometry are aligned by timestamp so each frame carries the robot
-pose used as the ray-cast origin. The robot pose axis and trajectory are
-logged alongside the map.
+Each variant's global map is logged to its own rerun entity (world/maps/<name>),
+so they overlay in one view and can be toggled on and off independently. Lidar
+and odometry are aligned by timestamp so each frame carries the robot pose used
+as the ray-cast origin.
 
 Usage:
     uv run python -m dimos.mapping.ray_tracing.utils.raytrace_rrd go2_mid360_stairs
-    uv run python -m dimos.mapping.ray_tracing.utils.raytrace_rrd go2_mid360_stairs --out map.rrd && rerun map.rrd
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import numpy as np
 import rerun as rr
 import typer
 
-from dimos.mapping.ray_tracing.transformer import RayTraceMap
+from dimos.mapping.ray_tracing.voxel_map import VoxelRayMapper
 from dimos.memory2.store.sqlite import SqliteStore
 from dimos.memory2.transform import FnTransformer
 from dimos.memory2.type.observation import Observation
 from dimos.msgs.nav_msgs.Odometry import Odometry
-from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2, register_colormap_annotation
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.data import resolve_named_path
 
 TIMELINE = "ts"
 
 PairObs = Observation[tuple[Observation[PointCloud2], Observation[Odometry]]]
+
+COLORS = {
+    "naive": [90, 200, 90],
+    "no_normal_gate": [235, 120, 60],
+    "normal_gate": [70, 170, 235],
+}
 
 
 def _attach_pose_from_odom(pair_obs: PairObs) -> Observation[PointCloud2]:
@@ -64,44 +69,14 @@ def main(
     out: Path | None = typer.Option(
         None, "--out", help="Output .rrd path. If omitted, spawn rerun live."
     ),
-    lidar_stream: str = typer.Option(
-        "fastlio_lidar", "--lidar-stream", help="Lidar stream name in the recording"
-    ),
-    odom_stream: str = typer.Option(
-        "fastlio_odometry", "--odom-stream", help="Odometry stream name in the recording"
-    ),
+    lidar_stream: str = typer.Option("fastlio_lidar", "--lidar-stream"),
+    odom_stream: str = typer.Option("fastlio_odometry", "--odom-stream"),
     align_tol: float = typer.Option(0.05, "--align-tol", help="Lidar/odom alignment tolerance (s)"),
-    voxel_size: float = typer.Option(0.1, "--voxel-size", help="Raycaster voxel edge length (m)"),
-    max_range: float = typer.Option(
-        30.0, "--max-range", help="Max ray cast distance (m); 0 = no limit"
-    ),
-    ray_subsample: int = typer.Option(1, "--ray-subsample", help="Keep every Nth ray for clearing"),
-    shadow_depth: float = typer.Option(
-        0.2, "--shadow-depth", help="Ray extension past endpoint (m)"
-    ),
-    grace_depth: float = typer.Option(
-        0.2, "--grace-depth", help="Spare voxels within this dist of endpoint (m)"
-    ),
-    min_health: int = typer.Option(-2, "--min-health", help="Voxel removal threshold"),
-    max_health: int = typer.Option(1, "--max-health", help="Voxel saturation cap"),
-    graze_cos: float = typer.Option(
-        0.7,
-        "--graze-cos",
-        help="Spare a clearing miss when |ray.normal| < this; raise to clear fewer",
-    ),
-    emit_every: int = typer.Option(1, "--emit-every", help="Yield the current map every N frames"),
-    render_voxel: float = typer.Option(
-        0.05, "--render-voxel", help="Voxel size for rerun rendering (m)"
-    ),
-    normals: bool = typer.Option(
-        True, "--normals/--no-normals", help="Draw a surface-normal arrow on each voxel"
-    ),
-    normal_scale: float = typer.Option(
-        0.1, "--normal-scale", help="Length of the normal arrows (m)"
-    ),
-    raw: bool = typer.Option(
-        True, "--raw/--no-raw", help="Log the raw unvoxelized sensor point cloud"
-    ),
+    voxel_size: float = typer.Option(0.1, "--voxel-size", help="Voxel edge length (m)"),
+    max_range: float = typer.Option(30.0, "--max-range", help="Max ray cast distance (m)"),
+    emit_every: int = typer.Option(1, "--emit-every", help="Log the maps every N frames"),
+    render_voxel: float = typer.Option(0.05, "--render-voxel", help="Voxel render size (m)"),
+    raw: bool = typer.Option(True, "--raw/--no-raw", help="Also log the raw sensor cloud"),
 ) -> None:
     db_path = resolve_named_path(dataset, ".db")
 
@@ -110,7 +85,6 @@ def main(
         rr.save(str(out))
     else:
         rr.spawn()
-    register_colormap_annotation("turbo")
 
     rr.log(
         "world/robot/axes",
@@ -121,83 +95,64 @@ def main(
         static=True,
     )
 
+    # Naive accumulates every voxel and never clears; the other two are identical
+    # except for the normal gate (graze_cos 0 disables it, 0.7 is the default).
+    mappers = {
+        "naive": VoxelRayMapper(
+            voxel_size=voxel_size,
+            max_range=max_range,
+            shadow_depth=0.0,
+            grace_depth=max_range,
+            min_health=0,
+        ),
+        "no_normal_gate": VoxelRayMapper(voxel_size=voxel_size, max_range=max_range, graze_cos=0.0),
+        "normal_gate": VoxelRayMapper(voxel_size=voxel_size, max_range=max_range, graze_cos=0.7),
+    }
+
     store = SqliteStore(path=str(db_path))
     with store:
         lidar = store.stream(lidar_stream, PointCloud2).order_by("ts")
         odom = store.stream(odom_stream, Odometry).order_by("ts")
-
         pose_tagged = lidar.align(odom, tolerance=align_tol).transform(
             FnTransformer(_attach_pose_from_odom)
         )
-        pipeline = pose_tagged.transform(
-            RayTraceMap(
-                voxel_size=voxel_size,
-                max_range=max_range,
-                ray_subsample=ray_subsample,
-                shadow_depth=shadow_depth,
-                grace_depth=grace_depth,
-                min_health=min_health,
-                max_health=max_health,
-                graze_cos=graze_cos,
-                emit_every=emit_every,
-                emit_normals=normals,
-                emit_raw=raw,
-            )
-        )
 
         trajectory: list[tuple[float, float, float]] = []
-        for obs in pipeline:
+        count = 0
+        for obs in pose_tagged:
+            if obs.pose_tuple is None:
+                continue
+            x, y, z, qx, qy, qz, qw = obs.pose_tuple
+            pts = obs.data.points_f32()
+            for mapper in mappers.values():
+                mapper.add_frame(pts, (x, y, z))
+            count += 1
+
+            if count % emit_every != 0:
+                continue
+
             rr.set_time(TIMELINE, timestamp=obs.ts)
-            rr.log("world/raytrace_map", obs.data.to_rerun(voxel_size=render_voxel))
-
-            raw_points = obs.tags.get("raw_points")
-            if raw_points is not None:
+            for name, mapper in mappers.items():
                 rr.log(
-                    "world/raw_points",
-                    rr.Points3D(raw_points, colors=[[150, 150, 150]], radii=0.01),
+                    f"world/maps/{name}",
+                    rr.Points3D(mapper.global_map(), colors=[COLORS[name]], radii=render_voxel / 2),
                 )
-
-            voxel_normals = obs.tags.get("voxel_normals")
-            if voxel_normals is not None:
-                centers = obs.data.points_f32()
-                keep = np.any(voxel_normals != 0.0, axis=1)
-                origins = centers[keep]
-                vectors = voxel_normals[keep]
-                # PCA normals are sign-ambiguous; orient them toward the robot.
-                if obs.pose_tuple is not None:
-                    to_robot = np.asarray(obs.pose_tuple[:3], np.float32) - origins
-                    flip = np.sum(vectors * to_robot, axis=1) < 0
-                    vectors = np.where(flip[:, None], -vectors, vectors)
-                rr.log(
-                    "world/raytrace_map/normals",
-                    rr.Arrows3D(
-                        origins=origins,
-                        vectors=vectors * normal_scale,
-                        colors=[[123, 44, 191]],
-                    ),
-                )
-
-            if obs.pose_tuple is not None:
-                x, y, z, qx, qy, qz, qw = obs.pose_tuple
-                rr.log(
-                    "world/robot",
-                    rr.Transform3D(
-                        translation=[x, y, z], quaternion=rr.Quaternion(xyzw=[qx, qy, qz, qw])
-                    ),
-                )
-                trajectory.append((x, y, z))
-                if len(trajectory) >= 2:
-                    rr.log(
-                        "world/robot_path",
-                        rr.LineStrips3D([trajectory], colors=[[255, 165, 0]]),
-                    )
-
-            print(f"frame_count={obs.tags['frame_count']}", end="\r", flush=True)
+            if raw:
+                rr.log("world/raw_points", rr.Points3D(pts, colors=[[90, 90, 90]], radii=0.01))
+            rr.log(
+                "world/robot",
+                rr.Transform3D(
+                    translation=[x, y, z], quaternion=rr.Quaternion(xyzw=[qx, qy, qz, qw])
+                ),
+            )
+            trajectory.append((x, y, z))
+            if len(trajectory) >= 2:
+                rr.log("world/robot_path", rr.LineStrips3D([trajectory], colors=[[255, 165, 0]]))
+            print(f"frame={count}", end="\r", flush=True)
         print()
 
     if out is not None:
-        print(f"wrote {out}")
-        print(f"open with: rerun {out}")
+        print(f"wrote {out}\nopen with: rerun {out}")
 
 
 if __name__ == "__main__":
