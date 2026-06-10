@@ -6,7 +6,7 @@ if nix_path="$(type -p nix)" ; then
   exit
 fi
 
-if [[ ($OSTYPE =~ linux) && ($INPUT_ENABLE_KVM == 'true') ]]; then
+if [[ ($OSTYPE =~ linux) && ("${INPUT_ENABLE_KVM:-false}" == 'true') ]]; then
   enable_kvm() {
     echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-install-nix-action-kvm.rules
     sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
