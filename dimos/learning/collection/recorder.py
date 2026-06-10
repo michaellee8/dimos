@@ -19,7 +19,7 @@ message to a SQLite store, flushing durably on stop(). Only *connected*
 streams are recorded, so the same recorder works for any arm whose
 coordinator publishes `joint_state`.
 
-The recorded stream names match what `DataPrepModule` reads: `color_image`
+The recorded stream names match what DataPrep reads: `color_image`
 and `joint_state` (observation), `status` (episode segmentation).
 """
 

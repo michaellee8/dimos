@@ -16,11 +16,12 @@
 
 Sub-configs (StreamField, SyncConfig, OutputConfig, EpisodeExtractor) and
 data records (Episode, Sample) live here. So do the stateless functions
-that walk samples — `resolve_field`, `compute_stats`, `extract_episodes`,
-`iter_episode_samples`. Importable without booting a Module.
+that walk samples — `resolve_field`, `extract_episodes`,
+`iter_episode_samples`. Pure and side-effect-free; importable without
+booting a Module.
 
-`DataPrepModule` (in `dataprep_module.py`) is a thin wrapper that runs
-these helpers on a thread.
+The impure orchestration that composes these (opening the store, driving
+the writer, writing files) lives in `build.py`.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ if TYPE_CHECKING:
 
 
 class EpisodeExtractor(BaseConfig):
-    extractor: Literal["episode_status", "ranges", "whole_session"] = "episode_status"
+    extractor: Literal["episode_status", "ranges"] = "episode_status"
     status_stream: str = "episode_status"
     ranges: list[tuple[float, float]] | None = None
 
@@ -70,6 +71,22 @@ class OutputConfig(BaseConfig):
     metadata: dict[str, Any] = {}
 
 
+class DataPrepConfig(BaseConfig):
+    """Everything needed to turn a recording into a dataset.
+
+    `source` is a recording `.db`; `observation`/`action` map dataset feature
+    names to recorded streams; `sync` resamples them onto a common timeline;
+    `output` selects format + path. Consumed by `build.run_dataprep`.
+    """
+
+    source: str = ""
+    episodes: EpisodeExtractor = EpisodeExtractor()
+    observation: dict[str, StreamField] = {}
+    action: dict[str, StreamField] = {}
+    sync: SyncConfig = SyncConfig(anchor="image", rate_hz=30.0, tolerance_ms=50.0)
+    output: OutputConfig = OutputConfig(format="lerobot", path="data/datasets/default")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Data records
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,10 +100,6 @@ class Episode(BaseModel):
     success: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @property
-    def duration(self) -> float:
-        return self.end_ts - self.start_ts
-
 
 class Sample(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -98,7 +111,7 @@ class Sample(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Pure helpers — used by format writers, DataPrepModule
+# Pure helpers — used by format writers and run_dataprep
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -138,8 +151,6 @@ def extract_episodes(store: SqliteStore, cfg: EpisodeExtractor) -> list[Episode]
             end of stream with pending: dropped (matches live spec)
 
     RANGES: emit one Episode per (start, end) tuple in `cfg.ranges`.
-
-    WHOLE_SESSION: one Episode covering the full time range of every stream.
     """
     if cfg.extractor == "ranges":
         if not cfg.ranges:
@@ -148,25 +159,6 @@ def extract_episodes(store: SqliteStore, cfg: EpisodeExtractor) -> list[Episode]
             Episode(id=f"ep_{i:06d}", start_ts=t0, end_ts=t1)
             for i, (t0, t1) in enumerate(cfg.ranges)
         ]
-
-    if cfg.extractor == "whole_session":
-        # Span every stream's time range.
-        names = store.list_streams()
-        if not names:
-            return []
-        starts: list[float] = []
-        ends: list[float] = []
-        for name in names:
-            try:
-                stream = store.stream(name)
-                t0, t1 = stream.get_time_range()
-                starts.append(t0)
-                ends.append(t1)
-            except Exception:
-                continue
-        if not starts:
-            return []
-        return [Episode(id="ep_000000", start_ts=min(starts), end_ts=max(ends))]
 
     # episode_status (default)
     status_stream = store.stream(cfg.status_stream)
@@ -314,35 +306,6 @@ def iter_episode_samples(
         yield Sample(ts=t, episode_id=episode.id, observation=obs_dict, action=act_dict)
 
 
-def compute_stats(
-    samples: Iterator[Sample],
-    image_subsample: int = 10,
-    quantile_reservoir: int = 10_000,
-    seed: int = 0,
-) -> dict[str, Any]:
-    """Single-pass per-feature stats over a Sample iterator.
-
-    Output schema matches LeRobot v2 ``stats.json``::
-
-        { "observation.<key>": {"mean", "std", "min", "max", "q01", "q99"},
-          "action.<key>":      {...} }
-
-    Thin wrapper over :class:`StreamingStats` so format writers and
-    ad-hoc callers share the exact same accumulator.
-    """
-    from dimos.learning.dataprep.formats._stats import StreamingStats
-
-    s = StreamingStats(
-        image_subsample=image_subsample, quantile_reservoir=quantile_reservoir, seed=seed
-    )
-    for sample in samples:
-        for k, v in sample.observation.items():
-            s.update(f"observation.{k}", np.asarray(v))
-        for k, v in sample.action.items():
-            s.update(f"action.{k}", np.asarray(v))
-    return s.finalize()
-
-
 def get_writer(format_name: str) -> Writer:
     """Lazy-import the format writer's `write` function."""
     if format_name == "lerobot":
@@ -352,3 +315,26 @@ def get_writer(format_name: str) -> Writer:
     else:
         raise ValueError(f"Unknown format: {format_name!r}")
     return write
+
+
+def get_inspector(format_name: str) -> Callable[[Path], dict[str, Any]]:
+    """Lazy-import the format reader's `inspect` function."""
+    if format_name == "lerobot":
+        from dimos.learning.dataprep.formats.lerobot import inspect
+    elif format_name == "hdf5":
+        from dimos.learning.dataprep.formats.hdf5 import inspect
+    else:
+        raise ValueError(f"Unknown format: {format_name!r}")
+    return inspect
+
+
+def summarize_lengths(lengths: list[int]) -> dict[str, Any]:
+    """Min/max/mean of per-episode frame counts + whether they're all equal."""
+    if not lengths:
+        return {"min": 0, "max": 0, "mean": 0.0, "uniform": True}
+    return {
+        "min": min(lengths),
+        "max": max(lengths),
+        "mean": sum(lengths) / len(lengths),
+        "uniform": min(lengths) == max(lengths),
+    }

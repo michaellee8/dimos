@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -143,3 +144,54 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
                     g.create_dataset(k, data=np.asarray(entry[k], dtype=np.float64))
 
     return out
+
+
+def inspect(path: Path) -> dict[str, Any]:
+    """Summarize an .hdf5 dataset: features (per-frame shape/dtype), episode
+    counts, and whether feature shapes are uniform across episodes."""
+    try:
+        import h5py
+    except ImportError as e:
+        raise RuntimeError("HDF5 inspect requires h5py — install with `pip install h5py`") from e
+
+    from dimos.learning.dataprep.core import summarize_lengths
+
+    out = Path(path)
+    with h5py.File(out, "r") as h5:
+        eps_g = h5["episodes"]
+        ep_names = sorted(eps_g.keys())
+        lengths = [int(eps_g[e].attrs.get("length", 0)) for e in ep_names]
+
+        observation: dict[str, Any] = {}
+        action: dict[str, Any] = {}
+        # Feature schema from the first episode (per-frame shape = dataset.shape[1:]).
+        if ep_names:
+            first = eps_g[ep_names[0]]
+            for grp, ref in (("observation", observation), ("action", action)):
+                if grp in first:
+                    for k, d in first[grp].items():
+                        ref[k] = {"shape": list(d.shape[1:]), "dtype": str(d.dtype)}
+
+        # Are per-frame shapes consistent across every episode?
+        shapes_uniform = True
+        for e in ep_names[1:]:
+            g = eps_g[e]
+            for grp, ref in (("observation", observation), ("action", action)):
+                if grp in g:
+                    for k, d in g[grp].items():
+                        if k in ref and list(d.shape[1:]) != ref[k]["shape"]:
+                            shapes_uniform = False
+
+        return {
+            "format": "hdf5",
+            "path": str(out),
+            "episodes": int(h5.attrs.get("num_episodes", len(ep_names))),
+            "frames": int(h5.attrs.get("num_frames", sum(lengths))),
+            "fps": float(h5.attrs.get("fps", 0.0)),
+            "robot": str(h5.attrs.get("robot", "unknown")),
+            "observation": observation,
+            "action": action,
+            "episode_lengths": summarize_lengths(lengths),
+            "shapes_uniform": shapes_uniform,
+            "has_stats": "stats" in h5,
+        }

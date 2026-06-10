@@ -312,3 +312,47 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
         json.dump(stats.finalize(), f, indent=2)
 
     return root
+
+
+_META_COLS = {"timestamp", "frame_index", "episode_index", "index", "task_index"}
+
+
+def inspect(path: Path) -> dict[str, Any]:
+    """Summarize a LeRobot v2 dataset from its meta/ files (no parquet load)."""
+    from dimos.learning.dataprep.core import summarize_lengths
+
+    root = Path(path)
+    info = json.loads((root / META_DIR / "info.json").read_text())
+    features = info.get("features", {})
+
+    observation: dict[str, Any] = {}
+    action: dict[str, Any] = {}
+    for name, feat in features.items():
+        if name in _META_COLS:
+            continue
+        entry = {"shape": feat.get("shape"), "dtype": feat.get("dtype")}
+        if name.startswith("observation"):
+            observation[name] = entry
+        elif name.startswith("action"):
+            action[name] = entry
+
+    lengths: list[int] = []
+    ep_path = root / META_DIR / "episodes.jsonl"
+    if ep_path.exists():
+        for line in ep_path.read_text().splitlines():
+            if line.strip():
+                lengths.append(int(json.loads(line).get("length", 0)))
+
+    return {
+        "format": "lerobot",
+        "path": str(root),
+        "episodes": info.get("total_episodes"),
+        "frames": info.get("total_frames"),
+        "fps": info.get("fps"),
+        "robot": info.get("robot_type"),
+        "observation": observation,
+        "action": action,
+        "episode_lengths": summarize_lengths(lengths),
+        "shapes_uniform": True,  # LeRobot declares one global feature schema
+        "has_stats": (root / META_DIR / "stats.json").exists(),
+    }
