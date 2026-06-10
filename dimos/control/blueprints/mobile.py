@@ -48,6 +48,7 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.std_msgs.Float32 import Float32
+from dimos.msgs.std_msgs.Int8 import Int8
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_stack.main import create_nav_stack, nav_stack_rerun_config
 from dimos.navigation.odometry_to_pose_stamped import OdometryToPoseStamped
@@ -56,6 +57,8 @@ from dimos.robot.catalog.ufactory import xarm7 as _catalog_xarm7
 from dimos.robot.sim.fopdt_plant_connection import FopdtPlantConnection
 from dimos.robot.unitree.g1.config import G1_LOCAL_PLANNER_PRECOMPUTED_PATHS
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
+from dimos.utils.benchmarking.benchmark import Benchmarker
+from dimos.utils.benchmarking.characterization_recorder import CharacterizationRecorder
 from dimos.utils.path_utils import get_project_root
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 from dimos.visualization.rerun.websocket_server import RerunWebSocketServer
@@ -431,7 +434,7 @@ _FLOWBASE_ARTIFACT = (
     / "data"
     / "characterization"
     / "flowbase"
-    / "flowbase_config_hw_concrete_2026-06-04_ada8c4ced.json"
+    / "flowbase_config_hw_concrete_2026-06-09_704a591f5.json"
 )
 
 coordinator_flowbase_precision_nav = (
@@ -504,8 +507,99 @@ coordinator_flowbase_precision_nav = (
 )
 
 
+# FlowBase operating-point benchmark — one-terminal HW flow, mirrors the Go2
+# benchmark (unitree_go2_benchmark + _rg). Bundles the FlowBase coordinator +
+# pygame KeyboardTeleop + the Benchmarker module + a telemetry recorder so the
+# operator runs a single command and steps through line/corner/square/circle ×
+# speeds, gated in the pygame window (ENTER run, K skip, Backspace quit). The
+# Benchmarker scores cross-track error from `joint_state` positions ([x,y,yaw],
+# populated by the flowbase adapter's read_odometry over Portal RPC) — NOT from
+# a raw /odom topic — so no SLAM/odom transport is needed here.
+#
+# The coordinator mirrors `coordinator_flowbase` (direct Portal-RPC adapter,
+# hw_id="base" so joint_state lands under the "base/*" prefix the flowbase plant
+# profile reads) and adds the precision_follower (rg arm). Priorities mirror the
+# Go2 benchmark coord: vel_base is HIGHEST (pri 20) so the operator keeps
+# keyboard override authority over the autonomous follower (highest priority
+# wins); the followers (pri 10) drive only while teleop is idle. zero_on_timeout
+# is False so vel_base goes DORMANT when no key is pressed (does NOT brake) —
+# otherwise it would continuously preempt the follower (Mode-A flag is for pure
+# teleop, not benchmarking). e-stop is mandatory: firmware has no command-deadman.
+coordinator_flowbase_benchmark = ControlCoordinator.blueprint(
+    publish_joint_state=True,
+    hardware=[_flowbase_twist_base()],
+    tasks=[
+        TaskConfig(
+            name="vel_base",
+            type="velocity",
+            joint_names=_base_joints,
+            priority=20,
+            params={"zero_on_timeout": False},
+        ),
+        # Baseline arm. Inactive until the Benchmarker RPCs configure(...) +
+        # start_path(...).
+        TaskConfig(
+            name="path_follower",
+            type="path_follower",
+            joint_names=_base_joints,
+            priority=10,
+        ),
+        # RG arm — same control law as path_follower but owns its own
+        # solve_profile() recompute reacting to KeyboardTeleop's e_max stream
+        # (number keys 0-9 set the corridor half-width live). artifact_path is
+        # the dense-fit tuning JSON loaded on start_path() for the plant model +
+        # velocity-profile constants.
+        TaskConfig(
+            name="precision_follower",
+            type="precision_path_follower",
+            joint_names=_base_joints,
+            priority=10,
+            params={
+                "artifact_path": str(_FLOWBASE_ARTIFACT),
+                "speed": 0.5,  # under the measured 0.63 m/s ceiling
+                "v_max_override": 0.5,
+            },
+        ),
+    ],
+).transports(
+    {
+        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
+        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+    }
+)
+
+
+def _make_flowbase_benchmark(rg: bool, tag: str):
+    """Compose the FlowBase benchmark bundle. ``rg=False`` is the bare baseline
+    arm (routes runs through ``path_follower``); ``rg=True`` routes through
+    ``precision_follower``. Recordings land at
+    ``<repo>/data/benchmark/flowbase/`` (tag differentiates baseline vs rg)."""
+    return autoconnect(
+        coordinator_flowbase_benchmark,
+        KeyboardTeleop.blueprint(publish_only_when_active=True),
+        Benchmarker.blueprint(robot="flowbase", mode="hw", gate_source="stream", rg=rg),
+        CharacterizationRecorder.blueprint(
+            robot_id="flowbase",
+            tag=tag,
+            out_dir=str(get_project_root() / "data" / "benchmark" / "flowbase"),
+        ),
+    ).transports(
+        {
+            ("gate", Int8): LCMTransport("/benchmark/gate", Int8),
+            ("e_max", Float32): LCMTransport("/e_max", Float32),
+            ("cmd_vel", Twist): LCMTransport("/cmd_vel", Twist),
+            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+        }
+    )
+
+
+flowbase_benchmark = _make_flowbase_benchmark(rg=False, tag="benchmark")
+flowbase_benchmark_rg = _make_flowbase_benchmark(rg=True, tag="benchmark_rg")
+
+
 __all__ = [
     "coordinator_flowbase",
+    "coordinator_flowbase_benchmark",
     "coordinator_flowbase_keyboard_teleop",
     "coordinator_flowbase_nav",
     "coordinator_flowbase_precision_nav",
@@ -513,4 +607,6 @@ __all__ = [
     "coordinator_mock_twist_base",
     "coordinator_sim_fopdt",
     "coordinator_sim_fopdt_flowbase",
+    "flowbase_benchmark",
+    "flowbase_benchmark_rg",
 ]
