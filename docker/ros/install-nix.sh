@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Defaults for inputs normally exported by the calling composite action.
+# Letting them default here means the script also works when called directly
+# from a workflow `run:` step without the action wrapper.
+: "${INPUT_ENABLE_KVM:=false}"
+: "${INPUT_SET_AS_TRUSTED_USER:=false}"
+: "${INPUT_EXTRA_NIX_CONFIG:=}"
+: "${INPUT_INSTALL_OPTIONS:=}"
+
 if nix_path="$(type -p nix)" ; then
   echo "Aborting: Nix is already installed at ${nix_path}"
   exit
 fi
 
-if [[ ($OSTYPE =~ linux) && ("${INPUT_ENABLE_KVM:-false}" == 'true') ]]; then
+if [[ ($OSTYPE =~ linux) && ($INPUT_ENABLE_KVM == 'true') ]]; then
   enable_kvm() {
     echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-install-nix-action-kvm.rules
     sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
