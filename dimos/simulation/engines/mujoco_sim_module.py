@@ -160,6 +160,16 @@ class MujocoSimModule(
         return 1.0
 
     @rpc
+    def get_sim_time(self) -> float:
+        """Sim-seconds advanced since the engine started (0.0 if not running)."""
+        return self._engine.sim_time if self._engine is not None else 0.0
+
+    @rpc
+    def get_rtf(self) -> float:
+        """Measured sim real-time factor (sim-time / wall-time); ~1.0 is real-time."""
+        return self._engine.rtf if self._engine is not None else 0.0
+
+    @rpc
     def start(self) -> None:
         if not self.config.address:
             raise RuntimeError("MujocoSimModule: config.address (MJCF path) is required")

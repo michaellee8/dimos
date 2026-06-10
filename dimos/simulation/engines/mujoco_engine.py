@@ -125,6 +125,13 @@ class MujocoEngine(SimulationEngine):
         self._camera_frames: dict[str, CameraFrame] = {}
         self._camera_lock = threading.Lock()
 
+        # Sim clock: sim-seconds advanced and the measured real-time factor
+        # (sim-time / wall-time). Published by the sim loop so consumers
+        # (e.g. the coordinator's trajectory timing) can pace off sim-time
+        # instead of wall-clock when physics runs below real-time.
+        self._sim_time = 0.0
+        self._rtf = 0.0
+
     def _resolve_xml_path(self, config_path: Path) -> Path:
         if config_path is None:
             raise ValueError("config_path is required for MuJoCo simulation loading")
@@ -275,13 +282,23 @@ class MujocoEngine(SimulationEngine):
 
     def _sim_loop(self) -> None:
         logger.info("sim loop started", cls=self.__class__.__name__)
-        dt = 1.0 / self._control_frequency
+        timestep = 1.0 / self._control_frequency  # MJCF physics timestep (e.g. 2ms)
 
         # Camera renderers: created once in the sim thread
         cam_renderers = self._init_cameras()
 
-        def _step_once(sync_viewer: bool) -> None:
-            loop_start = time.time()
+        # Real-time pacing. The old loop ran exactly one mj_step per wall
+        # iteration, so any frame that overran the timestep (a camera render or
+        # a GUI sync) pushed sim-time permanently behind wall-time. Instead we
+        # step physics until sim-time catches up to wall-time, bounded so a
+        # genuinely overloaded host can't spiral. Physics is ~0.05ms/step (tens
+        # of x real-time of headroom), so it recovers from a stall in well under
+        # a millisecond. The GUI viewer and cameras render on their own throttled
+        # cadence, decoupled from the physics rate.
+        max_catchup_steps = max(1, round(0.25 / timestep))  # cap 0.25s sim/iter
+        viewer_interval = 1.0 / 60.0  # passive GUI viewer only needs ~60Hz
+
+        def _physics_step() -> None:
             if self._on_before_step is not None:
                 try:
                     self._on_before_step(self)
@@ -289,30 +306,53 @@ class MujocoEngine(SimulationEngine):
                     logger.error("on_before_step failed", error=str(exc))
             self._apply_control()
             mujoco.mj_step(self._model, self._data)
-            if sync_viewer:
-                m_viewer.sync()
             self._update_joint_state()
             if self._on_after_step is not None:
                 try:
                     self._on_after_step(self)
                 except Exception as exc:
                     logger.error("on_after_step failed", error=str(exc))
-            self._render_cameras(loop_start, cam_renderers)
 
-            elapsed = time.time() - loop_start
-            sleep_time = dt - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+        def _run(m_viewer: object | None) -> None:
+            wall_start = time.monotonic()
+            sim_start = float(self._data.time)
+            last_viewer = 0.0
+            while not self._stop_event.is_set():
+                if m_viewer is not None and not m_viewer.is_running():
+                    break
+                now = time.monotonic()
+                target_sim = (now - wall_start) + sim_start
+
+                steps = 0
+                while self._data.time < target_sim and steps < max_catchup_steps:
+                    _physics_step()
+                    steps += 1
+
+                wall_elapsed = now - wall_start
+                with self._lock:
+                    self._sim_time = float(self._data.time) - sim_start
+                    self._rtf = self._sim_time / wall_elapsed if wall_elapsed > 1e-6 else 0.0
+
+                # Cameras render on their configured fps interval (checked inside).
+                self._render_cameras(time.time(), cam_renderers)
+
+                # GUI viewer at ~60Hz, not the physics rate.
+                if m_viewer is not None and (now - last_viewer) >= viewer_interval:
+                    m_viewer.sync()
+                    last_viewer = now
+
+                if steps < max_catchup_steps:
+                    # Caught up to real-time: sleep until the next step is due.
+                    self._stop_event.wait(timeout=timestep)
+                # else: behind real-time, keep stepping without sleeping.
 
         if self._headless:
-            while not self._stop_event.is_set():
-                _step_once(sync_viewer=False)
+            _run(None)
         else:
             with viewer.launch_passive(
                 self._model, self._data, show_left_ui=False, show_right_ui=False
             ) as m_viewer:
-                while m_viewer.is_running() and not self._stop_event.is_set():
-                    _step_once(sync_viewer=True)
+                _run(m_viewer)
 
         self._close_cam_renderers(cam_renderers)
         logger.info("sim loop stopped", cls=self.__class__.__name__)
@@ -352,6 +392,18 @@ class MujocoEngine(SimulationEngine):
     @property
     def control_frequency(self) -> float:
         return self._control_frequency
+
+    @property
+    def sim_time(self) -> float:
+        """Sim-seconds advanced since the sim loop started (mujoco data.time)."""
+        with self._lock:
+            return self._sim_time
+
+    @property
+    def rtf(self) -> float:
+        """Measured real-time factor: sim-time / wall-time. ~1.0 means real-time."""
+        with self._lock:
+            return self._rtf
 
     def read_joint_positions(self) -> list[float]:
         return self.joint_positions

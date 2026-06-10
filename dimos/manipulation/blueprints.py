@@ -352,7 +352,7 @@ xarm_perception_sim = autoconnect(
         # The perception module builds its own clouds from depth; nothing subscribes
         # to the sim's pointcloud port (GraspGen is unused — pick uses heuristics).
         # Disabling drops a 5Hz voxelized full-office-scene cloud (the main mem/CPU sink).
-        enable_pointcloud=True,
+        enable_pointcloud=False,
         fps=5,
     ),
     # Match the real-hardware xarm_perception thresholds: promotion reachable in a
