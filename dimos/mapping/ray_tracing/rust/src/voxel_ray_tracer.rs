@@ -26,6 +26,17 @@ pub struct Config {
     pub min_health: i32,
     #[validate(range(min = 1))]
     pub max_health: i32,
+    /// Spare a clearing miss when |ray · surface normal| is below this. Larger
+    /// spares steeper grazes: 0.5 clears anything hit past 30 deg off the
+    /// surface, 0.7 past ~45 deg. Raise it to stop grazing rays eroding floors,
+    /// treads and landings (whose slope can exceed 30 deg).
+    #[validate(range(min = 0.0, max = 1.0))]
+    #[serde(default = "default_graze_cos")]
+    pub graze_cos: f32,
+}
+
+fn default_graze_cos() -> f32 {
+    0.7
 }
 
 fn validate_health_range(cfg: &Config) -> Result<(), ValidationError> {
@@ -75,8 +86,9 @@ const NORMAL_MIN_POINTS: u32 = 3;
 /// A voxel is planar when its smallest covariance eigenvalue is below this
 /// fraction of the next-smallest.
 const NORMAL_PLANAR_RATIO: f32 = 0.15;
-/// Spare a clearing miss when |ray · normal| is below this (grazing incidence).
-const GRAZE_COS: f32 = 0.5;
+/// A patch is a line with no defined normal when its middle eigenvalue is below
+/// this fraction of the largest (e.g. a single grazing scan-line on a floor).
+const NORMAL_LINE_RATIO: f32 = 0.15;
 
 /// One voxel: occupancy health plus a running point covariance used to estimate
 /// the local surface normal. Points are accumulated relative to the voxel center
@@ -125,28 +137,41 @@ impl Voxel {
         let mean = self.sum / n;
         let cov = self.m2 / n - mean * mean.transpose();
         let eig = cov.symmetric_eigen();
-        let i0 = (0usize..3).min_by(|&a, &b| eig.eigenvalues[a].total_cmp(&eig.eigenvalues[b]))?;
-        let e0 = eig.eigenvalues[i0].max(0.0);
-        let e1 = (0usize..3)
-            .filter(|&i| i != i0)
-            .map(|i| eig.eigenvalues[i].max(0.0))
-            .fold(f32::INFINITY, f32::min);
-        if e0 > NORMAL_PLANAR_RATIO * e1.max(1e-9) {
+        let mut idx = [0usize, 1, 2];
+        idx.sort_by(|&a, &b| eig.eigenvalues[a].total_cmp(&eig.eigenvalues[b]));
+        let e0 = eig.eigenvalues[idx[0]].max(0.0);
+        let e1 = eig.eigenvalues[idx[1]].max(0.0);
+        let e2 = eig.eigenvalues[idx[2]].max(0.0);
+        if e2 < 1e-12 {
             return None;
         }
-        Some(eig.eigenvectors.column(i0).into_owned())
+        // Reject a line: both in-plane directions must carry real spread, or the
+        // normal is undefined (e.g. a single grazing scan-line across a floor).
+        if e1 < NORMAL_LINE_RATIO * e2 {
+            return None;
+        }
+        // Reject a patch that is not flat enough.
+        if e0 > NORMAL_PLANAR_RATIO * e1 {
+            return None;
+        }
+        Some(eig.eigenvectors.column(idx[0]).into_owned())
     }
 }
 
 /// Whether to spare an occupied voxel from a clearing miss: spare if a grazing
 /// ray skims its surface, or if it is a confident edge/corner. Voxels with too
 /// few points (no normal yet) are not spared, preserving the unguarded behavior.
-fn should_spare(voxels: &AHashMap<VoxelKey, Voxel>, key: VoxelKey, ray_unit: Vector3<f32>) -> bool {
+fn should_spare(
+    voxels: &AHashMap<VoxelKey, Voxel>,
+    key: VoxelKey,
+    ray_unit: Vector3<f32>,
+    graze_cos: f32,
+) -> bool {
     let Some(c) = voxels.get(&key) else {
         return false;
     };
     match c.planar_normal() {
-        Some(n) => ray_unit.dot(&n).abs() < GRAZE_COS,
+        Some(n) => ray_unit.dot(&n).abs() < graze_cos,
         None => c.num_pts >= NORMAL_MIN_POINTS,
     }
 }
@@ -254,6 +279,7 @@ pub fn update_map(
             cfg.voxel_size,
             cfg.shadow_depth,
             cfg.grace_depth,
+            cfg.graze_cos,
             origin_voxel,
             endpoint,
         );
@@ -306,6 +332,7 @@ fn find_misses_along_ray(
     voxel_size: f32,
     shadow_depth: f32,
     grace_depth: f32,
+    graze_cos: f32,
     origin_voxel: VoxelKey,
     endpoint: VoxelKey,
 ) {
@@ -424,7 +451,9 @@ fn find_misses_along_ray(
             continue;
         }
 
-        if map_voxels.contains_key(&(x, y, z)) && !should_spare(map_voxels, (x, y, z), ray_unit) {
+        if map_voxels.contains_key(&(x, y, z))
+            && !should_spare(map_voxels, (x, y, z), ray_unit, graze_cos)
+        {
             misses.insert((x, y, z));
         }
     }
@@ -443,6 +472,7 @@ mod tests {
             grace_depth: 0.0,
             min_health: 0,
             max_health: 1,
+            graze_cos: 0.5,
         }
     }
 
@@ -480,6 +510,7 @@ mod tests {
             voxel_size,
             shadow_depth,
             0.0,
+            0.5,
             origin_voxel,
             endpoint,
         );
@@ -523,6 +554,7 @@ mod tests {
             voxel_size,
             shadow_depth,
             0.0,
+            0.5,
             origin_voxel,
             endpoint,
         );
@@ -648,6 +680,7 @@ mod tests {
             grace_depth: 0.2,
             min_health: 0,
             max_health: 1,
+            graze_cos: 0.5,
         };
         let inv = 1.0 / voxel_size;
 
@@ -694,6 +727,90 @@ mod tests {
             total_clipped == 0,
             "planar grace regressed, ground voxels clipped:\n{table}"
         );
+    }
+
+    /// Dense surface samples for axis-aligned segments (vertical?, fixed, lo,
+    /// hi), swept across a y band so the per-voxel covariance is a genuine 2d
+    /// patch rather than a degenerate line in the x-z slice.
+    fn sample_segments(
+        segments: &[(bool, f32, f32, f32)],
+        voxel_size: f32,
+    ) -> Vec<(f32, f32, f32)> {
+        let ds = voxel_size / 6.0;
+        let ny = 5;
+        let mut pts = Vec::new();
+        for &(vertical, fixed, lo, hi) in segments {
+            let n = ((hi - lo) / ds).round().max(1.0) as i32;
+            for i in 0..=n {
+                let t = lo + (hi - lo) * (i as f32 / n as f32);
+                for j in 0..ny {
+                    let yy = voxel_size * (0.15 + 0.7 * j as f32 / (ny - 1) as f32);
+                    pts.push(if vertical {
+                        (fixed, yy, t)
+                    } else {
+                        (t, yy, fixed)
+                    });
+                }
+            }
+        }
+        pts
+    }
+
+    /// Build a map by accumulating sampled returns and marking each touched
+    /// voxel occupied. Returns the map and the sorted unique voxel keys.
+    fn build_surface(
+        lidar: &[(f32, f32, f32)],
+        voxel_size: f32,
+        health: VoxelHealth,
+    ) -> (VoxelMap, Vec<VoxelKey>) {
+        let inv = 1.0 / voxel_size;
+        let mut map = VoxelMap::default();
+        for &p in lidar {
+            map.accumulate(p, voxel_size);
+        }
+        let mut keys: Vec<VoxelKey> = lidar
+            .iter()
+            .map(|&(x, y, z)| world_to_voxel(x, y, z, inv))
+            .collect();
+        keys.sort();
+        keys.dedup();
+        for &k in &keys {
+            map.voxels.get_mut(&k).unwrap().health = health;
+        }
+        (map, keys)
+    }
+
+    /// Nearest forward intersection (t > 0) of a ray with the segments, as an
+    /// x-z point.
+    fn nearest_hit(
+        origin: (f32, f32, f32),
+        d: (f32, f32),
+        segments: &[(bool, f32, f32, f32)],
+    ) -> Option<(f32, f32)> {
+        let mut best: Option<(f32, (f32, f32))> = None;
+        for &(vertical, fixed, lo, hi) in segments {
+            let hit = if vertical {
+                if d.0.abs() < 1e-9 {
+                    continue;
+                }
+                let t = (fixed - origin.0) / d.0;
+                let z = origin.2 + t * d.1;
+                (t > 1e-4 && z >= lo && z <= hi).then_some((t, (fixed, z)))
+            } else {
+                if d.1.abs() < 1e-9 {
+                    continue;
+                }
+                let t = (fixed - origin.2) / d.1;
+                let x = origin.0 + t * d.0;
+                (t > 1e-4 && x >= lo && x <= hi).then_some((t, (x, fixed)))
+            };
+            if let Some(cand) = hit {
+                if best.is_none_or(|b| cand.0 < b.0) {
+                    best = Some(cand);
+                }
+            }
+        }
+        best.map(|(_, p)| p)
     }
 
     /// Write an SVG of the x-z plane: kept voxels blue, cleared voxels red,
@@ -916,7 +1033,6 @@ mod tests {
     #[test]
     fn stair_clipping_ray_fan() {
         let voxel_size = 0.1_f32;
-        let inv = 1.0 / voxel_size;
         let half = voxel_size * 0.5;
         let cfg = Config {
             voxel_size,
@@ -926,6 +1042,7 @@ mod tests {
             grace_depth: 0.2,
             min_health: 0,
             max_health: 1,
+            graze_cos: 0.5,
         };
 
         // True continuous staircase in the x-z plane (single y row): household
@@ -946,45 +1063,13 @@ mod tests {
             segments.push((false, zt, rx, rx + run));
         }
 
-        // Dense surface samples: the true lidar-visible geometry. Each segment
-        // is swept across a band of y as well so the per-voxel covariance is a
-        // genuine 2d patch (planar), not a degenerate line in the x-z slice.
-        let mut lidar: Vec<(f32, f32, f32)> = Vec::new();
-        let ds = voxel_size / 6.0;
-        let ny = 5;
-        for &(vertical, fixed, lo, hi) in &segments {
-            let n = ((hi - lo) / ds).round().max(1.0) as i32;
-            for i in 0..=n {
-                let t = lo + (hi - lo) * (i as f32 / n as f32);
-                for j in 0..ny {
-                    let yy = voxel_size * (0.15 + 0.7 * j as f32 / (ny - 1) as f32);
-                    lidar.push(if vertical {
-                        (fixed, yy, t)
-                    } else {
-                        (t, yy, fixed)
-                    });
-                }
-            }
-        }
+        let lidar = sample_segments(&segments, voxel_size);
+        let (mut map, all_stairs) = build_surface(&lidar, voxel_size, cfg.max_health);
 
-        let mut map = VoxelMap::default();
-        for &p in &lidar {
-            map.accumulate(p, voxel_size);
-        }
-        let mut all_stairs: Vec<VoxelKey> = lidar
-            .iter()
-            .map(|&(x, y, z)| world_to_voxel(x, y, z, inv))
-            .collect();
-        all_stairs.sort();
-        all_stairs.dedup();
-        for &k in &all_stairs {
-            map.voxels.get_mut(&k).unwrap().health = cfg.max_health;
-        }
-
-        // Sensor at the foot of the stairs, 0.2 m off the ground.
+        // Sensor at the foot of the stairs, 0.23 m off the ground.
         let origin = (half, half, base_z + 0.23);
 
-        // Five rays evenly spaced in elevation, sweeping the staircase. Each
+        // Six rays evenly spaced in elevation, sweeping the staircase. Each
         // ray's hit is the nearest forward intersection with a surface segment.
         const N_RAYS: usize = 6;
         let (lo_deg, hi_deg) = (0.0_f32, 27.0_f32);
@@ -992,31 +1077,7 @@ mod tests {
         for i in 0..N_RAYS {
             let frac = i as f32 / (N_RAYS - 1) as f32;
             let theta = (lo_deg + (hi_deg - lo_deg) * frac).to_radians();
-            let d = (theta.cos(), theta.sin());
-            let mut best: Option<(f32, (f32, f32))> = None;
-            for &(vertical, fixed, lo, hi) in &segments {
-                let hit = if vertical {
-                    if d.0.abs() < 1e-9 {
-                        continue;
-                    }
-                    let t = (fixed - origin.0) / d.0;
-                    let z = origin.2 + t * d.1;
-                    (t > 1e-4 && z >= lo && z <= hi).then_some((t, (fixed, z)))
-                } else {
-                    if d.1.abs() < 1e-9 {
-                        continue;
-                    }
-                    let t = (fixed - origin.2) / d.1;
-                    let x = origin.0 + t * d.0;
-                    (t > 1e-4 && x >= lo && x <= hi).then_some((t, (x, fixed)))
-                };
-                if let Some(cand) = hit {
-                    if best.is_none_or(|b| cand.0 < b.0) {
-                        best = Some(cand);
-                    }
-                }
-            }
-            if let Some((_, (hx, hz))) = best {
+            if let Some((hx, hz)) = nearest_hit(origin, (theta.cos(), theta.sin()), &segments) {
                 hits.push((hx, half, hz));
             }
         }
@@ -1056,6 +1117,187 @@ mod tests {
         );
     }
 
+    /// A flat landing floor with a wall at the far end, scanned by a fan of rays
+    /// from a sensor above the floor. Reports which floor voxels get cleared and
+    /// prints a sample of floor-voxel normals. Tune SENSOR_HEIGHT / shadow_depth
+    /// / NORMAL_MIN_POINTS to probe what erodes the floor.
+    ///
+    /// Run it with `cargo test landing_floor_ray_fan -- --nocapture`.
+    #[test]
+    fn landing_floor_ray_fan() {
+        let voxel_size = 0.1_f32;
+        let half = voxel_size * 0.5;
+        let cfg = Config {
+            voxel_size,
+            max_range: 50.0,
+            ray_subsample: 1,
+            shadow_depth: 0.2,
+            grace_depth: 0.2,
+            min_health: 0,
+            max_health: 1,
+            graze_cos: 0.5,
+        };
+
+        // Flat floor (horizontal, row 0) from the sensor out to a vertical wall.
+        let floor_z = half;
+        let x_wall = 25.0 * voxel_size + half;
+        let segments = vec![
+            (false, floor_z, half, x_wall),         // floor
+            (true, x_wall, floor_z, floor_z + 1.0), // wall
+        ];
+
+        let lidar = sample_segments(&segments, voxel_size);
+        let (mut map, all_surf) = build_surface(&lidar, voxel_size, cfg.max_health);
+
+        // Sensor above the floor. Drop this toward 0 to disable the z-slab guard
+        // (origin and floor in the same z-row) and stress the normal gate.
+        const SENSOR_HEIGHT: f32 = 0.3;
+        let origin = (half, half, floor_z + SENSOR_HEIGHT);
+
+        // Floor voxels and their normals, sampled before any clearing.
+        let floor: Vec<VoxelKey> = all_surf.iter().copied().filter(|k| k.2 == 0).collect();
+        for &k in floor.iter().step_by(floor.len().max(6) / 6) {
+            let normal = map.voxels.get(&k).and_then(Voxel::planar_normal);
+            eprintln!(
+                "  floor {k:?} normal {:?}",
+                normal.map(|n| [n[0], n[1], n[2]])
+            );
+        }
+
+        // Fan sweeping from steep-down at the near floor up to the wall.
+        const N_RAYS: usize = 16;
+        let (lo_deg, hi_deg) = (-35.0_f32, 18.0_f32);
+        let mut hits: Vec<(f32, f32, f32)> = Vec::new();
+        for i in 0..N_RAYS {
+            let frac = i as f32 / (N_RAYS - 1) as f32;
+            let theta = (lo_deg + (hi_deg - lo_deg) * frac).to_radians();
+            if let Some((hx, hz)) = nearest_hit(origin, (theta.cos(), theta.sin()), &segments) {
+                hits.push((hx, half, hz));
+            }
+        }
+
+        update_map(&mut map, origin, &hits, &cfg);
+
+        let svg_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("floor_clip.svg");
+        write_stair_svg(
+            &svg_path,
+            &all_surf,
+            &map,
+            &lidar,
+            origin,
+            &hits,
+            voxel_size,
+            cfg.shadow_depth,
+            cfg.grace_depth,
+        );
+        eprintln!("wrote {}", svg_path.display());
+
+        let cleared: Vec<VoxelKey> = floor
+            .iter()
+            .copied()
+            .filter(|v| !map.voxels.contains_key(v))
+            .collect();
+        eprintln!(
+            "{} rays hit, {} floor voxels, cleared {}: {cleared:?}",
+            hits.len(),
+            floor.len(),
+            cleared.len()
+        );
+        assert!(
+            cleared.is_empty(),
+            "ray fan cleared {} floor voxel(s): {cleared:?}",
+            cleared.len()
+        );
+    }
+
+    /// Robot on the step just below a landing, sensor at head height, so it can
+    /// just see over the landing. A single frame does NOT erode it: the rays hit
+    /// the surface directly and the grazed voxels share the hit's z-row, so the
+    /// z-slab guard protects them. This regression guard documents that the
+    /// realistic single-frame view is safe; real-data landing loss is a
+    /// multi-frame occlusion effect, reproduced elsewhere.
+    ///
+    /// Run it with `cargo test landing_grazed_from_below -- --nocapture`.
+    #[test]
+    fn landing_grazed_from_below() {
+        let voxel_size = 0.1_f32;
+        let half = voxel_size * 0.5;
+        let cfg = |graze_cos| Config {
+            voxel_size,
+            max_range: 50.0,
+            ray_subsample: 1,
+            shadow_depth: 0.2,
+            grace_depth: 0.2,
+            min_health: 0,
+            max_health: 1,
+            graze_cos,
+        };
+
+        // Staircase, then the top tread extended into a long flat landing and a
+        // back wall for the grazing rays to terminate on.
+        const N: i32 = 5;
+        let run = 3.0 * voxel_size;
+        let rise = 2.0 * voxel_size;
+        let first_riser_x = 3.0 * voxel_size + half;
+        let base_z = half;
+        let mut segments: Vec<(bool, f32, f32, f32)> = Vec::new();
+        for k in 1..=N {
+            let rx = first_riser_x + (k - 1) as f32 * run;
+            let zb = base_z + (k - 1) as f32 * rise;
+            let zt = base_z + k as f32 * rise;
+            segments.push((true, rx, zb, zt));
+            if k < N {
+                segments.push((false, zt, rx, rx + run));
+            }
+        }
+        let z_top = base_z + N as f32 * rise;
+        let landing_x0 = first_riser_x + (N - 1) as f32 * run;
+        segments.push((false, z_top, landing_x0, landing_x0 + 1.0));
+        segments.push((true, landing_x0 + 1.0, z_top, z_top + 1.0));
+
+        let lidar = sample_segments(&segments, voxel_size);
+        let landing_row = (z_top / voxel_size).floor() as i32;
+
+        // Robot on the step just below the landing, sensor 0.3 m up: it can just
+        // see over the landing edge, so its downward fan grazes that edge at the
+        // slope angle and skims the surface beyond toward the back wall.
+        let step_below_x = first_riser_x + (N - 2) as f32 * run + run * 0.5;
+        let origin = (step_below_x, half, z_top - rise + 0.3);
+        const N_RAYS: usize = 16;
+        let (lo_deg, hi_deg) = (-38.0_f32, -2.0_f32);
+        let mut hits: Vec<(f32, f32, f32)> = Vec::new();
+        for i in 0..N_RAYS {
+            let frac = i as f32 / (N_RAYS - 1) as f32;
+            let theta = (lo_deg + (hi_deg - lo_deg) * frac).to_radians();
+            if let Some((hx, hz)) = nearest_hit(origin, (theta.cos(), theta.sin()), &segments) {
+                hits.push((hx, half, hz));
+            }
+        }
+
+        let (mut map, surf) = build_surface(&lidar, voxel_size, 1);
+        update_map(&mut map, origin, &hits, &cfg(0.7));
+        let svg = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("landing_clip.svg");
+        write_stair_svg(
+            &svg, &surf, &map, &lidar, origin, &hits, voxel_size, 0.2, 0.2,
+        );
+        eprintln!("wrote {}", svg.display());
+
+        // When the robot can see the landing, it hits the surface directly and
+        // the grazed voxels share the hit's z-row, so the z-slab guard protects
+        // them. The landing must survive this view. (Real-data landing loss is a
+        // multi-frame occlusion effect, not a single grazing frame.)
+        let cleared: Vec<VoxelKey> = surf
+            .iter()
+            .copied()
+            .filter(|k| k.2 == landing_row && !map.voxels.contains_key(k))
+            .collect();
+        eprintln!("landing voxels cleared: {} {cleared:?}", cleared.len());
+        assert!(
+            cleared.is_empty(),
+            "landing must survive when the robot can see over it; cleared {cleared:?}"
+        );
+    }
+
     #[test]
     fn two_misses_needed_when_max_health_is_two() {
         let cfg = Config {
@@ -1072,6 +1314,37 @@ mod tests {
 
         update_map(&mut map, (0.0, 0.0, 0.0), &[(5.5, 0.5, 0.5)], &cfg);
         assert!(!map.voxels.contains_key(&(3, 0, 0)));
+    }
+
+    #[test]
+    fn planar_patch_yields_vertical_normal() {
+        let mut v = Voxel::default();
+        for i in 0..8 {
+            for j in 0..8 {
+                let x = 0.09 * (i as f32 / 7.0 - 0.5);
+                let y = 0.09 * (j as f32 / 7.0 - 0.5);
+                v.observe(Vector3::new(x, y, 0.0));
+            }
+        }
+        let n = v.planar_normal().expect("a 2d patch has a normal");
+        assert!(n[2].abs() > 0.99, "expected ~vertical normal, got {n:?}");
+    }
+
+    #[test]
+    fn line_like_patch_has_no_normal() {
+        // Wide in y, ~zero in x, tiny z noise: a grazing scan-line across a flat
+        // floor. Its smallest eigenvector is horizontal, so trusting it would
+        // clear the floor; the line guard must reject it.
+        let mut v = Voxel::default();
+        for j in 0..20 {
+            let y = 0.08 * (j as f32 / 19.0 - 0.5);
+            let z = 0.003 * ((j % 3) - 1) as f32;
+            v.observe(Vector3::new(0.0, y, z));
+        }
+        assert!(
+            v.planar_normal().is_none(),
+            "a line-like patch must not yield a normal"
+        );
     }
 
     #[test]

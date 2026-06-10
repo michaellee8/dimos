@@ -39,6 +39,7 @@ class RayTraceMap(Transformer[PointCloud2, PointCloud2]):
         max_range: float = 30.0,
         emit_every: int = 1,
         emit_normals: bool = False,
+        emit_raw: bool = False,
         **mapper_kwargs: Any,
     ) -> None:
         if emit_every < 0:
@@ -47,6 +48,7 @@ class RayTraceMap(Transformer[PointCloud2, PointCloud2]):
         self.max_range = max_range
         self.emit_every = emit_every
         self.emit_normals = emit_normals
+        self.emit_raw = emit_raw
         self._mapper_kwargs = mapper_kwargs
 
     def _make_obs(
@@ -61,6 +63,8 @@ class RayTraceMap(Transformer[PointCloud2, PointCloud2]):
             tags["voxel_normals"] = normals
         else:
             positions = mapper.global_map()
+        if self.emit_raw:
+            tags["raw_points"] = last_obs.data.points_f32()
         pcd = o3d.t.geometry.PointCloud()
         pcd.point["positions"] = o3c.Tensor.from_numpy(positions)
         cloud = PointCloud2(pointcloud=pcd, frame_id="world", ts=last_obs.ts)

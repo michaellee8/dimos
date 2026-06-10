@@ -84,6 +84,11 @@ def main(
     ),
     min_health: int = typer.Option(-2, "--min-health", help="Voxel removal threshold"),
     max_health: int = typer.Option(1, "--max-health", help="Voxel saturation cap"),
+    graze_cos: float = typer.Option(
+        0.7,
+        "--graze-cos",
+        help="Spare a clearing miss when |ray.normal| < this; raise to clear fewer",
+    ),
     emit_every: int = typer.Option(1, "--emit-every", help="Yield the current map every N frames"),
     render_voxel: float = typer.Option(
         0.05, "--render-voxel", help="Voxel size for rerun rendering (m)"
@@ -93,6 +98,9 @@ def main(
     ),
     normal_scale: float = typer.Option(
         0.1, "--normal-scale", help="Length of the normal arrows (m)"
+    ),
+    raw: bool = typer.Option(
+        True, "--raw/--no-raw", help="Log the raw unvoxelized sensor point cloud"
     ),
 ) -> None:
     db_path = resolve_named_path(dataset, ".db")
@@ -130,8 +138,10 @@ def main(
                 grace_depth=grace_depth,
                 min_health=min_health,
                 max_health=max_health,
+                graze_cos=graze_cos,
                 emit_every=emit_every,
                 emit_normals=normals,
+                emit_raw=raw,
             )
         )
 
@@ -139,6 +149,13 @@ def main(
         for obs in pipeline:
             rr.set_time(TIMELINE, timestamp=obs.ts)
             rr.log("world/raytrace_map", obs.data.to_rerun(voxel_size=render_voxel))
+
+            raw_points = obs.tags.get("raw_points")
+            if raw_points is not None:
+                rr.log(
+                    "world/raw_points",
+                    rr.Points3D(raw_points, colors=[[150, 150, 150]], radii=0.01),
+                )
 
             voxel_normals = obs.tags.get("voxel_normals")
             if voxel_normals is not None:

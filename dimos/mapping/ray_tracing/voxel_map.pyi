@@ -28,6 +28,7 @@ class VoxelRayMapper:
         grace_depth: float = 0.2,
         min_health: int = -2,
         max_health: int = 1,
+        graze_cos: float = 0.7,
     ) -> None: ...
     def add_frame(
         self,

@@ -29,7 +29,9 @@ impl VoxelRayMapper {
         grace_depth = 0.2,
         min_health = -2,
         max_health = 1,
+        graze_cos = 0.7,
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         voxel_size: f32,
         max_range: f32,
@@ -38,6 +40,7 @@ impl VoxelRayMapper {
         grace_depth: f32,
         min_health: i32,
         max_health: i32,
+        graze_cos: f32,
     ) -> PyResult<Self> {
         let config = Config {
             voxel_size,
@@ -47,6 +50,7 @@ impl VoxelRayMapper {
             grace_depth,
             min_health,
             max_health,
+            graze_cos,
         };
         config
             .validate()
