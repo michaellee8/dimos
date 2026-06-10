@@ -339,7 +339,17 @@ FLOWBASE_PLANT_PROFILE = RobotPlantProfile(
     odom_warmup_s=10.0,
     odom_stale_s=1.0,
     excited_channels=("vx", "vy", "wz"),  # holonomic — strafes
-    si_amplitudes={"vx": [0.2, 0.4, 0.6], "vy": [0.2, 0.4], "wz": [0.3, 0.6, 1.0]},
+    # Densified sweep (2026-06-09): ~5-6 fit points/axis (was the sparse
+    # placeholder [0.2,0.4,0.6]/[0.2,0.4]/[0.3,0.6,1.0] = 8 total fits, vs Go2's
+    # 15). Stays WITHIN the already-tested envelope — vx/vy ≤0.6 (achieved
+    # ceiling ~0.63 m/s), wz ≤1.0 rad/s — so this is denser, NOT faster (same
+    # speeds + risk as the prior run). Extending the RANGE to find the real top
+    # speed is separate: raise vx_max after the i2rt firmware-limit check.
+    si_amplitudes={
+        "vx": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        "vy": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6],
+        "wz": [0.2, 0.4, 0.6, 0.8, 1.0],
+    },
     step_s=6.0,
     pre_roll_s=1.0,
     max_dist_m=4.0,
