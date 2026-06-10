@@ -29,6 +29,7 @@ Compose at the CLI::
 from datetime import datetime
 from pathlib import Path
 
+from dimos.constants import STATE_DIR
 from dimos.core.core import rpc
 from dimos.core.stream import In
 from dimos.memory2.module import Recorder, RecorderConfig
@@ -43,14 +44,8 @@ logger = setup_logger()
 
 
 class TeleopRecorderConfig(RecorderConfig):
-    # Default path is a stem — TeleopRecorder.start() appends a per-run
-    # timestamp so successive runs don't clobber each other. Pass an absolute
-    # path with ``.db`` to opt out of timestamping.
-    db_path: str | Path = "recording_teleop.db"
-
-    # If True (default), generate a transport-stats report next to the .db on
-    # stop. Set False for a pure recording-only run (skips matplotlib import +
-    # report formatting).
+    
+    db_path: str | Path = STATE_DIR / "teleop_recordings" / "recording_teleop.db"
     generate_report: bool = True
 
 
@@ -61,7 +56,7 @@ class TeleopRecorder(Recorder):
     (``cmd_vel_stamped``), and hosted-teleop video stats. Unconnected ports stay
     empty in the DB. Each run lands in its own ``<stem>_<YYYYmmdd_HHMMSS>.db``
     so runs don't clobber. On stop, if ``generate_report=True``, also writes
-    ``report.md`` + ``latency.png`` + ``jitter.png`` next to the .db.
+    ``report.md`` next to the .db.
     """
 
     left_controller_output: In[PoseStamped]

@@ -16,7 +16,7 @@
 """Transport-stats report from a recorded teleop ``.db``.
 
 Reads the streams a ``TeleopRecorder`` writes (twist, poses, buttons, video
-stats) and emits ``report.md`` + ``latency.png`` + ``jitter.png`` next to it.
+stats) and emits ``report.md`` next to it.
 The math (percentiles, loss, reorder, stalls) is the same one the live HUD
 uses — both go through ``stream_stats``.
 
@@ -61,7 +61,7 @@ _STREAM_TYPES = {
 
 
 def generate_report(db_path: Path, out_dir: Path | None = None) -> Path:
-    """Write ``report.md`` (+ PNGs) for the recording at *db_path*.
+    """Write ``report.md`` for the recording at *db_path*.
 
     Output lands in *out_dir* if given, else next to the .db. Returns the
     written report.md path. Raises if the .db is missing or unreadable.
@@ -91,8 +91,7 @@ def generate_report(db_path: Path, out_dir: Path | None = None) -> Path:
     duration_s = _run_duration(records)
     timestamp = datetime.fromtimestamp(db_path.stat().st_mtime).strftime("%Y%m%d_%H%M%S")
 
-    graph_lines = _write_graphs(out_dir, active, twist_streams)
-    md = _format_report(timestamp, duration_s, active, video_summary, graph_lines)
+    md = _format_report(timestamp, duration_s, active, video_summary)
 
     report_path = out_dir / "report.md"
     report_path.write_text(md)
@@ -193,58 +192,11 @@ def _summarize_video(samples: list[VideoStats]) -> dict[str, Any] | None:
     }
 
 
-def _write_graphs(
-    out_dir: Path,
-    active: dict[str, dict[str, Any]],
-    records: dict[str, list[Any]],
-) -> list[str]:
-    """Render ``latency.png`` + ``jitter.png`` into *out_dir*.
-
-    Returns markdown lines that embed them, or an empty list if there's
-    nothing to plot or matplotlib is unavailable (the report still writes).
-    """
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception:
-        logger.warning("matplotlib unavailable — report has no graphs")
-        return []
-
-    refs: list[str] = []
-
-    jitter = []
-    for name in active:
-        msgs = records.get(name, [])
-        tss = sorted(float(m.ts) for m in msgs if getattr(m, "ts", 0.0) > 0)
-        if len(tss) >= 2:
-            jitter.append((name, (np.diff(tss) * 1000.0).tolist()))
-
-    if jitter:
-        fig, ax = plt.subplots(figsize=(9, 3.2))
-        for n, intervals in jitter:
-            ax.hist(intervals, bins=40, alpha=0.6, label=n)
-        ax.set(
-            xlabel="inter-arrival interval (ms)",
-            ylabel="count",
-            title="Inter-arrival jitter",
-        )
-        ax.legend(fontsize=8)
-        fig.tight_layout()
-        fig.savefig(out_dir / "jitter.png", dpi=110)
-        plt.close(fig)
-        refs += ["![jitter](jitter.png)", ""]
-
-    return ["## Graphs", "", *refs] if refs else []
-
-
 def _format_report(
     timestamp: str,
     duration_s: float,
     active: dict[str, dict[str, Any]],
     video: dict[str, Any] | None,
-    graph_lines: list[str],
 ) -> str:
     # If an external tool (e.g. data/notes/benchmarks/netem/apply.sh) left a
     # profile name at this path, record it in the report header.
@@ -302,7 +254,6 @@ def _format_report(
             "",
         ]
     lines += _video_lines(video)
-    lines += graph_lines
     return "\n".join(lines) + "\n"
 
 
