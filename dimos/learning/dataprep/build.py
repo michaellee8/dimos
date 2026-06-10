@@ -111,9 +111,7 @@ def run_dataprep(config: DataPrepConfig) -> Path:
         )
 
         writer = get_writer(config.output.format)
-        logger.info(
-            "[dataprep] writing %s dataset to %s", config.output.format, config.output.path
-        )
+        logger.info("[dataprep] writing %s dataset to %s", config.output.format, config.output.path)
 
         samples_seen = 0
         episodes_done = 0

@@ -5,16 +5,33 @@
     "status_stream": "status"
   },
   "observation": {
-    "image": {"stream": "color_image", "field": "data"},
-    "joint_state": {"stream": "joint_state", "field": "position"}
+    "image": {
+      "stream": "color_image",
+      "field": "data"
+    },
+    "joint_state": {
+      "stream": "joint_state",
+      "field": "position"
+    }
   },
   "action": {
-    "joint_target": {"stream": "joint_state", "field": "position"}
+    "joint_target": {
+      "stream": "joint_state",
+      "field": "position"
+    }
   },
-  "sync": {"anchor": "image", "rate_hz": 14.0, "tolerance_ms": 80.0},
+  "sync": {
+    "anchor": "image",
+    "rate_hz": 14.0,
+    "tolerance_ms": 80.0
+  },
   "output": {
     "format": "lerobot",
     "path": "data/datasets/session",
-    "metadata": {"fps": 14, "robot": "xarm7", "default_task_label": "pick_and_place"}
+    "metadata": {
+      "fps": 14,
+      "robot": "xarm7",
+      "default_task_label": "pick_and_place"
+    }
   }
 }
