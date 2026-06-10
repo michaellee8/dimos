@@ -36,7 +36,6 @@ from collections.abc import Callable
 import contextlib
 from dataclasses import dataclass
 import os
-import threading
 from typing import Any
 
 from dimos.protocol.pubsub.impl.webrtc.providers.spec import (
@@ -113,19 +112,9 @@ class BrokerProvider(AsyncProviderBase):
         self._hb_task: asyncio.Task[None] | None = None
         self._cmd_dc: RTCDataChannel | None = None
         self._cmd_dc_id: int | None = None
-        self._has_operator = threading.Event()
 
         # Guarded by self._lock (from the base).
         self._callbacks: dict[str, list[Callable[[bytes, str], None]]] = defaultdict(list)
-
-    @property
-    def has_operator(self) -> bool:
-        """Whether an operator's command channel is currently open."""
-        return self._has_operator.is_set()
-
-    def wait_for_operator(self, timeout: float | None = None) -> bool:
-        """Block until an operator connects. Returns True if one did."""
-        return self._has_operator.wait(timeout=timeout)
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -244,10 +233,6 @@ class BrokerProvider(AsyncProviderBase):
             maxRetransmits=self._config.max_retransmits,
         )
 
-        @ch.on("open")
-        def _on_open() -> None:
-            self._has_operator.set()
-
         @ch.on("message")
         def _on_msg(payload: Any) -> None:
             if isinstance(payload, str):
@@ -263,7 +248,6 @@ class BrokerProvider(AsyncProviderBase):
         self._cmd_dc = ch
 
     def _close_cmd_channel(self) -> None:
-        self._has_operator.clear()
         if self._cmd_dc is not None:
             with contextlib.suppress(Exception):
                 self._cmd_dc.close()

@@ -61,7 +61,9 @@ else:
 # Forces an SCTP m-line into the offer; CF-assigned channel ids start low, so
 # a high fixed id stays clear of them.
 _PLACEHOLDER_DC_ID = 100
-_MAX_MSG_SIZE = 1 * 1024 * 1024
+# CF Realtime drops DataChannel messages larger than this (observed: 100% loss
+# from 64KB up in the pubsub benchmark).
+_MAX_MSG_SIZE = 16 * 1024
 
 
 def _dc_name(topic: str) -> str:
