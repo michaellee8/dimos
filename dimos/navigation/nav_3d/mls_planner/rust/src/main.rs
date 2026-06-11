@@ -11,7 +11,7 @@ use lcm_msgs::geometry_msgs::{Point, Pose, PoseStamped, Quaternion};
 use lcm_msgs::nav_msgs::Path;
 use lcm_msgs::sensor_msgs::{PointCloud2, PointField};
 use lcm_msgs::std_msgs::{Header, Time};
-use tracing::info;
+use tracing::{debug, info};
 
 #[derive(Module)]
 struct MlsPlanner {
@@ -82,7 +82,7 @@ impl MlsPlanner {
         let edges_path = build_segments_path(graph, voxel_size, frame, now());
         publish_path(&self.node_edges, &edges_path).await;
 
-        info!(
+        debug!(
             global_map_points = points.len(),
             voxels = self.planner.voxel_count(),
             surface_cells = self.planner.surface().len(),
