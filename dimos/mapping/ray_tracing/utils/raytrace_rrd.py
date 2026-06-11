@@ -94,7 +94,9 @@ def main(
     emit_every: int = typer.Option(1, "--emit-every", help="Log the maps every N frames"),
     render_voxel: float = typer.Option(0.05, "--render-voxel", help="Voxel render size (m)"),
     normal_scale: float = typer.Option(0.08, "--normal-scale", help="Normal arrow length (m)"),
-    raw: bool = typer.Option(True, "--raw/--no-raw", help="Also log the raw sensor cloud"),
+    from_time: float | None = typer.Option(
+        None, "--from-time", help="Start replay at this stream timestamp (s)"
+    ),
 ) -> None:
     db_path = resolve_named_path(dataset, ".db")
 
@@ -113,39 +115,26 @@ def main(
         static=True,
     )
 
-    # naive accumulates every voxel and never clears. no_normal_gate turns the
-    # normal gate off. no_recency keeps the gate but never expires a spare.
-    # normal_gate is the full default behavior.
     mappers = {
-        # "naive": VoxelRayMapper(
-        #     voxel_size=voxel_size,
-        #     max_range=max_range,
-        #     shadow_depth=0.0,
-        #     grace_depth=max_range,
-        #     min_health=0,
-        # ),
-        # "no_normal_gate": VoxelRayMapper(voxel_size=voxel_size, max_range=max_range, graze_cos=0.0),
-        # "no_recency": VoxelRayMapper(
-        #     voxel_size=voxel_size, max_range=max_range, recency_window=RECENCY_OFF
-        # ),
+        "naive": VoxelRayMapper(
+            voxel_size=voxel_size,
+            max_range=max_range,
+            shadow_depth=0.0,
+            grace_depth=max_range,
+            min_health=0,
+        ),
+        "no_normal_gate": VoxelRayMapper(voxel_size=voxel_size, max_range=max_range, graze_cos=0.0),
         "defaults": VoxelRayMapper(voxel_size=voxel_size, max_range=max_range),
+        "no_recency": VoxelRayMapper(
+            voxel_size=voxel_size, max_range=max_range, recency_window=RECENCY_OFF
+        ),
     }
 
     store = SqliteStore(path=str(db_path))
     with store:
-        # giradelli stairs
-        # lidar = store.stream(lidar_stream, PointCloud2).order_by("ts").from_time(215)
-
-        # yerba buena people sidewalk
-        # lidar = store.stream(lidar_stream, PointCloud2).order_by("ts").from_time(359)
-
-        # yerba entering park
-        lidar = store.stream(lidar_stream, PointCloud2).order_by("ts").from_time(784)
-
-        # yerba buena down stairs
-        # fast lio is absolutely busted here
-        # lidar = store.stream(lidar_stream, PointCloud2).order_by("ts").from_time(1096)
-
+        lidar = store.stream(lidar_stream, PointCloud2).order_by("ts")
+        if from_time is not None:
+            lidar = lidar.from_time(from_time)
         odom = store.stream(odom_stream, Odometry).order_by("ts")
         pose_tagged = lidar.align(odom, tolerance=align_tol).transform(
             FnTransformer(_attach_pose_from_odom)
@@ -190,7 +179,6 @@ def main(
                 )
                 keep = np.any(normals != 0.0, axis=1)
                 origins, vectors = centers[keep], normals[keep]
-                # PCA normals are sign-ambiguous. Orient them toward the robot.
                 flip = np.sum(vectors * (robot - origins), axis=1) < 0
                 vectors = np.where(flip[:, None], -vectors, vectors)
                 rr.log(
@@ -202,8 +190,7 @@ def main(
                         radii=0.005,
                     ),
                 )
-            if raw:
-                rr.log("world/raw_points", rr.Points3D(pts, colors=[[90, 90, 90]], radii=0.01))
+            rr.log("world/raw_points", rr.Points3D(pts, colors=[[90, 90, 90]], radii=0.01))
             rr.log(
                 "world/robot",
                 rr.Transform3D(
