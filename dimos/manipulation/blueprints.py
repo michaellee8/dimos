@@ -297,6 +297,13 @@ _xarm7_sim_cfg = _catalog_xarm7(
     add_gripper=True,
     pitch=math.radians(45),
     tf_extra_links=["link7"],
+    # The MuJoCo scene mounts link_base on a 0.12m pedestal (scene.xml:
+    # link_base pos="0 0 .12"), so the Drake planner's base must sit at the same
+    # height — otherwise the planner solves IK for a base 0.12m too low and every
+    # planned pose executes ~0.12m high on the sim robot (grasps close above the
+    # object). Real hardware mounts the base at the world origin, so this is
+    # sim-only and the real xarm_perception blueprint is unaffected.
+    z_offset=0.12,
     # Camera-over-desk observation pose (the xarm7.xml "home" keyframe). The sim
     # boots at qpos0 (arm straight up, camera at the ceiling) and the MuJoCo engine
     # does not load keyframes; go_home/prepare() drive the arm here and capture it
