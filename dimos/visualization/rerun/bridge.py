@@ -57,6 +57,11 @@ from dimos.visualization.rerun.constants import (
     RerunOpenOption,
 )
 from dimos.visualization.rerun.init import rerun_init
+from dimos.visualization.rerun.topic_catalog import (
+    LcmTopicCatalog,
+    classify_lcm_topic_renderability,
+    is_selected_topic,
+)
 
 # TODO OUT visual annotations
 #
@@ -180,6 +185,9 @@ class Config(ModuleConfig):
     rerun_web: bool = RERUN_ENABLE_WEB
     web_port: int = RERUN_WEB_VIEWER_PORT
     blueprint: BlueprintFactory | None = _default_blueprint
+    selector_enabled: bool = False
+    catalog_freshness_window_s: float = 2.0
+    catalog_stats_window_s: float = 5.0
 
 
 Config.model_rebuild(_types_namespace={"Archetype": Archetype, "Blueprint": Blueprint})
@@ -215,6 +223,12 @@ class RerunBridgeModule(Module):
         self._last_log = {}
         self._override_cache: dict[str, Callable[[Any], RerunData | None]] = {}
         self._frame_attached: dict[str, str] = {}
+        self._staged_topics: set[str] = set()
+        self._applied_topics: set[str] = set()
+        self._catalog = LcmTopicCatalog(
+            freshness_window_s=self.config.catalog_freshness_window_s,
+            stats_window_s=self.config.catalog_stats_window_s,
+        )
 
     @property
     def host(self) -> str:
@@ -277,6 +291,9 @@ class RerunBridgeModule(Module):
 
         entity_path: str = self._get_entity_path(topic)
 
+        if self.config.selector_enabled and not is_selected_topic(topic, self._applied_topics):
+            return
+
         # Throttle entities with a max_hz limit
         if entity_path in self._min_intervals:
             now = time.monotonic()
@@ -284,7 +301,11 @@ class RerunBridgeModule(Module):
                 return
             self._last_log[entity_path] = now
 
-        rerun_data: RerunData | None = self._visual_override_for_entity_path(entity_path)(msg)
+        try:
+            rerun_data: RerunData | None = self._visual_override_for_entity_path(entity_path)(msg)
+        except Exception as exc:
+            self._catalog.record_error(topic, exc)
+            raise
 
         if not rerun_data:
             return
@@ -302,6 +323,69 @@ class RerunBridgeModule(Module):
                 if frame_id and self._frame_attached.get(entity_path) != frame_id:
                     rr.log(entity_path, rr.Transform3D(parent_frame=f"tf#/{frame_id}"))
                     self._frame_attached[entity_path] = frame_id
+
+    def _on_lcm_data(self, data: bytes, topic: Any) -> None:
+        """Observe raw LCM data, then decode/log only applied selector topics."""
+
+        entity_path = self._get_entity_path(topic)
+        renderability, render_reason = classify_lcm_topic_renderability(
+            topic,
+            entity_path=entity_path,
+            visual_override=self.config.visual_override,
+        )
+        self._catalog.observe(
+            topic,
+            data,
+            renderability=renderability,
+            render_reason=render_reason,
+        )
+
+        if not is_selected_topic(topic, self._applied_topics):
+            return
+
+        msg = self._catalog.decode(topic, data)
+        if msg is None:
+            return
+
+        self._on_message(msg, topic)
+
+    @rpc
+    def get_topic_catalog(self) -> list[dict[str, Any]]:
+        """Return the current selector catalog snapshot."""
+
+        return self._catalog.to_dicts(
+            staged_topics=self._staged_topics,
+            logging_topics=self._applied_topics,
+        )
+
+    @rpc
+    def stage_topics(self, topics: list[str]) -> list[str]:
+        """Replace the current-session staged topic selection."""
+
+        self._staged_topics = set(topics)
+        return sorted(self._staged_topics)
+
+    @rpc
+    def apply_staged_topics(self) -> list[str]:
+        """Apply the staged topic selection to selector-managed logging."""
+
+        self._applied_topics = set(self._staged_topics)
+        return sorted(self._applied_topics)
+
+    @rpc
+    def clear_staged_topics(self) -> list[str]:
+        """Clear staged topics without changing applied/logging topics."""
+
+        self._staged_topics = set()
+        return []
+
+    @rpc
+    def set_applied_topics(self, topics: list[str]) -> list[str]:
+        """Set selector-managed logging topics directly."""
+
+        self._applied_topics = set(topics)
+        self._staged_topics = set(topics)
+        return sorted(self._applied_topics)
 
     @rpc
     def start(self) -> None:
@@ -390,11 +474,19 @@ class RerunBridgeModule(Module):
         if self.config.blueprint:
             rr.send_blueprint(_with_graph_tab(self.config.blueprint()))
 
+        self._catalog = LcmTopicCatalog(
+            freshness_window_s=self.config.catalog_freshness_window_s,
+            stats_window_s=self.config.catalog_stats_window_s,
+        )
+
         for pubsub in self.config.pubsubs:
             logger.info(f"bridge listening on {pubsub.__class__.__name__}")
             if hasattr(pubsub, "start"):
                 pubsub.start()
-            unsub = pubsub.subscribe_all(self._on_message)
+            if self.config.selector_enabled and hasattr(pubsub, "subscribe_all_encoded"):
+                unsub = pubsub.subscribe_all_encoded(self._on_lcm_data)
+            else:
+                unsub = pubsub.subscribe_all(self._on_message)
             self.register_disposable(Disposable(unsub))
 
         for pubsub in self.config.pubsubs:
