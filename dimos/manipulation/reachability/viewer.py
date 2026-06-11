@@ -16,11 +16,16 @@
 
 The default view is the **body-frame workspace**: the arm's actual
 reachable volume in pelvis coordinates (the asymmetric blob a human
-expects — no heading quotient, no symmetry artifacts), rendered as voxel
-meshes colored by *dexterity* (fraction of approach angles reachable per
-cell, viridis: purple = one way in, yellow = approach from anywhere). A
-translucent shell shows everything reachable; an opaque core shows where
-the arm has options.
+expects — no heading quotient, no symmetry artifacts), rendered as a
+point cloud colored red→green by *dexterity* (fraction of approach
+angles reachable per cell: red = one way in, green = approach from
+anywhere), inside a translucent shell of everything reachable. An
+opaque voxel style is available for a solid volume reading.
+
+The IK ghost poses a **rigid** kinematic model. The real G1 arms are
+compliant and sag a few cm under gravity at manipulation PD gains —
+gravity-feedforward compensation belongs in the mink control task, not
+this viewer.
 
 Interactive extras:
 
@@ -63,6 +68,22 @@ _EMPTY_GRAY = (45, 45, 55)
 # Pure geometry builders (unit-tested without a server)
 
 
+def body_point_cloud(
+    cap: CapabilityMap, min_dexterity: float, min_count: int = 1
+) -> tuple[np.ndarray, np.ndarray]:
+    """(points, dexterity) at occupied body-frame cell centers."""
+    params = cap.params
+    dexterity = cap.body_dexterity()
+    keep = (cap.body_counts >= min_count) & (dexterity >= min_dexterity)
+    iz, ix, iy = np.nonzero(keep)
+    if len(iz) == 0:
+        return np.empty((0, 3)), np.empty(0)
+    centers = (np.arange(params.n_xy) + 0.5) * params.cell - params.r_xy
+    z_centers = (np.arange(params.n_z) + 0.5) * params.cell + params.z_min
+    points = np.stack([centers[ix], centers[iy], z_centers[iz]], axis=1)
+    return points, dexterity[iz, ix, iy]
+
+
 def body_voxel_mesh(
     cap: CapabilityMap, min_dexterity: float, min_count: int = 1
 ) -> tuple[Any, int]:
@@ -85,7 +106,7 @@ def body_voxel_mesh(
     import matplotlib
 
     colors = np.zeros((*matrix.shape, 4), dtype=np.uint8)
-    rgba = matplotlib.colormaps["viridis"](dexterity.transpose(1, 2, 0))
+    rgba = matplotlib.colormaps["RdYlGn"](dexterity.transpose(1, 2, 0))
     colors[..., :3] = (rgba[..., :3] * 255).astype(np.uint8)
     colors[..., 3] = 255
 
@@ -152,7 +173,7 @@ def _dexterity_image(cap: CapabilityMap, positions: np.ndarray, shape: tuple[int
     values[valid] = dexterity[iz[valid], ix[valid], iy[valid]]
     occupied[valid] = cap.body_counts[iz[valid], ix[valid], iy[valid]] > 0
 
-    rgba = matplotlib.colormaps["viridis"](np.clip(values / max(values.max(), 1e-9), 0, 1))
+    rgba = matplotlib.colormaps["RdYlGn"](np.clip(values / max(values.max(), 1e-9), 0, 1))
     image = (rgba[:, :3] * 255).astype(np.uint8)
     image[~occupied] = _EMPTY_GRAY
     return image.reshape(*shape, 3)
@@ -206,11 +227,11 @@ def position_cloud(
 
 
 def score_colors(scores: np.ndarray, vmax: float | None = None) -> np.ndarray:
-    """Score → viridis uint8 colors."""
+    """Score → red-to-green uint8 colors (red = barely reachable, green = rich)."""
     import matplotlib
 
     vmax = vmax or max(float(scores.max(initial=1.0)), 1.0)
-    rgba = matplotlib.colormaps["viridis"](np.clip(scores / vmax, 0, 1))
+    rgba = matplotlib.colormaps["RdYlGn"](np.clip(scores / vmax, 0, 1))
     return (rgba[:, :3] * 255).astype(np.uint8)
 
 
@@ -361,6 +382,7 @@ def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
                 "position (any orientation)",
             ),
         )
+        style = server.gui.add_dropdown("style", ("points", "voxels"), initial_value="points")
         dexterity_pct = server.gui.add_slider(
             "min dexterity [%]", min=0, max=60, step=1, initial_value=0
         )
@@ -403,20 +425,33 @@ def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
             except Exception:
                 pass
         if mode.value.startswith("workspace"):
-            core, n = body_voxel_mesh(cap, dexterity_pct.value / 100.0)
-            if core is not None:
-                server.scene.add_mesh_trimesh("/reachability/core", core)
-            if shell.value and dexterity_pct.value > 0:
+            n = 0
+            if style.value == "voxels":
+                core, n = body_voxel_mesh(cap, dexterity_pct.value / 100.0)
+                if core is not None:
+                    server.scene.add_mesh_trimesh("/reachability/core", core)
+            else:
+                points, dexterity = body_point_cloud(cap, dexterity_pct.value / 100.0)
+                n = len(points)
+                if n:
+                    server.scene.add_point_cloud(
+                        "/reachability/points",
+                        points=points.astype(np.float32),
+                        colors=score_colors(dexterity, vmax=max(float(dexterity.max()), 1e-9)),
+                        point_size=0.022,
+                        point_shape="circle",
+                    )
+            if shell.value:
                 outer, _ = body_voxel_mesh(cap, 0.0)
                 if outer is not None:
                     server.scene.add_mesh_simple(
                         "/reachability/shell",
                         vertices=np.asarray(outer.vertices),
                         faces=np.asarray(outer.faces),
-                        color=(120, 160, 140),
-                        opacity=0.12,
+                        color=(140, 200, 150),
+                        opacity=0.1,
                     )
-            logger.info(f"workspace view: {n} voxels at ≥{dexterity_pct.value}% dexterity")
+            logger.info(f"workspace view: {n} cells at ≥{dexterity_pct.value}% dexterity")
         else:
             if mode.value.startswith("position"):
                 points, scores = position_cloud(cap, int(min_score.value))
@@ -504,9 +539,12 @@ def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
         score = cap.scores(position[None], rotation.reshape(1, 3, 3))[0]
         iz, ix, iy, valid = cap.body_indices(position[None])
         dexterity = cap.body_dexterity()[iz[0], ix[0], iy[0]] if valid[0] else 0.0
+        # Rigid-model kinematics: the real G1 arms are compliant and sag a
+        # few cm under gravity at low PD gains — treat the posed arm as the
+        # commanded pose, not where the hardware would settle.
         ik_status.value = (
             f"IK {'reached' if reached else 'FAILED'} (err {error * 1000:.0f} mm) | "
-            f"map score {score} | dexterity {dexterity:.0%}"
+            f"map score {score} | dexterity {dexterity:.0%} | rigid model (no sag)"
         )
 
         if viser_urdf is not None and urdf_joint_names:
@@ -516,7 +554,7 @@ def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
                     cfg[i] = joints[name]
             viser_urdf.update_cfg(cfg)
 
-    for control in (side, mode, dexterity_pct, shell, min_score, theta_lo, theta_hi):
+    for control in (side, mode, style, dexterity_pct, shell, min_score, theta_lo, theta_hi):
         control.on_update(refresh_volume)
     for control in (side, show_yaw_slice, yaw_slice, show_z_slice, z_slice):
         control.on_update(refresh_slices)
