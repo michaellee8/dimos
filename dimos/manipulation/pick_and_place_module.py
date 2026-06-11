@@ -571,6 +571,16 @@ then refreshes perception obstacles.
                 f"No grasp poses found for '{object_name}'. Object may not be detected.",
             )
 
+        # Detected objects are added to the planning world as collision obstacles.
+        # The target object is its own grasp's obstacle, and at the folded
+        # camera-over-desk observation pose an arm link can sit inside a detection's
+        # (inflated) box — both produce COLLISION_AT_START and abort the pick. The
+        # grasp poses are already captured above, and the obstacle monitor only
+        # re-adds on an explicit scan (not continuously), so dropping the perception
+        # obstacles here lets the approach plan and holds for the rest of the pick.
+        # (This is the documented COLLISION_AT_START recovery, applied automatically.)
+        self.clear_perception_obstacles()
+
         # Lift if EE is low before approaching
         lift = self._lift_if_low(rname)
         if not lift.is_success():
