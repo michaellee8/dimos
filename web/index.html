@@ -3,11 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DimOS Teleop</title>
+    <title>DIMENSIONAL // TELEOP</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
-        // DimOS palette (sourced from dimensionalos.com Framer tokens):
-        // bg #181919, deep #151515, fg #fff, accent #b0e1f0 (pale desaturated cyan).
+        // DIMENSIONAL terminal palette (dimensionalos.com/prototype):
+        // bg #0d0e0e/#151515, faint grid, fg #fff, accent #b0e1f0 (pale cyan).
         tailwind.config = {
             theme: { extend: { colors: {
                 // Pale cyan accent — same hue across the scale so hover/active
@@ -15,21 +18,32 @@
                 dim: { 50:'#eaf6fb', 100:'#d4ecf5', 400:'#c4e7f3', 500:'#b0e1f0',
                        600:'#8fcfe2', 700:'#6db8cf', 900:'#3d6a7a' },
                 // Dark backgrounds matching the site (replaces Tailwind grays).
-                bg: { 900:'#181919', 950:'#151515' },
+                bg: { 900:'#0d0e0e', 950:'#121313' },
             }}}
         }
     </script>
     <style>
-        body { font-family: 'Inter', system-ui, sans-serif; }
+        body {
+            font-family: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', monospace;
+            /* faint terminal grid, matching dimensionalos.com/prototype */
+            background-color: #0d0e0e;
+            background-image:
+                linear-gradient(rgba(176, 225, 240, 0.035) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(176, 225, 240, 0.035) 1px, transparent 1px);
+            background-size: 28px 28px;
+        }
         .fade-in { animation: fadeIn 0.3s ease-in; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-        .key-reveal { font-family: 'JetBrains Mono', monospace; word-break: break-all; }
+        .key-reveal { word-break: break-all; }
         #canvas { display: none; position: absolute; inset: 0; width: 100%; height: 100%; }
+        /* CRT glow for the wordmark */
+        .crt-glow { filter: drop-shadow(0 0 6px rgba(176, 225, 240, 0.45)) drop-shadow(0 0 22px rgba(176, 225, 240, 0.18)); }
+        .term-caps { text-transform: uppercase; letter-spacing: 0.12em; }
         .kb-key {
             width: 56px; height: 56px;
             display: flex; align-items: center; justify-content: center;
-            background: #151515; border: 1px solid #2a2a2a;
-            border-radius: 8px; font-family: monospace; font-weight: 600;
+            background: #121313; border: 1px solid #2a2a2a;
+            border-radius: 4px; font-weight: 600;
             color: #d1d5db;
             user-select: none;
             /* Tappable on touch: no scroll/zoom hijack, no tap-highlight flash. */
@@ -40,7 +54,7 @@
         .kb-key.wide { width: 96px; font-size: 0.85rem; }
         .kb-key.pressed {
             background: #b0e1f0; border-color: #8fcfe2;
-            color: #151515;  /* dark text on pale cyan (white is unreadable) */
+            color: #121313;  /* dark text on pale cyan (white is unreadable) */
         }
     </style>
 </head>

@@ -28,33 +28,27 @@ export function renderAuth(c) {
 
 function shell(inner) {
     return `
-    <div class="min-h-screen flex items-center justify-center p-4"
-         style="background:
-            radial-gradient(ellipse 80% 50% at 50% -20%, rgba(176,225,240,0.06), transparent),
-            linear-gradient(#181919, #151515)">
+    <div class="min-h-screen flex flex-col items-center justify-center p-4">
         <div class="w-full max-w-md fade-in">
-            <div class="text-center mb-8 select-none">
-                <div class="inline-flex items-center gap-3 mb-3">
-                    <svg width="36" height="36" viewBox="0 0 36 36" fill="none" aria-hidden="true">
-                        <rect x="2" y="2" width="32" height="32" rx="7" stroke="#b0e1f0" stroke-width="2.5"/>
-                        <circle cx="18" cy="18" r="6" fill="#b0e1f0"/>
-                    </svg>
-                    <span class="text-2xl font-semibold tracking-[0.18em] text-white">DIMENSIONAL</span>
-                </div>
-                <p class="text-dim-500 text-sm font-medium tracking-[0.3em] uppercase">Teleop</p>
+            <div class="text-center mb-10 select-none">
+                <img src="assets/dimensional-logo.png" alt="DIMENSIONAL" draggable="false"
+                     class="crt-glow mx-auto mb-4 w-full max-w-[340px]">
+                <p class="term-caps text-dim-500 text-xs">Teleop console — operator access</p>
             </div>
-            <div class="bg-bg-950 border border-[#2a2a2a] rounded-xl p-6 shadow-xl">
+            <div class="bg-bg-950/90 border border-[#2a2a2a] p-6 shadow-xl">
                 ${inner}
             </div>
-            <p class="text-center text-gray-500 text-sm mt-6">
-                Powered by <a href="https://dimensionalos.com" class="text-dim-500 hover:text-dim-400">DimensionalOS</a>
-            </p>
+            <div class="term-caps text-center text-gray-600 text-[10px] leading-relaxed mt-8">
+                <p>© 2026 Dimensional Inc. All rights reserved.</p>
+                <p>This interface is part of the <a href="https://dimensionalos.com" class="text-dim-700 hover:text-dim-500">Dimensional operating system</a>.</p>
+                <p>Unauthorized duplication, transmission, or interdimensional transfer is highly prohibited.</p>
+            </div>
         </div>
     </div>`;
 }
 
-const inputCls = 'w-full px-4 py-2.5 bg-[#1f1f1f] border border-[#2a2a2a] rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-dim-400';
-const buttonCls = 'w-full py-2.5 bg-dim-500 hover:bg-dim-600 text-bg-950 font-medium rounded-lg transition-colors';
+const inputCls = 'w-full px-4 py-2.5 bg-[#0d0e0e] border border-[#2a2a2a] text-white placeholder-gray-600 text-sm focus:outline-none focus:border-dim-500 focus:ring-1 focus:ring-dim-500';
+const buttonCls = 'term-caps w-full py-2.5 bg-dim-500 hover:bg-dim-400 text-bg-950 text-sm font-bold transition-colors';
 
 function showError(msg) {
     const el = document.getElementById('auth-error');
@@ -67,19 +61,19 @@ function showError(msg) {
 function renderLoginRegister(c) {
     const isLogin = mode === 'login';
     c.innerHTML = shell(`
-        <div class="flex mb-6 bg-[#1f1f1f] rounded-lg p-1">
-            <button id="tab-login" class="flex-1 py-2 px-4 rounded-md text-sm font-medium"></button>
-            <button id="tab-register" class="flex-1 py-2 px-4 rounded-md text-sm font-medium"></button>
+        <div class="flex mb-6 border border-[#2a2a2a] p-1 gap-1">
+            <button id="tab-login" class="flex-1 py-2 px-4"></button>
+            <button id="tab-register" class="flex-1 py-2 px-4"></button>
         </div>
         <form id="auth-form">
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Email</label>
+                    <label class="term-caps block text-xs text-gray-400 mb-1.5">Email</label>
                     <input id="email" type="email" required value="${escHtml(state.userEmail)}"
                         class="${inputCls}" placeholder="you@company.com">
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Password</label>
+                    <label class="term-caps block text-xs text-gray-400 mb-1.5">Password</label>
                     <input id="password" type="password" required minlength="8"
                         autocomplete="${isLogin ? 'current-password' : 'new-password'}"
                         class="${inputCls}" placeholder="••••••••">
@@ -87,9 +81,9 @@ function renderLoginRegister(c) {
                 </div>
                 <div id="auth-error" class="text-red-400 text-sm hidden"></div>
                 <button type="submit" class="${buttonCls}">
-                    <span id="auth-btn-text">${isLogin ? 'Log In' : 'Create Account'}</span>
+                    <span id="auth-btn-text">${isLogin ? '[ LOG IN ]' : '[ CREATE ACCOUNT ]'}</span>
                 </button>
-                ${isLogin ? '<button type="button" id="forgot-link" class="w-full text-sm text-gray-500 hover:text-dim-400">Forgot password?</button>' : ''}
+                ${isLogin ? '<button type="button" id="forgot-link" class="term-caps w-full text-xs text-gray-500 hover:text-dim-400">Forgot password?</button>' : ''}
             </div>
         </form>`);
 
@@ -106,8 +100,8 @@ function renderLoginRegister(c) {
 }
 
 function styleTabs() {
-    const active = 'flex-1 py-2 px-4 rounded-md text-sm font-medium bg-dim-500 text-bg-950';
-    const inactive = 'flex-1 py-2 px-4 rounded-md text-sm font-medium text-gray-400 hover:text-white';
+    const active = 'term-caps flex-1 py-2 px-4 text-xs font-bold bg-dim-500 text-bg-950';
+    const inactive = 'term-caps flex-1 py-2 px-4 text-xs text-gray-500 hover:text-white';
     document.getElementById('tab-login').className = mode === 'login' ? active : inactive;
     document.getElementById('tab-register').className = mode === 'register' ? active : inactive;
     document.getElementById('tab-login').textContent = 'Log In';
@@ -120,7 +114,7 @@ async function handleAuth(e, c) {
     const password = document.getElementById('password').value;
     const btn = document.getElementById('auth-btn-text');
     document.getElementById('auth-error').classList.add('hidden');
-    btn.textContent = mode === 'login' ? 'Logging in…' : 'Creating account…';
+    btn.textContent = mode === 'login' ? '[ LOGGING IN… ]' : '[ CREATING ACCOUNT… ]';
     try {
         if (mode === 'login') {
             await doLogin(email, password);
@@ -145,7 +139,7 @@ async function handleAuth(e, c) {
             renderAuth(c);
             return;
         }
-        btn.textContent = mode === 'login' ? 'Log In' : 'Create Account';
+        btn.textContent = mode === 'login' ? '[ LOG IN ]' : '[ CREATE ACCOUNT ]';
         showError(err.message);
     }
 }
@@ -162,21 +156,21 @@ async function doLogin(email, password) {
 
 function renderConfirm(c) {
     c.innerHTML = shell(`
-        <h2 class="text-lg font-semibold text-white mb-1">Check your email</h2>
+        <h2 class="term-caps text-sm font-bold text-dim-500 mb-1">// Check your email</h2>
         <p class="text-gray-400 text-sm mb-6">We sent a verification code to
             <span class="text-white">${escHtml(pendingEmail)}</span></p>
         <form id="confirm-form">
             <div class="space-y-4">
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Verification code</label>
+                    <label class="term-caps block text-xs text-gray-400 mb-1.5">Verification code</label>
                     <input id="code" inputmode="numeric" autocomplete="one-time-code" required
                         class="${inputCls} tracking-[0.5em] text-center" placeholder="······">
                 </div>
                 <div id="auth-error" class="text-red-400 text-sm hidden"></div>
-                <button type="submit" class="${buttonCls}"><span id="auth-btn-text">Verify</span></button>
-                <div class="flex justify-between text-sm">
-                    <button type="button" id="resend" class="text-gray-500 hover:text-dim-400">Resend code</button>
-                    <button type="button" id="back" class="text-gray-500 hover:text-dim-400">Back to login</button>
+                <button type="submit" class="${buttonCls}"><span id="auth-btn-text">[ VERIFY ]</span></button>
+                <div class="flex justify-between">
+                    <button type="button" id="resend" class="term-caps text-xs text-gray-500 hover:text-dim-400">Resend code</button>
+                    <button type="button" id="back" class="term-caps text-xs text-gray-500 hover:text-dim-400">Back to login</button>
                 </div>
             </div>
         </form>`);
@@ -189,7 +183,7 @@ function renderConfirm(c) {
     document.getElementById('confirm-form').onsubmit = async (e) => {
         e.preventDefault();
         const btn = document.getElementById('auth-btn-text');
-        btn.textContent = 'Verifying…';
+        btn.textContent = '[ VERIFYING… ]';
         try {
             await confirmSignUp(pendingEmail, document.getElementById('code').value.trim());
             if (pendingPassword) {
@@ -199,7 +193,7 @@ function renderConfirm(c) {
                 renderAuth(c);
             }
         } catch (err) {
-            btn.textContent = 'Verify';
+            btn.textContent = '[ VERIFY ]';
             showError(err.message);
         }
     };
@@ -210,7 +204,7 @@ function renderConfirm(c) {
 function renderForgot(c) {
     const codeSent = mode === 'forgot-confirm';
     c.innerHTML = shell(`
-        <h2 class="text-lg font-semibold text-white mb-1">Reset password</h2>
+        <h2 class="term-caps text-sm font-bold text-dim-500 mb-1">// Reset password</h2>
         <p class="text-gray-400 text-sm mb-6">${codeSent
             ? `Enter the code sent to <span class="text-white">${escHtml(pendingEmail)}</span> and pick a new password.`
             : "We'll email you a reset code."}</p>
@@ -218,25 +212,25 @@ function renderForgot(c) {
             <div class="space-y-4">
                 ${codeSent ? `
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Reset code</label>
+                    <label class="term-caps block text-xs text-gray-400 mb-1.5">Reset code</label>
                     <input id="code" inputmode="numeric" autocomplete="one-time-code" required
                         class="${inputCls} tracking-[0.5em] text-center" placeholder="······">
                 </div>
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-1">New password</label>
+                    <label class="term-caps block text-xs text-gray-400 mb-1.5">New password</label>
                     <input id="new-password" type="password" required minlength="8"
                         autocomplete="new-password" class="${inputCls}" placeholder="••••••••">
                 </div>` : `
                 <div>
-                    <label class="block text-sm font-medium text-gray-300 mb-1">Email</label>
+                    <label class="term-caps block text-xs text-gray-400 mb-1.5">Email</label>
                     <input id="email" type="email" required value="${escHtml(pendingEmail)}"
                         class="${inputCls}" placeholder="you@company.com">
                 </div>`}
                 <div id="auth-error" class="text-red-400 text-sm hidden"></div>
                 <button type="submit" class="${buttonCls}">
-                    <span id="auth-btn-text">${codeSent ? 'Set New Password' : 'Send Reset Code'}</span>
+                    <span id="auth-btn-text">${codeSent ? '[ SET NEW PASSWORD ]' : '[ SEND RESET CODE ]'}</span>
                 </button>
-                <button type="button" id="back" class="w-full text-sm text-gray-500 hover:text-dim-400">Back to login</button>
+                <button type="button" id="back" class="term-caps w-full text-xs text-gray-500 hover:text-dim-400">Back to login</button>
             </div>
         </form>`);
 
@@ -247,19 +241,19 @@ function renderForgot(c) {
         try {
             if (!codeSent) {
                 pendingEmail = document.getElementById('email').value.trim();
-                btn.textContent = 'Sending…';
+                btn.textContent = '[ SENDING… ]';
                 await forgotPassword(pendingEmail);
                 mode = 'forgot-confirm';
                 renderAuth(c);
             } else {
-                btn.textContent = 'Saving…';
+                btn.textContent = '[ SAVING… ]';
                 const code = document.getElementById('code').value.trim();
                 const password = document.getElementById('new-password').value;
                 await confirmForgotPassword(pendingEmail, code, password);
                 await doLogin(pendingEmail, password);
             }
         } catch (err) {
-            btn.textContent = codeSent ? 'Set New Password' : 'Send Reset Code';
+            btn.textContent = codeSent ? '[ SET NEW PASSWORD ]' : '[ SEND RESET CODE ]';
             showError(err.message);
         }
     };

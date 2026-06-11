@@ -9,11 +9,11 @@ export async function renderDashboard(c) {
     <div class="max-w-4xl mx-auto p-6 fade-in">
         <header class="flex items-center justify-between mb-8">
             <div>
-                <h1 class="text-2xl font-bold text-white">Dashboard</h1>
-                <p class="text-gray-400 text-sm">${escHtml(state.userEmail)}</p>
+                <img src="assets/dimensional-logo.png" alt="DIMENSIONAL" draggable="false" class="crt-glow h-5 mb-2 select-none">
+                <p class="term-caps text-gray-500 text-xs">Operator: <span class="text-gray-300">${escHtml(state.userEmail)}</span></p>
             </div>
-            <button id="logoutBtn" class="px-4 py-2 text-sm text-gray-400 hover:text-white border border-[#2a2a2a] rounded-lg hover:border-[#3a3a3a] transition-colors">
-                Log Out
+            <button id="logoutBtn" class="term-caps px-4 py-2 text-xs text-gray-400 hover:text-white border border-[#2a2a2a] hover:border-dim-700 transition-colors">
+                [ Log Out ]
             </button>
         </header>
 
