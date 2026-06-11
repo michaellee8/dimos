@@ -201,87 +201,108 @@ coordinator_flowbase_keyboard_teleop = autoconnect(
 
 _flowbase_mid360_mount = Pose(0.20, -0.20, 0.10, *Quaternion.from_euler(Vector3(0, 0, 0)))
 
-coordinator_flowbase_nav = (
-    autoconnect(
-        FastLio2.blueprint(
-            host_ip=os.getenv("LIDAR_HOST_IP", "192.168.1.5"),
-            lidar_ip=os.getenv("LIDAR_IP", "192.168.1.189"),
-            mount=_flowbase_mid360_mount,
-            map_freq=1.0,
-            config="default.yaml",
-        ),
-        create_nav_stack(
-            planner="simple",
-            record=True,
-            nav_record={
-                "db_path": os.path.join(
-                    os.environ.get("DIMOS_RUN_LOG_DIR", "."), "nav_recording.db"
-                )
-            },
-            vehicle_height=0.5,  # FlowBase platform clearance — tune if needed
-            max_speed=0.8,  # conservative starting point
-            terrain_analysis={
-                # MID-360 is mounted ~10cm above base (close to floor); G1 has it at ~1.2m.
-                # Looser thresholds avoid classifying floor noise as obstacles.
-                "obstacle_height_threshold": 0.15,
-                "ground_height_threshold": 0.10,
-                "sensor_range": 20,
-            },
-            local_planner={
-                # Reusing G1's precomputed paths until FlowBase-specific ones exist.
-                "paths_dir": str(G1_LOCAL_PLANNER_PRECOMPUTED_PATHS),
-                "publish_free_paths": False,
-            },
-            simple_planner={
-                "cell_size": 0.2,
-                "obstacle_height_threshold": 0.15,
-                "inflation_radius": 0.3,  # FlowBase footprint smaller than G1's 0.5
-                "lookahead_distance": 2.0,
-                "replan_rate": 5.0,
-                "replan_cooldown": 2.0,
-            },
-        ),
-        # MovementManager: subscribes clicked_point + nav_cmd_vel + tele_cmd_vel,
-        # publishes muxed cmd_vel + goal (+ way_point, disconnected below).
-        MovementManager.blueprint(),
-        # FlowBase driver: ControlCoordinator with the existing JointVelocityTask
-        # passthrough; receives Twist from MovementManager on LCM /cmd_vel.
-        ControlCoordinator.blueprint(
-            hardware=[_flowbase_twist_base()],
-            tasks=[
-                TaskConfig(
-                    name="vel_base",
-                    type="velocity",
-                    joint_names=_base_joints,
-                    priority=10,
-                ),
-            ],
-        ),
-        RerunBridgeModule.blueprint(
-            **nav_stack_rerun_config({"memory_limit": "1GB"}, vis_throttle=0.5),
-            rerun_open="native",
-        ),
-        RerunWebSocketServer.blueprint(),
+# Global-planner lookahead for the FlowBase nav stack. The proven base nav uses
+# SimplePlanner lookahead_distance=2.0 — it aims ~2 m ahead and cuts curves (the
+# same pure-pursuit chord effect the follower benchmark found). The benchmark
+# lookahead sweep showed a shorter lookahead tracks tight curves far better, so
+# the `-nav-tuned` blueprint drops it while keeping the SAME working stack.
+# Sweep per run via -o <simpleplanner>.lookahead_distance=<x>.
+_FLOWBASE_NAV_LOOKAHEAD = 1.0
+
+
+def _make_flowbase_nav(lookahead_distance: float, *, record_db: str = "nav_recording.db"):
+    """FlowBase MID-360 + FastLio2 SLAM + terrain-aware simple nav stack with
+    click-to-drive in Rerun. ``lookahead_distance`` tunes the SimplePlanner's
+    curve-cut (proven base value = 2.0). Records planned path + odometry so runs
+    can be CTE-scored against the Phase-0 baseline (20260603-164011)."""
+    return (
+        autoconnect(
+            FastLio2.blueprint(
+                host_ip=os.getenv("LIDAR_HOST_IP", "192.168.1.5"),
+                lidar_ip=os.getenv("LIDAR_IP", "192.168.1.189"),
+                mount=_flowbase_mid360_mount,
+                map_freq=1.0,
+                config="default.yaml",
+            ),
+            create_nav_stack(
+                planner="simple",
+                record=True,
+                nav_record={
+                    "db_path": os.path.join(
+                        os.environ.get("DIMOS_RUN_LOG_DIR", "."), record_db
+                    )
+                },
+                vehicle_height=0.5,  # FlowBase platform clearance — tune if needed
+                max_speed=0.8,  # conservative starting point
+                terrain_analysis={
+                    # MID-360 is mounted ~10cm above base (close to floor); G1 has it at ~1.2m.
+                    # Looser thresholds avoid classifying floor noise as obstacles.
+                    "obstacle_height_threshold": 0.15,
+                    "ground_height_threshold": 0.10,
+                    "sensor_range": 20,
+                },
+                local_planner={
+                    # Reusing G1's precomputed paths until FlowBase-specific ones exist.
+                    "paths_dir": str(G1_LOCAL_PLANNER_PRECOMPUTED_PATHS),
+                    "publish_free_paths": False,
+                },
+                simple_planner={
+                    "cell_size": 0.2,
+                    "obstacle_height_threshold": 0.15,
+                    "inflation_radius": 0.3,  # FlowBase footprint smaller than G1's 0.5
+                    "lookahead_distance": lookahead_distance,
+                    "replan_rate": 5.0,
+                    "replan_cooldown": 2.0,
+                },
+            ),
+            # MovementManager: subscribes clicked_point + nav_cmd_vel + tele_cmd_vel,
+            # publishes muxed cmd_vel + goal (+ way_point, disconnected below).
+            MovementManager.blueprint(),
+            # FlowBase driver: ControlCoordinator with the existing JointVelocityTask
+            # passthrough; receives Twist from MovementManager on LCM /cmd_vel.
+            ControlCoordinator.blueprint(
+                hardware=[_flowbase_twist_base()],
+                tasks=[
+                    TaskConfig(
+                        name="vel_base",
+                        type="velocity",
+                        joint_names=_base_joints,
+                        priority=10,
+                    ),
+                ],
+            ),
+            RerunBridgeModule.blueprint(
+                **nav_stack_rerun_config({"memory_limit": "1GB"}, vis_throttle=0.5),
+                rerun_open="native",
+            ),
+            RerunWebSocketServer.blueprint(),
+        )
+        .remappings(
+            [
+                (FastLio2, "lidar", "registered_scan"),
+                (FastLio2, "global_map", "global_map_fastlio"),
+                # SimplePlanner / FarPlanner owns way_point — disconnect MovementManager's
+                # redundant pass-through copy (matches unitree-g1-nav-onboard).
+                (MovementManager, "way_point", "_mgr_way_point_unused"),
+            ]
+        )
+        .transports(
+            {
+                # MovementManager.cmd_vel publishes to LCM /cmd_vel by default; the
+                # coordinator's twist_command listens on the same topic.
+                ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
+                ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+            }
+        )
+        .global_config(n_workers=8)
     )
-    .remappings(
-        [
-            (FastLio2, "lidar", "registered_scan"),
-            (FastLio2, "global_map", "global_map_fastlio"),
-            # SimplePlanner / FarPlanner owns way_point — disconnect MovementManager's
-            # redundant pass-through copy (matches unitree-g1-nav-onboard).
-            (MovementManager, "way_point", "_mgr_way_point_unused"),
-        ]
-    )
-    .transports(
-        {
-            # MovementManager.cmd_vel publishes to LCM /cmd_vel by default; the
-            # coordinator's twist_command listens on the same topic.
-            ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        }
-    )
-    .global_config(n_workers=8)
-)
+
+
+# Proven click-to-go nav (produced the Phase-0 baseline 20260603-164011).
+coordinator_flowbase_nav = _make_flowbase_nav(2.0)
+# SAME stack, shorter global-planner lookahead → tighter curve tracking, for an
+# apples-to-apples click-to-go comparison vs the baseline.
+coordinator_flowbase_nav_tuned = _make_flowbase_nav(_FLOWBASE_NAV_LOOKAHEAD)
 
 
 # Mock arm (7-DOF) + mock holonomic base (3-DOF)
@@ -632,6 +653,7 @@ __all__ = [
     "coordinator_flowbase_benchmark",
     "coordinator_flowbase_keyboard_teleop",
     "coordinator_flowbase_nav",
+    "coordinator_flowbase_nav_tuned",
     "coordinator_flowbase_precision_nav",
     "coordinator_mobile_manip_mock",
     "coordinator_mock_twist_base",
