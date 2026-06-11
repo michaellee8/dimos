@@ -13,5 +13,5 @@
 # limitations under the License.
 
 TASK_FACTORIES = {
-    "g1_groot_wbc": "dimos.control.tasks.g1_groot_wbc_task:create_task",
+    "g1_groot_wbc": "dimos.control.tasks.g1_groot_wbc_task.g1_groot_wbc_task:create_task",
 }

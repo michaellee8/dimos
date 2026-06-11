@@ -55,6 +55,7 @@ logger = setup_logger()
 
 # Step hook signature: called with the engine instance inside the sim thread.
 StepHook = Callable[["MujocoEngine"], None]
+_MJJNT_FREE = int(mujoco.mjtJoint.mjJNT_FREE)
 _MUJOCO_FROM_BINARY_PATH = "from_binary_path"
 _RESET_WAIT_TIMEOUT_S = 5.0
 _RENDERER_GEOM_HEADROOM = 1024
@@ -138,6 +139,7 @@ class MujocoEngine(SimulationEngine):
             self._model = model
             self._xml_path = None
         else:
+            assert config_path is not None
             xml_path = self._resolve_xml_path(config_path)
             self._model = self._load_model(xml_path, meshdir=meshdir, assets=assets)
             self._xml_path = xml_path
@@ -165,9 +167,8 @@ class MujocoEngine(SimulationEngine):
             self._root_free_qpos_adr = self._robot_binding.root_qpos_adr
             self._root_free_qvel_adr = self._robot_binding.root_qvel_adr
         else:
-            free_joint = int(mujoco.mjtJoint.mjJNT_FREE)  # type: ignore[attr-defined]
             for joint_id in range(self._model.njnt):
-                if self._model.jnt_type[joint_id] == free_joint:
+                if self._model.jnt_type[joint_id] == _MJJNT_FREE:
                     self._root_free_qpos_adr = int(self._model.jnt_qposadr[joint_id])
                     self._root_free_qvel_adr = int(self._model.jnt_dofadr[joint_id])
                     break
@@ -979,9 +980,7 @@ def engine_main(
 
     imu_gyro_slice = _find_sensor_slice_inline(engine.model, imu_gyro_sensor_names)
     imu_accel_slice = _find_sensor_slice_inline(engine.model, imu_accel_sensor_names)
-    has_freejoint = bool(
-        engine.model.njnt > 0 and int(engine.model.jnt_type[0]) == int(mujoco.mjtJoint.mjJNT_FREE)
-    )
+    has_freejoint = bool(engine.model.njnt > 0 and int(engine.model.jnt_type[0]) == _MJJNT_FREE)
     hooks = WholeBodySimHooks(shm, dof=dof)
 
     odom_tx: LCMTransport[PoseStamped] = LCMTransport(odom_topic, PoseStamped)

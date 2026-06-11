@@ -39,7 +39,13 @@ class MjvOption:
     def __init__(self) -> None: ...
 
 class Renderer:
-    def __init__(self, model: MjModel, height: int = ..., width: int = ...) -> None: ...
+    def __init__(
+        self,
+        model: MjModel,
+        height: int = ...,
+        width: int = ...,
+        max_geom: int | None = ...,
+    ) -> None: ...
     def update_scene(
         self,
         data: MjData,
@@ -54,7 +60,18 @@ class Renderer:
 
 def mj_forward(model: MjModel, data: MjData) -> None: ...
 def mj_step(model: MjModel, data: MjData, nstep: int = ...) -> None: ...
+def mj_resetData(model: MjModel, data: MjData) -> None: ...
 def mj_resetDataKeyframe(model: MjModel, data: MjData, key: int) -> None: ...
+def mj_ray(
+    model: MjModel,
+    data: MjData,
+    pnt: NDArray[np.float64],
+    vec: NDArray[np.float64],
+    geomgroup: Any | None,
+    flg_static: int,
+    bodyexclude: int,
+    geomid: NDArray[np.int32],
+) -> float: ...
 def mj_name2id(model: MjModel, type: int, name: str | None) -> int: ...
 def mj_id2name(model: MjModel, type: int, id: int) -> str | None: ...
 def set_mjcb_control(
@@ -68,9 +85,11 @@ class mjtObj:
     mjOBJ_BODY: int
     mjOBJ_CAMERA: int
     mjOBJ_JOINT: int
+    mjOBJ_SENSOR: int
     mjOBJ_TENDON: int
 
 class mjtJoint:
+    mjJNT_FREE: int
     mjJNT_HINGE: int
     mjJNT_SLIDE: int
 

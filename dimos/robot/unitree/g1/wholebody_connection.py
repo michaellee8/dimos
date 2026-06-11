@@ -52,11 +52,9 @@ logger = setup_logger()
 
 _NUM_MOTORS = 29
 _NUM_MOTOR_SLOTS = 35  # G1 hg LowCmd has 35 slots; only 29 are used
-# mode_machine is a static value identifying the G1 firmware/hardware
-# variant.  Older code read it back from the first LowState frame and
-# echoed it into LowCmd; that callback path is unreliable on macOS
-# cyclonedds, and the value never changes for a given robot, so we
-# hardcode it.  29-DOF G1 (gear) reports 5.
+# Default mode_machine for the 29-DOF G1 gear variant. Users can override
+# G1WholeBodyConnectionConfig.mode_machine for other firmware/hardware
+# variants.
 _MODE_MACHINE_G1: int = 5
 
 # Joint names sourced from the canonical helper. Order matches the motor index
@@ -86,6 +84,7 @@ class G1WholeBodyConnectionConfig(ModuleConfig):
     release_sport_mode: bool = True
     publish_rate_hz: float = 500.0
     frame_id: str = "g1_pelvis"
+    mode_machine: int = _MODE_MACHINE_G1
 
 
 class G1WholeBodyConnection(Module):
@@ -114,10 +113,9 @@ class G1WholeBodyConnection(Module):
         self._low_cmd: LowCmd_ | None = None
         self._low_state: LowState_ | None = None
         self._crc: CRC | None = None
-        # mode_machine: hardcoded at start() to the static value for the
-        # 29-DOF G1.  We log a one-shot warning if the first LowState we
-        # read disagrees — that's the early signal of firmware drift on a
-        # variant that needs a different value.
+        # mode_machine: resolved from config at start(). We log a one-shot
+        # warning if the first LowState disagrees, which is the early signal
+        # that this robot variant needs a different configured value.
         self._mode_machine: int | None = None
         self._mode_machine_verified: bool = False
         # Guards _low_cmd / _low_state / _mode_machine across DDS, publish, and LCM threads.
@@ -163,8 +161,7 @@ class G1WholeBodyConnection(Module):
         # POS_STOP/VEL_STOP + zero gains so the robot can't twitch pre-command.
         self._low_cmd = unitree_hg_msg_dds__LowCmd_()
         self._low_cmd.mode_pr = 0  # PR (pitch/roll) mode
-        # mode_machine is a static value (see comment above the constant).
-        self._mode_machine = _MODE_MACHINE_G1
+        self._mode_machine = int(self.config.mode_machine)
         self._low_cmd.mode_machine = self._mode_machine
         for i in range(_NUM_MOTOR_SLOTS):
             self._low_cmd.motor_cmd[i].mode = 0x01  # enable
@@ -257,20 +254,22 @@ class G1WholeBodyConnection(Module):
         self._verify_mode_machine_once(fresh)
 
     def _verify_mode_machine_once(self, sample: object) -> None:
-        """One-shot sanity check: log if the hardcoded mode_machine
-        doesn't match what the firmware reports. Commands with a
-        wrong mode_machine are silently rejected, so this prevents
-        a confusing "everything looks fine but the robot doesn't
-        move" failure mode on G1 variants we haven't tested."""
+        """Warn if configured mode_machine differs from the firmware report.
+
+        Commands with a wrong mode_machine are silently rejected, so this
+        prevents a confusing "everything looks fine but the robot doesn't
+        move" failure mode on G1 variants we haven't tested.
+        """
         if self._mode_machine_verified:
             return
         self._mode_machine_verified = True
         actual = int(getattr(sample, "mode_machine", -1))
         if actual != self._mode_machine:
             logger.warning(
-                f"mode_machine mismatch: hardcoded {self._mode_machine}, "
+                f"mode_machine mismatch: configured {self._mode_machine}, "
                 f"robot reports {actual}.  Commands may be silently rejected "
-                f"by firmware — set _MODE_MACHINE_G1 to {actual} for this variant."
+                f"by firmware — set G1WholeBodyConnectionConfig.mode_machine "
+                f"to {actual} for this variant."
             )
 
     def _snapshot_motor_imu(self) -> G1LowStateSnapshot | None:
@@ -357,7 +356,7 @@ class G1WholeBodyConnection(Module):
                 # Pre-start or post-stop — drop silently.
                 return
 
-            # Echo mode_machine from the latest LowState — required by G1 firmware.
+            # G1 firmware requires mode_machine on every LowCmd frame.
             self._low_cmd.mode_machine = self._mode_machine
 
             for i in range(_NUM_MOTORS):
