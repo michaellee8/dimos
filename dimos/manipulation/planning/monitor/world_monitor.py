@@ -211,6 +211,26 @@ class WorldMonitor:
 
             logger.error(traceback.format_exc())
 
+    def on_entity_state_batch(self, msg: Any) -> None:
+        """Push scene-entity poses into the planning world.
+
+        Accepts a pimsim ``EntityStateBatch`` (``entries`` of
+        ``(EntityDescriptor, Pose)``) — the same authority-agnostic wire
+        format the simulators and the rust lidar consume, so planning sees
+        live entity poses whether MuJoCo, Havok, or (eventually) perception
+        owns physics. No-op on backends without entity support (Drake).
+        """
+        sync = getattr(self._world, "sync_entity_poses", None)
+        if sync is None:
+            return
+        try:
+            poses = {descriptor.entity_id: pose for descriptor, pose in getattr(msg, "entries", [])}
+        except (TypeError, ValueError, AttributeError) as e:
+            logger.warning(f"[WorldMonitor] Bad entity state batch: {e}")
+            return
+        if poses:
+            sync(poses)
+
     def on_collision_object(self, msg: CollisionObjectMessage) -> None:
         """Handle collision object message."""
         if self._obstacle_monitor is not None:

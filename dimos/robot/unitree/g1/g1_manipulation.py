@@ -12,14 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""G1-aware ManipulationModule that keeps Drake's pelvis aligned with /odom.
+"""G1-aware ManipulationModule that keeps the planning world's pelvis on /odom.
 
-The G1 catalog uses ``weld_base=False`` so Drake treats the pelvis as a
-6-DOF floating body.  Before each Cartesian plan we push the latest
-``/odom`` pose into Drake via ``WorldSpec.set_floating_base_pose`` —
-that way Drake's world frame matches MuJoCo's world frame and the
-parent ``move_to_pose`` / ``pick`` / ``refresh_obstacles`` paths can use
-world coordinates throughout (no per-skill frame conversions).
+The G1 catalog uses ``weld_base=False`` so the planning world (Drake or
+MuJoCo backend) treats the pelvis as a floating body.  Before each
+Cartesian plan we push the latest ``/odom`` pose into the world via
+``set_floating_base_pose`` — that way the planning world frame matches
+the simulator's world frame and the parent ``move_to_pose`` / ``pick`` /
+``refresh_obstacles`` paths can use world coordinates throughout (no
+per-skill frame conversions).
 """
 
 from __future__ import annotations
@@ -46,13 +47,13 @@ logger = setup_logger()
 
 
 class G1ManipulationModule(PickAndPlaceModule):
-    """PickAndPlaceModule that syncs Drake's floating-base pelvis to /odom.
+    """PickAndPlaceModule that syncs the planning world's pelvis to /odom.
 
     All Cartesian skills inherited from PickAndPlaceModule (move_to_pose,
     pick, place, drop_on, refresh_obstacles, look, scan_objects, …) work
-    unmodified — they all consume world-frame coordinates and Drake's
-    plant has the pelvis welded at the live /odom pose for the duration
-    of each plan.
+    unmodified — they all consume world-frame coordinates and the planning
+    world (Drake or MuJoCo backend) has the pelvis at the live /odom pose
+    for the duration of each plan.
     """
 
     odom: In[PoseStamped]

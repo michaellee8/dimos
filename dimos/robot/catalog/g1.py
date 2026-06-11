@@ -45,6 +45,12 @@ from dimos.utils.data import LfsPath
 # ``package://unitree_g1/meshes/...`` resolve via ``package_paths``.
 _G1_URDF = LfsPath("g1_urdf/g1.urdf")
 _G1_PACKAGE_DIR = LfsPath("g1_urdf")
+# MJCF variant for the mujoco planning backend — the same model file the
+# simulator and the GR00T WBC stack use, so planning, sim, and control share
+# one kinematic source of truth. Joint and body names are identical to the
+# URDF's, so only the model path/meshes differ between backends.
+_G1_MJCF = LfsPath("mujoco_sim/g1_gear_wbc.xml")
+_G1_MJCF_MESHDIR = LfsPath("g1_urdf/meshes")
 
 # (URDF joint, dimos canonical joint) per arm.  The dimos names are
 # what ``make_humanoid_joints("g1")`` emits — we hand-mirror them
@@ -92,14 +98,17 @@ def _g1_arm(
     grasp_offset_xyz: tuple[float, float, float],
     side: str,
     task_priority: int = 20,
+    backend: str = "drake",
 ) -> G1ArmCatalogEntry:
     urdf_joints = [u for u, _ in pairs]
     coord_joints = [c for _, c in pairs]
     coord_to_urdf = {c: u for u, c in pairs}
+    use_mjcf = backend == "mujoco"
 
     rmc = RobotModelConfig(
         name=name,
-        model_path=_G1_URDF,
+        model_path=_G1_MJCF if use_mjcf else _G1_URDF,
+        model_meshdir=_G1_MJCF_MESHDIR if use_mjcf else None,
         joint_names=urdf_joints,
         end_effector_link=end_effector_link,
         grasp_offset_xyz=grasp_offset_xyz,
@@ -110,13 +119,14 @@ def _g1_arm(
         # transforms are needed at the IK / obstacle / EE-pose layers.
         base_link="pelvis",
         weld_base=False,
-        package_paths={"unitree_g1": _G1_PACKAGE_DIR},
+        package_paths={} if use_mjcf else {"unitree_g1": _G1_PACKAGE_DIR},
         joint_name_mapping=coord_to_urdf,
         coordinator_task_name=f"traj_{name}",
         # The G1 URDF references mesh files as .STL, which Drake's
         # collision pipeline rejects (MakeConvexHull only takes .obj /
-        # .vtk / .gltf).  auto-convert at parse time.
-        auto_convert_meshes=True,
+        # .vtk / .gltf).  auto-convert at parse time.  MuJoCo loads the
+        # STLs directly.
+        auto_convert_meshes=not use_mjcf,
         # Required by the schema even though weld_base=False ignores it.
         base_pose=PoseStamped(
             position=Vector3(0.0, 0.0, 0.0),
@@ -158,25 +168,31 @@ _LEFT_GRASP_CENTER_FROM_WRIST_YAW = (0.12, -0.05, 0.0)
 _RIGHT_GRASP_CENTER_FROM_WRIST_YAW = (0.12, 0.05, 0.0)
 
 
-def g1_left_arm(name: str = "left_arm") -> G1ArmCatalogEntry:
+def g1_left_arm(name: str = "left_arm", backend: str = "drake") -> G1ArmCatalogEntry:
     """Default name "left_arm" rather than "g1_left_arm" because LLMs reach
-    for the natural English name first when the user says "the left arm"."""
+    for the natural English name first when the user says "the left arm".
+
+    ``backend="mujoco"`` points the config at the G1 MJCF (the same file
+    the sim uses) for the MujocoWorld planning backend.
+    """
     return _g1_arm(
         name,
         _LEFT_ARM_JOINT_PAIRS,
         "left_wrist_yaw_link",
         grasp_offset_xyz=_LEFT_GRASP_CENTER_FROM_WRIST_YAW,
         side="left",
+        backend=backend,
     )
 
 
-def g1_right_arm(name: str = "right_arm") -> G1ArmCatalogEntry:
+def g1_right_arm(name: str = "right_arm", backend: str = "drake") -> G1ArmCatalogEntry:
     return _g1_arm(
         name,
         _RIGHT_ARM_JOINT_PAIRS,
         "right_wrist_yaw_link",
         grasp_offset_xyz=_RIGHT_GRASP_CENTER_FROM_WRIST_YAW,
         side="right",
+        backend=backend,
     )
 
 

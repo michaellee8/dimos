@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 
     from numpy.typing import NDArray
 
+    from dimos.msgs.geometry_msgs.Pose import Pose
     from dimos.simulation.scene_assets.spec import ScenePackage
 
 try:
@@ -114,8 +115,8 @@ class _ObstacleEntry:
     removed: bool = False
 
 
-def _pose_to_pos_quat(pose: PoseStamped) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-    """PoseStamped → (position (3,), quaternion wxyz (4,))."""
+def _pose_to_pos_quat(pose: Pose | PoseStamped) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Pose/PoseStamped → (position (3,), quaternion wxyz (4,))."""
     matrix = Transform(translation=pose.position, rotation=pose.orientation).to_matrix()
     quat = np.empty(4, dtype=np.float64)
     mujoco.mju_mat2Quat(quat, np.ascontiguousarray(matrix[:3, :3]).reshape(9))
@@ -561,7 +562,7 @@ class MujocoWorld(WorldSpec):
             self._live.qpos[adr + 3 : adr + 7] = quat
             self._refresh(self._live)
 
-    def sync_entity_poses(self, poses: dict[str, PoseStamped]) -> None:
+    def sync_entity_poses(self, poses: dict[str, Pose | PoseStamped]) -> None:
         """Write scene-entity poses into the live context (world frame).
 
         Fed from ``/entity_state_batch`` by the entity-state monitor; works
