@@ -1,5 +1,9 @@
 # Pure Modules
 
+> New here? Start with the
+> [gentle, runnable introduction](/docs/usage/pure_modules.md) — this page
+> is the reference.
+
 A `PureModule` separates a module into two declarations and one pure function:
 
 - **when it runs** — one input marked `tick()` fires the ticks;
