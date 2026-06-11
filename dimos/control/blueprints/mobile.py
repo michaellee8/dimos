@@ -51,6 +51,7 @@ from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.msgs.std_msgs.Int8 import Int8
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_stack.main import create_nav_stack, nav_stack_rerun_config
+from dimos.navigation.nav_stack.modules.nav_record.nav_record import NavRecord
 from dimos.navigation.odometry_to_pose_stamped import OdometryToPoseStamped
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.catalog.ufactory import xarm7 as _catalog_xarm7
@@ -491,6 +492,15 @@ coordinator_flowbase_precision_nav = (
             disable_movement=True,  # 0-9 e_max slider only; no WASD Twist
         ),
         vis_module(viewer_backend=global_config.viewer),
+        # Records planned `path` + actual `odometry` (+ cmd_vel) to SQLite so a
+        # click-to-goal run can be CTE-scored against the Phase-0 nav baseline
+        # (flowbase_baselines/20260603-164011). Mirrors coordinator_flowbase_nav's
+        # record=True. Override path with -o nav-record.db_path=<file>.
+        NavRecord.blueprint(
+            db_path=os.path.join(
+                os.environ.get("DIMOS_RUN_LOG_DIR", "."), "precision_nav_recording.db"
+            ),
+        ),
     )
     .remappings(
         [
@@ -500,6 +510,9 @@ coordinator_flowbase_precision_nav = (
             # OdometryToPoseStamped publishes the SLAM pose as `odom` so it
             # autoconnects to ReplanningAStarPlanner.odom and shares /flowbase/odom.
             (OdometryToPoseStamped, "pose", "odom"),
+            # NavRecord: skip recording the heavy voxel global_map (remap to an
+            # unbound name) — only path + odometry + cmd_vel are needed for CTE.
+            (NavRecord, "global_map", "global_map_pgo"),
         ]
     )
     .transports(
