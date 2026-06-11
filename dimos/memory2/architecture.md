@@ -32,6 +32,8 @@ Supporting Systems:
 | `transform.py` | Transformer ABC, FnTransformer, FnIterTransformer, QualityWindow  |
 | `buffer.py`    | Backpressure buffers for live mode (KeepLast, Bounded, Unbounded) |
 | `embed.py`     | EmbedImages / EmbedText transformers                              |
+| `tick.py`      | Tick assembly — samplers (tick/latest/interpolate/window) + TickMachine |
+| `puremodule.py`| PureModule — pure `step` over aligned inputs; live ports or offline `over()` ([docs](puremodule.md)) |
 
 ## Subpackages
 
