@@ -1,0 +1,341 @@
+{
+  "provenance": {
+    "robot_id": "flowbase",
+    "surface": "concrete",
+    "mode": "default",
+    "date": "2026-06-09",
+    "git_sha": "704a591f5",
+    "sim_or_hw": "hw",
+    "characterization_session_dir": "(real FlowBase, LCM SI)",
+    "methodology_version": 2
+  },
+  "plant": {
+    "vx": {
+      "K": 0.7782454689106355,
+      "tau": 0.28776056326299493,
+      "L": 0.010270092999917324
+    },
+    "vy": {
+      "K": 0.7734763551495183,
+      "tau": 0.26679420026185996,
+      "L": 0.032613373000003776
+    },
+    "wz": {
+      "K": 2.9291823396223085,
+      "tau": 0.6071671127717971,
+      "L": 0.017220615000042017
+    }
+  },
+  "feedforward": {
+    "K_vx": 1.2849416282497215,
+    "K_vy": 1.2928643433537061,
+    "K_wz": 0.34139219893321526,
+    "output_min_vx": -1.0,
+    "output_max_vx": 1.0,
+    "output_min_vy": -1.0,
+    "output_max_vy": 1.0,
+    "output_min_wz": -1.5,
+    "output_max_wz": 1.5
+  },
+  "velocity_profile": {
+    "max_linear_speed": 0.621380252831168,
+    "max_angular_speed": 1.02,
+    "max_centripetal_accel": 1.0,
+    "max_linear_accel": 2.1593655704074566,
+    "max_linear_decel": 4.318731140814913,
+    "min_speed": 0.05,
+    "lookahead_pts": 8
+  },
+  "recommended_controller": {
+    "name": "baseline",
+    "params": {
+      "k_angular": 0.5
+    },
+    "evidence": "Baseline P-controller, hardcoded. The Go2 base is FOPDT per axis; at a given speed the tracking error equals the plant floor (tau + L) * v, which no reactive control law can beat (~zero headroom over the floor \u2014 validated controller bake-off). The only effective lever is speed vs path curvature, which the derived velocity profile + feedforward already apply. See reports/tuning_README.md and the characterization findings (this evidence string cites the Go2 result; a different robot's headroom is TBD until characterized)."
+  },
+  "caveats": [
+    "Valid only for surface='concrete', mode='default', hw. Re-run characterization on any surface or gait-mode change.",
+    "Plant fitted from (real FlowBase, LCM SI) on 2026-06-09 (git 704a591f5)."
+  ],
+  "operating_point_map": null,
+  "velocity_envelope": {
+    "vx": {
+      "floor": 0.05,
+      "ceiling": 0.621380252831168,
+      "floor_not_found": false,
+      "ceiling_not_found": false,
+      "saturating_at_amp": 2.5
+    },
+    "vy": {
+      "floor": 0.1,
+      "ceiling": 0.6266654143408446,
+      "floor_not_found": false,
+      "ceiling_not_found": false,
+      "saturating_at_amp": 1.5
+    },
+    "wz": {
+      "floor": 0.05,
+      "ceiling": 1.2,
+      "floor_not_found": false,
+      "ceiling_not_found": false,
+      "saturating_at_amp": 2.5
+    }
+  },
+  "dynamics_by_amplitude": {
+    "vx": [
+      {
+        "amp": 0.1,
+        "K": 0.7685691080379606,
+        "tau": 0.028821530787619475,
+        "L": 0.06577710199985631,
+        "r2": 0.7374176657659972,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.2,
+        "K": 0.7705146718375364,
+        "tau": 0.06895865509212899,
+        "L": 0.04866749000007076,
+        "r2": 0.7117556992136329,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.3,
+        "K": 0.7706713835314645,
+        "tau": 0.10020714449978463,
+        "L": 0.04369205999978476,
+        "r2": 0.7482973925521914,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.4,
+        "K": 0.7699781139891935,
+        "tau": 0.19905362759093456,
+        "L": 0.011147495999921375,
+        "r2": 0.7824567033555936,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.5,
+        "K": 0.7722402501092223,
+        "tau": 0.22725714734683103,
+        "L": 0.015202898000097775,
+        "r2": 0.8080598003906877,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.6,
+        "K": 0.7782454689106355,
+        "tau": 0.28776056326299493,
+        "L": 0.010270092999917324,
+        "r2": 0.8445847564351383,
+        "source": "sweep"
+      },
+      {
+        "amp": 2.5,
+        "K": 0.2485521011324672,
+        "tau": 0.3852309246734535,
+        "L": 0.014111241000136943,
+        "r2": 0.8758847745717585,
+        "source": "ceiling_probe"
+      },
+      {
+        "amp": 3.0,
+        "K": 0.20697913967961798,
+        "tau": 0.3661214204088819,
+        "L": 0.01026847349999116,
+        "r2": 0.8896279030916744,
+        "source": "ceiling_probe"
+      }
+    ],
+    "vy": [
+      {
+        "amp": 0.1,
+        "K": 0.7700689335519451,
+        "tau": 0.04703707124137203,
+        "L": 0.04644472899985885,
+        "r2": 0.6825599250794729,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.2,
+        "K": 0.7727756564604228,
+        "tau": 0.11835826856062734,
+        "L": 0.010246284999993804,
+        "r2": 0.6958873522058088,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.3,
+        "K": 0.7719204893870261,
+        "tau": 0.14908501395899498,
+        "L": 0.01027080850008133,
+        "r2": 0.7384085396220618,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.4,
+        "K": 0.7697782076772303,
+        "tau": 0.15596808840045762,
+        "L": 0.039776907000032224,
+        "r2": 0.7883196264264014,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.5,
+        "K": 0.77137165394587,
+        "tau": 0.28340973636412536,
+        "L": 0.010276604500063513,
+        "r2": 0.8175686535229898,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.6,
+        "K": 0.7734763551495183,
+        "tau": 0.26679420026185996,
+        "L": 0.032613373000003776,
+        "r2": 0.8664126222190579,
+        "source": "sweep"
+      },
+      {
+        "amp": 1.5,
+        "K": 0.4177769428938964,
+        "tau": 0.40469401875662964,
+        "L": 0.01027434100001301,
+        "r2": 0.8909764902207598,
+        "source": "ceiling_probe"
+      },
+      {
+        "amp": 2.0,
+        "K": 0.31327788715590826,
+        "tau": 0.40016960294607523,
+        "L": 0.02542528300000413,
+        "r2": 0.880096624024492,
+        "source": "ceiling_probe"
+      }
+    ],
+    "wz": [
+      {
+        "amp": 0.2,
+        "K": 2.888377907370635,
+        "tau": 0.13387830395572914,
+        "L": 0.02039882100007162,
+        "r2": 0.7515225063460811,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.4,
+        "K": 2.898685197606009,
+        "tau": 0.2493980763546955,
+        "L": 0.016766492999977345,
+        "r2": 0.8147779902154553,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.6,
+        "K": 2.904535886225959,
+        "tau": 0.36313294042231453,
+        "L": 0.01570302000004631,
+        "r2": 0.8555650720431593,
+        "source": "sweep"
+      },
+      {
+        "amp": 0.8,
+        "K": 2.9173821705427008,
+        "tau": 0.48326031137498915,
+        "L": 0.011090237999951569,
+        "r2": 0.864114421296782,
+        "source": "sweep"
+      },
+      {
+        "amp": 1.0,
+        "K": 2.9291823396223085,
+        "tau": 0.6071671127717971,
+        "L": 0.017220615000042017,
+        "r2": 0.8912738346498327,
+        "source": "sweep"
+      },
+      {
+        "amp": 2.5,
+        "K": 1.1697750431570284,
+        "tau": 0.6160526962626378,
+        "L": 0.011202192999917315,
+        "r2": 0.8844108041554611,
+        "source": "ceiling_probe"
+      },
+      {
+        "amp": 3.0,
+        "K": 0.9730903952932467,
+        "tau": 0.6016755702661277,
+        "L": 0.010286187000019709,
+        "r2": 0.8744804983270407,
+        "source": "ceiling_probe"
+      }
+    ]
+  },
+  "floor_probe_results": {
+    "vx": [
+      {
+        "amp": 0.02,
+        "motion_detected": false,
+        "sustained_samples": 0
+      },
+      {
+        "amp": 0.05,
+        "motion_detected": true,
+        "sustained_samples": 590
+      },
+      {
+        "amp": 0.1,
+        "motion_detected": true,
+        "sustained_samples": 591
+      },
+      {
+        "amp": 0.15,
+        "motion_detected": true,
+        "sustained_samples": 591
+      }
+    ],
+    "vy": [
+      {
+        "amp": 0.1,
+        "motion_detected": true,
+        "sustained_samples": 590
+      },
+      {
+        "amp": 0.15,
+        "motion_detected": true,
+        "sustained_samples": 589
+      },
+      {
+        "amp": 0.2,
+        "motion_detected": true,
+        "sustained_samples": 590
+      }
+    ],
+    "wz": [
+      {
+        "amp": 0.05,
+        "motion_detected": true,
+        "sustained_samples": 593
+      },
+      {
+        "amp": 0.1,
+        "motion_detected": true,
+        "sustained_samples": 591
+      },
+      {
+        "amp": 0.2,
+        "motion_detected": true,
+        "sustained_samples": 593
+      },
+      {
+        "amp": 0.3,
+        "motion_detected": true,
+        "sustained_samples": 592
+      }
+    ]
+  },
+  "valid_for_tuning": true,
+  "schema_version": 1
+}
