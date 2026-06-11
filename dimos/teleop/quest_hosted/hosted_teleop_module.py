@@ -37,6 +37,7 @@ from dimos_lcm.sensor_msgs import Joy as LCMJoy
 import httpx
 from reactivex.disposable import Disposable
 
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
@@ -146,26 +147,25 @@ class HostedTeleopModule(Module):
         self._start_heartbeat()
         self._start_telemetry()
         self._start_control_loop()
-        logger.info("HostedTeleopModule started")
 
     @rpc
     def stop(self) -> None:
         self._stop_event.set()
         if self._control_loop_thread is not None:
-            self._control_loop_thread.join(timeout=1.0)
+            self._control_loop_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
             self._control_loop_thread = None
         if self._heartbeat_thread is not None:
-            self._heartbeat_thread.join(timeout=2.0)
+            self._heartbeat_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
             self._heartbeat_thread = None
         if self._telemetry_thread is not None:
-            self._telemetry_thread.join(timeout=2.0)
+            self._telemetry_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
             self._telemetry_thread = None
-        if self._loop is not None and self._loop.is_running():
-            try:
-                self.spawn(self._disconnect()).result(timeout=5.0)
-            except Exception:
-                logger.exception("Error during disconnect")
-        # The base Module owns the event loop; it's torn down on module close.
+        try:
+            self.spawn(self._disconnect()).result(timeout=5.0)
+        except RuntimeError:
+            pass
+        except Exception:
+            logger.exception("Error during disconnect")
         super().stop()
 
     def _connect_blocking(self) -> None:
@@ -193,7 +193,9 @@ class HostedTeleopModule(Module):
             )
         )
         self._pc.addTrack(self._video_track)
-        sctp_init = self._pc.createDataChannel("_sctp_init", negotiated=True, id=0)
+        # Throwaway negotiated channel on id=0 to bring up SCTP; intentionally
+        # left open (CF/aiortc workaround — see README).
+        self._pc.createDataChannel("_sctp_init", negotiated=True, id=0)
 
         @self._pc.on("connectionstatechange")
         async def _on_state() -> None:
@@ -239,8 +241,6 @@ class HostedTeleopModule(Module):
 
         answer_sdp = propagate_bundle_candidates(data["sdp_answer"])
         await self._pc.setRemoteDescription(RTCSessionDescription(sdp=answer_sdp, type="answer"))
-
-        _ = sctp_init  # intentionally left open
 
         logger.info(
             f"Registered with broker: session_id={self._session_id}, "
@@ -290,12 +290,12 @@ class HostedTeleopModule(Module):
         )
         self._heartbeat_thread.start()
 
-    def _record_cmd_arrival(self, ts: float | None, seq: int | None) -> None:
+    def _record_cmd_arrival(self, ts: float | None) -> None:
         """Hook for the subclass cmd-decode path; feeds the HUD telemetry."""
-        self._cmd_stats.record(ts, seq)
+        self._cmd_stats.record(ts)
 
     def _start_telemetry(self) -> None:
-        """Push command-plane health (latency/jitter/loss/rate) to the operator HUD."""
+        """Push command-plane health (latency/jitter/rate) to the operator HUD."""
 
         def send_telemetry() -> None:
             stats = self._cmd_stats.snapshot()
@@ -318,6 +318,8 @@ class HostedTeleopModule(Module):
         def runner() -> None:
             interval = 1.0 / max(self.config.telemetry_hz, 0.1)
             while not self._stop_event.is_set():
+                # aiortc datachannels aren't thread-safe, so the actual send()
+                # must run on the event loop, not this timer thread.
                 if self._loop is not None and self._loop.is_running():
                     self._loop.call_soon_threadsafe(send_telemetry)
                 self._stop_event.wait(interval)
@@ -484,11 +486,17 @@ class HostedTeleopModule(Module):
                 float(off) if off is not None else float("nan"),
             )
         elif kind == "video_stats":
-            stats = VideoStats.from_dict(msg)
-            logger.info("video: %s", stats)
+            # Browser getStats() payload is untrusted; never let a parse error
+            # escape into the datachannel callback and stall ping/clock-sync.
+            try:
+                stats = VideoStats.from_dict(msg)
+            except (TypeError, ValueError):
+                logger.warning("state_reliable: malformed video_stats, dropping")
+                return
+            logger.debug("video: %s", stats)
             self.video_stats.publish(stats)
         else:
-            logger.debug(f"state_reliable: unknown message type {kind!r}")
+            logger.warning(f"state_reliable: unknown message type {kind!r}")
 
     def _dispatch_bytes(self, data: bytes) -> None:
         decoder = self._decoders.get(data[:8])
