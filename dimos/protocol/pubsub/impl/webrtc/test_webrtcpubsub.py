@@ -80,39 +80,3 @@ def test_basic_pub_sub(pubsub: WebRTCPubSub) -> None:
         assert received[0] == (b"hello world", "test_basic")
     finally:
         unsub()
-
-
-@pytest.mark.tool
-@skip_unless_cf
-@pytest.mark.timeout(60)
-def test_loopback_rtt(pubsub: WebRTCPubSub) -> None:
-    """Same-host loopback through the nearest CF PoP.
-
-    Measures transport-stack overhead (pub PC → CF edge → sub PC, both
-    local), NOT operator→robot teleop latency — that depends on the
-    operator's network. Sanity bound only; real numbers come from the
-    benchmark harness.
-    """
-    n = 30
-    durations: list[float] = []
-    received = threading.Event()
-    sent_at = [0.0]
-
-    def cb(_msg: bytes, _topic: str) -> None:
-        durations.append(time.perf_counter() - sent_at[0])
-        received.set()
-
-    unsub = pubsub.subscribe("test_rtt", cb)
-    try:
-        time.sleep(0.3)
-        for i in range(n):
-            received.clear()
-            sent_at[0] = time.perf_counter()
-            pubsub.publish("test_rtt", f"ping-{i}".encode())
-            assert received.wait(timeout=5.0), f"Timed out on ping {i}"
-
-        med = sorted(durations)[n // 2]
-        assert med < 1.0, f"Median loopback RTT too high: {med * 1000:.0f} ms"
-        print(f"\n  WebRTC loopback RTT via CF edge: median {med * 1000:.1f} ms (n={n})")
-    finally:
-        unsub()

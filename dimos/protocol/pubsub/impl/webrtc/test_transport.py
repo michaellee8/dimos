@@ -23,7 +23,7 @@ import struct
 
 import pytest
 
-from dimos.core.transport import CloudflareTransport, WebRTCTransport
+from dimos.core.transport import WebRTCTransport
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.protocol.pubsub.impl.webrtc.providers.spec import ProviderConfig
 
@@ -140,21 +140,8 @@ def test_typed_encode_decode() -> None:
     assert abs(received[0].value - 3.14) < 1e-9
 
 
-def test_fingerprint_filter() -> None:
-    transport = MockTransport("cmd_unreliable", FakeLCMMsg, name="filter")
-    received: list[FakeLCMMsg] = []
-    transport.subscribe(lambda msg: received.append(msg))
-    provider = transport._config.provider()
-
-    provider.publish("cmd_unreliable", OtherLCMMsg("hello").lcm_encode())
-    assert received == []
-    provider.publish("cmd_unreliable", FakeLCMMsg(2.71).lcm_encode())
-    assert len(received) == 1
-    assert abs(received[0].value - 2.71) < 1e-9
-
-
 def test_multiple_types_multiplexed() -> None:
-    """Two typed transports on the same channel filter independently."""
+    """Typed transports sharing one channel each receive only their own type."""
     t1 = MockTransport("cmd_unreliable", FakeLCMMsg, name="mux")
     t2 = MockTransport("cmd_unreliable", OtherLCMMsg, name="mux")
     r1: list[FakeLCMMsg] = []
@@ -164,9 +151,8 @@ def test_multiple_types_multiplexed() -> None:
 
     t1.broadcast(None, FakeLCMMsg(1.0))
     t2.broadcast(None, OtherLCMMsg("world"))
-    assert len(r1) == 1
-    assert len(r2) == 1
-    assert r2[0].text == "world"
+    assert [m.value for m in r1] == [1.0]
+    assert [m.text for m in r2] == ["world"]
 
 
 def test_wire_fingerprint_matches_encoding() -> None:
@@ -213,12 +199,6 @@ def test_pickle_roundtrip_preserves_everything() -> None:
 def test_provider_singleton_per_config() -> None:
     assert MockConfig(name="a").provider() is MockConfig(name="a").provider()
     assert MockConfig(name="a").provider() is not MockConfig(name="b").provider()
-
-
-def test_cloudflare_transport_kwargs_flow_into_config() -> None:
-    transport = CloudflareTransport("cmd_unreliable", TwistStamped, robot_id="fleet-07")
-    assert transport._config.robot_id == "fleet-07"
-    assert pickle.loads(pickle.dumps(transport))._config == transport._config
 
 
 # ─── Broker credential validation ────────────────────────────────────

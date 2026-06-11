@@ -445,12 +445,6 @@ class CloudflareTransport(WebRTCTransport[M]):
     _config_cls = BrokerConfig
 
 
-def _rebuild_video_transport(
-    cls: type[WebRTCVideoTransport], config: ProviderConfig
-) -> WebRTCVideoTransport:
-    return cls(config=config)
-
-
 class WebRTCVideoTransport(Transport[Any]):
     """Robot camera → remote viewer as a WebRTC video track (provider-agnostic).
 
@@ -470,9 +464,6 @@ class WebRTCVideoTransport(Transport[Any]):
 
     def __init__(self, *, config: ProviderConfig | None = None, **config_kwargs: Any) -> None:
         self._config = config or self._config_cls(**config_kwargs)
-
-    def __reduce__(self):  # type: ignore[no-untyped-def]
-        return (_rebuild_video_transport, (type(self), self._config))
 
     def start(self) -> None:
         pass  # provider starts lazily on first broadcast

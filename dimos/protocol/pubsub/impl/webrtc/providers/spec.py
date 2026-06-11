@@ -33,13 +33,14 @@ from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-try:
-    import aiortc  # noqa: F401
-    import httpx  # noqa: F401
+import importlib.util
 
-    WEBRTC_AVAILABLE = True
-except ImportError:
-    WEBRTC_AVAILABLE = False
+# Availability check without paying the aiortc/av import cost — these modules
+# are imported lazily by providers on first use (core.transport imports this
+# chain, so eager imports would tax every dimos process).
+WEBRTC_AVAILABLE = (
+    importlib.util.find_spec("aiortc") is not None and importlib.util.find_spec("httpx") is not None
+)
 
 
 @runtime_checkable

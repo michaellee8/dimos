@@ -48,7 +48,7 @@ from collections.abc import Callable
 import contextlib
 from dataclasses import dataclass
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from dimos.protocol.pubsub.impl.webrtc.providers.sdp import propagate_bundle_candidates
 from dimos.protocol.pubsub.impl.webrtc.providers.spec import (
@@ -57,23 +57,13 @@ from dimos.protocol.pubsub.impl.webrtc.providers.spec import (
     ProviderConfig,
     wait_connected,
 )
-from dimos.protocol.pubsub.impl.webrtc.providers.video_track import CameraVideoTrack
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-if WEBRTC_AVAILABLE:
-    from aiortc import (
-        RTCBundlePolicy,
-        RTCConfiguration,
-        RTCDataChannel,
-        RTCIceServer,
-        RTCPeerConnection,
-        RTCSessionDescription,
-    )
+if TYPE_CHECKING:
+    from aiortc import RTCDataChannel, RTCPeerConnection
     import httpx
-else:
-    RTCDataChannel = Any  # type: ignore[misc,assignment]
 
 
 @dataclass(frozen=True)
@@ -139,6 +129,8 @@ class BrokerProvider(AsyncProviderBase):
         self._dropped_publish_warned = False
         # Sendonly camera track, present in the initial offer so the broker
         # can bridge video without renegotiating the robot side.
+        from dimos.protocol.pubsub.impl.webrtc.providers.video_track import CameraVideoTrack
+
         self._video_track = CameraVideoTrack()
 
         # Guarded by self._lock (from the base).
@@ -151,6 +143,15 @@ class BrokerProvider(AsyncProviderBase):
     # ─── Connect / Disconnect (loop thread) ──────────────────────────
 
     async def _connect(self) -> None:
+        from aiortc import (
+            RTCBundlePolicy,
+            RTCConfiguration,
+            RTCIceServer,
+            RTCPeerConnection,
+            RTCSessionDescription,
+        )
+        import httpx
+
         self._http = httpx.AsyncClient(timeout=30.0)
         # MAX_BUNDLE + the id=0 throwaway channel are CF/aiortc workarounds —
         # see dimos/teleop/quest_hosted/README.md before changing.
