@@ -15,9 +15,14 @@
 """Broker-mediated Cloudflare Realtime provider (hosted teleop).
 
 The robot dials out to the ``dimensional-teleop`` broker, which owns CF
-session creation and operator lifecycle. The SCTP id of the operator's
-command channel arrives via heartbeat acks; we open/close the negotiated
-channel to track the broker's view (operator join / leave / rejoin).
+session creation and operator lifecycle. SCTP ids for all bridged channels
+arrive via heartbeat acks; we open/close the negotiated channels to track
+the broker's view (operator join / leave / rejoin).
+
+Channel plan (topic == DataChannel name):
+    cmd_unreliable      operator → robot   commands (unordered, lossy)
+    state_reliable      operator → robot   control plane (reliable)
+    state_reliable_back robot → operator   telemetry (reliable) — publishable
 The aiortc/CF quirks this inherits (MAX_BUNDLE, the id=0 throwaway channel)
 are documented in ``dimos/teleop/quest_hosted/README.md``.
 
@@ -80,13 +85,20 @@ class BrokerConfig(ProviderConfig):
 
 
 class BrokerProvider(AsyncProviderBase):
-    """Receive-only provider: operator commands arrive on one multiplexed
-    DataChannel; demux by LCM fingerprint happens at the transport layer.
+    """Bidirectional broker provider.
 
-    Robot → operator channels are not bridged by the broker yet, so
-    ``publish()`` raises. Telemetry/video stay on ``HostedTeleopModule``
-    until those move into this provider.
+    Inbound (operator → robot): ``cmd_unreliable`` + ``state_reliable``;
+    subscribers get the bytes of the channel matching their topic, and typed
+    demux by LCM fingerprint happens at the transport layer. Outbound
+    (robot → operator): ``publish()`` on ``state_reliable_back``; while no
+    operator is connected the channel doesn't exist and messages drop, which
+    is normal pubsub behaviour. Together with ``CloudflareTransport`` this
+    replaces ``HostedTeleopModule`` for the data planes; video remains there
+    until this provider grows media-track support.
     """
+
+    INBOUND_CHANNELS = ("cmd_unreliable", "state_reliable")
+    OUTBOUND_CHANNELS = ("state_reliable_back",)
 
     def __init__(self, config: BrokerConfig | None = None) -> None:
         if not WEBRTC_AVAILABLE:
@@ -110,8 +122,11 @@ class BrokerProvider(AsyncProviderBase):
         self._pc: RTCPeerConnection | None = None
         self.session_id: str | None = None
         self._hb_task: asyncio.Task[None] | None = None
-        self._cmd_dc: RTCDataChannel | None = None
-        self._cmd_dc_id: int | None = None
+        # name → open negotiated channel / its SCTP id. Mutated on the loop
+        # thread (heartbeat); read from any thread under self._lock.
+        self._dcs: dict[str, RTCDataChannel] = {}
+        self._dc_ids: dict[str, int | None] = {}
+        self._dropped_publish_warned = False
 
         # Guarded by self._lock (from the base).
         self._callbacks: dict[str, list[Callable[[bytes, str], None]]] = defaultdict(list)
@@ -181,7 +196,8 @@ class BrokerProvider(AsyncProviderBase):
                     f"{self._broker_url}/api/v1/sessions/{self.session_id}",
                     headers=self._headers,
                 )
-        self._close_cmd_channel()
+        for name in list(self._dcs):
+            self._close_channel(name)
         if self._pc:
             await self._pc.close()
             self._pc = None
@@ -212,58 +228,85 @@ class BrokerProvider(AsyncProviderBase):
         if r.status_code != 200:
             logger.warning("Heartbeat failed: %d %s", r.status_code, r.text[:200])
             return
-        sub_id = r.json().get("cmd_channel_subscriber_id")
-        sub_id = int(sub_id) if sub_id is not None else None
+        ack = r.json()
+        ids = {
+            "cmd_unreliable": ack.get("cmd_channel_subscriber_id"),
+            "state_reliable": ack.get("state_channel_subscriber_id"),
+            "state_reliable_back": ack.get("state_back_channel_publisher_id"),
+        }
         # Track the broker's view: open on join, close on leave, re-open on
-        # rejoin (the broker assigns a fresh SCTP id per operator session).
-        if sub_id != self._cmd_dc_id:
-            self._close_cmd_channel()
-            self._cmd_dc_id = sub_id
-            if sub_id is not None:
-                self._open_cmd_channel(sub_id)
+        # rejoin (the broker assigns fresh SCTP ids per operator session).
+        for name, raw_id in ids.items():
+            sctp_id = int(raw_id) if raw_id is not None else None
+            if sctp_id != self._dc_ids.get(name):
+                self._close_channel(name)
+                self._dc_ids[name] = sctp_id
+                if sctp_id is not None:
+                    self._open_channel(name, sctp_id)
 
-    def _open_cmd_channel(self, sctp_id: int) -> None:
+    def _channel_options(self, name: str) -> dict[str, Any]:
+        if name == "cmd_unreliable":
+            return {"ordered": self._config.ordered, "maxRetransmits": self._config.max_retransmits}
+        return {"ordered": True}  # state channels are reliable
+
+    def _open_channel(self, name: str, sctp_id: int) -> None:
         assert self._pc is not None
-        logger.info("Opening negotiated cmd_unreliable on SCTP id %d", sctp_id)
+        logger.info("Opening negotiated %s on SCTP id %d", name, sctp_id)
         ch = self._pc.createDataChannel(
-            "cmd_unreliable",
-            negotiated=True,
-            id=sctp_id,
-            ordered=self._config.ordered,
-            maxRetransmits=self._config.max_retransmits,
+            name, negotiated=True, id=sctp_id, **self._channel_options(name)
         )
 
-        @ch.on("message")
-        def _on_msg(payload: Any) -> None:
-            if isinstance(payload, str):
-                payload = payload.encode()
-            with self._lock:
-                callbacks = [cb for cbs in self._callbacks.values() for cb in cbs]
-            for cb in callbacks:
-                try:
-                    cb(payload, "cmd_unreliable")
-                except Exception:
-                    logger.exception("Broker subscriber callback error")
+        if name in self.INBOUND_CHANNELS:
 
-        self._cmd_dc = ch
+            @ch.on("message")
+            def _on_msg(payload: Any) -> None:
+                if isinstance(payload, str):
+                    payload = payload.encode()
+                with self._lock:
+                    callbacks = list(self._callbacks.get(name, ()))
+                for cb in callbacks:
+                    try:
+                        cb(payload, name)
+                    except Exception:
+                        logger.exception("Broker subscriber callback error")
 
-    def _close_cmd_channel(self) -> None:
-        if self._cmd_dc is not None:
+        with self._lock:
+            self._dcs[name] = ch
+
+    def _close_channel(self, name: str) -> None:
+        with self._lock:
+            ch = self._dcs.pop(name, None)
+        if ch is not None:
             with contextlib.suppress(Exception):
-                self._cmd_dc.close()
-            self._cmd_dc = None
+                ch.close()
 
     # ─── Public API (Provider) ───────────────────────────────────────
 
     def publish(self, topic: str, data: bytes) -> None:
-        raise NotImplementedError(
-            "The teleop broker does not bridge robot→operator DataChannels yet; "
-            "broker-backed transports are receive-only (direction in)."
-        )
+        """Robot → operator. Only outbound channels are publishable; messages
+        drop while no operator is connected (the channel doesn't exist yet)."""
+        if topic not in self.OUTBOUND_CHANNELS:
+            raise ValueError(
+                f"Robot can only publish on {self.OUTBOUND_CHANNELS}; "
+                f"{topic!r} is an operator→robot channel"
+            )
+        if isinstance(data, (bytearray, memoryview)):
+            data = bytes(data)
+        with self._lock:
+            if not self._started or self._loop is None:
+                return
+            ch = self._dcs.get(topic)
+            if ch is None or ch.readyState != "open":
+                if not self._dropped_publish_warned:
+                    self._dropped_publish_warned = True
+                    logger.info("Dropping %s publish: no operator connected", topic)
+                return
+            self._dropped_publish_warned = False
+            self._loop.call_soon_threadsafe(ch.send, data)
 
     def subscribe(self, topic: str, callback: Callable[[bytes, str], None]) -> Callable[[], None]:
-        """All subscribers receive all inbound bytes from the multiplexed
-        command channel; the transport layer filters by LCM fingerprint."""
+        """Subscribers receive the bytes of the inbound channel matching
+        their topic; the transport layer filters by LCM fingerprint."""
         if not self.is_connected:
             self.start()
         with self._lock:

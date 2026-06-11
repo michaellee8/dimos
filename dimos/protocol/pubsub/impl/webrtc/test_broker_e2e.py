@@ -80,6 +80,8 @@ def test_operator_to_transport_e2e() -> None:
     received: list[TwistStamped] = []
     transport = CloudflareTransport("cmd_unreliable", TwistStamped)
     transport.subscribe(received.append)
+    # Robot → operator telemetry on the same provider/session.
+    back_transport = CloudflareTransport("state_reliable_back", TwistStamped)
     time.sleep(3)  # session registration
 
     sessions = _api("GET", "/sessions")
@@ -90,7 +92,9 @@ def test_operator_to_transport_e2e() -> None:
         pc = RTCPeerConnection(
             RTCConfiguration(iceServers=[RTCIceServer(urls=["stun:stun.cloudflare.com:3478"])])
         )
-        pc.createDataChannel("_sctp_init")  # placeholder, same as the web client
+        pc.createDataChannel(
+            "_sctp_init", negotiated=True, id=0
+        )  # placeholder; pinned id so CF-assigned ids can never collide
         await pc.setLocalDescription(await pc.createOffer())
         while pc.iceGatheringState != "complete":
             await asyncio.sleep(0.05)
@@ -115,12 +119,33 @@ def test_operator_to_transport_e2e() -> None:
             ordered=False,
             maxRetransmits=0,
         )
+        back_bytes: list[bytes] = []
+        back_ch = pc.createDataChannel(
+            "state_reliable_back",
+            negotiated=True,
+            id=bridge["state_back_channel_id"],
+            ordered=True,
+        )
+
+        @back_ch.on("message")
+        def _on_back(payload: object) -> None:
+            back_bytes.append(payload if isinstance(payload, bytes) else str(payload).encode())
+
         for _ in range(100):
             if ch.readyState == "open":
                 break
             await asyncio.sleep(0.1)
         assert ch.readyState == "open"
         await asyncio.sleep(3)  # robot heartbeat (1 Hz) delivers subscriber ids
+
+        # Robot → operator: telemetry through the broker-bridged back channel.
+        for i in range(10):
+            back_transport.broadcast(None, TwistStamped(linear=[0.0, 0.0, 1.0 + i]))
+            await asyncio.sleep(0.05)
+        await asyncio.sleep(2)
+        assert back_bytes, "no robot->operator telemetry arrived"
+        back_msg = TwistStamped.lcm_decode(back_bytes[-1])
+        assert back_msg.linear.z >= 1.0, back_msg.linear
 
         sent = 0
         for i in range(40):
@@ -143,6 +168,7 @@ def test_operator_to_transport_e2e() -> None:
         assert abs(sample.linear.x - 0.5) < 1e-9
     finally:
         transport.stop()
+        back_transport.stop()
         # transport.stop() deliberately leaves the process-scoped provider
         # running; stop it here so the test doesn't leak its loop thread.
         if transport._pubsub is not None:
