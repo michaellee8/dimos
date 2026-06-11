@@ -338,19 +338,6 @@ if DDS_AVAILABLE:
 M = TypeVar("M", bound=DimosMsg)
 
 
-def _wire_fingerprint(msg_type: type[DimosMsg]) -> bytes:
-    """First 8 wire bytes for a dimos msg type.
-
-    Derived by encoding a default instance because ``_get_packed_fingerprint``
-    can disagree with the wire format: e.g. ``TwistStamped`` inherits the
-    fingerprint of ``Twist`` but encodes as LCM ``TwistStamped``.
-    """
-    try:
-        return msg_type().lcm_encode()[:8]  # type: ignore[call-arg]
-    except TypeError:
-        return msg_type._get_packed_fingerprint()  # type: ignore[attr-defined,no-any-return]
-
-
 def _rebuild_webrtc_transport(
     cls: type[WebRTCTransport[M]], topic: str, msg_type: type[M] | None, config: ProviderConfig
 ) -> WebRTCTransport[M]:
@@ -365,7 +352,7 @@ class WebRTCTransport(PubSubTransport[M]):
 
     * **Raw bytes** (``msg_type=None``): messages pass through as ``bytes``.
     * **Typed LCM** (``msg_type=SomeMsg``): LCM-encoded on ``broadcast()``,
-      LCM-decoded + fingerprint-filtered on ``subscribe()`` — so multiple
+      LCM-decoded on ``subscribe()`` (foreign types on the shared channel are skipped) — so multiple
       transports sharing one multiplexed DataChannel each receive only
       their own message type.
 
@@ -390,7 +377,6 @@ class WebRTCTransport(PubSubTransport[M]):
         super().__init__(topic)
         self._msg_type = msg_type
         self._config = config or self._config_cls(**config_kwargs)
-        self._fingerprint = _wire_fingerprint(msg_type) if msg_type is not None else None
         self._pubsub: WebRTCPubSub | None = None
         # Guards first-use init: concurrent subscribe()/broadcast() must not
         # construct two WebRTCPubSub wrappers (one would silently orphan any
@@ -415,12 +401,18 @@ class WebRTCTransport(PubSubTransport[M]):
             self.start()
         assert self._pubsub is not None
 
-        if self._msg_type is not None and self._fingerprint is not None:
-            fp, msg_type = self._fingerprint, self._msg_type
+        if self._msg_type is not None:
+            msg_type = self._msg_type
 
             def _typed_cb(data: bytes, _topic: str) -> None:
-                if data[:8] == fp:
-                    callback(msg_type.lcm_decode(data))  # type: ignore[arg-type]
+                # The channel is multiplexed (e.g. the browser sends Twists and
+                # Poses on cmd_unreliable); lcm_decode verifies the wire
+                # fingerprint and raises on other types — skip those.
+                try:
+                    msg = msg_type.lcm_decode(data)
+                except ValueError:
+                    return
+                callback(msg)  # type: ignore[arg-type]
 
             return self._pubsub.subscribe(self.topic, _typed_cb)
         return self._pubsub.subscribe(self.topic, lambda msg, _topic: callback(msg))  # type: ignore[arg-type]

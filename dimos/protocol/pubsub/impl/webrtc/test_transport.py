@@ -94,6 +94,8 @@ class FakeLCMMsg:
 
     @classmethod
     def lcm_decode(cls, data: bytes) -> FakeLCMMsg:
+        if data[:8] != cls._FINGERPRINT:  # like real LCM generated code
+            raise ValueError("Decode error")
         return cls(struct.unpack("<d", data[8:])[0])
 
 
@@ -113,6 +115,8 @@ class OtherLCMMsg:
 
     @classmethod
     def lcm_decode(cls, data: bytes) -> OtherLCMMsg:
+        if data[:8] != cls._FINGERPRINT:  # like real LCM generated code
+            raise ValueError("Decode error")
         return cls(data[8:].decode())
 
 
@@ -166,10 +170,11 @@ def test_multiple_types_multiplexed() -> None:
 
 
 def test_wire_fingerprint_matches_encoding() -> None:
-    """The filter must use the wire prefix, not _get_packed_fingerprint().
+    """Demux must follow the wire format, not _get_packed_fingerprint().
 
     TwistStamped inherits Twist's fingerprint but encodes as LCM TwistStamped —
-    filtering on the class fingerprint would drop every real message.
+    any filter keyed on the class fingerprint would drop every real message.
+    The try-decode demux delegates the check to lcm_decode, which gets it right.
     """
     transport = MockTransport("cmd_unreliable", TwistStamped, name="wire")
     received: list[TwistStamped] = []
