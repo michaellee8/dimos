@@ -35,9 +35,8 @@ logger = setup_logger()
 
 import importlib.util
 
-# Availability check without paying the aiortc/av import cost — these modules
-# are imported lazily by providers on first use (core.transport imports this
-# chain, so eager imports would tax every dimos process).
+# find_spec instead of importing: aiortc takes ~150ms and core.transport pulls
+# this module in everywhere. Providers import aiortc lazily on start().
 WEBRTC_AVAILABLE = (
     importlib.util.find_spec("aiortc") is not None and importlib.util.find_spec("httpx") is not None
 )
