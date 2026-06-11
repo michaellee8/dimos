@@ -412,6 +412,22 @@ class MujocoEngine(SimulationEngine):
             with viewer.launch_passive(
                 self._model, self._data, show_left_ui=False, show_right_ui=False
             ) as m_viewer:
+                # Cooked scene packages place the environment + objects in geom
+                # group 3 (hidden in the passive viewer by default), so the viewer
+                # would otherwise show only the robot in a black void. Enable all
+                # geom groups and frame the free camera on the robot base.
+                try:
+                    mujoco.mj_forward(self._model, self._data)
+                    for _g in range(len(m_viewer.opt.geomgroup)):
+                        m_viewer.opt.geomgroup[_g] = 1
+                    _bid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, "link_base")
+                    if _bid >= 0:
+                        m_viewer.cam.lookat[:] = self._data.xpos[_bid]
+                        m_viewer.cam.distance = 2.5
+                        m_viewer.cam.azimuth = 90.0
+                        m_viewer.cam.elevation = -20.0
+                except Exception as exc:
+                    logger.warning("viewer setup (geom groups/camera) failed", error=str(exc))
                 _run(m_viewer)
 
         self._close_cam_renderers(cam_renderers)
