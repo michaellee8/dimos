@@ -37,13 +37,18 @@
     "fast-lio": {
       "flake": false,
       "locked": {
-        "narHash": "sha256-FJpt9RSnrkTdOJ35X8XIGDeOlwtm/KTNHQxCijGr10w=",
-        "path": "/home/dimos/repos/dimos-module-fastlio2",
-        "type": "path"
+        "lastModified": 1781136428,
+        "narHash": "sha256-rqzroZAzhQ7A+wOGsN7Qzk64p7m3+4doyb92fyLAOZE=",
+        "owner": "dimensionalOS",
+        "repo": "dimos-module-fastlio2",
+        "rev": "02d506674b8e532d6fc094214ea76c958dbfcbcb",
+        "type": "github"
       },
       "original": {
-        "path": "/home/dimos/repos/dimos-module-fastlio2",
-        "type": "path"
+        "owner": "dimensionalOS",
+        "ref": "pointlio",
+        "repo": "dimos-module-fastlio2",
+        "type": "github"
       }
     },
     "flake-utils": {
