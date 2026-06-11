@@ -28,7 +28,7 @@ from typing import Any
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
 from dimos.simulation.unity.module import UnityBridgeModule
-from dimos.visualization.vis_module import vis_module, vis_module_with_selector
+from dimos.visualization.vis_module import vis_module
 
 
 def _rerun_blueprint() -> Any:
@@ -58,29 +58,3 @@ unity_sim = autoconnect(
         },
     ),
 )
-
-
-unity_sim_selector = autoconnect(
-    UnityBridgeModule.blueprint(
-        headless=True,
-        publish_images=False,
-        unity_connect_timeout=2.0,
-    ),
-    vis_module_with_selector(
-        viewer_backend=global_config.viewer,
-        rerun_config={
-            "blueprint": _rerun_blueprint,
-            "rerun_open": "none",
-            "rerun_web": True,
-            "visual_override": {
-                "world/camera_info": UnityBridgeModule.rerun_suppress_camera_info,
-            },
-            "static": {
-                "world/color_image": UnityBridgeModule.rerun_static_pinhole,
-            },
-        },
-        selector_config={
-            "title": "DimOS Unity Sim Rerun Topic Selector",
-        },
-    ),
-).global_config(simulation=True)

@@ -118,7 +118,6 @@ all_blueprints = {
     "unitree-go2-webrtc-keyboard-teleop": "dimos.robot.unitree.go2.blueprints.basic.unitree_go2_webrtc_keyboard_teleop:unitree_go2_webrtc_keyboard_teleop",
     "unitree-go2-webrtc-rage-keyboard-teleop": "dimos.robot.unitree.go2.blueprints.basic.unitree_go2_webrtc_rage_keyboard_teleop:unitree_go2_webrtc_rage_keyboard_teleop",
     "unity-sim": "dimos.simulation.unity.blueprint:unity_sim",
-    "unity-sim-selector": "dimos.simulation.unity.blueprint:unity_sim_selector",
     "xarm-perception": "dimos.manipulation.blueprints:xarm_perception",
     "xarm-perception-agent": "dimos.manipulation.blueprints:xarm_perception_agent",
     "xarm-perception-sim": "dimos.manipulation.blueprints:xarm_perception_sim",

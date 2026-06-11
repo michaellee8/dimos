@@ -82,6 +82,11 @@ def vis_module_with_selector(
 ) -> Blueprint:
     """Create an opt-in Rerun visualization blueprint with topic selection.
 
+    Deprecated as a general blueprint composition surface. Prefer
+    ``dimos topic monitor`` for interactive selected-only visualization after a
+    normal DimOS run has started. This helper remains for the dedicated
+    hardware-free selector demo and focused tests.
+
     The standard ``vis_module`` remains automatic and unchanged. This helper
     enables selector-managed logging: live LCM topics are cataloged first, and
     only explicitly applied renderable topics are converted/logged to Rerun.

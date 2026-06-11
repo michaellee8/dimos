@@ -84,23 +84,21 @@ if __name__ == "__main__":
 
 Every LCM stream, such as `color_image` (output by CameraModule), that uses a data type (like `Image`) that has a `.to_rerun` method will get rendered (`rr.log`) using the LCM topic as the rerun entity path. In other words: to render something, simply log it to a stream and it will automatically be available in rerun.
 
-## Opt-in LCM Topic Selector
+## Topic Monitor
 
-Use `vis_module_with_selector` when you want a runtime web console for choosing which live LCM topics are logged to Rerun:
+Use `dimos topic monitor` when you want an interactive web console for choosing which live LCM topics are logged to a Rerun view:
 
-```python skip
-from dimos.core.coordination.blueprints import autoconnect
-from dimos.core.global_config import global_config
-from dimos.hardware.sensors.camera.module import CameraModule
-from dimos.visualization.vis_module import vis_module_with_selector
-
-camera_selector_demo = autoconnect(
-    CameraModule.blueprint(),
-    vis_module_with_selector(viewer_backend=global_config.viewer),
-)
+```bash
+uv run dimos topic monitor
+uv run dimos topic monitor --no-open
+uv run dimos topic monitor --run latest
 ```
 
-The standard `vis_module(...)` path is unchanged: renderable LCM topics are logged automatically. The selector path is explicit opt-in and starts the Rerun bridge in managed-selection mode.
+The monitor is an independent foreground sidecar. It observes the visible LCM bus, owns its own Rerun bridge/viewer and Reflex selector UI, and exits when you press Ctrl-C. If a DimOS run is active, the command prints that run as context; if no run is active, it starts in LCM bus-only mode and can still catalog traffic from manual or external publishers.
+
+The standard `vis_module(...)` path is unchanged: renderable LCM topics are logged automatically by blueprints that include normal visualization. `dimos topic monitor` does not control, disable, or reuse any existing visualization in the running blueprint. Its staged/applied selection affects only the monitor-owned Rerun viewer.
+
+By default the command allocates an isolated set of local ports instead of reusing the fixed Rerun defaults, then prints the actual URLs. It opens the selector page automatically when possible; if browser opening fails, open the printed selector URL manually. Use `--no-open` to skip browser launch.
 
 For a hardware-free demo on a laptop or desktop, run the built-in synthetic publisher:
 
@@ -108,23 +106,11 @@ For a hardware-free demo on a laptop or desktop, run the built-in synthetic publ
 uv run dimos --viewer rerun run demo-rerun-topic-selector
 ```
 
-Then open the selector app at `http://localhost:9879`. The demo serves the Rerun web viewer for the embedded right pane and does not open a native Rerun window. The standalone `http://localhost:9878/?url=rerun%2Bhttp%3A%2F%2F127.0.0.1%3A9877%2Fproxy` viewer URL is only a fallback/debug URL.
+This demo remains a self-contained hardware-free smoke test for the selector UI. It uses fixed local demo ports and serves the Rerun web viewer for the embedded right pane without opening a native Rerun window. For ordinary robot, simulation, or replay workflows, prefer running the normal stack and then starting `dimos topic monitor`.
 
-For a hardware-free simulation QA stack that publishes live typed LCM topics, run:
+The monitor provides a Reflex visual console next to the Rerun web viewer. It starts local services for the selector frontend, selector API, Reflex backend websocket/API, Rerun gRPC source, and Rerun web viewer. The exact ports are printed by the CLI because they are allocated per monitor instance.
 
-```bash
-uv run dimos --viewer rerun run unity-sim-selector
-```
-
-This uses the Unity simulation bridge in headless mode with selector-managed Rerun logging. It does not require robot hardware; if no Unity binary or external Unity client is available, the kinematic simulation loop still publishes topics such as `/odometry#nav_msgs.Odometry` for selector testing.
-
-Selector mode provides a Reflex visual console next to the Rerun web viewer. By default it starts three local services:
-
-- selector frontend: `http://localhost:9879`
-- selector API: `http://localhost:9880`
-- Reflex backend websocket/API: `http://localhost:9881`
-
-The selector API is local to the DimOS worker and forwards UI actions to the in-process bridge RPC contract. The Reflex frontend runs as a local `reflex run` subprocess using explicit frontend/backend ports, polls that API, and renders the "DimOS Visual Console" layout:
+The selector API is local to the monitor process and forwards UI actions to the monitor-owned selected-only bridge. The Reflex frontend runs as a local `reflex run` subprocess using explicit frontend/backend ports, polls that API, and renders the "DimOS Visual Console" layout:
 
 - a header bar with LCM traffic and Rerun connectivity status chips
 - a fixed-width catalog rail with search, `renderable`/`live`/`heavy`/`selected` filter chips, and a `visible/total` counter
@@ -161,9 +147,9 @@ The page also calls out common degraded states: no LCM data yet (pulsing empty s
 
 ### v1 scope
 
-The selector discovers live LCM topics only. SHM, ROS, DDS, coordinator metadata, and stored replay stream catalogs are future work unless those streams are actively bridged to LCM during the run.
+The monitor discovers live LCM topics only. SHM, ROS, DDS, coordinator metadata, and stored replay stream catalogs are future work unless those streams are actively bridged to LCM during the run.
 
-To make a topic renderable, prefer a typed LCM channel whose message implements `to_rerun()`. For message types that should not own rendering logic, pass a `visual_override` converter in `rerun_config`. Avoid using `RerunWebSocketServer` as a catalog API; it remains the viewer-to-robot click/teleop websocket path.
+To make a topic renderable in monitor mode, prefer a typed LCM channel whose message implements `to_rerun()`. Blueprint-specific `visual_override`, static Rerun scene objects, and custom topic-to-entity mappings are not loaded by `dimos topic monitor` in v1. Avoid using `RerunWebSocketServer` as a catalog API; it remains the viewer-to-robot click/teleop websocket path.
 
 ## Performance Tuning
 

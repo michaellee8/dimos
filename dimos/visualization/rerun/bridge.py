@@ -305,6 +305,13 @@ class RerunBridgeModule(Module):
             rerun_data: RerunData | None = self._visual_override_for_entity_path(entity_path)(msg)
         except Exception as exc:
             self._catalog.record_error(topic, exc)
+            if self.config.selector_enabled:
+                logger.warning(
+                    "Selector-managed Rerun conversion failed; topic will remain cataloged",
+                    topic=str(topic),
+                    exc_info=True,
+                )
+                return
             raise
 
         if not rerun_data:
