@@ -407,7 +407,11 @@ apriltag = [
 ]
 
 all = [
-    "dimos[agents,apriltag,base,cpu,cuda,docker,drone,manipulation,misc,perception,psql,sim,unitree,visualization,web]",
+    "dimos[agents,apriltag,base,cpu,cuda,docker,drone,ik,manipulation,misc,perception,psql,sim,unitree,visualization,web]",
+]
+ik = [
+    "daqp>=0.8.7",
+    "mink>=1.1.0",
 ]
 
 [dependency-groups]

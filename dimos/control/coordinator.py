@@ -496,9 +496,14 @@ class ControlCoordinator(Module):
                     task.set_velocities_by_name(velocities_by_name, t_now)
 
     def _on_cartesian_command(self, msg: PoseStamped) -> None:
-        """Route incoming PoseStamped to CartesianIKTask by task name.
+        """Route incoming PoseStamped to a cartesian task by frame_id.
 
-        Uses frame_id as the target task name for routing.
+        ``frame_id`` is the target task name. Multi-end-effector tasks
+        (mink_ik) are addressed as ``"<task_name>/<ee>"`` — the task is
+        looked up by the prefix and receives the remainder as the pose's
+        frame_id (e.g. ``"mink_arms/left_ee"`` → task ``mink_arms``,
+        ee ``left_ee``). Exact task-name matches keep priority, so
+        existing single-EE routing is unchanged.
         """
         task_name = msg.frame_id
         if not task_name:
@@ -509,6 +514,11 @@ class ControlCoordinator(Module):
 
         with self._task_lock:
             task = self._tasks.get(task_name)
+            if task is None and "/" in task_name:
+                base, _, sub_frame = task_name.partition("/")
+                task = self._tasks.get(base)
+                if task is not None:
+                    msg.frame_id = sub_frame
             if task is None:
                 logger.warning(f"Cartesian command for unknown task: {task_name}")
                 return
@@ -679,8 +689,10 @@ class ControlCoordinator(Module):
                     "Use task_invoke RPC or set transport via blueprint."
                 )
 
-        # Subscribe to cartesian commands if any cartesian_ik tasks configured
-        has_cartesian_ik = any(t.type in ("cartesian_ik", "teleop_ik") for t in self.config.tasks)
+        # Subscribe to cartesian commands if any cartesian tasks configured
+        has_cartesian_ik = any(
+            t.type in ("cartesian_ik", "teleop_ik", "mink_ik") for t in self.config.tasks
+        )
         if has_cartesian_ik:
             try:
                 self._cartesian_command_unsub = self.cartesian_command.subscribe(

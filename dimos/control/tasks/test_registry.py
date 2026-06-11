@@ -23,6 +23,7 @@ def test_control_task_registry_discovers_manifest_task_types() -> None:
     assert registry.available() == [
         "cartesian_ik",
         "g1_groot_wbc",
+        "mink_ik",
         "servo",
         "teleop_ik",
         "trajectory",

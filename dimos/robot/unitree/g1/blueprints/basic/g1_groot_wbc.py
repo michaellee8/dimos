@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
+import importlib.util
 import logging
 import os
 from pathlib import Path
@@ -128,6 +129,36 @@ def _arm_holder_config() -> TaskConfig:
         priority=10,
         auto_start=True,
         params={"default_positions": ARM_DEFAULT_POSE},
+    )
+
+
+def _mink_arms_config() -> TaskConfig | None:
+    """QP differential-IK arm task (priority 20, above servo_arms).
+
+    Inert until the first cartesian command arrives — servo_arms keeps
+    holding through arbitration until then. Targets are pelvis-frame
+    PoseStamped on the cartesian_command stream, addressed as
+    ``frame_id="mink_arms/left_ee"`` / ``"mink_arms/right_ee"``.
+    Requires the [ik] extra; silently disabled when mink is missing.
+    """
+    if importlib.util.find_spec("mink") is None:
+        logger.info("mink not installed; mink_arms task disabled (pip install 'dimos[ik]')")
+        return None
+    return TaskConfig(
+        name="mink_arms",
+        type="mink_ik",
+        joint_names=g1_arms,
+        priority=20,
+        auto_start=True,
+        params={
+            "model_path": str(_MJCF_PATH),
+            "model_meshdir": str(_G1_MESH_DIR),
+            "ee_frames": {
+                "left_ee": "left_wrist_yaw_link",
+                "right_ee": "right_wrist_yaw_link",
+            },
+            "synced_joints": g1_legs_waist,
+        },
     )
 
 
@@ -325,6 +356,7 @@ def _coordinator_blueprint(selection: _BackendSelection) -> tuple[Blueprint, str
             },
         ),
         *([selection.arm_holder] if selection.arm_holder is not None else []),
+        *([mink_arms] if (mink_arms := _mink_arms_config()) is not None else []),
     ]
 
     coordinator = ControlCoordinator.blueprint(
@@ -348,6 +380,7 @@ def _coordinator_blueprint(selection: _BackendSelection) -> tuple[Blueprint, str
             ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
             ("joint_command", JointState): LCMTransport("/g1/joint_command", JointState),
             ("twist_command", Twist): LCMTransport(cmd_vel_topic, Twist),
+            ("cartesian_command", PoseStamped): LCMTransport("/g1/cartesian_command", PoseStamped),
             ("motor_states", JointState): LCMTransport("/g1/motor_states", JointState),
             ("imu", Imu): LCMTransport("/g1/imu", Imu),
             ("motor_command", MotorCommandArray): LCMTransport(
