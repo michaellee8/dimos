@@ -32,10 +32,18 @@ resource "aws_cognito_user_pool" "teleop" {
     }
   }
 
-  # Cognito-default sender: fine pre-production (50 emails/day cap).
-  # Move to SES (DEVELOPER) before real launch.
+  # Sender: Cognito default until SES production access is granted, then
+  # no-reply@dimensionalos.com via SES (set ses_email_enabled=true, re-apply).
   email_configuration {
-    email_sending_account = "COGNITO_DEFAULT"
+    email_sending_account = var.ses_email_enabled ? "DEVELOPER" : "COGNITO_DEFAULT"
+    source_arn            = var.ses_email_enabled ? aws_ses_domain_identity.main.arn : null
+    from_email_address    = var.ses_email_enabled ? "DIMENSIONAL <no-reply@dimensionalos.com>" : null
+  }
+
+  verification_message_template {
+    default_email_option = "CONFIRM_WITH_CODE"
+    email_subject        = "DIMENSIONAL // teleop access code"
+    email_message        = "DIMENSIONAL TELEOP\n\nYour operator verification code is {####}\n\nThis code expires shortly. If you did not request access, ignore this message.\n\n(c) Dimensional Inc. — dimensionalos.com"
   }
 
   schema {
