@@ -87,12 +87,14 @@ unitree_go2_nav_3d = autoconnect(
         lidar_ip=os.getenv("LIDAR_IP", "192.168.1.155"),
         map_freq=-1.0,
     ).remappings([(FastLio2, "global_map", "global_map_fastlio")]),
-    RayTracingVoxelMap.blueprint(voxel_size=voxel_size),
+    RayTracingVoxelMap.blueprint(voxel_size=voxel_size, emit_every=10),
+    # global_map is remapped off so the planner runs purely on the
+    # incremental local_map + region_bounds pair.
     MLSPlannerNative.blueprint(
         world_frame="odom",
         voxel_size=voxel_size,
         robot_height=go2_lidar_height,
-    ),
+    ).remappings([(MLSPlannerNative, "global_map", "global_map_unused")]),
     GoalRelay.blueprint(),
     BasicPathFollower.blueprint(lookahead_m=1.2, heading_gain=0.8, max_angular=0.6),
     MovementManager.blueprint(),
