@@ -16,12 +16,11 @@
 mapping/loop_closure/utils/map_rrd.py), focused on the post-processed result.
 
 For each lidar stream it logs both the per-frame clouds and a single aggregated,
-voxel-downsampled "map" (corrected fastlio re-anchored on `gtsam_odom`; the Go2
-`lidar` stays in its own `odom` frame). Clouds get a slight height-color
-gradient; trajectories get a start->end gradient. Each AprilTag is placed in 3D
-(via the corrected trajectory) with its detections, a labeled marker, basis-
-vector axes at the perceived pose, and the robot's-eye camera image at the
-recognition moment.
+voxel-downsampled "map" (each cloud in its own world frame). Clouds get a slight
+height-color gradient; trajectories get a start->end gradient. Each AprilTag is
+placed in 3D (via the gtsam-corrected trajectory) with its detections, a labeled
+marker, basis-vector axes at the perceived pose, and the robot's-eye camera image
+at the recognition moment.
 """
 
 from __future__ import annotations
@@ -443,9 +442,7 @@ def build_rrd(
             f"/world/{m}": rrb.EntityBehavior(visible=False)
             for m in (
                 "go2_map",
-                "corrected_go2_map",
                 "fastlio_map",
-                "corrected_fastlio_map",
                 "onboard_map",
             )
         }
@@ -475,17 +472,16 @@ def build_rrd(
         )
 
         ci = 0  # rotate a distinct base color through each point cloud
-        for raw, corr, name in [
-            ("go2_lidar", "go2_lidar_corrected", "go2"),  # new: correct transforms
-            ("fastlio_lidar", "fastlio_lidar_corrected", "fastlio"),  # legacy mid360
-            ("lidar", None, "onboard"),  # legacy Go2 onboard L1, own frame
+        for name, stream in [
+            ("go2", "go2_lidar"),
+            ("fastlio", "fastlio_lidar"),
+            ("onboard", "lidar"),  # legacy Go2 onboard L1, own frame
         ]:
-            for stream, ent in [(raw, name), (corr, f"corrected_{name}")]:
-                if stream and stream in streams:
-                    base = _CLOUD_PALETTE[ci % len(_CLOUD_PALETTE)]
-                    ci += 1
-                    _log_frames(store, stream, f"world/{ent}_lidar", cloud_stride, map_voxel, base)
-                    _log_map(store, stream, f"world/{ent}_map", map_voxel, base)
+            if stream in streams:
+                base = _CLOUD_PALETTE[ci % len(_CLOUD_PALETTE)]
+                ci += 1
+                _log_frames(store, stream, f"world/{name}_lidar", cloud_stride, map_voxel, base)
+                _log_map(store, stream, f"world/{name}_map", map_voxel, base)
 
         _log_apriltags(store, db_path, cam_xform, intrinsics, resolution)
 

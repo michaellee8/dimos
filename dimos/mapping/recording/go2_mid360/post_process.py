@@ -38,11 +38,6 @@ from dimos.robot.unitree.go2.config import (
     GO2_FRONT_CAMERA_RESOLUTION,
 )
 
-# Lidar/odom pairs that may be re-anchored onto gtsam_odom — only when their odom
-# is the same frame family gtsam was built from. The legacy Go2 onboard
-# `lidar`/`odom` is a different estimator frame -> left as-is.
-REANCHOR_PAIRS = [("go2_lidar", "go2_odom"), ("fastlio_lidar", "fastlio_odometry")]
-
 
 def load_camera(db: Path) -> CameraParams:
     return (
@@ -54,4 +49,4 @@ def load_camera(db: Path) -> CameraParams:
 
 
 if __name__ == "__main__":
-    run(description=__doc__, reanchor_pairs=REANCHOR_PAIRS, load_camera=load_camera)
+    run(description=__doc__, load_camera=load_camera)

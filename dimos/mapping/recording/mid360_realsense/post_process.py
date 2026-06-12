@@ -37,9 +37,6 @@ from dimos.mapping.recording.utils.post_process import CameraParams, run
 from dimos.memory2.store.sqlite import SqliteStore
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 
-# The RealSense + Mid-360 recording only has the fastlio lidar/odom pair; its odom
-# is the same frame family gtsam was built from, so the re-anchor composes.
-REANCHOR_PAIRS = [("fastlio_lidar", "fastlio_odometry")]
 CAMERA_INFO_STREAM = "realsense_camera_info"
 
 # camera_optical pose in mid360_link (the frame fastlio odom is anchored to),
@@ -61,4 +58,4 @@ def load_camera(db: Path) -> CameraParams:
 
 
 if __name__ == "__main__":
-    run(description=__doc__, reanchor_pairs=REANCHOR_PAIRS, load_camera=load_camera)
+    run(description=__doc__, load_camera=load_camera)

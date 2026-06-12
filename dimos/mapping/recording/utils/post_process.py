@@ -18,14 +18,13 @@ For every `mem2.db` under a recordings directory it:
   1. prints a recording sanity check (rec_check),
   2. detects AprilTags -> `april_tags` stream                 (apriltags),
   3. solves a drift-corrected trajectory -> `gtsam_odom`       (gtsam_gt),
-  4. re-anchors each lidar onto it -> `<lidar>_corrected`      (lidar_reanchor),
-  5. writes a Rerun `.rrd` visualization                        (build_rrd).
+  4. writes a Rerun `.rrd` visualization                        (build_rrd).
 
 A tag seen at several times pins the odometry chain and removes accumulated
 drift. Also writes `gtsam_odom.tum` next to each db (relocalization groundtruth).
 
-Each rig calls `run()` with its own re-anchor pairs and a `load_camera(db)`
-returning `(intrinsics, distortion, optical_in_base, resolution)`.
+Each rig calls `run()` with a `load_camera(db)` returning
+`(intrinsics, distortion, optical_in_base, resolution)`.
 """
 
 from __future__ import annotations
@@ -40,14 +39,12 @@ from dimos.mapping.recording.utils import rec_check
 from dimos.mapping.recording.utils.apriltags import detect_apriltags
 from dimos.mapping.recording.utils.build_rrd import build_rrd
 from dimos.mapping.recording.utils.gtsam_gt import build_gtsam_gt, write_gtsam_odom
-from dimos.mapping.recording.utils.lidar_reanchor import reanchor_stream
 from dimos.memory2.store.sqlite import SqliteStore
 
 DB_NAME = "mem2.db"
 
 # (intrinsics 3x3, distortion, optical_in_base [x,y,z,qx,qy,qz,qw], (width, height))
 CameraParams = tuple[np.ndarray, np.ndarray, list[float], tuple[int, int]]
-ReanchorPairs = list[tuple[str, str]]
 
 
 def _created_time(path: Path) -> float:
@@ -92,15 +89,14 @@ def correct_db(
     intrinsics,
     distortion,
     optical_in_base,
-    reanchor_pairs: ReanchorPairs,
     image_stream,
     apriltag_stream,
     gtsam_stream,
     marker_length,
     dictionary,
 ):
-    """AprilTag detection -> GTSAM trajectory -> re-anchor lidar. Returns True if
-    a corrected trajectory was written."""
+    """AprilTag detection -> GTSAM trajectory. Returns True if a corrected
+    trajectory was written."""
     with SqliteStore(path=str(db)) as store:
         detections = detect_apriltags(
             store, intrinsics, distortion, image_stream, apriltag_stream, marker_length, dictionary
@@ -111,20 +107,6 @@ def correct_db(
     trajectory = build_gtsam_gt(str(db), detections, optical_in_base)
     with SqliteStore(path=str(db)) as store:
         write_gtsam_odom(store, trajectory, gtsam_stream, db.parent / "gtsam_odom.tum")
-        stream_names = store.list_streams()
-        for lidar_stream, odom_stream in reanchor_pairs:
-            if lidar_stream in stream_names and odom_stream in stream_names:
-                try:
-                    reanchor_stream(
-                        store,
-                        str(db),
-                        lidar_stream=lidar_stream,
-                        odom_stream=odom_stream,
-                        gtsam_stream=gtsam_stream,
-                        out_stream=f"{lidar_stream}_corrected",
-                    )
-                except Exception as error:
-                    print(f"   re-anchor {lidar_stream}_corrected failed: {error}")
     return True
 
 
@@ -135,7 +117,6 @@ def process_db(
     distortion,
     optical_in_base,
     resolution,
-    reanchor_pairs: ReanchorPairs,
     image_stream,
     apriltag_stream,
     gtsam_stream,
@@ -167,16 +148,15 @@ def process_db(
         already_corrected = gtsam_stream in store.list_streams()
 
     if no_gtsam:
-        print("   --no-gtsam: skipping AprilTag/GTSAM/re-anchor")
+        print("   --no-gtsam: skipping AprilTag/GTSAM")
     elif already_corrected and not force:
-        print(f"   already has '{gtsam_stream}' — skipping AprilTag/GTSAM/re-anchor (use --force)")
+        print(f"   already has '{gtsam_stream}' — skipping AprilTag/GTSAM (use --force)")
     else:
         correct_db(
             db,
             intrinsics=intrinsics,
             distortion=distortion,
             optical_in_base=optical_in_base,
-            reanchor_pairs=reanchor_pairs,
             image_stream=image_stream,
             apriltag_stream=apriltag_stream,
             gtsam_stream=gtsam_stream,
@@ -204,7 +184,6 @@ def process_db(
 def run(
     *,
     description: str | None,
-    reanchor_pairs: ReanchorPairs,
     load_camera: Callable[[Path], CameraParams],
 ) -> None:
     """Parse CLI args and post-process each resolved recording. `load_camera`
@@ -233,12 +212,12 @@ def run(
     parser.add_argument(
         "--check",
         action="store_true",
-        help="only sanity-check each recording and write summary.json (no GTSAM/re-anchor/.rrd)",
+        help="only sanity-check each recording and write summary.json (no GTSAM/.rrd)",
     )
     parser.add_argument(
         "--no-gtsam",
         action="store_true",
-        help="skip AprilTag/GTSAM/re-anchor (e.g. rebuild only the .rrd)",
+        help="skip AprilTag/GTSAM (e.g. rebuild only the .rrd)",
     )
     parser.add_argument("--no-rrd", action="store_true", help="skip the .rrd visualization step")
     parser.add_argument(
@@ -278,7 +257,6 @@ def run(
                 distortion=distortion,
                 optical_in_base=optical_in_base,
                 resolution=resolution,
-                reanchor_pairs=reanchor_pairs,
                 image_stream=args.image_stream,
                 apriltag_stream=args.apriltag_stream,
                 gtsam_stream=args.gtsam_stream,
