@@ -16,9 +16,14 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+import sqlite3
+import tempfile
 import threading
 import time
 
+import cv2
 import numpy as np
 
 from dimos.core.coordination.blueprints import autoconnect
@@ -118,6 +123,273 @@ class H264WebcamRecorder(Recorder):
     """Recorder with a typed image input for webcam H.264 QA."""
 
     color_image: In[Image]
+
+
+class JpegBenchmarkRecorder(Recorder):
+    """Recorder for the JPEG side of the storage-size benchmark."""
+
+    jpeg_image: In[Image]
+
+
+class H264BenchmarkRecorder(Recorder):
+    """Recorder for the H.264 side of the storage-size benchmark."""
+
+    h264_image: In[Image]
+
+
+class H264StorageBenchmarkSourceConfig(SyntheticVideoSourceConfig):
+    video_path: str = ""
+    width: int = 320
+    height: int = 240
+    fps: float = 15.0
+    frame_count: int = 150
+    output_frame_id: str = "h264_storage_benchmark_camera"
+
+
+class H264StorageBenchmarkSource(Module):
+    """Publish identical raw frames to JPEG and H.264 recording paths."""
+
+    config: H264StorageBenchmarkSourceConfig
+    jpeg_image: Out[Image]
+    h264_image: Out[Image]
+
+    _thread: threading.Thread | None = None
+    _stop_event: threading.Event | None = None
+
+    @rpc
+    def start(self) -> None:
+        super().start()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._publish_loop, daemon=True)
+        self._thread.start()
+        video_path = self._configured_video_path()
+        source = str(video_path) if video_path is not None else "synthetic pattern"
+        logger.info(
+            "Started H.264/JPEG storage benchmark source: %s, %sx%s @ %.2f FPS for up to %s frames",
+            source,
+            self.config.width,
+            self.config.height,
+            self.config.fps,
+            self.config.frame_count,
+        )
+
+    @rpc
+    def stop(self) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        super().stop()
+
+    def _publish_loop(self) -> None:
+        assert self._stop_event is not None
+        video_path = self._configured_video_path()
+        if video_path is not None:
+            self._publish_video_file(video_path)
+            return
+
+        period = 1.0 / max(self.config.fps, 0.1)
+        next_publish = time.monotonic()
+        for seq in range(self.config.frame_count):
+            if self._stop_event.is_set():
+                break
+            frame = self._make_frame(seq)
+            self.jpeg_image.publish(frame)
+            self.h264_image.publish(frame.copy())
+            next_publish += period
+            time.sleep(max(0.0, next_publish - time.monotonic()))
+        logger.info("H.264/JPEG storage benchmark source finished publishing frames")
+
+    def _configured_video_path(self) -> Path | None:
+        value = self.config.video_path or os.environ.get("DIMOS_H264_BENCHMARK_VIDEO", "")
+        return Path(value).expanduser() if value else None
+
+    def _publish_video_file(self, video_path: Path) -> None:
+        assert self._stop_event is not None
+        if not video_path.exists():
+            logger.error("Benchmark video file does not exist: %s", video_path)
+            return
+
+        capture = cv2.VideoCapture(str(video_path))
+        try:
+            if not capture.isOpened():
+                logger.error("Failed to open benchmark video file: %s", video_path)
+                return
+
+            period = 1.0 / max(self.config.fps, 0.1)
+            next_publish = time.monotonic()
+            published = 0
+            for seq in range(self.config.frame_count):
+                if self._stop_event.is_set():
+                    break
+                ok, frame_bgr = capture.read()
+                if not ok:
+                    break
+                frame = self._image_from_video_frame(frame_bgr)
+                self.jpeg_image.publish(frame)
+                self.h264_image.publish(frame.copy())
+                published = seq + 1
+                next_publish += period
+                time.sleep(max(0.0, next_publish - time.monotonic()))
+            logger.info(
+                "H.264/JPEG storage benchmark video source published %s frames from %s",
+                published,
+                video_path,
+            )
+        finally:
+            capture.release()
+
+    def _image_from_video_frame(self, frame_bgr: np.ndarray) -> Image:
+        if self.config.width > 0 and self.config.height > 0:
+            frame_bgr = cv2.resize(
+                frame_bgr,
+                (self.config.width, self.config.height),
+                interpolation=cv2.INTER_AREA,
+            )
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        return Image(
+            data=frame_rgb,
+            format=ImageFormat.RGB,
+            frame_id=self.config.output_frame_id,
+            ts=time.time(),
+        )
+
+    def _make_frame(self, seq: int) -> Image:
+        yy, xx = np.indices((self.config.height, self.config.width), dtype=np.uint16)
+        base = (xx + (yy * 2) + (seq * 4) + self.config.seed) % 256
+        marker = ((xx // 20 + yy // 20 + seq) % 2) * 35
+        data = np.stack(
+            (base, (base + 70 + marker) % 256, (base + 145) % 256),
+            axis=2,
+        ).astype(np.uint8)
+        return Image(
+            data=data,
+            format=ImageFormat.RGB,
+            frame_id=self.config.output_frame_id,
+            ts=time.time(),
+        )
+
+
+class H264StorageBenchmarkReporterConfig(ModuleConfig):
+    jpeg_db_path: str = "benchmark_jpeg.db"
+    h264_db_path: str = "benchmark_h264.db"
+    min_wait_seconds: float = 12.0
+    wait_seconds: float = 18.0
+    stable_seconds: float = 2.0
+    poll_seconds: float = 0.5
+
+
+class H264StorageBenchmarkReporter(Module):
+    """Log the JPEG vs H.264 SQLite DB size comparison."""
+
+    config: H264StorageBenchmarkReporterConfig
+
+    _thread: threading.Thread | None = None
+    _stop_event: threading.Event | None = None
+    _last_summary: str | None = None
+
+    @rpc
+    def start(self) -> None:
+        super().start()
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._report_loop, daemon=True)
+        self._thread.start()
+
+    @rpc
+    def stop(self) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+        super().stop()
+
+    @rpc
+    def summary(self) -> str:
+        """Return the most recent JPEG-vs-H.264 storage benchmark summary."""
+        return self._last_summary or "benchmark summary not available yet"
+
+    def _report_loop(self) -> None:
+        assert self._stop_event is not None
+        started_at = time.monotonic()
+        deadline = time.monotonic() + self.config.wait_seconds
+        stable_since: float | None = None
+        last_sizes: tuple[int, int] | None = None
+        jpeg_path = Path(self.config.jpeg_db_path)
+        h264_path = Path(self.config.h264_db_path)
+
+        while time.monotonic() < deadline and not self._stop_event.is_set():
+            if jpeg_path.exists() and h264_path.exists():
+                sizes = (
+                    _sqlite_snapshot_size(jpeg_path),
+                    _sqlite_snapshot_size(h264_path),
+                )
+                if sizes == last_sizes:
+                    stable_since = stable_since or time.monotonic()
+                    recording_window_elapsed = (
+                        time.monotonic() - started_at >= self.config.min_wait_seconds
+                    )
+                    if (
+                        recording_window_elapsed
+                        and time.monotonic() - stable_since >= self.config.stable_seconds
+                    ):
+                        self._log_sizes(sizes[0], sizes[1])
+                        return
+                else:
+                    last_sizes = sizes
+                    stable_since = None
+            time.sleep(self.config.poll_seconds)
+
+        if jpeg_path.exists() and h264_path.exists():
+            self._log_sizes(
+                _sqlite_snapshot_size(jpeg_path),
+                _sqlite_snapshot_size(h264_path),
+            )
+        else:
+            missing = [str(path) for path in (jpeg_path, h264_path) if not path.exists()]
+            self._last_summary = f"benchmark DB size unavailable; missing={missing}"
+            logger.warning(self._last_summary)
+
+    def _log_sizes(self, jpeg_bytes: int, h264_bytes: int) -> None:
+        ratio = h264_bytes / jpeg_bytes if jpeg_bytes else float("inf")
+        saved = jpeg_bytes - h264_bytes
+        saved_pct = (saved / jpeg_bytes * 100.0) if jpeg_bytes else 0.0
+        self._last_summary = (
+            "H.264/JPEG storage benchmark: "
+            f"jpeg={jpeg_bytes} bytes ({jpeg_bytes / 1024 / 1024:.2f} MiB), "
+            f"h264={h264_bytes} bytes ({h264_bytes / 1024 / 1024:.2f} MiB), "
+            f"h264/jpeg={ratio:.3f}, saved={saved} bytes ({saved_pct:.1f}%)"
+        )
+        logger.info(self._last_summary)
+        print(self._last_summary, flush=True)
+
+
+def _sqlite_snapshot_size(path: Path) -> int:
+    """Return compact SQLite DB size, even while WAL sidecars are active."""
+    if not path.exists():
+        return 0
+    try:
+        with tempfile.NamedTemporaryFile(prefix=f"{path.stem}-", suffix=".db") as tmp:
+            source = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+            target = sqlite3.connect(tmp.name)
+            try:
+                source.backup(target)
+            finally:
+                target.close()
+                source.close()
+            return Path(tmp.name).stat().st_size
+    except sqlite3.Error:
+        return _sqlite_live_file_size(path)
+
+
+def _sqlite_live_file_size(path: Path) -> int:
+    total = path.stat().st_size if path.exists() else 0
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(f"{path}{suffix}")
+        if sidecar.exists():
+            total += sidecar.stat().st_size
+    return total
 
 
 class H264MemoryReplayConfig(ModuleConfig):
@@ -225,6 +497,7 @@ class H264VideoProbe(Module):
 
 _h264_config = H264Config(bitrate=1_000_000, target_fps=10, keyframe_interval=15)
 _webcam_h264_config = H264Config(bitrate=2_000_000, target_fps=15, keyframe_interval=30)
+_benchmark_h264_config = H264Config(bitrate=1_500_000, target_fps=15, keyframe_interval=30)
 
 
 def _webcam() -> Webcam:
@@ -245,6 +518,33 @@ demo_h264_video_e2e = autoconnect(
             "/demo_h264_video_e2e/color_image",
             Image,
             config=_h264_config,
+            decode_images=False,
+        )
+    }
+)
+
+
+demo_h264_storage_benchmark = autoconnect(
+    H264StorageBenchmarkSource.blueprint(),
+    JpegBenchmarkRecorder.blueprint(
+        db_path="benchmark_jpeg.db",
+        on_existing=OnExisting.OVERWRITE,
+    ),
+    H264BenchmarkRecorder.blueprint(
+        db_path="benchmark_h264.db",
+        on_existing=OnExisting.OVERWRITE,
+        codecs={"h264_image": "h264"},
+    ),
+    H264StorageBenchmarkReporter.blueprint(
+        jpeg_db_path="benchmark_jpeg.db",
+        h264_db_path="benchmark_h264.db",
+    ),
+).transports(
+    {
+        ("h264_image", Image): H264LcmTransport(
+            "/demo_h264_storage_benchmark/h264_image",
+            Image,
+            config=_benchmark_h264_config,
             decode_images=False,
         )
     }
