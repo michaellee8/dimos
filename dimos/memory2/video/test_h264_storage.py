@@ -14,14 +14,20 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import platform
+
 import numpy as np
 import pytest
 
+from dimos.memory2.backend import Backend
 from dimos.memory2.codecs.base import codec_from_id, codec_id
 from dimos.memory2.codecs.jpeg import JpegCodec
 from dimos.memory2.store.sqlite import SqliteStore
 from dimos.memory2.video.h264 import H264ImageCodec
 from dimos.msgs.sensor_msgs.Image import H264_IMAGE_ENCODING, Image, ImageFormat
+
+_SKIP_SQLITE_VEC = platform.machine() == "aarch64" or platform.system() == "Darwin"
 
 
 def _raw_image(seq: int, fmt: ImageFormat = ImageFormat.RGB) -> Image:
@@ -80,7 +86,9 @@ def test_codec_id_and_factory_support_h264_for_image() -> None:
     assert isinstance(codec_from_id("h264", "dimos.msgs.sensor_msgs.Image.Image"), H264ImageCodec)
 
 
-def test_h264_stream_stores_encoded_images_with_normal_backend(tmp_path) -> None:
+def test_h264_stream_stores_encoded_images_with_normal_backend(tmp_path: Path) -> None:
+    if _SKIP_SQLITE_VEC:
+        pytest.skip("sqlite-vec extension not loadable here")
     db = tmp_path / "h264.db"
     with SqliteStore(path=str(db)) as store:
         stream = store.stream("cam", Image, codec="h264")
@@ -96,7 +104,9 @@ def test_h264_stream_stores_encoded_images_with_normal_backend(tmp_path) -> None
         assert obs.data.width == 2
 
 
-def test_h264_replay_emits_encoded_images(tmp_path) -> None:
+def test_h264_replay_emits_encoded_images(tmp_path: Path) -> None:
+    if _SKIP_SQLITE_VEC:
+        pytest.skip("sqlite-vec extension not loadable here")
     store = SqliteStore(path=str(tmp_path / "replay.db"))
     stream = store.stream("cam", Image, codec="h264")
     stream.append(_encoded_image(1), ts=1.0)
@@ -108,12 +118,16 @@ def test_h264_replay_emits_encoded_images(tmp_path) -> None:
     assert [image.codec_metadata["seq"] for image in replayed] == [1, 2]
 
 
-def test_default_image_stream_still_uses_jpeg_codec(tmp_path) -> None:
+def test_default_image_stream_still_uses_jpeg_codec(tmp_path: Path) -> None:
+    if _SKIP_SQLITE_VEC:
+        pytest.skip("sqlite-vec extension not loadable here")
     store = SqliteStore(path=str(tmp_path / "jpeg.db"))
     stream = store.stream("rgb", Image)
     stream.append(_raw_image(1))
 
-    assert isinstance(stream._source.codec, JpegCodec)
+    source = stream._source
+    assert isinstance(source, Backend)
+    assert isinstance(source.codec, JpegCodec)
     assert store.stream("rgb").first().data.encoding == "raw"
 
 
