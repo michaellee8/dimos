@@ -12,12 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run Point-LIO over a .pcap and append the odometry into an existing .db.
+"""Run Point-LIO over a .pcap and append its outputs into an existing .db.
 
 Given a Livox Mid-360 pcap capture and a memory2 SQLite database, this streams
 the pcap through the Point-LIO native module (deterministic clock, single feeder
--> never loads the whole pcap into memory) and writes a ``pointlio_odometry``
-stream into the database at the native publish rate (~30 Hz).
+-> never loads the whole pcap into memory) and writes two streams into the
+database, both time-aligned onto the db's existing clock:
+
+* ``pointlio_odometry`` -- the IESKF pose at the native odom rate (~30 Hz).
+* ``pointlio_lidar`` -- the registered (deskewed, odom-frame) point cloud at the
+  native pointcloud rate (~10 Hz).
+
+If either stream already exists in the db the run aborts, unless ``--force`` is
+given, in which case the existing ``pointlio_odometry`` and ``pointlio_lidar``
+streams are dropped before the new ones are written.
 
 Timing conversion
 -----------------
@@ -53,6 +61,7 @@ import time
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In
 from dimos.msgs.nav_msgs.Odometry import Odometry
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
 # Below this the db's existing timestamps are sensor-boot seconds, not unix time.
 _SENSOR_CLOCK_MAX = 1e8
@@ -75,19 +84,23 @@ class RecConfig(ModuleConfig):
 
 
 class Rec(Module):
-    """Append Point-LIO odometry into an existing SQLite db with ts conversion."""
+    """Append Point-LIO odometry + lidar into an existing SQLite db with ts conversion."""
 
     config: RecConfig
     pointlio_odometry: In[Odometry]
+    pointlio_lidar: In[PointCloud2]
     _offset: float | None = None
-    _last_ts: float = 0.0
-    _count: int = 0
+    _last_odom_ts: float = 0.0
+    _last_lidar_ts: float = 0.0
+    _odom_count: int = 0
+    _lidar_count: int = 0
 
     async def main(self) -> AsyncIterator[None]:
         from dimos.memory2.store.sqlite import SqliteStore
 
         self._store = SqliteStore(path=self.config.db_path)
         self._os = self._store.stream("pointlio_odometry", Odometry)
+        self._ls = self._store.stream("pointlio_lidar", PointCloud2)
         yield
         self._store.stop()
 
@@ -102,16 +115,27 @@ class Rec(Module):
         # db on wall-clock time -> start-align Point-LIO onto the db's earliest ts.
         return ref - first_ts
 
-    async def handle_pointlio_odometry(self, v: Odometry) -> None:
-        raw_ts = getattr(v, "ts", None) or time.time()
+    def _aligned_ts(self, raw_ts: float, last_ts: float) -> float:
+        """Convert a sensor ts onto the db clock, kept strictly above last_ts."""
         if self._offset is None:
             self._offset = self._resolve_offset(raw_ts)
-        ts = max(raw_ts + self._offset, self._last_ts + _EPS)
-        self._last_ts = ts
+        return max(raw_ts + self._offset, last_ts + _EPS)
+
+    async def handle_pointlio_odometry(self, v: Odometry) -> None:
+        raw_ts = getattr(v, "ts", None) or time.time()
+        ts = self._aligned_ts(raw_ts, self._last_odom_ts)
+        self._last_odom_ts = ts
         pose = getattr(v, "pose", None)
         pose_inner = getattr(pose, "pose", None) if pose is not None else None
         self._os.append(v, ts=ts, pose=pose_inner)
-        self._count += 1
+        self._odom_count += 1
+
+    async def handle_pointlio_lidar(self, v: PointCloud2) -> None:
+        raw_ts = getattr(v, "ts", None) or time.time()
+        ts = self._aligned_ts(raw_ts, self._last_lidar_ts)
+        self._last_lidar_ts = ts
+        self._ls.append(v, ts=ts)
+        self._lidar_count += 1
 
 
 def _db_ref_start_ts(db_path: Path) -> float:
@@ -128,10 +152,15 @@ def _db_ref_start_ts(db_path: Path) -> float:
         for table in tables:
             if table.startswith("_") or table.startswith("sqlite_"):
                 continue
-            cols = [c[1] for c in con.execute(f"PRAGMA table_info('{table}')").fetchall()]
-            if "ts" not in cols:
+            try:
+                # vec0/rtree virtual tables (sqlite-vec etc.) raise "no such
+                # module" here when the extension isn't loaded -- skip them.
+                cols = [c[1] for c in con.execute(f"PRAGMA table_info('{table}')").fetchall()]
+                if "ts" not in cols:
+                    continue
+                row = con.execute(f"SELECT MIN(ts) FROM '{table}'").fetchone()
+            except sqlite3.OperationalError:
                 continue
-            row = con.execute(f"SELECT MIN(ts) FROM '{table}'").fetchone()
             if row and row[0] is not None:
                 best = row[0] if best is None else min(best, row[0])
         return best if best is not None else -1.0
@@ -139,14 +168,14 @@ def _db_ref_start_ts(db_path: Path) -> float:
         con.close()
 
 
-def _odom_stats(db_path: Path) -> tuple[int, float, float]:
-    """(count, min_ts, max_ts) for the pointlio_odometry table; zeros if absent."""
+def _table_stats(db_path: Path, table: str) -> tuple[int, float, float]:
+    """(count, min_ts, max_ts) for a stream table; zeros if absent."""
     if not db_path.exists():
         return 0, 0.0, 0.0
     con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
     try:
         try:
-            row = con.execute("SELECT COUNT(*), MIN(ts), MAX(ts) FROM pointlio_odometry").fetchone()
+            row = con.execute(f"SELECT COUNT(*), MIN(ts), MAX(ts) FROM '{table}'").fetchone()
         except sqlite3.OperationalError:
             return 0, 0.0, 0.0
         cnt = row[0] or 0
@@ -168,6 +197,24 @@ def _run(args: argparse.Namespace) -> int:
     from dimos.core.coordination.blueprints import autoconnect
     from dimos.core.coordination.module_coordinator import ModuleCoordinator
     from dimos.hardware.sensors.lidar.pointlio.module import PointLio
+    from dimos.memory2.store.sqlite import SqliteStore
+
+    pointlio_streams = ("pointlio_odometry", "pointlio_lidar")
+    store = SqliteStore(path=str(db_path))
+    try:
+        existing = sorted(set(store.list_streams()) & set(pointlio_streams))
+        if existing and not args.force:
+            print(
+                f"[pcap_to_db] {db_path.name} already has {existing}; pass --force to overwrite",
+                file=sys.stderr,
+            )
+            return 2
+        for name in existing:
+            store.delete_stream(name)
+        if existing:
+            print(f"[pcap_to_db] --force: dropped existing {existing}", flush=True)
+    finally:
+        store.stop()
 
     ref_start_ts = _db_ref_start_ts(db_path)
     time_offset = float("nan") if args.time_offset is None else args.time_offset
@@ -194,7 +241,12 @@ def _run(args: argparse.Namespace) -> int:
             deterministic_clock=True,
             replay_dual_thread=False,
             debug=False,
-        ).remappings([(PointLio, "odometry", "pointlio_odometry")]),
+        ).remappings(
+            [
+                (PointLio, "odometry", "pointlio_odometry"),
+                (PointLio, "lidar", "pointlio_lidar"),
+            ]
+        ),
         Rec.blueprint(
             db_path=str(db_path),
             ref_start_ts=ref_start_ts,
@@ -210,7 +262,7 @@ def _run(args: argparse.Namespace) -> int:
     try:
         while True:
             time.sleep(_POLL_SEC)
-            cnt, min_ts, max_ts = _odom_stats(db_path)
+            cnt, min_ts, max_ts = _table_stats(db_path, "pointlio_odometry")
             if cnt == 0:
                 continue
             if first_max is None:
@@ -232,11 +284,13 @@ def _run(args: argparse.Namespace) -> int:
     finally:
         coord.stop()
 
-    cnt, min_ts, max_ts = _odom_stats(db_path)
-    span = max_ts - min_ts
+    o_cnt, o_min, o_max = _table_stats(db_path, "pointlio_odometry")
+    l_cnt = _table_stats(db_path, "pointlio_lidar")[0]
+    span = o_max - o_min
     print(
-        f"[pcap_to_db] done rows={cnt} ts=[{min_ts:.3f}, {max_ts:.3f}] "
-        f"span={span:.1f}s wall={time.time() - t0:.1f}s",
+        f"[pcap_to_db] done odom={o_cnt} lidar={l_cnt} "
+        f"ts=[{o_min:.3f}, {o_max:.3f}] span={span:.1f}s "
+        f"wall={time.time() - t0:.1f}s",
         flush=True,
     )
     return 0
@@ -262,7 +316,12 @@ def main(argv: list[str]) -> int:
         "--time-offset",
         type=float,
         default=None,
-        help="seconds added to every odom ts; omit to auto-derive from the db clock",
+        help="seconds added to every output ts; omit to auto-derive from the db clock",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite existing pointlio_odometry/pointlio_lidar streams in the db",
     )
     return _run(parser.parse_args(argv))
 
