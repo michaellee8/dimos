@@ -26,6 +26,8 @@ class H264ImageCodec:
     for visualization or module consumption.
     """
 
+    CODEC_ID = "h264"
+
     def encode(self, value: Image) -> bytes:
         if value.encoding != H264_IMAGE_ENCODING:
             raise ValueError(

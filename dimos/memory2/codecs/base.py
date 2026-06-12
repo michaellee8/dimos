@@ -75,9 +75,12 @@ def codec_from_id(codec_id_str: str, payload_module: str) -> Codec[Any]:
 
 
 def _class_to_id(codec: Any) -> str:
+    explicit_id = getattr(codec, "CODEC_ID", None)
+    if explicit_id is not None:
+        if not isinstance(explicit_id, str):
+            raise TypeError(f"Codec CODEC_ID must be str, got {type(explicit_id).__name__}")
+        return explicit_id
     name = type(codec).__name__
-    if name == "H264ImageCodec":
-        return "h264"
     if name.endswith("Codec"):
         return name[:-5].lower()
     return name.lower()

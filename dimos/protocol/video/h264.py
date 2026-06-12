@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import TYPE_CHECKING, Any, Protocol, cast
@@ -149,6 +149,7 @@ class AiortcH264Codec:
         self.config = config or H264Config()
         try:
             from aiortc.codecs.h264 import (
+                MAX_FRAME_RATE,
                 H264Decoder as AiortcDecoder,
                 H264Encoder as AiortcEncoder,
                 h264_depayload,
@@ -163,7 +164,52 @@ class AiortcH264Codec:
         self._av = av
         self._jitter_frame_type = JitterFrame
         self._depayload = h264_depayload
-        self._encoder = AiortcEncoder()
+
+        class ConfiguredAiortcEncoder(AiortcEncoder):
+            def __init__(self, h264_config: H264Config) -> None:
+                super().__init__()
+                self._dimos_config = h264_config
+
+            def _encode_frame(self, frame: av.VideoFrame, force_keyframe: bool) -> Iterator[bytes]:
+                configured_bitrate = self.codec.bit_rate if self.codec else None
+                if self.codec and (
+                    frame.width != self.codec.width
+                    or frame.height != self.codec.height
+                    or configured_bitrate is None
+                    or abs(self.target_bitrate - configured_bitrate) / configured_bitrate > 0.1
+                ):
+                    self.buffer_data = b""
+                    self.buffer_pts = None
+                    self.codec = None
+
+                if force_keyframe:
+                    frame.pict_type = av.video.frame.PictureType.I
+                else:
+                    frame.pict_type = av.video.frame.PictureType.NONE
+
+                if self.codec is None:
+                    self.codec = av.CodecContext.create("libx264", "w")
+                    self.codec.width = frame.width
+                    self.codec.height = frame.height
+                    self.codec.bit_rate = self.target_bitrate
+                    self.codec.pix_fmt = self._dimos_config.pixel_format
+                    self.codec.framerate = Fraction(MAX_FRAME_RATE, 1)
+                    self.codec.time_base = Fraction(1, MAX_FRAME_RATE)
+                    self.codec.options = {
+                        "level": "31",
+                        "preset": self._dimos_config.preset,
+                        "tune": self._dimos_config.tune,
+                    }
+                    self.codec.profile = _av_h264_profile(self._dimos_config.profile)
+
+                data_to_send = b""
+                for package in self.codec.encode(frame):
+                    data_to_send += bytes(package)
+
+                if data_to_send:
+                    yield from self._split_bitstream(data_to_send)
+
+        self._encoder = ConfiguredAiortcEncoder(self.config)
         self._decoder = AiortcDecoder()
         self._frame_index = 0
         self._time_base = Fraction(1, self.config.target_fps)
@@ -318,6 +364,18 @@ def _av_input_format(format: ImageFormat) -> str:
             return "gray"
         case _:
             raise UnsupportedVideoImageError(f"Unsupported H.264 image format: {format.value}")
+
+
+def _av_h264_profile(profile: str) -> str:
+    match profile.lower():
+        case "baseline":
+            return "Baseline"
+        case "main":
+            return "Main"
+        case "high":
+            return "High"
+        case _:
+            return profile
 
 
 __all__ = [

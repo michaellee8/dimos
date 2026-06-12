@@ -58,7 +58,7 @@ class H264EncoderMixin(PubSubEncoderMixin[LCMTopicProto, Image, bytes]):
             self._decoder = H264Decoder(self.h264_config)
         try:
             return self._decoder.decode(image)
-        except VideoDecodeGapError as exc:
+        except (VideoDecodeGapError, ValueError) as exc:
             raise DecodingError(str(exc)) from exc
 
 

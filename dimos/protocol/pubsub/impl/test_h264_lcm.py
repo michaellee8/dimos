@@ -61,12 +61,15 @@ class FakeEncoder:
 
 
 class FakeDecoder:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, invalid: bool = False) -> None:
         self.fail = fail
+        self.invalid = invalid
 
     def decode(self, image: Image) -> Image:
         if self.fail:
             raise VideoDecodeGapError("waiting for keyframe")
+        if self.invalid:
+            raise ValueError("Expected H.264 encoded Image")
         return Image(
             data=np.zeros((image.height, image.width, 3), dtype=np.uint8),
             format=image.format,
@@ -150,6 +153,17 @@ def test_h264_lcm_suppresses_decode_gap() -> None:
     )
 
     with pytest.raises(DecodingError, match="waiting for keyframe"):
+        transport.decode(encoded.lcm_encode(), StubTopic("/color", Image))
+
+
+def test_h264_lcm_suppresses_invalid_h264_image() -> None:
+    transport = H264LCM()
+    transport._decoder = FakeDecoder(invalid=True)  # type: ignore[assignment]
+    encoded = FakeEncoder().encode(
+        Image(data=np.zeros((2, 3, 3), dtype=np.uint8), format=ImageFormat.RGB, frame_id="cam")
+    )
+
+    with pytest.raises(DecodingError, match="Expected H.264 encoded Image"):
         transport.decode(encoded.lcm_encode(), StubTopic("/color", Image))
 
 
