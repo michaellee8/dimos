@@ -16,11 +16,8 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 import sqlite3
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any
 
-from dimos.memory2.backend import Backend
-from dimos.memory2.codecs.pickle import PickleCodec
-from dimos.memory2.notifier.subject import SubjectNotifier
 from dimos.memory2.type.observation import _UNLOADED
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.VideoPacket import VideoPacket
@@ -36,13 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from dimos.memory2.blobstore.base import BlobStore
-    from dimos.memory2.notifier.base import Notifier
-    from dimos.memory2.observationstore.base import ObservationStore
-    from dimos.memory2.type.filter import StreamQuery
     from dimos.memory2.type.observation import Observation
-    from dimos.memory2.vectorstore.base import VectorStore
-
-T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -127,11 +118,18 @@ class H264FrameIndexStore:
     def stop(self) -> None:
         pass
 
+    def delete_stream(self, stream_name: str) -> None:
+        self._conn.execute("DELETE FROM h264_frames WHERE stream_name = ?", (stream_name,))
+
     def insert(self, stream_name: str, observation_id: int, packet: VideoPacket) -> None:
         keyframe_observation_id = (
             observation_id
             if packet.is_keyframe
-            else self._keyframe_observation_id(stream_name, packet.keyframe_seq)
+            else self._keyframe_observation_id(
+                stream_name,
+                packet.keyframe_seq,
+                current_observation_id=observation_id,
+            )
         )
         self._conn.execute(
             """
@@ -207,123 +205,133 @@ class H264FrameIndexStore:
             for row in rows
         ]
 
-    def _keyframe_observation_id(self, stream_name: str, keyframe_seq: int) -> int:
+    def _keyframe_observation_id(
+        self,
+        stream_name: str,
+        keyframe_seq: int,
+        *,
+        current_observation_id: int,
+    ) -> int:
         row = self._conn.execute(
             """
             SELECT observation_id FROM h264_frames
-            WHERE stream_name = ? AND seq = ? AND is_keyframe = 1
+            WHERE stream_name = ? AND seq = ? AND is_keyframe = 1 AND observation_id <= ?
+            ORDER BY observation_id DESC
+            LIMIT 1
             """,
-            (stream_name, keyframe_seq),
+            (stream_name, keyframe_seq, current_observation_id),
         ).fetchone()
         if row is None:
             raise VideoDecodeGapError(f"No H.264 keyframe index for seq {keyframe_seq}")
         return int(row[0])
 
 
-class H264ImageBackend(Backend[Image], Generic[T]):
-    """memory2 backend that stores one H.264 packet blob per Image observation."""
+class H264ImagePayloadStrategy:
+    """Stateful H.264 payload strategy for logical ``Stream[Image]`` storage."""
+
+    codec_id = "h264"
 
     def __init__(
         self,
         *,
-        metadata_store: ObservationStore[Image],
-        blob_store: BlobStore,
-        frame_index: H264FrameIndexStore,
-        storage_config: H264ImageStorageConfig | None = None,
-        vector_store: VectorStore | None = None,
-        notifier: Notifier[Image] | None = None,
-        eager_blobs: bool = False,
+        storage_config: H264ImageStorageConfig | dict[str, Any] | None = None,
+        frame_index: H264FrameIndexStore | None = None,
     ) -> None:
-        self.storage_config = storage_config or H264ImageStorageConfig()
+        self.storage_config = (
+            H264ImageStorageConfig.parse(storage_config)
+            if storage_config is not None
+            else H264ImageStorageConfig()
+        )
         self.frame_index = frame_index
-        self._encoder = H264Encoder(
-            self.storage_config.codec,
-            codec=self.storage_config.codec_adapter,
-        )
-        super().__init__(
-            metadata_store=metadata_store,
-            codec=PickleCodec(),
-            data_type=Image,
-            blob_store=blob_store,
-            vector_store=vector_store,
-            notifier=notifier or SubjectNotifier(),
-            eager_blobs=eager_blobs,
-        )
+        self._encoder: H264Encoder | None = None
+
+    def bind_frame_index(self, frame_index: H264FrameIndexStore) -> None:
+        self.frame_index = frame_index
+
+    def bind_sqlite(self, conn: sqlite3.Connection) -> None:
+        self.bind_frame_index(H264FrameIndexStore(conn))
 
     def start(self) -> None:
-        super().start()
+        if self.frame_index is None:
+            raise RuntimeError("H.264 image payload strategy requires a frame index store")
         self.frame_index.start()
 
-    def _make_loader(self, row_id: int) -> Any:
-        bs = self.blob_store
-        if bs is None:
-            raise RuntimeError("BlobStore required for H.264 image storage")
-        name = self.name
+    def stop(self) -> None:
+        pass
+
+    def encode(self, value: Image) -> bytes:
+        if not isinstance(value, Image):
+            raise TypeError(
+                f"H.264 image payload strategy expects Image, got {type(value).__name__}"
+            )
+        if self._encoder is None:
+            self._encoder = H264Encoder(
+                self.storage_config.codec,
+                codec=self.storage_config.codec_adapter,
+            )
+        return self._encoder.encode(value).lcm_encode()
+
+    def after_blob_put(self, stream_name: str, row_id: int, encoded: bytes) -> None:
         frame_index = self.frame_index
+        if frame_index is None:
+            raise RuntimeError("H.264 image payload strategy requires a frame index store")
+        frame_index.insert(stream_name, row_id, VideoPacket.lcm_decode(encoded))
+
+    def make_loader(self, stream_name: str, row_id: int, blob_store: BlobStore) -> Any:
         storage_config = self.storage_config
 
         def loader() -> Image:
-            packet_ids = frame_index.packet_ids_for_decode(name, row_id)
             decoder = H264Decoder(storage_config.codec, codec=storage_config.codec_adapter)
-            decoded: Image | None = None
-            for packet_id in packet_ids:
-                packet = VideoPacket.lcm_decode(bs.get(name, packet_id))
-                decoded = decoder.decode(packet)
-            if decoded is None:
-                raise VideoDecodeGapError(f"No H.264 packet available for observation {row_id}")
-            return decoded
+            packet = VideoPacket.lcm_decode(blob_store.get(stream_name, row_id))
+            return decoder.decode(packet)
 
         return loader
 
-    def append(self, obs: Observation[Image]) -> Observation[Image]:
-        payload = obs.data
-        if not isinstance(payload, Image):
-            raise TypeError(f"Stream expects Image, got {type(payload).__qualname__}")
-        obs.data_type = Image
-        packet = self._encoder.encode(payload)
-        encoded = packet.lcm_encode()
-        try:
-            row_id = self.metadata_store.insert(obs)
-            obs.id = row_id
-            assert self.blob_store is not None
-            self.blob_store.put(self.name, row_id, encoded)
-            self.frame_index.insert(self.name, row_id, packet)
-            obs._data = _UNLOADED
-            obs._loader = self._make_loader(row_id)
-            if self.vector_store is not None:
-                emb = getattr(obs, "embedding", None)
-                if emb is not None:
-                    self.vector_store.put(self.name, row_id, emb)
-            if hasattr(self.metadata_store, "commit"):
-                self.metadata_store.commit()
-        except BaseException:
-            if hasattr(self.metadata_store, "rollback"):
-                self.metadata_store.rollback()
-            raise
-        self.notifier.notify(obs)
-        return obs
+    def attach_loaders(
+        self,
+        stream_name: str,
+        observations: Iterator[Observation[Image]],
+        blob_store: BlobStore,
+    ) -> Iterator[Observation[Image]]:
+        decoder = H264Decoder(self.storage_config.codec, codec=self.storage_config.codec_adapter)
 
-    def _attach_loaders(self, it: Iterator[Observation[Image]]) -> Iterator[Observation[Image]]:
-        for obs in it:
+        for obs in observations:
             obs.data_type = Image
             if obs._loader is None and isinstance(obs._data, type(_UNLOADED)):
-                obs._loader = self._make_loader(obs.id)
+                row_id = obs.id
+
+                def loader(row_id: int = row_id) -> Image:
+                    packet = VideoPacket.lcm_decode(blob_store.get(stream_name, row_id))
+                    return decoder.decode(packet)
+
+                obs._loader = loader
             yield obs
 
-    def _iterate_snapshot(self, query: StreamQuery) -> Iterator[Observation[Image]]:
-        it = self._attach_loaders(self.metadata_store.query(query))
-        if self.eager_blobs:
-            for obs in it:
-                _ = obs.data
-                yield obs
-        else:
-            yield from it
+    def should_suppress_decode_error(self, error: BaseException) -> bool:
+        return isinstance(error, VideoDecodeGapError)
+
+    def delete_stream(self, stream_name: str) -> None:
+        if self.frame_index is not None:
+            self.frame_index.delete_stream(stream_name)
 
     def serialize(self) -> dict[str, Any]:
-        cfg = super().serialize()
-        cfg["codec_id"] = "h264"
-        cfg["image_storage"] = self.storage_config.serialize()
-        return cfg
+        return {
+            "class": f"{type(self).__module__}.{type(self).__qualname__}",
+            "config": {"storage_config": self.storage_config.serialize()},
+        }
+
+
+def h264_image_payload_strategy_from_any(raw: Any) -> H264ImagePayloadStrategy | None:
+    storage_config = storage_config_from_any(raw)
+    if storage_config is None:
+        return None
+    return H264ImagePayloadStrategy(storage_config=storage_config)
+
+
+def bind_sqlite_frame_index(strategy: Any, conn: sqlite3.Connection) -> Any:
+    if isinstance(strategy, H264ImagePayloadStrategy):
+        strategy.bind_frame_index(H264FrameIndexStore(conn))
+    return strategy
 
 
 def storage_config_from_any(raw: Any) -> H264ImageStorageConfig | None:
@@ -345,8 +353,10 @@ def storage_config_with_adapter(
 __all__ = [
     "H264FrameIndexRow",
     "H264FrameIndexStore",
-    "H264ImageBackend",
+    "H264ImagePayloadStrategy",
     "H264ImageStorageConfig",
+    "bind_sqlite_frame_index",
+    "h264_image_payload_strategy_from_any",
     "storage_config_from_any",
     "storage_config_with_adapter",
 ]

@@ -8,11 +8,11 @@
 - [x] 1.6 Add explicit errors for unsupported image formats, missing video dependencies, and unusable GOP/decode state.
 - [x] 1.7 Add focused codec tests for per-frame Annex B packet shape, keyframe metadata, SPS/PPS bootstrap behavior, sequence-gap handling, dependency errors, and unsupported image formats.
 
-## 2. Image lazy data support
+## 2. Image compatibility and observation lazy decode
 
-- [x] 2.1 Extend `Image` construction/access so metadata fields remain available without forcing pixel decode when an image is backed by a lazy pixel loader.
+- [x] 2.1 Keep `Image` eager and numpy-backed; use memory2 `Observation.data` as the lazy H.264 decode boundary.
 - [x] 2.2 Preserve existing eager `Image` behavior and compatibility for current JPEG, LCM, SHM, memory2, and visualization consumers.
-- [x] 2.3 Add tests proving eager images still work, lazy images expose metadata without decode, and `Image.data` materializes pixels exactly when requested.
+- [x] 2.3 Add tests proving eager images still work after the H.264 storage changes.
 
 ## 3. Live H.264 image transport
 
@@ -23,14 +23,15 @@
 
 ## 4. memory2 H.264 image storage
 
-- [x] 4.1 Add per-stream H.264 image storage configuration for direct store creation and recorder configuration.
-- [x] 4.2 Route configured memory2 `Image` streams to H.264-backed storage while leaving unconfigured `Image` streams on the existing default storage path.
+- [x] 4.1 Add per-stream H.264 image payload strategy configuration for direct store creation and recorder configuration.
+- [x] 4.2 Route configured memory2 `Image` streams through a generic payload strategy while leaving unconfigured `Image` streams on the existing default storage path.
 - [x] 4.3 Store one observation row per source frame and one encoded Annex B frame packet payload per observation.
-- [x] 4.4 Add persistent GOP/keyframe index metadata for H.264-backed image streams.
+- [x] 4.4 Add persistent H.264 frame/keyframe metadata for H.264-backed image streams.
 - [x] 4.5 Persist and reload per-stream storage configuration so reopened stores recognize H.264-backed image streams.
-- [x] 4.6 Add lazy observation loading that returns metadata without decode and reconstructs `Image` pixels from the nearest prior usable keyframe through the requested observation when `obs.data` is accessed.
-- [x] 4.7 Add replay support that emits decoded `Image` values in observation timestamp order for H.264-backed streams.
-- [x] 4.8 Add memory2 tests for append/query, metadata access without decode, keyframe and mid-GOP lazy decode, missing-GOP failure, store reopen, replay, default JPEG compatibility, and unsupported formats.
+- [x] 4.6 Add lazy observation loading that returns metadata without decode and reconstructs `Image` pixels on best-effort H.264 decode when `obs.data` is accessed.
+- [x] 4.7 Add replay support that emits decoded `Image` values in observation timestamp order and suppresses undecodable deltas until the first valid keyframe after the replay start point.
+- [x] 4.8 Add memory2 tests for append/query, metadata access without decode, keyframe and sequential lazy decode, missing-GOP failure, store reopen, replay seek suppression, default JPEG compatibility, and unsupported formats.
+- [x] 4.9 Add generic payload strategy tests for lifecycle, payload encoding/loading, registry persistence, SQLite binding, and replay decode-error suppression.
 
 ## 5. Synthetic end-to-end blueprint and manual QA surface
 
@@ -44,7 +45,7 @@
 
 - [x] 6.1 Update user-facing transport docs with H.264 opt-in behavior, `Image` stream preservation, Annex B per-frame packets, keyframe/GOP recovery, unsupported formats, and dependency notes.
 - [x] 6.2 Update blueprint docs with an H.264 image transport mapping example.
-- [x] 6.3 Update memory2 docs with H.264 image storage configuration, one-observation-per-frame behavior, metadata query without decode, lazy `obs.data` decode, random access from keyframes, and replay behavior.
+- [x] 6.3 Update memory2 docs with H.264 image payload strategy configuration, one-observation-per-frame behavior, metadata query without decode, lazy `obs.data` decode, best-effort keyframe startup, and replay behavior.
 - [x] 6.4 Add docs for running and inspecting the `demo-h264-video-e2e` synthetic QA blueprint.
 - [x] 6.5 Update contributor testing docs with video dependency setup, focused test targets, skip behavior when dependencies are unavailable, and blueprint-registry regeneration guidance.
 - [x] 6.6 Update coding-agent docs if maintainers want the H.264/Foxglove packet-shape rule documented for future agent edits.
@@ -53,7 +54,7 @@
 
 - [x] 7.1 Run `openspec validate add-h264-codec-mem2-storage --strict`.
 - [x] 7.2 Run focused unit tests for H.264 codec/access-unit/GOP behavior.
-- [x] 7.3 Run focused unit tests for lazy `Image` behavior.
+- [x] 7.3 Run focused unit tests for eager `Image` compatibility.
 - [x] 7.4 Run focused memory2 storage tests for H.264 append/query/lazy decode/reopen/replay/default compatibility.
 - [x] 7.5 Run focused live transport tests for H.264 LCM round-trip and sequence-gap recovery.
 - [x] 7.6 Run `uv run pytest dimos/robot/test_all_blueprints_generation.py` if the demo blueprint is registered.

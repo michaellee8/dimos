@@ -152,6 +152,10 @@ suppresses decoded output until the next keyframe. Keyframes include decoder
 parameter data, such as SPS/PPS, so a new subscriber can start decoding at a
 keyframe.
 
+LCM H.264 is best-effort in v1. DimOS does not yet provide transport QoS,
+durable keyframe cache, keyframe request, or PLI behavior for LCM. Those belong
+in a later QoS/video-session design.
+
 The first H.264 image path supports uint8 RGB, BGR, and grayscale images. It
 raises an explicit error for depth, 16-bit, alpha, or other unsupported image
 formats instead of silently converting pixels. Selecting H.264 requires the video

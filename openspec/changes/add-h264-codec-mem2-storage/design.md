@@ -65,7 +65,7 @@ Core packet and codec classes:
   - Fields: `seq`, `ts`, `frame_id`, `width`, `height`, `format`, `codec`, `bitstream`, `is_keyframe`, `keyframe_seq`, `pts`, `data`.
   - First supported `codec`: `h264`.
   - First supported `bitstream`: Annex B complete access unit for exactly one source frame, aligned with Foxglove `CompressedVideo` expectations: for every full-frame encoder input call, DimOS creates one `VideoPacket` containing all NAL units emitted for that input frame.
-  - A `VideoPacket` is a complete encoded-frame packet, not necessarily an independently decodable image. Keyframe packets must contain enough decoder bootstrap data for late join and random access, including SPS/PPS on every IDR; delta-frame packets require prior decoded GOP state.
+  - A `VideoPacket` is a complete encoded-frame packet, not necessarily an independently decodable image. Keyframe packets must contain enough decoder bootstrap data for late join and recovery, including SPS/PPS on every IDR; delta-frame packets require prior decoded GOP state.
 
 - `dimos/protocol/video/h264.py`
   - `H264Config`: bitrate, target fps, keyframe interval, profile, preset/tune, max GOP frames, pixel format.
@@ -82,13 +82,12 @@ Implementation dependency:
 - DimOS should assemble the aiortc payloads for one encoded source frame into a single Annex B `VideoPacket.data` value before publication/storage. This packet carries every NAL unit emitted for that encoder input frame, but only IDR/keyframe packets are expected to be independently bootstrappable. WebRTC carriers may keep aiortc RTP packetization internally, but LCM/DDS/memory2 should exchange complete access units.
 - The adapter should avoid leaking aiortc classes such as `JitterFrame` and RTP payload descriptors into DimOS public APIs. If future aiortc versions change these codec internals, only `AiortcH264Codec` should need adjustment.
 
-Image lazy data support:
+Image payload semantics:
 
 - `dimos/msgs/sensor_msgs/Image.py`
-  - Add an explicit lazy pixel path mirroring `Observation`: metadata fields remain available, while `data` materializes pixels on access.
-  - `height`, `width`, `format`, `frame_id`, and `ts` must be available without forcing decode.
-  - Existing eager construction remains valid.
-  - This is needed for transport subscribers that inspect metadata or keep only the latest frame without always decoding pixels.
+  - Keep `Image` as the eager numpy-backed payload used by existing modules, transports, visualization, and JPEG storage.
+  - H.264 laziness belongs at memory2's `Observation.data` boundary, not inside `Image`.
+  - When H.264 decode succeeds, `obs.data` returns a normal eager `Image`.
 
 LCM carrier classes:
 
@@ -112,22 +111,21 @@ WebRTC carrier classes, later:
 memory2 storage classes:
 
 - `dimos/memory2/video/h264.py`
-  - `H264ImageStorageConfig`: mode/config object for opt-in memory2 H.264 image storage.
-  - `H264ImageBackend`: image-specific backend or payload strategy that owns encoder state and writes one observation row plus one `VideoPacket` blob per frame.
-  - `H264FrameIndexStore`: creates and queries a standalone GOP index table.
-  - `H264ObservationLoader`: reconstructs a requested frame by loading the nearest keyframe packet and ordered delta packets through the requested observation.
-  - `H264ReplayDecodeSession`: shares decoder state during sequential replay so adjacent frames decode once.
+  - `H264ImagePayloadStrategy`: generic memory2 payload strategy for logical `Stream[Image]` storage.
+  - `H264ImageStorageConfig`: config object consumed by the payload strategy.
+  - `H264FrameIndexStore`: stores H.264 frame metadata for cleanup, diagnostics, and future indexed decode work.
+  - The strategy owns encoder state on append and writes one observation row plus one serialized `VideoPacket` blob per source frame.
+  - Observation loaders and replay use the same H.264 decode-session policy as live transport: deltas are suppressed until a valid keyframe establishes decoder state.
 
 Store/recorder integration:
 
 - `dimos/memory2/store/sqlite.py`
-  - Recognize image storage config when creating a stream.
-  - Route `Image` streams with `mode="h264"` to the H.264 image backend.
-  - Persist storage config in `_streams` so reopening the database selects the right loader.
+  - Persist generic `payload_strategy` config in `_streams` so reopening the database restores the selected payload strategy.
+  - Bind SQLite-backed auxiliary stores to strategies through generic strategy hooks rather than H.264-specific `Store` branches.
 
 - `dimos/memory2/module.py`
-  - Add recorder-level per-stream image storage configuration.
-  - Recorder still subscribes to `In[Image]`; storage mode controls how incoming images are persisted.
+  - Add recorder-level per-stream `payload_strategies` configuration.
+  - Recorder still subscribes to `In[Image]`; the payload strategy controls how incoming images are persisted.
 
 ### Where components run
 
@@ -147,7 +145,7 @@ Subscriber machine / worker process
   H264LcmTransport.subscribe()
     └─ LCM receives packet bytes
          └─ GopBuffer validates seq/keyframe state
-              └─ H264Decoder produces Image or lazy Image
+              └─ H264Decoder produces eager Image
                    └─ module In[Image] callback
 ```
 
@@ -157,10 +155,10 @@ memory2 recording path:
 Recorder module process
   In[Image] receives normal Image
     └─ stream.append(Image)
-         └─ H264ImageBackend owns encoder state
+         └─ generic Backend delegates payload bytes to H264ImagePayloadStrategy
               ├─ observation table row: ts / pose / tags
               ├─ blob row: serialized VideoPacket with complete Annex B access unit
-              └─ h264 frame index: seq / keyframe row / pts / format
+              └─ h264 frame metadata: seq / keyframe / pts / format
 ```
 
 memory2 replay/decode path:
@@ -169,8 +167,9 @@ memory2 replay/decode path:
 Replay or query process
   stream query returns Observation[Image] metadata
     └─ obs.data
-         └─ H264ObservationLoader loads keyframe + delta packet chain
-              └─ H264Decoder reconstructs Image
+         └─ H264 payload strategy decodes through H264Decoder session state
+              ├─ delta before valid keyframe: suppress/fail clearly
+              └─ keyframe and following deltas: return eager Image
 ```
 
 The first implementation may re-encode images when recording a decoded `Image` stream that originally arrived over H.264 transport. Preserving incoming packet bytes end-to-end can be a later optimization via a packet side-channel; it is not required to make the public behavior correct.
@@ -221,14 +220,16 @@ blueprint = autoconnect(camera(), consumer()).transports(
 memory2 direct store activation:
 
 ```python
-from dimos.memory2.video.h264 import H264ImageStorageConfig
+from dimos.memory2.video.h264 import H264ImagePayloadStrategy, H264ImageStorageConfig
 from dimos.protocol.video.h264 import H264Config
 
 stream = store.stream(
     "color_image",
     Image,
-    image_storage=H264ImageStorageConfig(
-        codec=H264Config(bitrate=2_000_000, keyframe_interval=30),
+    payload_strategy=H264ImagePayloadStrategy(
+        storage_config=H264ImageStorageConfig(
+            codec=H264Config(bitrate=2_000_000, keyframe_interval=30),
+        ),
     ),
 )
 ```
@@ -237,9 +238,11 @@ Recorder activation:
 
 ```python
 MyRecorder.blueprint(
-    image_storage={
-        "color_image": H264ImageStorageConfig(
-            codec=H264Config(bitrate=2_000_000, keyframe_interval=30),
+    payload_strategies={
+        "color_image": H264ImagePayloadStrategy(
+            storage_config=H264ImageStorageConfig(
+                codec=H264Config(bitrate=2_000_000, keyframe_interval=30),
+            ),
         )
     }
 )
@@ -271,7 +274,7 @@ Components:
 
 - `H264E2ERecorder(Recorder)`
   - Declares `color_image: In[Image]`.
-  - Uses recorder-level `image_storage={"color_image": H264ImageStorageConfig(...)}` so memory2 writes the received image stream as H.264 packets rather than JPEG blobs.
+  - Uses recorder-level `payload_strategies={"color_image": H264ImagePayloadStrategy(...)}` so memory2 writes the received image stream as H.264 packets rather than JPEG blobs.
   - Defaults `db_path` to an explicit temporary/demo path such as `h264_video_e2e.db` so manual QA can inspect it.
 
 - `H264VideoProbe(Module)`
@@ -284,7 +287,7 @@ Blueprint sketch:
 ```python
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.transport import H264LcmTransport
-from dimos.memory2.video.h264 import H264ImageStorageConfig
+from dimos.memory2.video.h264 import H264ImagePayloadStrategy, H264ImageStorageConfig
 from dimos.msgs.sensor_msgs import Image
 from dimos.protocol.video.h264 import H264Config
 
@@ -300,8 +303,10 @@ demo_h264_video_e2e = autoconnect(
     SyntheticVideoSource.blueprint(width=640, height=360, fps=30),
     H264E2ERecorder.blueprint(
         db_path="h264_video_e2e.db",
-        image_storage={
-            "color_image": H264ImageStorageConfig(codec=h264_config),
+        payload_strategies={
+            "color_image": H264ImagePayloadStrategy(
+                storage_config=H264ImageStorageConfig(codec=h264_config),
+            ),
         },
     ),
     H264VideoProbe.blueprint(expected_width=640, expected_height=360),
@@ -326,7 +331,7 @@ Manual QA contract:
 - Run `dimos run demo-h264-video-e2e --daemon`.
 - Confirm logs show H.264 encoder initialization, periodic keyframes, probe frame counts, and recorder append counts.
 - Open the produced memory2 store and query `color_image` observations without touching `obs.data`; metadata should be available without decode.
-- Access `obs.data` on a keyframe and a mid-GOP delta frame; both should return decoded `Image` pixels, with the mid-GOP read decoding from the nearest prior keyframe.
+- Access `obs.data` during ordered replay/query. Delta frames before the first valid keyframe after the start point may be suppressed or fail clearly; the first keyframe at or after the start point and later deltas should return decoded `Image` pixels.
 - Replay the stored stream and confirm decoded images arrive on the normal replay schedule.
 - Run a seq-gap variant, either by a test-only packet drop option in `H264LcmTransport` or a direct `GopBuffer` driver, and verify the probe receives no corrupted images and resumes only after the next keyframe.
 
@@ -381,10 +386,10 @@ No CLI command is required for the core feature. The synthetic `demo-h264-video-
    - Alternative rejected: MP4 segment files as the primary model, because live transports and per-frame memory2 replay become harder to align.
 
 3. **Keep `codec_for(Image)` as JPEG.**
-   - Rationale: H.264 writes need stateful encoder ownership and GOP indexing; the stateless memory2 `Codec` contract should remain simple and backward compatible.
+   - Rationale: H.264 writes need stateful encoder ownership; the stateless memory2 `Codec` contract should remain simple and backward compatible. H.264 storage uses a generic payload strategy instead of changing the default codec.
 
 4. **Decode only from valid GOP state.**
-   - Rationale: missing H.264 packets can corrupt decoded pixels. After a seq gap, subscribers and storage loaders should suppress or fail decode until a keyframe restores a self-contained GOP.
+   - Rationale: missing H.264 packets can corrupt decoded pixels. After a seq gap, late join, or replay seek into a GOP, subscribers and memory2 replay should suppress or fail decode until a keyframe restores a self-contained GOP.
    - Key detail: complete per-frame access units remove RTP-fragment handling from DimOS storage, but they do not remove inter-frame dependencies; P-frames still require prior decoded reference frames.
 
 5. **Use aiortc's H.264 codec classes through a DimOS adapter.**
@@ -410,28 +415,30 @@ This change affects image transport and recording only. It does not command robo
 
 Simulation and hardware cameras use the same `Image` semantics. Unsupported image formats such as depth or 16-bit images should fail at H.264 configuration/append/publish time with a clear error, not silently convert or corrupt data.
 
-Replay must emit normal decoded `Image` objects on the existing memory2 replay schedule. Sequential replay should share decoder state so normal playback decodes each packet once. Seek or random access may decode from the nearest prior keyframe through the requested frame.
+Replay must emit normal decoded `Image` objects on the existing memory2 replay schedule. Sequential replay should share decoder state so normal playback decodes each packet once.
+
+V1 H.264 decode is best-effort. Late subscribers and memory2 replay/query starting at timestamp `T` start without prior GOP state; delta frames are suppressed until the first keyframe at or after `T`, then that keyframe and following decodable deltas are available. Full QoS, durable keyframe cache, keyframe request/PLI, and indexed random decode are follow-up design work.
 
 Manual QA should use the synthetic `demo-h264-video-e2e` blueprint so no robot or physical camera is required. The demo should verify live LCM round-trip, memory2 append/query without decode, lazy `obs.data` decode, replay, and seq-gap behavior.
 
 ## Risks / Trade-offs
 
 - **Stateful codec complexity:** H.264 has encoder and decoder state. Mitigation: keep state in explicit `H264Encoder`, `H264Decoder`, and `GopBuffer` classes rather than hiding it in `Codec`.
-- **Lazy `Image.data` compatibility:** Existing `Image` assumes eager numpy data. Mitigation: add lazy pixel support carefully so metadata properties do not force decode and eager construction remains unchanged.
+- **Observation-level lazy decode:** Existing `Image` remains eager. Mitigation: keep H.264 laziness at `Observation.data` so generic image consumers remain unchanged.
 - **Packet loss:** LCM has no built-in reliable delivery or late-join keyframe durability. Mitigation: periodic IDR frames and seq-gap suppression; later add keyframe request or durable carriers where available.
 - **Dependency variability:** aiortc/PyAV/FFmpeg support varies by platform. Mitigation: keep H.264 optional under the extra that already provides aiortc/WebRTC support, preserve JPEG defaults, and fail clearly when video mode is selected without dependencies.
 - **aiortc codec API stability:** aiortc codec classes are importable and useful, but the most stable aiortc surface is WebRTC itself. Mitigation: isolate all direct codec imports in `AiortcH264Codec`, pin/verify aiortc versions, and add focused tests around encode/depayload/decode behavior.
 - **Double encode on record:** A recorder consuming decoded H.264 transport images may re-encode for memory2 storage. Mitigation: accept this in the first version; consider packet pass-through as a later optimization.
-- **Random access latency:** Mid-GOP access requires decoding from a prior keyframe. Mitigation: short GOP defaults and decoder reuse during sequential replay.
+- **Best-effort random access:** Mid-GOP access without prior decoder state may be unavailable in v1. Mitigation: short GOP defaults, decoder reuse during sequential replay, and suppression until the first keyframe after the start point.
 
 ## Migration / Rollout
 
 1. Reuse the existing aiortc/WebRTC dependency path for H.264 support; add a lightweight `video` extra only if users need H.264 storage without the broader WebRTC extra.
 2. Add `VideoPacket`, H.264 config, `AiortcH264Codec`, DimOS-facing encoder/decoder wrappers, GOP buffer, Annex B access-unit assembly, and explicit errors.
-3. Add lazy pixel support to `Image` while preserving eager API behavior.
+3. Preserve eager `Image` behavior; keep lazy decode at `Observation.data`.
 4. Add `H264LCM` and `H264LcmTransport` as the first live carrier adapter.
-5. Add memory2 H.264 storage config, backend/payload strategy, GOP index table, and lazy loader.
-6. Add registry serialization so reopened SQLite stores know which streams use H.264 storage.
+5. Add memory2 generic payload-strategy support and H.264 image payload strategy.
+6. Add registry serialization so reopened SQLite stores know which streams use H.264 payload strategy.
 7. Add `demo_h264_video_e2e` for synthetic end-to-end live transport plus memory2 storage QA.
 8. Add tests and synthetic manual QA for live transport, storage, lazy decode, replay, unsupported formats, and seq gaps.
 9. Update memory2 and transport docs with opt-in examples and dependency notes.
@@ -446,7 +453,6 @@ No generated blueprint registry update is needed unless a runnable demo blueprin
 - Should LCM H.264 publish raw packet bytes under an `Image` channel name or use a distinct LCM message type/channel suffix internally?
 - What default bitrate, keyframe interval, and target FPS should be used for common DimOS camera streams?
 - Should first-version memory2 storage store packet blobs in the existing `{stream}_blob` table or introduce a dedicated packet blob table?
-- Should transport subscribers receive lazy `Image` objects by default, or should eager decode remain the default for maximum compatibility?
 - Should WebRTC integration reuse this `VideoPacket` abstraction, or map directly between `Image` and WebRTC media tracks with optional packet export for memory2?
 - Does aiortc expose a stable encoded-frame hook that can avoid decode/re-encode when recording a WebRTC H.264 stream into memory2?
 - Should `AiortcH264Codec` pin to aiortc minor versions or include compatibility tests against the minimum supported aiortc version?

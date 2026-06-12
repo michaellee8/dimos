@@ -59,5 +59,5 @@ authors or memory2 observations.
 For LCM, DDS, and memory2 storage, each encoded packet must contain all H.264 NAL
 units for exactly one source frame as one Annex B access unit. Store one memory2
 observation per source frame. P-frames still depend on earlier GOP state, so
-decode from a valid keyframe and suppress output after sequence gaps until the
-next keyframe.
+decode from a valid keyframe and suppress output after sequence gaps, late join,
+or replay seek until the next keyframe.

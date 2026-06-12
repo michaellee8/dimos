@@ -30,7 +30,7 @@ from dimos.hardware.sensors.camera.module import CameraModule
 from dimos.hardware.sensors.camera.webcam import Webcam
 from dimos.memory2.module import OnExisting, Recorder
 from dimos.memory2.store.sqlite import SqliteStore
-from dimos.memory2.video.h264 import H264ImageStorageConfig
+from dimos.memory2.video.h264 import H264ImagePayloadStrategy, H264ImageStorageConfig
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.protocol.pubsub.impl.h264_lcm import H264LCM
 from dimos.protocol.video.h264 import H264Config
@@ -224,8 +224,10 @@ demo_h264_video_e2e = autoconnect(
     H264E2ERecorder.blueprint(
         db_path="h264_video_e2e.db",
         on_existing=OnExisting.OVERWRITE,
-        image_storage={
-            "color_image": H264ImageStorageConfig(codec=_h264_config),
+        payload_strategies={
+            "color_image": H264ImagePayloadStrategy(
+                storage_config=H264ImageStorageConfig(codec=_h264_config)
+            ),
         },
     ),
     H264VideoProbe.blueprint(),
@@ -245,8 +247,10 @@ demo_h264_webcam_record = autoconnect(
     H264WebcamRecorder.blueprint(
         db_path="webcam_h264.db",
         on_existing=OnExisting.OVERWRITE,
-        image_storage={
-            "color_image": H264ImageStorageConfig(codec=_webcam_h264_config),
+        payload_strategies={
+            "color_image": H264ImagePayloadStrategy(
+                storage_config=H264ImageStorageConfig(codec=_webcam_h264_config)
+            ),
         },
     ),
 ).transports(

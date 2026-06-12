@@ -46,6 +46,21 @@ DimOS SHALL provide periodic keyframes for H.264 image streams so subscribers ca
 - **THEN** the keyframe packet MUST include the decoder parameter information needed for that bootstrap, such as SPS/PPS for H.264 Annex B streams
 - **AND** later delta frames in the same GOP may depend on that decoded keyframe state.
 
+### Requirement: H.264 live decode is best-effort without QoS guarantees
+DimOS SHALL apply a best-effort H.264 decode policy for live carriers that do not provide video QoS, keyframe requests, or durable keyframe caching.
+
+#### Scenario: Subscriber starts without GOP state
+- **GIVEN** an H.264 live subscriber starts receiving packets at a point whose first packet is a delta frame
+- **WHEN** the subscriber's decoder has no valid prior GOP state
+- **THEN** DimOS MUST suppress decoded output for undecodable delta frames
+- **AND** DimOS MUST begin delivering decoded `Image` values after the first keyframe at or after the subscriber start point establishes valid decoder state.
+
+#### Scenario: QoS policy is deferred
+- **GIVEN** an H.264 image stream uses an LCM-style best-effort carrier
+- **WHEN** packets are lost or a subscriber joins late
+- **THEN** DimOS MUST rely on periodic keyframes and decode suppression for v1 recovery
+- **AND** DimOS documentation must describe keyframe request, durable keyframe cache, retransmission, and transport QoS as follow-up design work rather than v1 guarantees.
+
 ### Requirement: Sequence gaps recover safely
 DimOS SHALL detect missing or out-of-order H.264 live-stream packets and resume decoded image delivery from a valid keyframe state.
 

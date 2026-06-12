@@ -138,6 +138,13 @@ class ReplayStream(Generic[T]):
             data = self._autocast(data)
         return cast("T", data)
 
+    def _should_suppress_decode_error(self, error: BaseException) -> bool:
+        stream = self._replay.store.stream(self._name)
+        source = getattr(stream, "_source", None)
+        strategy = getattr(source, "payload_strategy", None)
+        should_suppress = getattr(strategy, "should_suppress_decode_error", None)
+        return bool(should_suppress is not None and should_suppress(error))
+
     def _base_stream(self) -> Stream[Any]:
         """Memory2 Stream bounded by the replay window, ordered by ts."""
         cfg = self._replay.config
@@ -189,8 +196,14 @@ class ReplayStream(Generic[T]):
             emitted = False
             obs: Any
             for obs in self._base_stream():
+                try:
+                    decoded = self._decode(obs)
+                except BaseException as exc:
+                    if self._should_suppress_decode_error(exc):
+                        continue
+                    raise
                 emitted = True
-                yield (obs.ts, self._decode(obs))
+                yield (obs.ts, decoded)
             if not self._replay.config.loop or not emitted:
                 break
 
@@ -203,6 +216,10 @@ class ReplayStream(Generic[T]):
             return self._decode(self._base_stream().first())
         except LookupError:
             return None
+        except BaseException as exc:
+            if self._should_suppress_decode_error(exc):
+                return None
+            raise
 
     def find_closest(self, timestamp: float, tolerance: float = 1.0) -> T | None:
         s: Stream[Any] = self._replay.store.stream(self._name)
@@ -210,7 +227,12 @@ class ReplayStream(Generic[T]):
             obs: Any = s.at(timestamp, tolerance).first()
         except LookupError:
             return None
-        return self._decode(obs)
+        try:
+            return self._decode(obs)
+        except BaseException as exc:
+            if self._should_suppress_decode_error(exc):
+                return None
+            raise
 
     def observable(self) -> Observable[T]:
         """Timed Observable scheduled against the Replay's shared anchor.
@@ -239,8 +261,14 @@ class ReplayStream(Generic[T]):
                     emitted = False
                     obs: Any
                     for obs in base():
+                        try:
+                            decoded = decode(obs)
+                        except BaseException as exc:
+                            if self._should_suppress_decode_error(exc):
+                                continue
+                            raise
                         emitted = True
-                        yield (obs.ts, decode(obs))
+                        yield (obs.ts, decoded)
                     if not loop or not emitted:
                         break
 

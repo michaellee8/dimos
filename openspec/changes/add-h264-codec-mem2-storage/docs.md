@@ -9,10 +9,10 @@
 - Update `docs/usage/blueprints.md` with an opt-in blueprint transport mapping example for `H264LcmTransport` and `H264Config`.
 - Update memory2 user docs, likely under `docs/usage/` or the memory2 capability docs, to describe opt-in H.264-backed image storage:
   - Default image storage remains JPEG-backed.
-  - Users opt in per stream with `H264ImageStorageConfig`.
+  - Users opt in per stream with `H264ImagePayloadStrategy`.
   - memory2 still stores one observation per source frame.
   - metadata queries do not require pixel decode.
-  - accessing `obs.data` lazily reconstructs an `Image`, decoding from the nearest prior keyframe when needed.
+  - accessing `obs.data` lazily reconstructs an `Image` when the H.264 decode session has valid GOP state; replay/decoded views suppress deltas until the first keyframe at or after the start point.
   - replay emits decoded `Image` frames on the normal replay schedule.
 - Add a short manual QA section for `demo-h264-video-e2e` after the demo blueprint exists:
   - run `dimos run demo-h264-video-e2e --daemon`

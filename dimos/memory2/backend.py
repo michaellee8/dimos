@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Generic, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar
 
 from dimos.core.resource import CompositeResource
 from dimos.memory2.codecs.base import Codec, codec_id
@@ -40,6 +40,30 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+class PayloadStrategy(Protocol[T]):
+    """Stateful payload encoding hook for a memory2 stream.
+
+    Stateless storage uses ``Codec`` directly. Stateful encodings such as video
+    can provide a strategy without requiring a special Backend subclass.
+    """
+
+    codec_id: str
+
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+    def encode(self, value: T) -> bytes: ...
+    def after_blob_put(self, stream_name: str, row_id: int, encoded: bytes) -> None: ...
+    def make_loader(self, stream_name: str, row_id: int, blob_store: BlobStore) -> Any: ...
+    def attach_loaders(
+        self,
+        stream_name: str,
+        observations: Iterator[Observation[T]],
+        blob_store: BlobStore,
+    ) -> Iterator[Observation[T]]: ...
+    def should_suppress_decode_error(self, error: BaseException) -> bool: ...
+    def serialize(self) -> dict[str, Any]: ...
+
+
 class Backend(CompositeResource, Generic[T]):
     """Orchestrates metadata, blob, vector, and live stores for one stream.
     (encode → insert → store blob → index vector → notify) lives here,
@@ -55,6 +79,7 @@ class Backend(CompositeResource, Generic[T]):
         vector_store: VectorStore | None = None,
         notifier: Notifier[T] | None = None,
         eager_blobs: bool = False,
+        payload_strategy: PayloadStrategy[T] | None = None,
     ) -> None:
         super().__init__()
         self.metadata_store = self.register_disposable(metadata_store)
@@ -64,6 +89,7 @@ class Backend(CompositeResource, Generic[T]):
         self.vector_store = self.register_disposable(vector_store) if vector_store else None
         self.notifier: Notifier[T] = self.register_disposable(notifier or SubjectNotifier())
         self.eager_blobs = eager_blobs
+        self.payload_strategy = payload_strategy
 
     def start(self) -> None:
         self.metadata_store.start()
@@ -71,6 +97,13 @@ class Backend(CompositeResource, Generic[T]):
             self.blob_store.start()
         if self.vector_store is not None:
             self.vector_store.start()
+        if self.payload_strategy is not None:
+            self.payload_strategy.start()
+
+    def stop(self) -> None:
+        if self.payload_strategy is not None:
+            self.payload_strategy.stop()
+        super().stop()
 
     @property
     def name(self) -> str:
@@ -81,6 +114,8 @@ class Backend(CompositeResource, Generic[T]):
         if bs is None:
             raise RuntimeError("BlobStore required but not configured")
         name, codec = self.name, self.codec
+        if self.payload_strategy is not None:
+            return self.payload_strategy.make_loader(name, row_id, bs)
 
         def loader() -> Any:
             raw = bs.get(name, row_id)
@@ -107,7 +142,10 @@ class Backend(CompositeResource, Generic[T]):
         # Encode payload before any locking (avoids holding locks during IO)
         encoded: bytes | None = None
         if self.blob_store is not None and not is_scalar:
-            encoded = self.codec.encode(payload)
+            if self.payload_strategy is not None:
+                encoded = self.payload_strategy.encode(payload)
+            else:
+                encoded = self.codec.encode(payload)
 
         try:
             # Insert metadata, get assigned id
@@ -118,6 +156,8 @@ class Backend(CompositeResource, Generic[T]):
             if encoded is not None:
                 assert self.blob_store is not None
                 self.blob_store.put(self.name, row_id, encoded)
+                if self.payload_strategy is not None:
+                    self.payload_strategy.after_blob_put(self.name, row_id, encoded)
                 # Replace inline data with lazy loader
                 obs._data = _UNLOADED
                 obs._loader = self._make_loader(row_id)
@@ -154,6 +194,9 @@ class Backend(CompositeResource, Generic[T]):
             for obs in it:
                 obs.data_type = self.data_type
                 yield obs
+            return
+        if self.payload_strategy is not None:
+            yield from self.payload_strategy.attach_loaders(self.name, it, self.blob_store)
             return
         for obs in it:
             obs.data_type = self.data_type
@@ -263,4 +306,7 @@ class Backend(CompositeResource, Generic[T]):
             "blob_store": self.blob_store.serialize() if self.blob_store else None,
             "vector_store": self.vector_store.serialize() if self.vector_store else None,
             "notifier": self.notifier.serialize(),
+            "payload_strategy": self.payload_strategy.serialize()
+            if self.payload_strategy is not None
+            else None,
         }

@@ -27,7 +27,7 @@ DimOS needs an opt-in H.264 image-stream path that preserves the public `Image` 
 ### New Capabilities
 
 - `h264-image-streams`: Covers carrier-neutral H.264 image packets, live image-stream encode/decode behavior, keyframe/GOP handling, sequence-gap behavior, and transport compatibility expectations.
-- `memory2-h264-storage`: Covers opt-in H.264-backed memory2 image observation storage, per-frame packet persistence, GOP indexing, lazy `Image` reconstruction, and replay compatibility.
+- `memory2-h264-storage`: Covers opt-in H.264-backed memory2 image observation storage, per-frame packet persistence, best-effort GOP decode, lazy `Observation.data` reconstruction, and replay compatibility.
 
 ### Modified Capabilities
 
