@@ -21,8 +21,7 @@ import numpy as np
 import pytest
 
 from dimos.msgs.protocol import DimosMsg
-from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
-from dimos.msgs.sensor_msgs.VideoPacket import VideoPacket
+from dimos.msgs.sensor_msgs.Image import H264_IMAGE_ENCODING, Image, ImageFormat
 from dimos.protocol.pubsub.encoders import DecodingError, LCMTopicProto
 from dimos.protocol.pubsub.impl.h264_lcm import H264LCM, H264EncoderMixin
 from dimos.protocol.video.h264 import VideoDecodeGapError
@@ -34,36 +33,45 @@ class StubTopic:
     lcm_type: type[DimosMsg] | None = None
 
 
+def _encoded(image: Image, *, seq: int = 0, key: bool = True) -> Image:
+    return Image.encoded(
+        data=b"\x00\x00\x00\x01\x65" if key else b"\x00\x00\x00\x01\x41",
+        encoding=H264_IMAGE_ENCODING,
+        format=image.format,
+        frame_id=image.frame_id,
+        ts=image.ts,
+        codec_metadata={
+            "seq": seq,
+            "codec": "h264",
+            "bitstream": "annex_b",
+            "is_keyframe": key,
+            "keyframe_seq": seq if key else 0,
+            "pts": seq * 90,
+            "width": image.width,
+            "height": image.height,
+            "channels": image.channels,
+            "dtype": str(image.dtype),
+        },
+    )
+
+
 class FakeEncoder:
-    def encode(self, image: Image) -> VideoPacket:
-        return VideoPacket(
-            seq=0,
-            ts=image.ts,
-            frame_id=image.frame_id,
-            width=image.width,
-            height=image.height,
-            format=image.format.value,
-            codec="h264",
-            bitstream="annex_b",
-            is_keyframe=True,
-            keyframe_seq=0,
-            pts=90,
-            data=b"\x00\x00\x00\x01\x65",
-        )
+    def encode(self, image: Image) -> Image:
+        return _encoded(image)
 
 
 class FakeDecoder:
     def __init__(self, *, fail: bool = False) -> None:
         self.fail = fail
 
-    def decode(self, packet: VideoPacket) -> Image:
+    def decode(self, image: Image) -> Image:
         if self.fail:
             raise VideoDecodeGapError("waiting for keyframe")
         return Image(
-            data=np.zeros((packet.height, packet.width, 3), dtype=np.uint8),
-            format=ImageFormat(packet.format),
-            frame_id=packet.frame_id,
-            ts=packet.ts,
+            data=np.zeros((image.height, image.width, 3), dtype=np.uint8),
+            format=image.format,
+            frame_id=image.frame_id,
+            ts=image.ts,
         )
 
 
@@ -92,50 +100,64 @@ class InMemoryH264PubSub(H264EncoderMixin, InMemoryPubSubBase):  # type: ignore[
     pass
 
 
-def test_h264_lcm_encodes_image_as_video_packet_bytes() -> None:
+def test_h264_lcm_encodes_image_as_h264_encoded_image_bytes() -> None:
     transport = H264LCM()
     transport._encoder = FakeEncoder()  # type: ignore[assignment]
     image = Image(data=np.zeros((2, 3, 3), dtype=np.uint8), format=ImageFormat.RGB, frame_id="cam")
 
     payload = transport.encode(image, StubTopic("/color", Image))
-    packet = VideoPacket.lcm_decode(payload)
+    encoded = Image.lcm_decode(payload)
 
-    assert packet.codec == "h264"
-    assert packet.bitstream == "annex_b"
-    assert packet.width == 3
-    assert packet.height == 2
-    assert packet.is_keyframe is True
+    assert encoded.encoding == H264_IMAGE_ENCODING
+    assert encoded.codec_metadata["codec"] == "h264"
+    assert encoded.codec_metadata["bitstream"] == "annex_b"
+    assert encoded.width == 3
+    assert encoded.height == 2
+    assert encoded.codec_metadata["is_keyframe"] is True
 
 
-def test_h264_lcm_decodes_video_packet_bytes_to_image() -> None:
+def test_h264_lcm_decodes_h264_image_bytes_to_raw_image() -> None:
     transport = H264LCM()
     transport._decoder = FakeDecoder()  # type: ignore[assignment]
-    packet = FakeEncoder().encode(
+    encoded = FakeEncoder().encode(
         Image(data=np.zeros((2, 3, 3), dtype=np.uint8), format=ImageFormat.RGB, frame_id="cam")
     )
 
-    image = transport.decode(packet.lcm_encode(), StubTopic("/color", Image))
+    image = transport.decode(encoded.lcm_encode(), StubTopic("/color", Image))
 
+    assert image.encoding == "raw"
     assert image.frame_id == "cam"
     assert image.shape == (2, 3, 3)
+
+
+def test_h264_lcm_decode_false_returns_encoded_image() -> None:
+    transport = H264LCM(decode_images=False)
+    encoded = FakeEncoder().encode(
+        Image(data=np.zeros((2, 3, 3), dtype=np.uint8), format=ImageFormat.RGB, frame_id="cam")
+    )
+
+    image = transport.decode(encoded.lcm_encode(), StubTopic("/color", Image))
+
+    assert image.encoding == H264_IMAGE_ENCODING
+    assert image.frame_id == "cam"
 
 
 def test_h264_lcm_suppresses_decode_gap() -> None:
     transport = H264LCM()
     transport._decoder = FakeDecoder(fail=True)  # type: ignore[assignment]
-    packet = FakeEncoder().encode(
+    encoded = FakeEncoder().encode(
         Image(data=np.zeros((2, 3, 3), dtype=np.uint8), format=ImageFormat.RGB, frame_id="cam")
     )
 
     with pytest.raises(DecodingError, match="waiting for keyframe"):
-        transport.decode(packet.lcm_encode(), StubTopic("/color", Image))
+        transport.decode(encoded.lcm_encode(), StubTopic("/color", Image))
 
 
-def test_h264_lcm_suppresses_non_video_packet_payload() -> None:
+def test_h264_lcm_suppresses_non_image_payload() -> None:
     transport = H264LCM()
 
-    with pytest.raises(DecodingError, match="Invalid VideoPacket payload"):
-        transport.decode(b"not-a-video-packet", StubTopic("/color", Image))
+    with pytest.raises(DecodingError):
+        transport.decode(b"not-an-image", StubTopic("/color", Image))
 
 
 def test_h264_lcm_publish_subscribe_delivers_decoded_image() -> None:
@@ -164,16 +186,20 @@ def test_h264_lcm_late_subscriber_waits_for_keyframe() -> None:
     transport._decoder = decoder  # type: ignore[assignment]
 
     transport.subscribe(topic, lambda image, _topic: received.append(image))
-    delta_packet = FakeEncoder().encode(
-        Image(data=np.zeros((2, 3, 3), dtype=np.uint8), format=ImageFormat.RGB, frame_id="cam")
+    delta = _encoded(
+        Image(data=np.zeros((2, 3, 3), dtype=np.uint8), format=ImageFormat.RGB, frame_id="cam"),
+        seq=1,
+        key=False,
     )
-    InMemoryPubSubBase.publish(transport, topic, delta_packet.lcm_encode())
+    InMemoryPubSubBase.publish(transport, topic, delta.lcm_encode())
 
     decoder.fail = False
-    keyframe_packet = FakeEncoder().encode(
-        Image(data=np.zeros((2, 3, 3), dtype=np.uint8), format=ImageFormat.RGB, frame_id="cam")
+    keyframe = _encoded(
+        Image(data=np.zeros((2, 3, 3), dtype=np.uint8), format=ImageFormat.RGB, frame_id="cam"),
+        seq=2,
+        key=True,
     )
-    InMemoryPubSubBase.publish(transport, topic, keyframe_packet.lcm_encode())
+    InMemoryPubSubBase.publish(transport, topic, keyframe.lcm_encode())
 
     assert len(received) == 1
     assert received[0].frame_id == "cam"

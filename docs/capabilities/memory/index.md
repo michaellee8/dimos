@@ -215,19 +215,13 @@ matters and frame-to-frame compression is worth the dependency cost.
 
 ```python skip
 from dimos.memory2.store.sqlite import SqliteStore
-from dimos.memory2.video.h264 import H264ImagePayloadStrategy, H264ImageStorageConfig
 from dimos.msgs.sensor_msgs.Image import Image
-from dimos.protocol.video.h264 import H264Config
 
 store = SqliteStore(path="robot_video.db")
 color = store.stream(
     "color_image",
     Image,
-    payload_strategy=H264ImagePayloadStrategy(
-        storage_config=H264ImageStorageConfig(
-            codec=H264Config(bitrate=2_000_000, keyframe_interval=30),
-        ),
-    ),
+    codec="h264",
 )
 ```
 
@@ -235,32 +229,24 @@ Recorders can configure the same setting per input stream:
 
 ```python skip
 from dimos.memory2.module import Recorder
-from dimos.memory2.video.h264 import H264ImagePayloadStrategy, H264ImageStorageConfig
-from dimos.protocol.video.h264 import H264Config
 
 recorder = Recorder.blueprint(
     db_path="robot_video.db",
-    payload_strategies={
-        "color_image": H264ImagePayloadStrategy(
-            storage_config=H264ImageStorageConfig(
-                codec=H264Config(bitrate=2_000_000, keyframe_interval=30),
-            ),
-        )
-    },
+    codecs={"color_image": "h264"},
 )
 ```
 
 H.264 storage keeps the normal memory2 shape: one observation row per source
-frame. The blob for that observation stores one serialized video packet whose
-payload is a complete H.264 Annex B access unit, not individual RTP fragments.
-The store also writes H.264 frame metadata for cleanup, diagnostics, and future
-indexed decode work.
+frame. The blob for that observation stores one encoded `Image` whose data is a
+complete H.264 Annex B access unit, not individual RTP fragments. H.264 frame
+metadata lives in `Image.codec_metadata`.
 
 Metadata queries do not decode pixels. You can inspect timestamps, poses, tags,
-and frame ids without paying decode cost. Accessing `obs.data` decodes lazily
-when the H.264 decode session has valid GOP state and returns a normal `Image`.
-Replay emits decoded `Image` values in timestamp order and suppresses deltas
-until the first keyframe at or after the replay start point.
+frame ids, `Image.encoding`, and H.264 codec metadata without paying decode
+cost. Accessing `obs.data` returns an encoded `Image` for H.264 streams. Use an
+explicit H.264 decode session to convert replayed encoded images to raw pixel
+images; that decoder suppresses deltas until the first keyframe at or after the
+replay start point.
 
 H.264 storage currently supports uint8 RGB, BGR, and grayscale images. It raises
 an explicit error for depth images, 16-bit images, alpha formats, and other

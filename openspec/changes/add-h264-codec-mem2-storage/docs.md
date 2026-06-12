@@ -2,30 +2,31 @@
 
 - Update `docs/usage/transports/index.md` or the image-transport-specific transport docs to describe opt-in H.264 image transport behavior:
   - Public module streams remain `Out[Image]` and `In[Image]`.
-  - `H264LcmTransport` compresses image payloads internally as H.264 and delivers decoded `Image` objects to subscribers.
-  - H.264 packets contain complete Annex B access units for one source frame, matching Foxglove-style `CompressedVideo` expectations.
+  - `H264LcmTransport` compresses image payloads internally as H.264 and delivers decoded `Image` objects by default.
+  - `decode_images=False` delivers encoded `Image` objects for storage or explicit decode sessions.
+  - H.264 encoded images contain complete Annex B access units for one source frame, matching Foxglove-style `CompressedVideo` expectations.
   - Delta frames require prior GOP state; after packet loss or late join, subscribers resume on the next keyframe.
   - Unsupported image formats fail clearly rather than silently converting.
 - Update `docs/usage/blueprints.md` with an opt-in blueprint transport mapping example for `H264LcmTransport` and `H264Config`.
 - Update memory2 user docs, likely under `docs/usage/` or the memory2 capability docs, to describe opt-in H.264-backed image storage:
   - Default image storage remains JPEG-backed.
-  - Users opt in per stream with `H264ImagePayloadStrategy`.
+  - Users opt in per stream with `codec="h264"` or recorder `codecs={"stream": "h264"}`.
   - memory2 still stores one observation per source frame.
-  - metadata queries do not require pixel decode.
-  - accessing `obs.data` lazily reconstructs an `Image` when the H.264 decode session has valid GOP state; replay/decoded views suppress deltas until the first keyframe at or after the start point.
-  - replay emits decoded `Image` frames on the normal replay schedule.
+  - metadata queries and `obs.data` access return encoded `Image` values without pixel decode.
+  - explicit H.264 decode sessions convert encoded replay streams to raw decoded `Image` values and suppress deltas until the first keyframe at or after the start point.
+  - replay emits encoded `Image` values on the normal replay schedule.
 - Add a short manual QA section for `demo-h264-video-e2e` after the demo blueprint exists:
   - run `dimos run demo-h264-video-e2e --daemon`
   - inspect probe/recorder logs
   - query the generated memory2 store
-  - validate lazy decode, replay, and seq-gap recovery.
+  - validate encoded storage, replay decode, and seq-gap recovery.
 - Mention optional video dependencies in the installation or feature docs. Users should know that H.264 mode requires the aiortc/PyAV/FFmpeg dependency path while JPEG defaults remain available without selecting H.264.
 
 ## Contributor Docs
 
 - Update `docs/development/testing.md` or a nearby development testing guide with H.264-specific test commands once tests exist:
-  - unit tests for `VideoPacket`, H.264 access-unit assembly, GOP buffering, unsupported formats, and lazy `Image.data` behavior
-  - memory2 storage tests for append/query/lazy decode/reopen/replay
+  - unit tests for encoded `Image` metadata, H.264 access-unit assembly, GOP buffering, unsupported formats, and raw-pixel guards
+  - memory2 storage tests for `H264ImageCodec`, append/query/reopen/replay, and default JPEG compatibility
   - synthetic end-to-end demo/blueprint smoke test for live LCM transmission and memory2 recording.
 - Document dependency expectations for contributors who run video tests locally, including how to install the relevant `uv` extras and how tests should skip clearly when video dependencies are unavailable.
 - If `demo_h264_video_e2e` is registered as a runnable blueprint, contributor docs should remind maintainers to regenerate `dimos/robot/all_blueprints.py` with `pytest dimos/robot/test_all_blueprints_generation.py`.

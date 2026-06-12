@@ -158,7 +158,6 @@ class Store(Configurable, CompositeResource):
     ) -> Backend[Any]:
         """Create a Backend for the named stream. Called once per stream name."""
         codec = self._resolve_codec(payload_type, config.pop("codec", None))
-        payload_strategy = config.pop("payload_strategy", None)
 
         # Instantiate or use provided instances
         obs = config.pop("observation_store", self.config.observation_store)
@@ -185,7 +184,6 @@ class Store(Configurable, CompositeResource):
             vector_store=vs,
             notifier=notifier,
             eager_blobs=config.get("eager_blobs", False),
-            payload_strategy=payload_strategy,
         )
 
     def stream(self, name: str, payload_type: type[T] | None = None, **overrides: Any) -> Stream[T]:

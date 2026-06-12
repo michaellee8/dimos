@@ -24,7 +24,6 @@ from dimos.memory2.backend import Backend
 from dimos.memory2.blobstore.base import BlobStore
 from dimos.memory2.blobstore.sqlite import SqliteBlobStore
 from dimos.memory2.codecs.base import codec_id
-from dimos.memory2.codecs.pickle import PickleCodec
 from dimos.memory2.observationstore.sqlite import SqliteObservationStore
 from dimos.memory2.registry import RegistryStore, deserialize_component, qual
 from dimos.memory2.store.base import Store, StoreConfig
@@ -72,15 +71,9 @@ class SqliteStore(Store):
         data_type = _resolve_payload_type(payload_module)
         eager_blobs = stored.get("eager_blobs", False)
         page_size = stored.get("page_size", self.config.page_size)
-        payload_strategy_data = stored.get("payload_strategy")
-        codec = (
-            PickleCodec()
-            if payload_strategy_data is not None
-            else codec_from_id(stored["codec_id"], payload_module)
-        )
+        codec = codec_from_id(stored["codec_id"], payload_module)
 
         backend_conn = self._open_connection()
-        payload_strategy = self._deserialize_payload_strategy(payload_strategy_data, backend_conn)
 
         # Reconstruct components from serialized config
         bs_data = stored.get("blob_store")
@@ -128,7 +121,6 @@ class SqliteStore(Store):
             vector_store=vs,
             notifier=notifier,
             eager_blobs=eager_blobs,
-            payload_strategy=payload_strategy,
         )
 
     @staticmethod
@@ -138,14 +130,10 @@ class SqliteStore(Store):
         """Serialize a backend's config for registry storage."""
         cfg: dict[str, Any] = {
             "payload_module": payload_module,
-            "codec_id": backend.payload_strategy.codec_id
-            if backend.payload_strategy is not None
-            else codec_id(backend.codec),
+            "codec_id": codec_id(backend.codec),
             "eager_blobs": backend.eager_blobs,
             "page_size": page_size,
         }
-        if backend.payload_strategy is not None:
-            cfg["payload_strategy"] = backend.payload_strategy.serialize()
         if backend.blob_store is not None:
             cfg["blob_store"] = backend.blob_store.serialize()
         if backend.vector_store is not None:
@@ -177,23 +165,14 @@ class SqliteStore(Store):
 
         backend_conn = self._open_connection()
 
-        payload_strategy = self._payload_strategy_from_config(config, backend_conn)
-
         # Inject conn-shared instances unless user provided overrides
         if not isinstance(config.get("blob_store"), BlobStore):
             config["blob_store"] = SqliteBlobStore(conn=backend_conn)
         if not isinstance(config.get("vector_store"), VectorStore):
             config["vector_store"] = SqliteVectorStore(conn=backend_conn)
 
-        # Resolve codec early — needed for SqliteObservationStore. Stateful
-        # payload strategies own blob encoding/decoding, so keep sqlite eager
-        # joins disabled and use a harmless metadata-store codec.
-        if payload_strategy is not None:
-            codec = PickleCodec()
-            config["eager_blobs"] = False
-            config["payload_strategy"] = payload_strategy
-        else:
-            codec = self._resolve_codec(payload_type, config.get("codec"))
+        # Resolve codec early — needed for SqliteObservationStore.
+        codec = self._resolve_codec(payload_type, config.get("codec"))
         config["codec"] = codec
 
         # Create SqliteObservationStore with conn-sharing
@@ -222,48 +201,12 @@ class SqliteStore(Store):
 
         return backend
 
-    @staticmethod
-    def _deserialize_payload_strategy(
-        data: dict[str, Any] | None,
-        conn: sqlite3.Connection,
-    ) -> Any | None:
-        if data is None:
-            return None
-        strategy = deserialize_component(data)
-        SqliteStore._bind_payload_strategy(strategy, conn)
-        return strategy
-
-    @staticmethod
-    def _payload_strategy_from_config(
-        config: dict[str, Any], conn: sqlite3.Connection
-    ) -> Any | None:
-        strategy = config.pop("payload_strategy", None)
-        if strategy is None:
-            return None
-        SqliteStore._bind_payload_strategy(strategy, conn)
-        return strategy
-
-    @staticmethod
-    def _bind_payload_strategy(strategy: Any, conn: sqlite3.Connection) -> None:
-        bind = getattr(strategy, "bind_sqlite", None)
-        if bind is not None:
-            bind(conn)
-
     def list_streams(self) -> list[str]:
         db_names = set(self._registry.list_streams())
         return sorted(db_names | set(self._streams.keys()))
 
     def delete_stream(self, name: str) -> None:
-        stored = self._registry.get(name)
-        payload_strategy = None
-        if stored is not None:
-            payload_strategy = self._deserialize_payload_strategy(
-                stored.get("payload_strategy"),
-                self._registry_conn,
-            )
         super().delete_stream(name)
-        if payload_strategy is not None and hasattr(payload_strategy, "delete_stream"):
-            payload_strategy.delete_stream(name)
         self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}"')
         self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_blob"')
         self._registry_conn.execute(f'DROP TABLE IF EXISTS "{name}_vec"')

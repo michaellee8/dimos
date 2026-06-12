@@ -120,7 +120,8 @@ Use `H264LcmTransport` when a high-rate `Image` stream needs video compression
 over LCM. The module API stays the same: publishers still call
 `Out[Image].publish(image)`, and subscribers still receive `Image` values. The
 transport encodes each source frame as one H.264 Annex B access unit on the wire
-and decodes it at the subscriber.
+and decodes it at the subscriber by default. Set `decode_images=False` when a
+subscriber, such as a recorder, should receive encoded `Image` values instead.
 
 ```python skip
 from dimos.core.transport import H264LcmTransport
@@ -141,6 +142,11 @@ blueprint = blueprint.transports(
     }
 )
 ```
+
+Encoded delivery uses the same public `Image` type but sets
+`image.encoding == "h264"`, stores the Annex B payload in `image.data`, and stores
+sequence/keyframe metadata in `image.codec_metadata`. Raw-pixel methods raise for
+encoded images; decode them through a H.264 decode session first.
 
 H.264 transport is opt-in. The default image paths remain unchanged: normal LCM
 uses the `Image` LCM encoding, and memory2 still stores images with the default

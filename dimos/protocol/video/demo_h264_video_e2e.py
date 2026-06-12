@@ -30,10 +30,9 @@ from dimos.hardware.sensors.camera.module import CameraModule
 from dimos.hardware.sensors.camera.webcam import Webcam
 from dimos.memory2.module import OnExisting, Recorder
 from dimos.memory2.store.sqlite import SqliteStore
-from dimos.memory2.video.h264 import H264ImagePayloadStrategy, H264ImageStorageConfig
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.protocol.pubsub.impl.h264_lcm import H264LCM
-from dimos.protocol.video.h264 import H264Config
+from dimos.protocol.video.h264 import H264Config, H264Decoder, VideoDecodeGapError
 from dimos.utils.logging_config import setup_logger
 from dimos.visualization.vis_module import vis_module
 
@@ -130,7 +129,7 @@ class H264MemoryReplayConfig(ModuleConfig):
 
 
 class H264MemoryReplay(Module):
-    """Replay a memory2 H.264 image stream as normal `Image` frames."""
+    """Replay a memory2 H.264 image stream as decoded `Image` frames."""
 
     config: H264MemoryReplayConfig
     color_image: Out[Image]
@@ -145,13 +144,22 @@ class H264MemoryReplay(Module):
             duration=self.config.duration,
             loop=self.config.loop,
         )
+        decoder = H264Decoder(_webcam_h264_config)
+
+        def publish_decoded(image: Image) -> None:
+            try:
+                self.color_image.publish(decoder.decode(image))
+            except VideoDecodeGapError:
+                # V1 best effort: seek/replay can begin mid-GOP. Suppress deltas
+                # until the next keyframe restores decoder state.
+                return
 
         def on_error(error: Exception) -> None:
             logger.error("H.264 replay pipeline error: %s", error, exc_info=True)
 
         self.register_disposable(
             replay.streams.color_image.observable().subscribe(
-                on_next=self.color_image.publish,
+                on_next=publish_decoded,
                 on_error=on_error,
             )
         )
@@ -197,7 +205,11 @@ class H264VideoProbe(Module):
             self._received += 1
 
             if self._received % 10 == 0:
-                logger.info("H.264 video probe received %s decoded frames", self._received)
+                logger.info(
+                    "H.264 video probe received %s %s frames",
+                    self._received,
+                    image.encoding,
+                )
 
     @rpc
     def summary(self) -> str:
@@ -224,11 +236,7 @@ demo_h264_video_e2e = autoconnect(
     H264E2ERecorder.blueprint(
         db_path="h264_video_e2e.db",
         on_existing=OnExisting.OVERWRITE,
-        payload_strategies={
-            "color_image": H264ImagePayloadStrategy(
-                storage_config=H264ImageStorageConfig(codec=_h264_config)
-            ),
-        },
+        codecs={"color_image": "h264"},
     ),
     H264VideoProbe.blueprint(),
 ).transports(
@@ -237,6 +245,7 @@ demo_h264_video_e2e = autoconnect(
             "/demo_h264_video_e2e/color_image",
             Image,
             config=_h264_config,
+            decode_images=False,
         )
     }
 )
@@ -247,11 +256,7 @@ demo_h264_webcam_record = autoconnect(
     H264WebcamRecorder.blueprint(
         db_path="webcam_h264.db",
         on_existing=OnExisting.OVERWRITE,
-        payload_strategies={
-            "color_image": H264ImagePayloadStrategy(
-                storage_config=H264ImageStorageConfig(codec=_webcam_h264_config)
-            ),
-        },
+        codecs={"color_image": "h264"},
     ),
 ).transports(
     {
@@ -259,6 +264,7 @@ demo_h264_webcam_record = autoconnect(
             "/demo_h264_webcam_record/color_image",
             Image,
             config=_webcam_h264_config,
+            decode_images=False,
         )
     }
 )

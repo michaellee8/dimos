@@ -17,15 +17,18 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import numpy as np
 
-from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
-from dimos.msgs.sensor_msgs.VideoPacket import VideoPacket
+from dimos.msgs.sensor_msgs.Image import H264_IMAGE_ENCODING, Image, ImageFormat
 
 if TYPE_CHECKING:
     import av
+
+
+H264_CODEC = "h264"
+H264_BITSTREAM = "annex_b"
 
 
 class MissingVideoDependencyError(ImportError):
@@ -72,7 +75,7 @@ class H264CodecAdapter(Protocol):
 
     def encode_image(self, image: Image, *, force_keyframe: bool) -> tuple[bytes, int]: ...
 
-    def decode_packet(self, packet: VideoPacket) -> Image: ...
+    def decode_image(self, image: Image) -> Image: ...
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,10 @@ class H264AccessUnit:
 def ensure_supported_image(image: Image, config: H264Config) -> None:
     """Validate the first-version H.264 image input contract."""
 
+    if image.encoding != "raw":
+        raise UnsupportedVideoImageError(
+            f"H.264 encoding expects raw Image data; got encoding={image.encoding!r}"
+        )
     if image.format not in config.supported_formats:
         supported = ", ".join(fmt.value for fmt in config.supported_formats)
         raise UnsupportedVideoImageError(
@@ -113,6 +120,26 @@ def ensure_supported_image(image: Image, config: H264Config) -> None:
         raise UnsupportedVideoImageError(
             f"H.264 image encoding requires 1 or 3 channels; got {image.channels}"
         )
+
+
+def h264_metadata(image: Image) -> dict[str, Any]:
+    """Return validated H.264 metadata from an encoded Image."""
+
+    if image.encoding != H264_IMAGE_ENCODING:
+        raise ValueError(f"Expected H.264 encoded Image, got encoding={image.encoding!r}")
+    metadata = image.codec_metadata
+    if metadata.get("codec", H264_CODEC) != H264_CODEC:
+        raise ValueError(f"Expected codec={H264_CODEC!r}, got {metadata.get('codec')!r}")
+    if metadata.get("bitstream", H264_BITSTREAM) != H264_BITSTREAM:
+        raise ValueError(
+            f"Expected bitstream={H264_BITSTREAM!r}, got {metadata.get('bitstream')!r}"
+        )
+    for key in ("seq", "is_keyframe", "keyframe_seq", "pts", "width", "height"):
+        if key not in metadata:
+            raise ValueError(f"H.264 encoded Image missing metadata field {key!r}")
+    if not isinstance(image.data, bytes):
+        raise ValueError("H.264 encoded Image payload must be bytes")
+    return metadata
 
 
 class AiortcH264Codec:
@@ -150,30 +177,34 @@ class AiortcH264Codec:
         access_unit = H264AccessUnit.from_rtp_payloads(payloads, self._depayload)
         return access_unit.data, int(pts)
 
-    def decode_packet(self, packet: VideoPacket) -> Image:
-        frame = self._jitter_frame_type(data=packet.data, timestamp=packet.pts)
+    def decode_image(self, image: Image) -> Image:
+        metadata = h264_metadata(image)
+        assert isinstance(image.data, bytes)
+        frame = self._jitter_frame_type(data=image.data, timestamp=int(metadata["pts"]))
         decoded_frames = self._decoder.decode(frame)
         if not decoded_frames:
             raise VideoDecodeGapError("H.264 decoder produced no frame")
-        return self._from_video_frame(decoded_frames[0], packet)
+        return self._from_video_frame(decoded_frames[0], image)
 
     def _to_video_frame(self, image: Image) -> av.VideoFrame:
         fmt = _av_input_format(image.format)
-        frame = self._av.VideoFrame.from_ndarray(np.ascontiguousarray(image.data), format=fmt)
+        frame = self._av.VideoFrame.from_ndarray(
+            np.ascontiguousarray(image.require_raw("h264 encode")), format=fmt
+        )
         frame.pts = self._frame_index
         frame.time_base = self._time_base
         self._frame_index += 1
         return frame
 
     @staticmethod
-    def _from_video_frame(frame: av.VideoFrame, packet: VideoPacket) -> Image:
-        image_format = ImageFormat(packet.format)
+    def _from_video_frame(frame: av.VideoFrame, image: Image) -> Image:
+        image_format = image.format
         arr = frame.to_ndarray(format=_av_input_format(image_format))
-        return Image(data=arr, format=image_format, frame_id=packet.frame_id, ts=packet.ts)
+        return Image(data=arr, format=image_format, frame_id=image.frame_id, ts=image.ts)
 
 
 class H264Encoder:
-    """Encode a normal DimOS Image stream into per-frame H.264 packets."""
+    """Encode a normal DimOS Image stream into per-frame H.264 Images."""
 
     def __init__(
         self,
@@ -186,28 +217,33 @@ class H264Encoder:
         self._seq = 0
         self._keyframe_seq = -1
 
-    def encode(self, image: Image, *, force_keyframe: bool = False) -> VideoPacket:
+    def encode(self, image: Image, *, force_keyframe: bool = False) -> Image:
         ensure_supported_image(image, self.config)
         is_keyframe = self._should_force_keyframe(force_keyframe)
         access_unit, pts = self._codec.encode_image(image, force_keyframe=is_keyframe)
         if is_keyframe:
             self._keyframe_seq = self._seq
-        packet = VideoPacket(
-            seq=self._seq,
-            ts=image.ts,
-            frame_id=image.frame_id,
-            width=image.width,
-            height=image.height,
-            format=image.format.value,
-            codec="h264",
-            bitstream="annex_b",
-            is_keyframe=is_keyframe,
-            keyframe_seq=self._keyframe_seq,
-            pts=pts,
-            data=access_unit,
-        )
+        metadata: dict[str, Any] = {
+            "seq": self._seq,
+            "codec": H264_CODEC,
+            "bitstream": H264_BITSTREAM,
+            "is_keyframe": is_keyframe,
+            "keyframe_seq": self._keyframe_seq,
+            "pts": pts,
+            "width": image.width,
+            "height": image.height,
+            "channels": image.channels,
+            "dtype": str(image.dtype),
+        }
         self._seq += 1
-        return packet
+        return Image.encoded(
+            data=access_unit,
+            encoding=H264_IMAGE_ENCODING,
+            format=image.format,
+            frame_id=image.frame_id,
+            ts=image.ts,
+            codec_metadata=metadata,
+        )
 
     def _should_force_keyframe(self, requested: bool) -> bool:
         if requested or self._seq == 0 or self._keyframe_seq < 0:
@@ -217,35 +253,40 @@ class H264Encoder:
 
 
 class GopBuffer:
-    """Track H.264 GOP validity across a packet stream."""
+    """Track H.264 GOP validity across an encoded Image stream."""
 
     def __init__(self) -> None:
         self.expected_seq: int | None = None
         self.keyframe_seq: int | None = None
         self.valid = False
 
-    def accept(self, packet: VideoPacket) -> bool:
-        """Return True when the packet can be safely decoded."""
+    def accept(self, image: Image) -> bool:
+        """Return True when the encoded Image can be safely decoded."""
 
-        if self.expected_seq is not None and packet.seq != self.expected_seq:
+        metadata = h264_metadata(image)
+        seq = int(metadata["seq"])
+        keyframe_seq = int(metadata["keyframe_seq"])
+        is_keyframe = bool(metadata["is_keyframe"])
+
+        if self.expected_seq is not None and seq != self.expected_seq:
             self.valid = False
-        self.expected_seq = packet.seq + 1
+        self.expected_seq = seq + 1
 
-        if packet.is_keyframe:
-            self.keyframe_seq = packet.seq
+        if is_keyframe:
+            self.keyframe_seq = seq
             self.valid = True
             return True
 
         if not self.valid:
             return False
-        if self.keyframe_seq is None or packet.keyframe_seq != self.keyframe_seq:
+        if self.keyframe_seq is None or keyframe_seq != self.keyframe_seq:
             self.valid = False
             return False
         return True
 
 
 class H264Decoder:
-    """Decode per-frame H.264 packets into normal DimOS Images."""
+    """Decode H.264 encoded Images into normal raw DimOS Images."""
 
     def __init__(
         self,
@@ -258,12 +299,13 @@ class H264Decoder:
         self._codec = codec or AiortcH264Codec(self.config)
         self._gop_buffer = gop_buffer or GopBuffer()
 
-    def decode(self, packet: VideoPacket) -> Image:
-        if not self._gop_buffer.accept(packet):
+    def decode(self, image: Image) -> Image:
+        metadata = h264_metadata(image)
+        if not self._gop_buffer.accept(image):
             raise VideoDecodeGapError(
-                f"Cannot decode H.264 packet seq={packet.seq}; waiting for next keyframe"
+                f"Cannot decode H.264 image seq={metadata['seq']}; waiting for next keyframe"
             )
-        return self._codec.decode_packet(packet)
+        return self._codec.decode_image(image)
 
 
 def _av_input_format(format: ImageFormat) -> str:
@@ -279,6 +321,8 @@ def _av_input_format(format: ImageFormat) -> str:
 
 
 __all__ = [
+    "H264_BITSTREAM",
+    "H264_CODEC",
     "AiortcH264Codec",
     "GopBuffer",
     "H264AccessUnit",
@@ -290,4 +334,5 @@ __all__ = [
     "UnsupportedVideoImageError",
     "VideoDecodeGapError",
     "ensure_supported_image",
+    "h264_metadata",
 ]

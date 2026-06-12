@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 from dimos.msgs.sensor_msgs.Image import Image
-from dimos.msgs.sensor_msgs.VideoPacket import VideoPacket
 from dimos.protocol.pubsub.encoders import DecodingError, LCMTopicProto, PubSubEncoderMixin
 from dimos.protocol.pubsub.impl.lcmpubsub import LCMPubSubBase
 from dimos.protocol.video.h264 import H264Config, H264Decoder, H264Encoder, VideoDecodeGapError
@@ -26,9 +25,16 @@ from dimos.protocol.video.h264 import H264Config, H264Decoder, H264Encoder, Vide
 class H264EncoderMixin(PubSubEncoderMixin[LCMTopicProto, Image, bytes]):
     """Encoder mixin for Image streams using H.264 packets on the wire."""
 
-    def __init__(self, *, config: H264Config | None = None, **kwargs: object) -> None:
+    def __init__(
+        self,
+        *,
+        config: H264Config | None = None,
+        decode_images: bool = True,
+        **kwargs: object,
+    ) -> None:
         super().__init__(**kwargs)  # type: ignore[misc]
         self.h264_config = config or H264Config()
+        self.decode_images = decode_images
         self._encoder: H264Encoder | None = None
         self._decoder: H264Decoder | None = None
 
@@ -42,14 +48,16 @@ class H264EncoderMixin(PubSubEncoderMixin[LCMTopicProto, Image, bytes]):
             raise DecodingError("Ignoring LCM_SELF_TEST topic")
         if topic.lcm_type is not None and not issubclass(topic.lcm_type, Image):
             raise DecodingError(f"H.264 LCM topic {topic.topic!r} is not typed as Image")
+        try:
+            image = Image.lcm_decode(msg)
+        except ValueError as exc:
+            raise DecodingError(str(exc)) from exc
+        if not self.decode_images:
+            return image
         if self._decoder is None:
             self._decoder = H264Decoder(self.h264_config)
         try:
-            packet = VideoPacket.lcm_decode(msg)
-        except ValueError as exc:
-            raise DecodingError(str(exc)) from exc
-        try:
-            return self._decoder.decode(packet)
+            return self._decoder.decode(image)
         except VideoDecodeGapError as exc:
             raise DecodingError(str(exc)) from exc
 

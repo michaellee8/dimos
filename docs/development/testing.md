@@ -67,8 +67,8 @@ pytest -m self_hosted dimos/path/to/test_something.py
 
 The H.264 unit tests use fake codec adapters where possible, so they run in the
 default suite without requiring FFmpeg/libx264. Run the focused tests after
-changing video packet shape, eager `Image` compatibility, H.264 transport, memory2
-storage, or the demo blueprint:
+changing encoded `Image` shape, eager/raw `Image` compatibility, H.264 transport,
+memory2 storage, or the demo blueprint:
 
 ```bash
 uv run pytest dimos/protocol/video/test_h264.py dimos/msgs/sensor_msgs/test_image.py -q
@@ -80,8 +80,8 @@ CI=1 uv run pytest dimos/robot/test_all_blueprints_generation.py -q
 The runtime H.264 path uses `aiortc`, PyAV, FFmpeg, and libx264. If a test or
 manual run instantiates the real codec and those dependencies are missing, H.264
 should fail with an actionable dependency error. Keep fake-adapter unit tests in
-place so the default suite still covers packet semantics, GOP handling, and
-memory2 behavior.
+place so the default suite still covers encoded-image semantics, GOP handling,
+and memory2 behavior.
 
 When you add or rename a runnable demo blueprint, regenerate
 `dimos/robot/all_blueprints.py` with:
