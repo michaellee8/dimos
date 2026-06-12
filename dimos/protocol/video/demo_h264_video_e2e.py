@@ -550,6 +550,7 @@ class H264VideoProbe(Module):
 _h264_config = H264Config(bitrate=1_000_000, target_fps=10, keyframe_interval=15)
 _webcam_h264_config = H264Config(bitrate=2_000_000, target_fps=15, keyframe_interval=30)
 _benchmark_h264_config = H264Config(bitrate=1_500_000, target_fps=15, keyframe_interval=30)
+_inter_machine_h264_topic = "/demo_h264_inter_machine/color_image"
 
 
 def _webcam() -> Webcam:
@@ -614,6 +615,54 @@ demo_h264_webcam_record = autoconnect(
             Image,
             config=_webcam_h264_config,
             decode_images=False,
+        )
+    }
+)
+
+
+demo_h264_webcam_rerun = autoconnect(
+    CameraModule.blueprint(hardware=_webcam, transform=None, frequency=15.0),
+    H264VideoProbe.blueprint(),
+    vis_module(
+        "rerun",
+        rerun_config={"pubsubs": [H264LCM(config=_webcam_h264_config)]},
+    ),
+).transports(
+    {
+        ("color_image", Image): H264LcmTransport(
+            "/demo_h264_webcam_rerun/color_image",
+            Image,
+            config=_webcam_h264_config,
+        )
+    }
+)
+
+
+demo_h264_webcam_publish = autoconnect(
+    CameraModule.blueprint(hardware=_webcam, transform=None, frequency=15.0),
+).transports(
+    {
+        ("color_image", Image): H264LcmTransport(
+            _inter_machine_h264_topic,
+            Image,
+            config=_webcam_h264_config,
+        )
+    }
+)
+
+
+demo_h264_rerun_subscribe = autoconnect(
+    H264VideoProbe.blueprint(),
+    vis_module(
+        "rerun",
+        rerun_config={"pubsubs": [H264LCM(config=_webcam_h264_config)]},
+    ),
+).transports(
+    {
+        ("color_image", Image): H264LcmTransport(
+            _inter_machine_h264_topic,
+            Image,
+            config=_webcam_h264_config,
         )
     }
 )
