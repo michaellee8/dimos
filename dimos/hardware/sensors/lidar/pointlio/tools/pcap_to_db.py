@@ -264,7 +264,6 @@ def _run(args: argparse.Namespace) -> int:
     blueprint = autoconnect(
         PointLio.blueprint(
             frame_id="world",
-            map_freq=-1,
             odom_freq=args.odom_freq,
             replay_pcap=pcap_path,
             deterministic_clock=True,

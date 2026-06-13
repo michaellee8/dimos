@@ -4,8 +4,8 @@
 // FAST-LIO2 + Livox Mid-360 native module for dimos NativeModule framework.
 //
 // Binds Livox SDK2 directly into FAST-LIO-NON-ROS: SDK callbacks feed
-// CustomMsg/Imu to FastLio, which performs EKF-LOAM SLAM.  Registered
-// (world-frame) point clouds and odometry are published on LCM.
+// CustomMsg/Imu to FastLio, which performs EKF-LOAM SLAM.  Sensor-frame
+// (mid360_link) point clouds and odometry are published on LCM.
 //
 // Usage:
 //   ./fastlio2_native \
@@ -35,7 +35,6 @@
 #include "dimos_native_module.hpp"
 #include "pcap_replay.hpp"
 #include "timing.hpp"
-#include "voxel_map.hpp"
 
 // dimos LCM message headers
 #include "geometry_msgs/Quaternion.hpp"
@@ -123,7 +122,6 @@ static std::optional<std::chrono::steady_clock::time_point> virtual_now() {
 
 static std::string g_lidar_topic;
 static std::string g_odometry_topic;
-static std::string g_map_topic;
 static std::string g_frame_id;        // required via --frame_id
 static std::string g_child_frame_id;   // required via --child_frame_id
 static float g_frequency = 10.0f;
@@ -184,9 +182,11 @@ using dimos::time_from_seconds;
 using dimos::make_header;
 
 // ---------------------------------------------------------------------------
-// Publish lidar (world-frame point cloud)
+// Publish lidar point cloud in the sensor body frame (g_frame_id / mid360_link)
 // ---------------------------------------------------------------------------
-
+//
+// `cloud` is FAST-LIO's undistorted scan in the sensor's own frame
+// (get_body_cloud), so points are published as-is with no world registration.
 static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
                           const std::string& topic = "") {
     const std::string& chan = topic.empty() ? g_lidar_topic : topic;
@@ -225,23 +225,11 @@ static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
     pc.data_length = pc.row_step;
     pc.data.resize(pc.data_length);
 
-    // Apply full init_pose (rotation+translation) to match the odometry frame.
-    const bool apply_init_pose = has_init_pose();
     for (int i = 0; i < num_points; ++i) {
         float* dst = reinterpret_cast<float*>(pc.data.data() + i * 16);
-        if (apply_init_pose) {
-            double rx, ry, rz;
-            quat_rotate(g_init_qx, g_init_qy, g_init_qz, g_init_qw,
-                        cloud->points[i].x, cloud->points[i].y, cloud->points[i].z,
-                        rx, ry, rz);
-            dst[0] = static_cast<float>(rx + g_init_x);
-            dst[1] = static_cast<float>(ry + g_init_y);
-            dst[2] = static_cast<float>(rz + g_init_z);
-        } else {
-            dst[0] = cloud->points[i].x;
-            dst[1] = cloud->points[i].y;
-            dst[2] = cloud->points[i].z;
-        }
+        dst[0] = cloud->points[i].x;
+        dst[1] = cloud->points[i].y;
+        dst[2] = cloud->points[i].z;
         dst[3] = cloud->points[i].intensity;
     }
 
@@ -499,7 +487,6 @@ int main(int argc, char** argv) {
     // Required: LCM topics for output ports
     g_lidar_topic = mod.has("lidar") ? mod.topic("lidar") : "";
     g_odometry_topic = mod.has("odometry") ? mod.topic("odometry") : "";
-    g_map_topic = mod.has("global_map") ? mod.topic("global_map") : "";
 
     if (g_lidar_topic.empty() && g_odometry_topic.empty()) {
         fprintf(stderr, "Error: at least one of --lidar or --odometry is required\n");
@@ -522,16 +509,13 @@ int main(int argc, char** argv) {
     std::string lidar_ip = mod.arg("lidar_ip", "192.168.1.155");
     g_frequency = mod.arg_float("frequency", 10.0f);
     g_frame_id = mod.arg_required("frame_id");
-    g_child_frame_id = mod.arg_required("child_frame_id");
+    g_child_frame_id = mod.arg_required("odom_frame_id");
     float pointcloud_freq = mod.arg_float("pointcloud_freq", 5.0f);
     float odom_freq = mod.arg_float("odom_freq", 50.0f);
     CloudFilterConfig filter_cfg;
     filter_cfg.voxel_size = mod.arg_float("voxel_size", 0.1f);
     filter_cfg.sor_mean_k = mod.arg_int("sor_mean_k", 50);
     filter_cfg.sor_stddev = mod.arg_float("sor_stddev", 1.0f);
-    float map_voxel_size = mod.arg_float("map_voxel_size", 0.1f);
-    float map_max_range = mod.arg_float("map_max_range", 100.0f);
-    float map_freq = mod.arg_float("map_freq", 0.0f);
 
     // Propagates to the FAST-LIO core via the `fastlio_debug` global.
     bool debug = mod.arg_bool("debug", false);
@@ -608,8 +592,6 @@ int main(int argc, char** argv) {
                g_lidar_topic.empty() ? "(disabled)" : g_lidar_topic.c_str());
         printf("[fastlio2] odometry topic: %s\n",
                g_odometry_topic.empty() ? "(disabled)" : g_odometry_topic.c_str());
-        printf("[fastlio2] global_map topic: %s\n",
-               g_map_topic.empty() ? "(disabled)" : g_map_topic.c_str());
         printf("[fastlio2] config: %s\n", config_path.c_str());
         printf("[fastlio2] host_ip: %s  lidar_ip: %s  frequency: %.1f Hz\n",
                host_ip.c_str(), lidar_ip.c_str(), g_frequency);
@@ -617,9 +599,6 @@ int main(int argc, char** argv) {
                pointcloud_freq, odom_freq);
         printf("[fastlio2] voxel_size: %.3f  sor_mean_k: %d  sor_stddev: %.1f\n",
                filter_cfg.voxel_size, filter_cfg.sor_mean_k, filter_cfg.sor_stddev);
-        if (!g_map_topic.empty())
-            printf("[fastlio2] map_voxel_size: %.3f  map_max_range: %.1f  map_freq: %.1f Hz\n",
-                   map_voxel_size, map_max_range, map_freq);
     }
 
     // Signal handlers
@@ -653,14 +632,6 @@ int main(int argc, char** argv) {
     std::optional<std::chrono::steady_clock::time_point> last_pc_publish;
     std::optional<std::chrono::steady_clock::time_point> last_odom_publish;
 
-    std::unique_ptr<VoxelMap> global_map;
-    std::chrono::microseconds map_interval{0};
-    std::optional<std::chrono::steady_clock::time_point> last_map_publish;
-    if (!g_map_topic.empty() && map_freq > 0.0f) {
-        global_map = std::make_unique<VoxelMap>(map_voxel_size, map_max_range);
-        map_interval = std::chrono::microseconds(
-            static_cast<int64_t>(1e6 / map_freq));
-    }
 
     // Per-section timing for `run_main_iter`, active only with --debug.
     // maybe_flush() below prints a summary every second.
@@ -668,11 +639,9 @@ int main(int argc, char** argv) {
     static timing::Section t_emit_check{"emit.lock+swap"};
     static timing::Section t_feed_lidar{"fast_lio.feed_lidar"};
     static timing::Section t_process{"fast_lio.process"};
-    static timing::Section t_get_world_cloud{"fast_lio.get_world_cloud"};
+    static timing::Section t_get_world_cloud{"fast_lio.get_body_cloud"};
     static timing::Section t_filter_cloud{"filter_cloud"};
     static timing::Section t_publish_lidar{"publish_lidar"};
-    static timing::Section t_map_insert{"global_map.insert"};
-    static timing::Section t_map_publish{"global_map.publish"};
     static timing::Section t_publish_odom{"publish_odometry"};
 
     auto run_main_iter = [&](std::chrono::steady_clock::time_point now) {
@@ -697,9 +666,6 @@ int main(int argc, char** argv) {
         }
         if (!last_odom_publish.has_value()) {
             last_odom_publish = seed;
-        }
-        if (global_map && !last_map_publish.has_value()) {
-            last_map_publish = seed;
         }
 
         // At frame rate: drain accumulated points into a CustomMsg and feed
@@ -754,46 +720,22 @@ int main(int argc, char** argv) {
 
             const bool lidar_due =
                 !g_lidar_topic.empty() && now - *last_pc_publish >= pc_interval;
-            const bool map_due =
-                global_map && now - *last_map_publish >= map_interval;
 
-            // get_world_cloud + filter_cloud (SOR) is the loop's costliest step,
-            // so build it only when a publish is due. CPU optimization, not the
-            // divergence fix (that was a deque race in the core, fixed there).
-            if (lidar_due || map_due) {
-                auto world_cloud = ([&]() {
+            // get_body_cloud + filter_cloud (SOR) is the loop's costliest step,
+            // so build it only when a publish is due.
+            if (lidar_due) {
+                auto body_cloud = ([&]() {
                     timing::Scope s(t_get_world_cloud);
-                    return fast_lio.get_world_cloud();
+                    return fast_lio.get_body_cloud();
                 })();
-                if (world_cloud && !world_cloud->empty()) {
+                if (body_cloud && !body_cloud->empty()) {
                     auto filtered = ([&]() {
                         timing::Scope s(t_filter_cloud);
-                        return filter_cloud<PointType>(world_cloud, filter_cfg);
+                        return filter_cloud<PointType>(body_cloud, filter_cfg);
                     })();
-
-                    if (lidar_due) {
-                        timing::Scope s(t_publish_lidar);
-                        publish_lidar(filtered, ts);
-                        last_pc_publish = now;
-                    }
-
-                    // Global voxel map: insert scan, prune, publish at map_freq.
-                    if (global_map) {
-                        {
-                            timing::Scope s(t_map_insert);
-                            global_map->insert<PointType>(filtered);
-                        }
-                        if (map_due) {
-                            timing::Scope s(t_map_publish);
-                            global_map->prune(
-                                static_cast<float>(pose[0]),
-                                static_cast<float>(pose[1]),
-                                static_cast<float>(pose[2]));
-                            auto map_cloud = global_map->to_cloud<PointType>();
-                            publish_lidar(map_cloud, ts, g_map_topic);
-                            last_map_publish = now;
-                        }
-                    }
+                    timing::Scope s(t_publish_lidar);
+                    publish_lidar(filtered, ts);
+                    last_pc_publish = now;
                 }
             }
 
