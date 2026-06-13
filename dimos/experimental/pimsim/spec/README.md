@@ -45,21 +45,31 @@ The split is what lets a consumer cache identity/geometry once (by
 
 | Protocol | Role | Style | Implemented by |
 |---|---|---|---|
-| **`EntityAuthority`** | owns a scene's physics; broadcasts an `EntityStateBatch` every tick | pub/sub port (`Out[EntityStateBatch]`) + one `@rpc` | `BabylonSceneViewerModule` (Havok) · `MujocoSimModule` (headless) |
-| **`EntityConsumer`** | authority-blind reader of the stream; never touches a physics engine | pub/sub port (`In[EntityStateBatch]`) | `SceneLidarModule` · `SplatCameraModule` · `MujocoWorld.sync_entity_poses` · reachability builder |
+| **`EntityAuthority`** | owns a scene's physics; broadcasts an `EntityStateBatch` every tick | pub/sub port (`Out[EntityStateBatch]`) + `@rpc spawn_entity` | `MujocoSimModule` (headless) · `BabylonSceneViewerModule` (Havok, `browser` mode) |
+| **`EntityConsumer`** | authority-blind reader of the stream; never touches a physics engine | pub/sub port (`In[EntityStateBatch]`, named `entity_states`) | `SceneLidarModule` · `SplatCameraModule` · the planning world (via `world_monitor`→`MujocoWorld.sync_entity_poses`) · reachability builder · `BabylonSceneViewerModule` (`external` mode) |
+
+**The roles are not exclusive.** `BabylonSceneViewerModule` implements *both*:
+it's an `EntityAuthority` in `browser` mode (Havok produces the stream) and an
+`EntityConsumer`/viewer in `external` mode (it mirrors another authority's
+stream). `authority_mode` (`OWNS` vs `MIRROR`) says which way an instance is
+pointed. `MujocoSimModule` is authority-only.
 
 **Why two interface styles in one spec.** PimSim's entity flow is *streaming*:
 an authority publishes on its own clock and nobody calls it, so its contract
 is the dimos **port** (`Out`/`In`), declared as a Protocol attribute — not a
-method. Surfaces that are genuinely *called* synchronously use **method
-stubs** (the `WorldSpec` style): the `@rpc spawn_entity`, and the proposed
-`SceneObjectWorld` below. *Streaming = ports, synchronous = methods* — and
-knowing which a thing is, is half of understanding PimSim.
+method. Surfaces genuinely *called* synchronously use **method stubs** (the
+`WorldSpec` style): the `@rpc spawn_entity`, and the proposed `SceneObjectWorld`
+below. *Streaming = ports, synchronous = methods.*
 
-`EntityAuthority` also carries `authority_mode` (`OWNS` vs `MIRROR` — today the
-Babylon `entity_authority` `"browser"`/`"external"` string). The
-`entity_state_batch` it publishes each tick *is* the contract every consumer
-depends on; everything else exists to produce it.
+Two caveats the spec makes explicit: ports bind by **topic**
+(`/entity_state_batch`), so the producer names its port `entity_state_batch`
+and consumers name theirs `entity_states` — both fine. And `spawn_entity` is a
+contract for **all** authorities (you should be able to spawn entities the
+scene has assets for); Babylon implements it today, MuJoCo seeds from config
+and doesn't yet expose runtime spawn — a known gap, not a protocol weakness.
+`odom` is deliberately **not** in the authority contract — it's a separate
+robot-pose concern the two authorities legitimately handle differently
+(MuJoCo publishes it; Babylon consumes it for FK).
 
 ## Proposed: one scene noun, two verbs (`DESIGN.md` §7-A)
 

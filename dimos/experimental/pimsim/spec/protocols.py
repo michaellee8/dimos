@@ -61,7 +61,6 @@ if TYPE_CHECKING:
     from dimos.core.stream import In, Out
     from dimos.experimental.pimsim.spec.models import SceneObject
     from dimos.msgs.geometry_msgs.Pose import Pose
-    from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -71,7 +70,7 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class EntityAuthority(Protocol):
-    """A pluggable physics authority: owns a scene's physics and broadcasts it.
+    """The producer role: owns a scene's physics and broadcasts entity state.
 
     An authority ingests a cooked ``ScenePackage`` once (at construction, from
     config — not via a call), then **publishes an ``EntityStateBatch`` every
@@ -79,64 +78,78 @@ class EntityAuthority(Protocol):
     pose. Consumers subscribe and never learn which authority is upstream;
     swapping authorities is a blueprint flag and nothing downstream changes.
 
-    Two authorities exist today, complementary rather than rival:
+    Authority is a *role*, not a kind of module — and it is **not exclusive
+    with consuming**. ``BabylonSceneViewerModule`` implements both this and
+    ``EntityConsumer``: it OWNS physics (Havok) in ``entity_authority="browser"``
+    mode, and in ``"external"`` mode it MIRRORS another authority's stream as a
+    viewer (i.e. behaves as a consumer). ``MujocoSimModule`` is authority-only,
+    headless and deterministic. ``authority_mode`` says which way an instance is
+    currently pointed.
 
-    * ``BabylonSceneViewerModule`` — Havok physics (WASM) in a browser tab;
-      interactive, multi-user, grab-and-throw. ``authority_mode == OWNS`` when
-      its ``entity_authority`` flag is ``"browser"``.
-    * ``MujocoSimModule`` — headless, deterministic, control-grade.
-
-    The contract is the **output port** below — not a method you call. The
-    authority drives ``entity_state_batch`` from its own physics loop.
+    The contract is the **output port** below — not a method you call; the
+    authority drives it from its own physics loop. (Robot base pose / ``odom``
+    is a separate concern and deliberately *not* part of this contract — that
+    is why the two authorities legitimately differ on how they handle it.)
     """
 
     entity_state_batch: Out[EntityStateBatch]
     """THE contract every consumer depends on: a fresh snapshot of every entity
-    (descriptor + world pose) published each tick."""
-
-    odom: Out[PoseStamped]
-    """The robot base pose, on the same bus."""
+    (descriptor + world pose) published each tick. Live when
+    ``authority_mode == OWNS``; a MIRROR instance consumes instead (see
+    ``EntityConsumer``)."""
 
     @property
     def authority_mode(self) -> AuthorityMode:
-        """``OWNS`` — simulates physics, is the source of truth.
-        ``MIRROR`` — renders another authority's stream as kinematic bodies (a
-        viewer). For the Babylon viewer this is ``entity_authority``
-        ``"browser"`` vs ``"external"``."""
+        """``OWNS`` — this instance simulates physics and produces the stream.
+        ``MIRROR`` — it consumes another authority's stream and renders it as
+        kinematic bodies (a viewer, not a simulator). For the Babylon viewer
+        this is ``entity_authority`` ``"browser"`` vs ``"external"``."""
         ...
 
     def spawn_entity(self, descriptor: EntityDescriptor, pose: Pose) -> bool:
-        """``@rpc`` — add one body at runtime that was not in the cooked
-        package. Returns ``False`` if rejected — e.g. a ``MIRROR`` authority,
-        which only echoes the upstream stream and does not simulate."""
+        """Add one body at runtime, beyond the cooked package, that the scene
+        has assets for. Returns ``False`` if rejected — e.g. a ``MIRROR``
+        instance, which only echoes the upstream stream.
+
+        Both authorities should support this in principle. Babylon does today
+        (``@rpc``); MuJoCo currently only seeds entities from its
+        ``scene_entities`` config and does not yet expose runtime spawn — a
+        known gap to close, not a reason to weaken the contract."""
         ...
 
 
 @runtime_checkable
 class EntityConsumer(Protocol):
-    """An authority-blind consumer of the entity stream.
+    """The consumer role: reads the entity stream, blind to the authority.
 
     Subscribes to ``EntityStateBatch`` and reacts; never references a physics
-    engine, so it behaves identically no matter which authority is upstream.
-    The asymmetry is the architecture working: adding a consumer is "subscribe
-    to the stream," not "integrate with the simulator." Current consumers:
+    engine, so it behaves identically no matter which authority is upstream —
+    including when the upstream is a MIRROR-mode authority. Adding a consumer is
+    "subscribe to the stream," not "integrate with the simulator." Consumers:
 
     * ``SceneLidarModule`` — BVH raycast vs the cooked collision GLB + the
       dynamic entities from the stream (same scene the sim simulates).
     * ``SplatCameraModule`` — composite live entity poses + arm hulls onto a
       Gaussian-splat render.
-    * ``MujocoWorld.sync_entity_poses`` — write streamed poses into the
-      planner's collision world.
-    * the reachability map builder — sample arm FK against that world.
+    * the planning world — ``MujocoWorld.sync_entity_poses`` writes streamed
+      poses into the collision world. (Here the ``world_monitor`` module owns
+      the port and *calls* the world, so the world consumes the data
+      indirectly — a second consumer shape, not a subscribing module.)
+    * the reachability map builder — samples arm FK against that world.
+    * ``BabylonSceneViewerModule`` in ``external`` mode — the same module that
+      is an authority in ``browser`` mode, here acting as a viewer.
 
-    The contract is the **input port** below.
+    The contract is the **input port** below. dimos binds it by topic
+    (``/entity_state_batch``), so the local attribute name is each module's
+    choice — consumers today name it ``entity_states``.
     """
 
-    entity_state_batch: In[EntityStateBatch]
-    """The subscribed stream. The consumer keys on ``descriptor.entity_id`` for
-    identity across ticks, and uses ``mesh_ref`` / ``shape_hint`` / ``extents``
-    to instantiate geometry the first time it sees an id; pose updates
-    thereafter are just the ``Pose`` half of each entry."""
+    entity_states: In[EntityStateBatch]
+    """The subscribed stream (topic ``/entity_state_batch``). The consumer keys
+    on ``descriptor.entity_id`` for identity across ticks, and uses
+    ``mesh_ref`` / ``shape_hint`` / ``extents`` to instantiate geometry the
+    first time it sees an id; pose updates thereafter are just the ``Pose``
+    half of each entry."""
 
 
 # ─────────────────────────────────────────────────────────────────────────
