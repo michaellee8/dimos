@@ -10,11 +10,31 @@ import {
     state,
 } from './state.js';
 
+const STUN_ONLY = [{ urls: 'stun:stun.cloudflare.com:3478' }];
+
+// Connection waits hang forever on networks that silently drop UDP (ICE sits
+// in 'checking'); cap them so the operator gets an error instead.
+const CONNECT_TIMEOUT_MS = 20000;
+const CHANNEL_OPEN_TIMEOUT_MS = 10000;
+
+function timeout(ms, label) {
+    return new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(label)), ms));
+}
+
 export async function setupWebRTC(sessionId) {
     setStatus('Negotiating WebRTC...');
-    state.pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.cloudflare.com:3478' }]
-    });
+    // TURN must be in the PC's config at construction for relay candidates
+    // to gather with the offer. Best-effort: a broker without TURN
+    // configured returns STUN-only, and a failed fetch degrades to it.
+    let iceServers = STUN_ONLY;
+    try {
+        const turn = await api('GET', '/sessions/turn-credentials');
+        if (turn.ice_servers?.length) iceServers = turn.ice_servers;
+    } catch (err) {
+        console.warn('[turn] credential fetch failed — STUN only:', err);
+    }
+    state.pc = new RTCPeerConnection({ iceServers });
     const pc = state.pc;
 
     const sctpPlaceholder = pc.createDataChannel('_sctp_init');
@@ -72,6 +92,8 @@ export async function setupWebRTC(sessionId) {
             pc.addEventListener('connectionstatechange', check);
         }),
         iceFailed,
+        timeout(CONNECT_TIMEOUT_MS,
+            'Timed out connecting — your network may block WebRTC (UDP)'),
     ]);
 
     try { sctpPlaceholder.close(); } catch (_) {}
@@ -96,6 +118,7 @@ export async function setupWebRTC(sessionId) {
             state.cmdChannel.onerror = (e) => reject(e);
         }),
         iceFailed,
+        timeout(CHANNEL_OPEN_TIMEOUT_MS, 'Command channel never opened'),
     ]);
 
     // state_reliable — best-effort. Older brokers omit state_channel_id and
