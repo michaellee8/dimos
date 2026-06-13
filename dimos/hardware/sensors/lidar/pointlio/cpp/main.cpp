@@ -62,40 +62,27 @@ static std::atomic<bool> g_running{true};
 static lcm::LCM* g_lcm = nullptr;
 static FastLio* g_fastlio = nullptr;
 
-// Virtual clock: in replay mode, tracks the pcap timestamp of the packet
-// currently being fed so publish_*() reports the original capture time
-// instead of replay wall time. Live mode leaves it at 0 and publish_*()
-// falls back to system_clock::now().
+// Replay: virtual clock holds the pcap timestamp of the packet being fed so
+// publish_*() reports capture time. Live leaves it 0 → system_clock::now().
 static std::atomic<bool> g_replay_mode{false};
 static std::atomic<uint64_t> g_virtual_clock_ns{0};
 
-// Deterministic clock mode. When set, both live and replay drive
-// g_virtual_clock_ns from the packet's sensor-clock pkt->timestamp (which
-// is identical bit-for-bit between SDK delivery and pcap), and use it as
-// the source for scan-boundary rate limits and publish timestamps. This
-// removes wall-clock jitter from scan boundaries → live and replay produce
-// the same algorithm state. Trade-off: published header.stamp values
-// become sensor-boot-relative seconds instead of unix wall time, so this
-// is off by default and only flipped on by the record/replay demos.
+// Deterministic mode: drive the virtual clock from pkt->timestamp (identical
+// live vs pcap) for rate limits + publish ts, removing wall-clock jitter so
+// live and replay produce identical state. Cost: header.stamp becomes
+// sensor-boot seconds, not unix time. Off by default; record/replay demos only.
 static std::atomic<bool> g_deterministic_clock{false};
 
-// First packet's sensor ts (deterministic mode only). Used to seed the
-// main loop's rate-limit bookmarks at exactly the first delivered packet,
-// independent of when the main loop's first iteration happens to run.
+// First packet's sensor ts (deterministic mode only): seeds the main loop's
+// rate-limit bookmarks at the first delivered packet regardless of loop timing.
 static std::atomic<uint64_t> g_first_packet_clock_ns{0};
 
-// First-packet marker. Used by record/replay tooling to align the SDK's
-// warmup-induced packet drop with replay. The C++ binary writes the wall
-// clock of the first on_point_cloud / on_imu_data callback (live mode
-// only) to this file; demo_replay reads it back and passes the value as
-// --replay_skip_until_ns so pcap_replay drops the same SDK-eaten prefix.
+// First-packet marker: live writes the first callback's pkt->timestamp here;
+// demo_replay reads it back as --replay_skip_until_ns to drop the same
+// SDK-eaten warmup prefix. pkt->timestamp is bit-identical live vs pcap.
 static std::string g_first_packet_marker_path;
 static std::atomic<bool> g_first_packet_marker_written{false};
 
-// The packet's sensor-clock timestamp (pkt->timestamp) is identical bit-for-bit
-// between the live SDK delivery path and the recorded pcap, so writing it from
-// the first SDK callback gives replay an exact boundary to skip on. Wall clock
-// would only let us match within delivery latency (sub-ms).
 static void mark_first_packet(uint64_t pkt_timestamp_ns) {
     if (g_first_packet_marker_path.empty()) {
         return;
@@ -119,18 +106,11 @@ static double get_publish_ts() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-// Virtualized clock for the main loop's frame/publish rate limiters. In
-// replay mode this returns a time_point derived from g_virtual_clock_ns so
-// scan boundaries are determined by packet arrival, not by wall-clock thread
-// scheduling jitter. Returns nullopt if replay hasn't yet seen a packet
-// (caller should skip rate-limit checks in that case).
+// Clock for the main loop's rate limiters. In deterministic mode returns a
+// time_point from g_virtual_clock_ns (sensor-paced), else wall clock — the
+// latter keeps the feeder/main scan-composition race needed to reproduce live
+// divergence offline. nullopt = no packet seen yet; skip rate-limit checks.
 static std::optional<std::chrono::steady_clock::time_point> virtual_now() {
-    // Only the deterministic-clock flag drives the virtual (sensor-paced)
-    // clock. Replay with deterministic_clock=false must use the real wall
-    // clock so scan boundaries are cut on thread-scheduling timing — that
-    // restores the live feeder/main scan-composition race that the
-    // deterministic path deliberately removes (needed to reproduce the live
-    // divergence offline).
     if (g_deterministic_clock.load()) {
         uint64_t ns = g_virtual_clock_ns.load();
         if (ns == 0) {
@@ -149,17 +129,15 @@ static std::string g_child_frame_id;   // required via --child_frame_id
 static float g_frequency = 10.0f;
 
 // Initial pose offset (applied to all SLAM outputs)
-// Position offset
 static double g_init_x = 0.0;
 static double g_init_y = 0.0;
 static double g_init_z = 0.0;
-// Orientation offset as quaternion (identity = no rotation)
 static double g_init_qx = 0.0;
 static double g_init_qy = 0.0;
 static double g_init_qz = 0.0;
 static double g_init_qw = 1.0;
 
-// Helper: quaternion multiply (Hamilton product)  q_out = q1 * q2
+// Hamilton product: q_out = q1 * q2
 static void quat_mul(double ax, double ay, double az, double aw,
                      double bx, double by, double bz, double bw,
                      double& ox, double& oy, double& oz, double& ow) {
@@ -169,21 +147,18 @@ static void quat_mul(double ax, double ay, double az, double aw,
     oz = aw*bz + ax*by - ay*bx + az*bw;
 }
 
-// Helper: rotate a vector by a quaternion  v_out = q * v * q_inv
+// Rotate vector by quaternion: v_out = q * v * q_inv
 static void quat_rotate(double qx, double qy, double qz, double qw,
                         double vx, double vy, double vz,
                         double& ox, double& oy, double& oz) {
-    // t = 2 * cross(q_xyz, v)
     double tx = 2.0 * (qy*vz - qz*vy);
     double ty = 2.0 * (qz*vx - qx*vz);
     double tz = 2.0 * (qx*vy - qy*vx);
-    // v_out = v + qw*t + cross(q_xyz, t)
     ox = vx + qw*tx + (qy*tz - qz*ty);
     oy = vy + qw*ty + (qz*tx - qx*tz);
     oz = vz + qw*tz + (qx*ty - qy*tx);
 }
 
-// Check if initial pose is non-identity
 static bool has_init_pose() {
     return g_init_x != 0.0 || g_init_y != 0.0 || g_init_z != 0.0 ||
            g_init_qx != 0.0 || g_init_qy != 0.0 || g_init_qz != 0.0 || g_init_qw != 1.0;
@@ -226,7 +201,7 @@ static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
     pc.is_bigendian = 0;
     pc.is_dense = 1;
 
-    // Fields: x, y, z, intensity (float32 each)
+    // x, y, z, intensity (float32 each)
     pc.fields_length = 4;
     pc.fields.resize(4);
 
@@ -250,12 +225,7 @@ static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
     pc.data_length = pc.row_step;
     pc.data.resize(pc.data_length);
 
-    // Apply the full init_pose transform (rotation + translation) to point clouds.
-    // FAST-LIO's map origin is at the sensor's initial position.  The rotation
-    // corrects axis direction (e.g. 180° X for upside-down mount) and the
-    // translation shifts the origin so that ground sits at z≈0 (e.g. z=1.2
-    // for a sensor mounted 1.2m above ground).  This matches the odometry
-    // frame, which also gets the full init_pose applied.
+    // Apply full init_pose (rotation+translation) to match the odometry frame.
     const bool apply_init_pose = has_init_pose();
     for (int i = 0; i < num_points; ++i) {
         float* dst = reinterpret_cast<float*>(pc.data.data() + i * 16);
@@ -289,7 +259,7 @@ static void publish_odometry(const custom_messages::Odometry& odom, double times
     msg.header = make_header(g_frame_id, timestamp);
     msg.child_frame_id = g_child_frame_id;
 
-    // Pose (apply initial pose offset: p_out = R_init * p_slam + t_init)
+    // p_out = R_init * p_slam + t_init
     if (has_init_pose()) {
         double rx, ry, rz;
         quat_rotate(g_init_qx, g_init_qy, g_init_qz, g_init_qw,
@@ -322,12 +292,11 @@ static void publish_odometry(const custom_messages::Odometry& odom, double times
         msg.pose.pose.orientation.w = odom.pose.pose.orientation.w;
     }
 
-    // Covariance (fixed-size double[36])
     for (int i = 0; i < 36; ++i) {
         msg.pose.covariance[i] = odom.pose.covariance[i];
     }
 
-    // Twist (zero — FAST-LIO doesn't output velocity directly)
+    // Twist zeroed — FAST-LIO doesn't output velocity.
     msg.twist.twist.linear.x = 0;
     msg.twist.twist.linear.y = 0;
     msg.twist.twist.linear.z = 0;
@@ -351,11 +320,9 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
     uint64_t ts_ns = get_timestamp_ns(data);
     uint16_t dot_num = data->dot_num;
 
-    // Per-point intra-packet time offset, matching livox_ros_driver2
-    // (pub_handler.cpp: point_interval = time_interval*100/dot_num ns;
-    //  offset_time = base + i*point_interval). Without this, every point in a
-    // packet collapses to one timestamp and per-point deskew is lost — fatal
-    // during aggressive motion. time_interval unit is 0.1us, so *100 → ns.
+    // Per-point intra-packet offset (matches livox_ros_driver2). Without it all
+    // points share one timestamp and per-point deskew is lost. time_interval
+    // unit is 0.1us, so *100 → ns.
     const uint64_t point_interval_ns =
         dot_num > 0 ? static_cast<uint64_t>(data->time_interval) * 100 / dot_num : 0;
 
@@ -365,12 +332,9 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
 
     std::lock_guard<std::mutex> lock(g_pc_mutex);
 
-    // Update the deterministic-mode virtual clock INSIDE the accumulator
-    // mutex so the main loop can never observe a clock advance without
-    // also seeing the matching points (race that drifts scan composition).
-    // Monotonic update: SDK threads can deliver packets slightly out of
-    // sensor-ts order, and we must not let a later store(lower_ts) undo
-    // a previous store(higher_ts).
+    // Advance the virtual clock under the accumulator mutex so the main loop
+    // can't see a clock advance without the matching points. Monotonic CAS:
+    // out-of-order SDK delivery must not roll the clock back.
     if (g_deterministic_clock.load()) {
         uint64_t expected = 0;
         g_first_packet_clock_ns.compare_exchange_strong(expected, ts_ns);
@@ -392,7 +356,7 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
             cp.z = static_cast<double>(pts[i].z) / 1000.0;
             cp.reflectivity = pts[i].reflectivity;
             cp.tag = pts[i].tag;
-            cp.line = 0;  // Mid-360: non-repetitive, single "line"
+            cp.line = 0;  // Mid-360: single line
             cp.offset_time = static_cast<uli>((ts_ns - g_frame_start_ns) + i * point_interval_ns);
             g_accumulated_points.push_back(cp);
         }
@@ -419,10 +383,8 @@ static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
     uint64_t pkt_ts_ns = get_timestamp_ns(data);
     if (!g_replay_mode.load()) {
         mark_first_packet(pkt_ts_ns);
-        // Live IMU-drop instrumentation: a dropped UDP datagram shows up as a
-        // jump in the sensor timestamp (each pkt is ~5ms apart at 200Hz). Wall
-        // gaps that exceed sensor gaps mean callback starvation. Confirms (or
-        // refutes) the dropped-IMU divergence hypothesis on real hardware.
+        // Live IMU-drop instrumentation: a dropped datagram shows as a sensor-ts
+        // jump; wall gaps exceeding sensor gaps mean callback starvation.
         static std::atomic<uint64_t> last_pkt_ts_ns{0};
         static std::atomic<uint64_t> imu_pkt_count{0};
         static std::atomic<uint64_t> imu_gap_count{0};
@@ -478,10 +440,8 @@ static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
         for (int j = 0; j < 9; ++j)
             imu_msg->angular_velocity_covariance[j] = 0.0;
 
-        // Point-LIO consumes accel in g (config acc_norm=1.0; the EKF applies
-        // its own G_m_s2/acc_norm scaling internally). The Livox SDK already
-        // reports acc in g, so feed it raw — multiplying by GRAVITY_MS2 here
-        // would double-scale, blow up the gravity estimate, and permanently
+        // Point-LIO expects accel in g (EKF does its own scaling). SDK already
+        // reports g, so feed raw — scaling by GRAVITY_MS2 would double-scale and
         // trip the satu_acc check at rest.
         imu_msg->linear_acceleration.x = static_cast<double>(imu_pts[i].acc_x);
         imu_msg->linear_acceleration.y = static_cast<double>(imu_pts[i].acc_y);
@@ -492,10 +452,8 @@ static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
         g_fastlio->feed_imu(imu_msg);
     }
 
-    // Advance the deterministic-mode virtual clock AFTER feed_imu has
-    // queued the sample, holding g_pc_mutex so this is fully serialized
-    // with on_point_cloud / the main-loop scan swap. Monotonic CAS so
-    // out-of-order SDK delivery can't roll the clock backward.
+    // Advance the virtual clock after feed_imu, under g_pc_mutex so it's
+    // serialized with on_point_cloud / the scan swap. Monotonic CAS.
     if (g_deterministic_clock.load()) {
         std::lock_guard<std::mutex> lock(g_pc_mutex);
         uint64_t expected = 0;
@@ -575,8 +533,7 @@ int main(int argc, char** argv) {
     float map_max_range = mod.arg_float("map_max_range", 100.0f);
     float map_freq = mod.arg_float("map_freq", 0.0f);
 
-    // Verbose logging — propagates to the FAST-LIO C++ core via the
-    // `fastlio_debug` global. Default false → only real errors print.
+    // Propagates to the FAST-LIO core via the `fastlio_debug` global.
     bool debug = mod.arg_bool("debug", false);
     fastlio_debug = debug;
 
@@ -594,21 +551,17 @@ int main(int argc, char** argv) {
     ports.host_imu_data   = mod.arg_int("host_imu_data_port", port_defaults.host_imu_data);
     ports.host_log_data   = mod.arg_int("host_log_data_port", port_defaults.host_log_data);
 
-    // Replay mode (offline). When --replay_pcap is given the SDK is not
-    // initialized; a feeder thread reads the pcap and calls the existing
-    // on_point_cloud / on_imu_data callbacks directly. publish_*() uses
-    // the pcap timestamps as the clock so outputs match the original run.
+    // Replay: skip SDK init; a feeder thread reads the pcap and calls
+    // on_point_cloud / on_imu_data directly, using pcap ts as the clock.
     std::string replay_pcap = mod.arg("replay_pcap", "");
-    // Alternative replay source: a flat binary of driver CustomMsg/Imu frames
-    // dumped from a ROS bag (tools/dump_bag_frames.py). Feeds the port the EXACT
-    // driver output the ROS reference consumes, bypassing UDP->CustomMsg
-    // reconstruction — isolates port faithfulness from reconstruction fidelity.
+    // Alt source: flat binary of driver CustomMsg/Imu frames from a ROS bag
+    // (tools/dump_bag_frames.py). Bypasses UDP->CustomMsg reconstruction to
+    // isolate port faithfulness from reconstruction fidelity.
     std::string replay_bagframes = mod.arg("replay_bagframes", "");
     g_replay_mode.store(!replay_pcap.empty() || !replay_bagframes.empty());
 
-    // Drop pcap packets with pcap_ts < this value. Used in replay to mimic
-    // the SDK warmup discard that the live run experienced — so the
-    // algorithm starts from the same first packet in both modes.
+    // Drop pcap packets with pcap_ts < this, mimicking the live SDK warmup
+    // discard so both modes start from the same first packet.
     uint64_t replay_skip_until_ns = 0;
     {
         std::string s = mod.arg("replay_skip_until_ns", "0");
@@ -617,19 +570,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Live mode: write the wall_clock_ns of the first SDK callback to this
-    // file. Pair with replay's --replay_skip_until_ns to align packet sets.
+    // Live: write the first callback's ts here; pairs with replay's
+    // --replay_skip_until_ns to align packet sets.
     g_first_packet_marker_path = mod.arg("first_packet_marker", "");
 
-    // Replay: feed point and IMU on two separate threads (mimics the live
-    // Livox SDK's concurrent delivery threads). Only meaningful with
-    // deterministic_clock=false.
+    // Replay: feed point and IMU on two threads (mimics the SDK's concurrent
+    // delivery). Only meaningful with deterministic_clock=false.
     const bool replay_dual_thread = mod.arg_bool("replay_dual_thread", false);
 
-    // Drive virtual_now() and get_publish_ts() off the packet's sensor
-    // clock in both live and replay. Eliminates wall-clock jitter from
-    // scan boundaries and makes outputs bit-comparable across modes.
-    // Changes header.stamp from unix wall time to sensor-boot seconds.
     g_deterministic_clock.store(mod.arg_bool("deterministic_clock", false));
 
     // Initial pose offset [x, y, z, qx, qy, qz, qw]
@@ -686,16 +634,13 @@ int main(int argc, char** argv) {
     }
     g_lcm = &lcm;
 
-    // Init FAST-LIO with config
     if (debug) printf("[fastlio2] Initializing FAST-LIO...\n");
     FastLio fast_lio(config_path, msr_freq, main_freq);
     g_fastlio = &fast_lio;
     if (debug) printf("[fastlio2] FAST-LIO initialized.\n");
 
-    // Main-loop state. The body lives in `run_main_iter` below so it can be
-    // invoked from either the wall-clock-paced main thread (live) or the
-    // pcap-paced feeder thread (replay), with no race on accumulator
-    // contents in the replay case.
+    // Main-loop state. Body lives in `run_main_iter` so it can run from either
+    // the wall-paced main thread (live) or the pcap-paced feeder (replay).
     auto frame_interval = std::chrono::microseconds(
         static_cast<int64_t>(1e6 / g_frequency));
     std::optional<std::chrono::steady_clock::time_point> last_emit;
@@ -717,11 +662,8 @@ int main(int argc, char** argv) {
             static_cast<int64_t>(1e6 / map_freq));
     }
 
-    // Per-section timing counters for `run_main_iter`. Active only when
-    // --debug is on (Scope's constructor reads `fastlio_debug` and no-ops
-    // otherwise). `timing::maybe_flush(now)` at the bottom prints a per-
-    // section summary every second of wall clock so we can see both how
-    // often each part fires and how long each call takes.
+    // Per-section timing for `run_main_iter`, active only with --debug.
+    // maybe_flush() below prints a summary every second.
     static timing::Section t_iter{"run_main_iter"};
     static timing::Section t_emit_check{"emit.lock+swap"};
     static timing::Section t_feed_lidar{"fast_lio.feed_lidar"};
@@ -735,13 +677,10 @@ int main(int argc, char** argv) {
 
     auto run_main_iter = [&](std::chrono::steady_clock::time_point now) {
         timing::Scope iter_scope(t_iter);
-        // Lazy-seed all rate-limit bookmarks on the first iteration so they
-        // line up with the chosen clock (wall in live, pcap in replay) and
-        // don't fire immediately based on an arbitrary "since program start"
-        // delta. In deterministic mode we seed from the FIRST packet's
-        // sensor ts (not the current ts) so both live and replay anchor
-        // their first scan boundary at the same packet — required for
-        // bit-for-bit live↔replay parity.
+        // Lazy-seed rate-limit bookmarks on the first iteration so they align
+        // with the chosen clock. In deterministic mode seed from the FIRST
+        // packet's ts (not now) so live and replay anchor the same scan
+        // boundary — required for bit-for-bit parity.
         auto seed = now;
         if (g_deterministic_clock.load()) {
             uint64_t first = g_first_packet_clock_ns.load();
@@ -763,12 +702,9 @@ int main(int argc, char** argv) {
             last_map_publish = seed;
         }
 
-        // At frame rate: drain accumulated raw points into a CustomMsg
-        // and feed to FAST-LIO. Hold g_pc_mutex across the rate-limit
-        // CHECK as well as the swap, so in deterministic mode the
-        // virtual clock + accumulator are observed atomically with no
-        // other thread able to slip a packet in between the decision
-        // and the swap.
+        // At frame rate: drain accumulated points into a CustomMsg and feed
+        // FAST-LIO. Hold g_pc_mutex across the rate-limit check AND swap so the
+        // clock + accumulator are observed atomically (no packet slips between).
         std::vector<custom_messages::CustomPoint> points;
         uint64_t frame_start = 0;
         {
@@ -792,7 +728,6 @@ int main(int argc, char** argv) {
             }
         }
         if (!points.empty()) {
-            // Build CustomMsg
             auto lidar_msg = boost::make_shared<custom_messages::CustomMsg>();
             lidar_msg->header.seq = 0;
             lidar_msg->header.stamp = custom_messages::Time().fromSec(
@@ -807,14 +742,12 @@ int main(int argc, char** argv) {
             fast_lio.feed_lidar(lidar_msg);
         }
 
-        // Run one FAST-LIO IESKF step. Cheap when the IMU/lidar queues
-        // are empty; the heavy work happens after a feed_lidar above.
+        // One FAST-LIO IESKF step (cheap when queues empty).
         {
             timing::Scope s(t_process);
             fast_lio.process();
         }
 
-        // Check for new SLAM results and publish (rate-limited).
         auto pose = fast_lio.get_pose();
         if (!pose.empty() && (pose[0] != 0.0 || pose[1] != 0.0 || pose[2] != 0.0)) {
             double ts = get_publish_ts();
@@ -824,14 +757,9 @@ int main(int argc, char** argv) {
             const bool map_due =
                 global_map && now - *last_map_publish >= map_interval;
 
-            // get_world_cloud() + filter_cloud (SOR, mean_k=50) are by far the
-            // most expensive step in the loop, so build them ONLY when a lidar
-            // or map publish is actually due rather than every main_freq
-            // iteration. (Note: this is a CPU optimization, not the divergence
-            // fix — the live runaway was a std::deque race in the fastlio core's
-            // sync_packages/IESKF loop, since fixed by locking mtx_buffer there.
-            // Dropped IMU datagrams were ruled out: live diverged with zero
-            // dropped packets.)
+            // get_world_cloud + filter_cloud (SOR) is the loop's costliest step,
+            // so build it only when a publish is due. CPU optimization, not the
+            // divergence fix (that was a deque race in the core, fixed there).
             if (lidar_due || map_due) {
                 auto world_cloud = ([&]() {
                     timing::Scope s(t_get_world_cloud);
@@ -843,15 +771,13 @@ int main(int argc, char** argv) {
                         return filter_cloud<PointType>(world_cloud, filter_cfg);
                     })();
 
-                    // Per-scan world-frame cloud at pointcloud_freq.
                     if (lidar_due) {
                         timing::Scope s(t_publish_lidar);
                         publish_lidar(filtered, ts);
                         last_pc_publish = now;
                     }
 
-                    // Global voxel map: insert this scan, prune, then publish
-                    // a snapshot at map_freq.
+                    // Global voxel map: insert scan, prune, publish at map_freq.
                     if (global_map) {
                         {
                             timing::Scope s(t_map_insert);
@@ -871,7 +797,7 @@ int main(int argc, char** argv) {
                 }
             }
 
-            // Pose + covariance, rate-limited to odom_freq.
+            // Pose + covariance at odom_freq.
             if (!g_odometry_topic.empty() && now - *last_odom_publish >= odom_interval) {
                 timing::Scope s(t_publish_odom);
                 publish_odometry(fast_lio.get_odometry(), ts);
@@ -879,30 +805,20 @@ int main(int argc, char** argv) {
             }
         }
 
-        // Periodic per-section summary to stderr (no-op when --debug off).
         timing::maybe_flush(std::chrono::steady_clock::now());
     };
 
-    // Source of point/IMU packets:
-    //   live mode  -> Livox SDK opens UDP sockets + dispatches via callbacks
-    //                 from its own threads. Main thread drives run_main_iter
-    //                 at main_freq, consuming whatever the SDK queued.
-    //   replay mode -> the feeder thread reads the pcap and pushes packets
-    //                  through the same on_point/on_imu callbacks (paced at
-    //                  realtime via sleep_until). The MAIN thread — same
-    //                  one that runs in live mode — owns run_main_iter and
-    //                  drains the accumulator. Two threads in both modes,
-    //                  matching architectures, so the only difference is
-    //                  the source of packets (SDK vs pcap).
+    // Packet source: live = Livox SDK callbacks from its own threads; replay =
+    // feeder thread reads pcap through the same callbacks. Either way the main
+    // thread owns run_main_iter, so the only difference is SDK vs pcap.
     std::thread replay_thread;
     if (g_replay_mode.load()) {
         if (debug) printf("[fastlio2] REPLAY mode, pcap=%s\n", replay_pcap.c_str());
         replay_thread = std::thread([&]() {
             if (!replay_bagframes.empty()) {
-                // Bag-frame replay: read driver CustomMsg/Imu records from the
-                // flat dump and feed them straight into the port, serialized
-                // with the EKF (feed -> run_main_iter) on this one thread. No
-                // UDP reconstruction, no accumulator. Deterministic by design.
+                // Bag-frame replay: feed driver records straight into the port,
+                // serialized with the EKF on this thread. No reconstruction, no
+                // accumulator — deterministic by design.
                 std::ifstream bf(replay_bagframes, std::ios::binary);
                 if (!bf) {
                     fprintf(stderr, "[bagframes] cannot open %s\n", replay_bagframes.c_str());
@@ -1009,9 +925,8 @@ int main(int argc, char** argv) {
                 on_imu_data(0, 0, p, nullptr);
             };
             rep.on_clock = [](uint64_t pcap_ts_ns) {
-                // In deterministic mode the callbacks already pushed the
-                // sensor pkt->timestamp into g_virtual_clock_ns — don't
-                // overwrite with the pcap (wall) ts.
+                // Deterministic mode already pushed pkt->timestamp; don't
+                // overwrite with the pcap ts.
                 if (g_deterministic_clock.load()) {
                     return;
                 }
@@ -1019,23 +934,18 @@ int main(int argc, char** argv) {
             };
             rep.running = &g_running;
             if (g_deterministic_clock.load() && !replay_dual_thread) {
-                // Deterministic serial replay: the feeder thread drives the
-                // EKF synchronously after each packet (on_iter) with no
-                // wall-clock pacing. Feed+process are strictly serialized, so
-                // the run is reproducible and matches the reference Point-LIO's
-                // single-executor semantics. The two-thread realtime path
-                // (else branch) leaves which IMU samples are present at scan
-                // composition up to wall-clock scheduling — that interleaving
-                // race makes even clean data diverge nondeterministically.
+                // Serial replay: feeder drives the EKF synchronously per packet,
+                // unpaced. Feed+process strictly serialized → reproducible,
+                // matching Point-LIO's single-executor semantics. The realtime
+                // path's interleaving race makes even clean data diverge.
                 rep.realtime = false;
                 rep.on_iter = [&]() {
                     auto now_opt = virtual_now();
                     if (now_opt.has_value()) run_main_iter(*now_opt);
                 };
             } else {
-                // Live-throughput path: feeder paced at wall-clock rate, the
-                // main thread drives run_main_iter. Used for wall-clock replay
-                // and dual-thread live-race reproduction.
+                // Realtime path: feeder paced at wall clock, main thread drives
+                // run_main_iter. For wall-clock replay and live-race repro.
                 rep.realtime = true;
             }
             rep.skip_until_ns = replay_skip_until_ns;
@@ -1059,32 +969,27 @@ int main(int argc, char** argv) {
         if (debug) printf("[fastlio2] SDK started, waiting for device...\n");
     }
 
-    // Bag-frame replay always drives run_main_iter from the feeder thread
-    // (step() after each feed), so the main thread must stay out of the EKF
-    // regardless of the deterministic_clock flag — otherwise both threads
+    // Bag-frame replay drives run_main_iter from the feeder, so the main thread
+    // must stay out of the EKF regardless of deterministic_clock — else both
     // co-drive run_main_iter and race on the shared measurement cloud.
     const bool serial_replay =
         g_replay_mode.load() && !replay_dual_thread &&
         (g_deterministic_clock.load() || !replay_bagframes.empty());
     while (g_running.load()) {
         if (serial_replay) {
-            // The feeder thread's on_iter drives run_main_iter; the main
-            // thread only services LCM and waits for the feeder to finish.
+            // Feeder drives run_main_iter; main thread only services LCM.
             lcm.handleTimeout(10);
             continue;
         }
         auto loop_start = std::chrono::high_resolution_clock::now();
         auto now_opt = virtual_now();
         if (!now_opt.has_value()) {
-            // No clock yet — in replay this means the feeder hasn't read
-            // its first packet; in live it shouldn't happen because
-            // virtual_now falls back to steady_clock::now().
+            // No clock yet (replay feeder hasn't read a packet).
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
             continue;
         }
         run_main_iter(*now_opt);
 
-        // Drain LCM messages.
         lcm.handleTimeout(0);
 
         // Rate control (~main_freq, 5kHz default).

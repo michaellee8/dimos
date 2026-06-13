@@ -42,38 +42,27 @@ struct Replayer {
     PacketCb on_point;
     PacketCb on_imu;
     ClockCb on_clock;
-    // Called synchronously after every packet, once the payload has been
-    // appended and the virtual clock advanced. The replay path runs the
-    // main-loop body here so feeding + processing happen on a single
-    // thread — eliminates the feeder-vs-main-loop race on accumulator
-    // contents.
+    // Runs the main-loop body inline after each packet so feed+process stay on
+    // one thread, avoiding a feeder-vs-main-loop race on accumulator contents.
     IterCb on_iter;
     std::atomic<bool>* running = nullptr;
     bool realtime = true;
-    // Drop Livox packets whose sensor timestamp (pkt->timestamp) is
-    // strictly less than this. Used to mimic the SDK warmup window from a
-    // paired live run so the algorithm starts from the same first packet
-    // in both modes. Comparing on sensor ts (which is identical bit-for-bit
-    // between live SDK delivery and pcap replay) is exact; comparing on
-    // wall pcap_ts would be off by SDK delivery latency.
+    // Drop packets with sensor ts < this to mimic the SDK warmup window from a
+    // paired live run. Sensor ts is bit-identical live vs replay; wall pcap_ts
+    // would be off by SDK delivery latency.
     uint64_t skip_until_ns = 0;
-    // When true, point and IMU packets are fed from TWO separate threads
-    // (each paced realtime against a shared wall anchor) instead of one
-    // serial feeder. This reproduces the live Livox SDK, which delivers
-    // point and IMU on independent threads — so on_point_cloud and
-    // on_imu_data actually overlap, exposing concurrency the single-feeder
-    // path can never hit. Requires deterministic_clock=false (wall clock).
+    // Feed point/IMU on two threads (vs one serial feeder) to reproduce the
+    // live SDK's independent delivery threads, exposing point/IMU overlap.
+    // Requires wall clock (deterministic_clock=false).
     bool dual_thread = false;
 
-    // One parsed Livox UDP payload plus its pcap (wall) and sensor timestamps.
     struct Pkt {
         uint64_t pcap_ts_ns = 0;
         bool is_point = false;
         std::vector<uint8_t> payload;
     };
 
-    // Parse the whole pcap into point and IMU payload streams (applying the
-    // sensor-ts skip window). Returns false on a malformed/unsupported file.
+    // Parse pcap into point/IMU streams, applying skip window. False on bad file.
     bool prebuffer(std::vector<Pkt>& point_pkts, std::vector<Pkt>& imu_pkts) {
         std::ifstream f(path, std::ios::binary);
         if (!f) {
@@ -154,8 +143,7 @@ struct Replayer {
         return true;
     }
 
-    // Pace one pre-buffered stream against a shared wall anchor and dispatch
-    // each payload to its callback. Runs on its own thread in dual mode.
+    // Pace one stream against the shared wall anchor; own thread in dual mode.
     void feed_stream(const std::vector<Pkt>& pkts, const PacketCb& cb,
                      std::chrono::steady_clock::time_point start_wall,
                      uint64_t first_pcap_ts_ns) {
@@ -173,9 +161,8 @@ struct Replayer {
         }
     }
 
-    // Two-thread feeder: reproduces the live SDK's concurrent point/IMU
-    // delivery. The main loop (run_main_iter) drains the accumulator as in
-    // live; no on_clock/on_iter (wall-clock mode only).
+    // Two-thread feeder; main loop drains accumulator as in live. Wall-clock
+    // mode only (no on_clock/on_iter).
     bool run_dual() {
         std::vector<Pkt> point_pkts, imu_pkts;
         if (!prebuffer(point_pkts, imu_pkts)) return false;
@@ -303,9 +290,7 @@ struct Replayer {
             auto* livox_pkt =
                 reinterpret_cast<LivoxLidarEthernetPacket*>(buf.data() + payload_off);
 
-            // Sensor-clock skip: drop packets the live SDK wouldn't have
-            // seen (those before its first delivered callback) so the
-            // algorithm processes the same input set in both modes.
+            // Skip packets the live SDK wouldn't have delivered yet.
             if (skip_until_ns > 0) {
                 uint64_t pkt_ts;
                 std::memcpy(&pkt_ts, livox_pkt->timestamp, sizeof(uint64_t));
@@ -341,15 +326,13 @@ struct Replayer {
             } else {
                 other++;
             }
-            // Advance the virtual clock AFTER the payload has been added to
-            // accumulators. Reverse order would let the main-loop thread see
-            // the clock advance and emit a scan that's missing this packet.
+            // Advance clock only after the payload is accumulated, else a scan
+            // could be emitted missing this packet.
             if (on_clock) {
                 on_clock(pcap_ts_ns);
             }
 
-            // Run one main-loop iteration synchronously so feeding and
-            // processing are strictly serialized in replay mode.
+            // Serialize feed and process in replay mode.
             if (on_iter) {
                 on_iter();
             }

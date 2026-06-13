@@ -1,24 +1,14 @@
 // Copyright 2026 Dimensional Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// Lightweight per-section timing for diagnosing where wall time goes in
-// `run_main_iter`. Active only when --debug is on (i.e. the global
-// `fastlio_debug` flag is true) so non-debug runs pay only a single
-// branch per scope.
+// Lightweight per-section timing for `run_main_iter`. Active only when the
+// global `fastlio_debug` flag is set, so non-debug runs pay one branch per
+// scope.
 //
 // Usage:
-//
 //   static timing::Section sec{"filter_cloud"};
-//   {
-//       timing::Scope s(sec);
-//       // ...do work...
-//   }
-//   // and periodically:
-//   timing::maybe_flush(now);
-//
-// The flush prints one line per section to stderr every flush interval
-// (1 second of wall clock) summarising count / mean / max / total, then
-// resets the accumulators. The flush is cheap when nothing was recorded.
+//   { timing::Scope s(sec); /* work */ }
+//   timing::maybe_flush(now);  // periodically
 
 #pragma once
 
@@ -29,7 +19,7 @@
 #include <mutex>
 #include <vector>
 
-#include "fast_lio_debug.hpp"  // for the global `fastlio_debug` flag
+#include "fast_lio_debug.hpp"
 
 namespace timing {
 
@@ -47,7 +37,6 @@ struct Section {
         uint64_t prev = max_ns.load(std::memory_order_relaxed);
         while (ns > prev &&
                !max_ns.compare_exchange_weak(prev, ns, std::memory_order_relaxed)) {
-            // prev is updated on failure by compare_exchange_weak.
         }
     }
 };
@@ -82,11 +71,8 @@ struct Scope {
     }
 };
 
-// Print one summary line per section to stderr every FLUSH_INTERVAL wall
-// seconds, then reset accumulators. The check is cheap: a single time
-// comparison guarded by the fastlio_debug flag. The mutex serialises the
-// flush between threads (replay's feeder vs live's main loop) so we
-// never see torn output.
+// Print one line per section to stderr every FLUSH_INTERVAL, then reset.
+// Mutex serialises flushes across threads (replay feeder vs live main loop).
 inline void maybe_flush(std::chrono::steady_clock::time_point now) {
     if (!fastlio_debug) {
         return;
