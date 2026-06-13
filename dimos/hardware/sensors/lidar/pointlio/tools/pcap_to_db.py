@@ -51,9 +51,9 @@ Usage (from the dimos6 venv)::
     source .venv/bin/activate
 
     # Build a fresh db from scratch (no existing db needed). The ruwik2_part3
-    # sample pcap is available via LFS:
+    # sample pcap (120s, includes the velocity-spike segment) is in LFS:
     PCAP=$(python -c "from dimos.utils.data import get_data; \
-        print(get_data('ruwik2_part3') / 'ruwik2_part3.pcap')")
+        print(get_data('ruwik2_part3/ruwik2_part3.pcap'))")
     python -m dimos.hardware.sensors.lidar.pointlio.tools.pcap_to_db --pcap "$PCAP"
     # -> writes ruwik2_part3.db next to the sample with pointlio_odometry
     #    + pointlio_lidar.
