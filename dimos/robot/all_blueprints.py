@@ -173,7 +173,6 @@ all_modules = {
     "g1-whole-body-connection": "dimos.robot.unitree.g1.wholebody_connection.G1WholeBodyConnection",
     "go2-connection": "dimos.robot.unitree.go2.connection.GO2Connection",
     "go2-fleet-connection": "dimos.robot.unitree.go2.fleet_connection.Go2FleetConnection",
-    "go2-low-level-control": "dimos.control.examples.go2_standup.Go2LowLevelControl",
     "go2-memory": "dimos.robot.unitree.go2.blueprints.smart.unitree_go2.Go2Memory",
     "go2-teleop-module": "dimos.teleop.quest.quest_extensions.Go2TeleopModule",
     "google-maps-skill-container": "dimos.agents.skills.google_maps_skill_container.GoogleMapsSkillContainer",
