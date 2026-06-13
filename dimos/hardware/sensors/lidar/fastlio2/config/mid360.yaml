@@ -11,15 +11,23 @@ preprocess:
     blind: 0.5
 
 mapping:
-    acc_cov: 0.1
+    # acc_cov is the divergence guard. At the upstream default (0.1) FAST-LIO
+    # odometry runs away to km/s on aggressive Go2 motion — the IMU acceleration
+    # prediction dominates the IESKF and diverges. Raising acc_cov down-weights
+    # that prediction. On the ruwik2_pt3 raw pcap the threshold is sharp between
+    # 0.3 (diverges) and 0.35 (bounded); 0.5 holds with margin (reliably bounded
+    # across reps, peak ~5 m/s, matching Point-LIO). See jhist
+    # dimos-fastlio-velocity-spike.md (2026-06-13 correction).
+    acc_cov: 0.5
     gyr_cov: 0.1
     b_acc_cov: 0.0001
     b_gyr_cov: 0.0001
-    # Scan downsampling that feeds the IESKF. The upstream default (0.5 m) is too
-    # sparse on aggressive Go2 motion: the point-to-plane update becomes
-    # ill-conditioned and odometry velocity diverges to km/s. Replaying ruwik2_pt3
-    # shows a sharp threshold between 0.38 m (diverges) and 0.35 m (bounded); 0.1 m
-    # stays bounded with margin. See jhist dimos-fastlio-velocity-spike.md (2026-06-10).
+    # Scan voxel that feeds the IESKF. NOTE: an earlier finding that voxel 0.1 m
+    # bounds the velocity divergence turned out to be a re-encoding artifact
+    # (measured on a bag with synthesized per-point timestamps). On the raw pcap,
+    # voxel size does NOT bound divergence at any value — acc_cov above is the
+    # real guard. 0.1 m retained only for scan density, not for stability.
+    # See jhist dimos-fastlio-velocity-spike.md (2026-06-13 correction).
     filter_size_surf: 0.1
     filter_size_map: 0.1
     fov_degree:    360
