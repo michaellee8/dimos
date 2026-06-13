@@ -199,8 +199,10 @@ class RealSenseCamera(DepthCameraHardware, Module, perception.DepthCamera):
             imu_config.enable_device(self.config.serial_number)
 
         try:
-            imu_config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f)
-            imu_config.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f)
+            # Explicit IMU rates required: without an fps librealsense falls back to
+            # accel @ 63 Hz, which D4xx firmware doesn't offer -> "Couldn't resolve requests".
+            imu_config.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 200)
+            imu_config.enable_stream(rs.stream.gyro, rs.format.motion_xyz32f, 200)
             imu_profile = imu_pipeline.start(imu_config, self._on_imu_frame)
         except RuntimeError as error:
             print(f"RealSense IMU unavailable, disabling IMU stream: {error}")
@@ -210,7 +212,15 @@ class RealSenseCamera(DepthCameraHardware, Module, perception.DepthCamera):
 
         if self._profile is not None and self.config.enable_depth:
             depth_stream = self._profile.get_stream(rs.stream.depth)
-            accel_stream = imu_profile.get_stream(rs.stream.accel)
+            # The accel profile must come from the device's extrinsics graph, not the
+            # separately-started IMU pipeline -- cross-pipeline profiles aren't linked and
+            # get_extrinsics_to() raises "Requested extrinsics are not available!".
+            accel_stream = next(
+                profile
+                for sensor in self._profile.get_device().query_sensors()
+                for profile in sensor.get_stream_profiles()
+                if profile.stream_type() == rs.stream.accel
+            )
             self._depth_to_imu_extrinsics = depth_stream.get_extrinsics_to(accel_stream)
 
     def _on_imu_frame(self, frame: rs.frame) -> None:

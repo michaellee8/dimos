@@ -102,6 +102,7 @@ def _shaded(pts: np.ndarray, base) -> np.ndarray:
 def _log_frames(store, stream, entity, stride, voxel, base):
     if stream not in store.list_streams():
         return
+    print(f"   rrd: logging {stream} frames -> {entity} (stride {stride}) ...", flush=True)
     n = 0
     for k, obs in enumerate(store.stream(stream, PointCloud2)):
         if k % stride:
@@ -241,6 +242,7 @@ def _log_apriltags(store, db_path, cam_xform, intrinsics, resolution, max_views_
     a pinhole frustum at the camera pose (3D only — see the blueprint)."""
     if "april_tags" not in store.list_streams():
         return
+    print("   rrd: placing april_tags in 3D ...", flush=True)
     connection = sqlite3.connect(db_path)
     traj_stream = "gtsam_odom" if _has_rows(connection, "gtsam_odom") else "fastlio_odometry"
     pose_rows = connection.execute(
