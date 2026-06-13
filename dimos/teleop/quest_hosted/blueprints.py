@@ -30,6 +30,7 @@ from dimos.teleop.quest_hosted.hosted_extensions import (
     HostedArmTeleopModule,
     HostedTwistTeleopModule,
 )
+from dimos.teleop.quest_hosted.state_bridge import TeleopStateBridge
 from dimos.teleop.utils.recorder import TeleopRecorder, TeleopRecorderConfig
 
 # Single XArm7 teleop via the hosted (WebRTC) client. Pass `--simulation` to
@@ -67,15 +68,41 @@ teleop_hosted_go2 = autoconnect(
 # provider/PeerConnection), and robot → operator telemetry can ride
 # CloudflareTransport("state_reliable_back", ...) the same way.
 #
+# Clock-sync pings are answered inside BrokerProvider. TeleopStateBridge
+# republishes operator video_stats as Out[VideoStats] (recorder picks it up)
+# and pushes robot_telemetry (command-plane latency/jitter/loss) back to the
+# operator HUD on state_reliable_back, measured from a raw tap on the command
+# wire — no TwistStamped change.
+#
 # Run:  TELEOP_API_KEY=dtk_live_... dimos run teleop-hosted-go2-transport
 #       (robot identity is derived from the key; TELEOP_ROBOT_ID optional)
 # then connect from https://teleop.dimensionalos.com (keyboard view).
-teleop_hosted_go2_transport = unitree_go2_basic.transports(
-    {
-        ("cmd_vel", Twist): CloudflareTransport("cmd_unreliable", TwistStamped),
-        ("color_image", Image): CloudflareVideoTransport(),
-    }
-).global_config(viewer="none")
+teleop_hosted_go2_transport = (
+    autoconnect(
+        unitree_go2_basic,
+        TeleopStateBridge.blueprint(),
+    )
+    .transports(
+        {
+            ("cmd_vel", Twist): CloudflareTransport("cmd_unreliable", TwistStamped),
+            ("color_image", Image): CloudflareVideoTransport(),
+            ("state_json", bytes): CloudflareTransport("state_reliable"),
+            ("telemetry_out", bytes): CloudflareTransport("state_reliable_back"),
+            # Raw tap on the command wire for command-plane stats (reads the
+            # Header's stamp+seq off the bytes). Independent subscriber from
+            # cmd_vel above — same channel, separate decode.
+            ("cmd_raw", bytes): CloudflareTransport("cmd_unreliable"),
+            # Recorder tap on the command wire: when hosted-teleop-recorder is
+            # composed, its cmd_vel_stamped port subscribes to the SAME channel
+            # — independent typed decode, stamped with the browser's ts so the
+            # report's timing math works. Unused (harmless) when no recorder.
+            ("cmd_vel_stamped", TwistStamped): CloudflareTransport(
+                "cmd_unreliable", TwistStamped
+            ),
+        }
+    )
+    .global_config(viewer="none")
+)
 
 
 HOSTED_RECORDINGS_DIR = STATE_DIR / "hosted_teleop" / "recordings"

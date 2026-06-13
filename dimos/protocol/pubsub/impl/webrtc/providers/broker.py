@@ -47,7 +47,9 @@ from collections import defaultdict
 from collections.abc import Callable
 import contextlib
 from dataclasses import dataclass
+import json
 import os
+import time
 from typing import TYPE_CHECKING, Any
 
 from dimos.protocol.pubsub.impl.webrtc.providers.sdp import propagate_bundle_candidates
@@ -286,6 +288,8 @@ class BrokerProvider(AsyncProviderBase):
             def _on_msg(payload: Any) -> None:
                 if isinstance(payload, str):
                     payload = payload.encode()
+                if name == "state_reliable":
+                    self._maybe_answer_ping(payload)
                 with self._lock:
                     callbacks = list(self._callbacks.get(name, ()))
                 for cb in callbacks:
@@ -303,6 +307,35 @@ class BrokerProvider(AsyncProviderBase):
         if ch is not None:
             with contextlib.suppress(Exception):
                 ch.close()
+
+    def _maybe_answer_ping(self, payload: bytes) -> None:
+        """Answer the web client's clock-sync ping inline on the loop thread.
+
+        The operator measures RTT/offset from ping→pong timing, so the reply
+        must not ride a module hop (stream dispatch latency would inflate
+        every sample, and keep-latest mailboxes could drop pings outright).
+        The ping still fans out to subscribers afterwards — the provider stays
+        a transparent relay with this one reflex attached.
+        """
+        if not payload.startswith(b"{"):
+            return  # LCM binary or other non-JSON — not ours
+        try:
+            msg = json.loads(payload)
+        except ValueError:
+            return
+        if msg.get("type") != "ping" or msg.get("client_ts") is None:
+            return
+        pong = json.dumps(
+            {"type": "pong", "client_ts": msg["client_ts"], "robot_ts": time.time()}
+        )
+        with self._lock:
+            ch = self._dcs.get("state_reliable_back")
+        # Pong MUST go on state_reliable_back — CF bridges one direction only;
+        # a robot send on state_reliable would be silently dropped.
+        if ch is not None and ch.readyState == "open":
+            ch.send(pong)
+        else:
+            logger.warning("ping received but state_reliable_back not open — pong dropped")
 
     # ─── Public API (Provider) ───────────────────────────────────────
 
