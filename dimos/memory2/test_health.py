@@ -21,7 +21,15 @@ from typing import Any
 import pytest
 
 import dimos.memory2.health
-from dimos.memory2.health import DEGRADED, OK, STALLED, Health, HealthMonitor
+from dimos.memory2.health import (
+    DEGRADED,
+    OK,
+    STALLED,
+    Health,
+    HealthConfig,
+    HealthMonitor,
+    ModuleContracts,
+)
 
 
 class LogSpy:
@@ -65,11 +73,32 @@ class Clock:
         return self.t
 
 
+_CONTRACT_KEYS = {"min_output_hz", "max_drop_ratio", "max_tick_latency_s", "max_missing_ratio"}
+_HEALTH_KEYS = {
+    "interval_s",
+    "warmup_s",
+    "unhealthy_log_every_s",
+    "stall_after_s",
+    "ratio_min_samples",
+    "stream",
+}
+
+
 def make(clock: Clock, **kwargs: Any) -> tuple[HealthMonitor, list[Health]]:
+    """Build a monitor from flat kwargs, routed into the structured sub-configs."""
     snaps: list[Health] = []
-    kwargs.setdefault("interval_s", 1.0)
-    kwargs.setdefault("warmup_s", 0.0)  # most tests skip warmup gating
-    m = HealthMonitor("mod", clock=clock, sink=snaps.append, **kwargs)
+    health_kwargs = {k: v for k, v in kwargs.items() if k in _HEALTH_KEYS}
+    health_kwargs.setdefault("interval_s", 1.0)
+    health_kwargs.setdefault("warmup_s", 0.0)  # most tests skip warmup gating
+    rest = {k: v for k, v in kwargs.items() if k not in _CONTRACT_KEYS | _HEALTH_KEYS}
+    m = HealthMonitor(
+        "mod",
+        clock=clock,
+        sink=snaps.append,
+        contracts=ModuleContracts(**{k: v for k, v in kwargs.items() if k in _CONTRACT_KEYS}),
+        health=HealthConfig(**health_kwargs),
+        **rest,
+    )
     return m, snaps
 
 
@@ -267,6 +296,31 @@ def test_missing_ratio_is_configurable() -> None:
         m.on_resolved()
     for _ in range(8):  # 80% missing, under the 90% contract
         m.on_missing(["imu"])
+    assert report(m, clock).state == OK
+
+
+def test_per_output_contract_only_flags_contracted_port() -> None:
+    clock = Clock()
+    m, _ = make(clock, out_min_hz={"cmd": 10.0})
+    for _ in range(3):
+        m.on_output("cmd")  # 3 Hz < 10 Hz contract
+    # 'alerts' emits nothing at all — sparse by design, uncontracted, no violation
+    h = report(m, clock)
+    assert h.state == DEGRADED
+    assert h.violations == ("output 'cmd' at 3.0 Hz < contract 10 Hz",)
+
+    for _ in range(12):
+        m.on_output("cmd")
+    assert report(m, clock).state == OK
+
+
+def test_per_input_missing_ratio_overrides_global() -> None:
+    clock = Clock()
+    m, _ = make(clock, max_missing_ratio=0.5, missing_ratio_by_input={"gps": 0.9})
+    for _ in range(10):
+        m.on_resolved()
+    for _ in range(8):
+        m.on_missing(["gps"])  # 80% — over global 0.5, under gps's declared 0.9
     assert report(m, clock).state == OK
 
 

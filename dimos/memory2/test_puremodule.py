@@ -24,7 +24,15 @@ from typing import TYPE_CHECKING, Annotated, Any
 import pytest
 
 from dimos.core.stream import In, Out
-from dimos.memory2.puremodule import Outputs, PureModule, interpolate, latest, tick, window
+from dimos.memory2.puremodule import (
+    Outputs,
+    PureModule,
+    contract,
+    interpolate,
+    latest,
+    tick,
+    window,
+)
 from dimos.memory2.store.memory import MemoryStore
 from dimos.memory2.tick import Interpolate, Latest, TickMachine, Window
 from dimos.memory2.type.observation import Observation
@@ -540,6 +548,16 @@ def test_live_wiring_end_to_end() -> None:
         module.stop()
 
 
+def _reset_rx_pool() -> None:
+    """Replace the shared RxPY thread pool so the conftest leak check passes."""
+    from reactivex.scheduler import ThreadPoolScheduler
+
+    import dimos.utils.threadpool as tp
+
+    tp.scheduler.executor.shutdown(wait=True)
+    tp.scheduler = ThreadPoolScheduler(max_workers=tp.get_max_workers())
+
+
 def _await(condition: Callable[[], bool], timeout: float = 5.0) -> bool:
     """Bounded wait on a cheap condition — no fixed sleeps in assertions."""
     deadline = time.monotonic() + timeout
@@ -614,6 +632,102 @@ def test_live_backpressure_keeplast_skips_stale_ticks() -> None:
     finally:
         gates.unblock()
         unsub()
+        module.stop()
+
+
+@pytest.mark.tool
+def test_input_sources_feed_live_runner_from_store(store: MemoryStore) -> None:
+    """The live↔stored switch: all inputs sourced -> no transports anywhere."""
+    from dimos.memory2.buffer import Unbounded
+
+    gates = _GatedSteps()
+
+    class TsEcho(PureModule):
+        frame: In[int] = tick()
+        out: Out[float]
+        backpressure = Unbounded()
+
+        def step(self, frame: int, ts: float) -> float:
+            gates.gate()
+            return ts
+
+    recorded = fill(store.stream("frames", int), [(10.0, 1), (10.5, 2), (11.0, 3)])
+
+    module = TsEcho()
+    module.input_sources = {"frame": recorded}  # a stored stream is a valid source
+    outs: list[float] = []
+    unsub = module.out.subscribe(outs.append)
+
+    module.start()
+    try:
+        for _ in range(3):
+            assert gates.step_once()
+        assert _await(lambda: len(outs) == 3)
+        assert outs == [10.0, 10.5, 11.0]  # recorded timestamps, not wall clock
+    finally:
+        gates.unblock()
+        unsub()
+        module.stop()
+        _reset_rx_pool()  # source.observable() schedules on the shared rx pool
+
+
+class Contracted(PureModule):
+    frame: In[int] = tick(expect_hz=30)
+    gps: In[str] = latest(max_age=0.5, expect_hz=1, max_missing_ratio=0.9)
+
+    cmd: Out[str] = contract(min_hz=10)
+    alerts: Out[str]  # sparse by design — no contract
+
+    def step(self, frame: int, gps: str | None) -> dict[str, str]:
+        return {"cmd": f"go {frame}"}
+
+
+def test_class_level_contracts_collected_in_plan() -> None:
+    plan = Contracted._plan()
+    assert plan.expect_hz == {"frame": 30, "gps": 1}
+    assert plan.missing_ratio == {"gps": 0.9}
+    assert plan.out_min_hz == {"cmd": 10}
+
+
+def test_contracted_out_port_still_declared_in_blueprint() -> None:
+    bp = Contracted.blueprint()
+    (atom,) = bp.blueprints
+    assert {"frame", "gps", "cmd", "alerts"} <= {s.name for s in atom.streams}
+
+
+@pytest.mark.tool
+def test_class_contracts_reach_the_monitor(store: MemoryStore) -> None:
+    module = Contracted(contracts={"max_drop_ratio": 0.8})  # module-wide config still applies
+    module.input_sources = {  # empty sourced inputs: no transports needed
+        "frame": store.stream("frame", int),
+        "gps": store.stream("gps", str),
+    }
+    try:
+        module.start()
+        assert module.health_monitor.expected_hz == {"frame": 30, "gps": 1}
+        assert module.health_monitor.out_min_hz == {"cmd": 10}
+        assert module.health_monitor.missing_ratio_by_input == {"gps": 0.9}
+        assert module.health_monitor.max_drop_ratio == 0.8
+    finally:
+        module.stop()
+        _reset_rx_pool()
+
+
+@pytest.mark.tool
+def test_input_sources_unknown_name_raises() -> None:
+    class Echo(PureModule):
+        frame: In[int] = tick()
+        out: Out[int]
+
+        def step(self, frame: int) -> int:
+            return frame
+
+    module = Echo()
+    module.input_sources = {"typo": object()}
+    try:
+        with pytest.raises(TypeError, match="typo"):
+            module.start()
+    finally:
         module.stop()
 
 

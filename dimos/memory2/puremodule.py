@@ -83,6 +83,7 @@ Alignment semantics live in :mod:`dimos.memory2.tick`.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import functools
 import inspect
 import queue
 import sys
@@ -105,7 +106,7 @@ from dimos.core.module import Module, ModuleConfig
 from dimos.core.resource import CompositeResource
 from dimos.core.stream import In, Out
 from dimos.memory2.buffer import BackpressureBuffer, ClosedError, KeepLast
-from dimos.memory2.health import Health, HealthMonitor
+from dimos.memory2.health import Health, HealthConfig, HealthMonitor, ModuleContracts
 from dimos.memory2.store.null import NullStore
 from dimos.memory2.tick import (
     MISSING,
@@ -130,7 +131,16 @@ if TYPE_CHECKING:
 
 logger = setup_logger()
 
-__all__ = ["Outputs", "PureModule", "interpolate", "latest", "tick", "window"]
+__all__ = [
+    "OutContract",
+    "Outputs",
+    "PureModule",
+    "contract",
+    "interpolate",
+    "latest",
+    "tick",
+    "window",
+]
 
 _STOP = object()
 
@@ -152,6 +162,34 @@ class _Plan:
     params: tuple[_Param, ...]
     stateful: bool
     uses_out: bool  # step declares the reserved `out` writer parameter
+    expect_hz: dict[str, float]  # class-declared per-input rates
+    missing_ratio: dict[str, float]  # class-declared per-input missing thresholds
+    out_min_hz: dict[str, float]  # class-declared per-output rate contracts
+
+
+class OutContract:
+    """Class-level health contract on an ``Out`` port (see :func:`contract`)."""
+
+    def __init__(self, min_hz: float | None = None) -> None:
+        if min_hz is not None and min_hz <= 0:
+            raise ValueError(f"contract(min_hz) requires min_hz > 0, got {min_hz}")
+        self.min_hz = min_hz
+
+    def __repr__(self) -> str:
+        return f"OutContract(min_hz={self.min_hz})"
+
+
+def contract(min_hz: float | None = None) -> Any:
+    """Declare a per-output health contract as the port's default value::
+
+        cmd: Out[Twist] = contract(min_hz=10)   # this port must emit >= 10 Hz
+        alerts: Out[str]                        # sparse by design — no contract
+
+    Class-level declaration — per-port contracts live here, not in
+    deployment config. Typed ``Any`` so it can sit on an ``Out[X]``
+    annotation.
+    """
+    return OutContract(min_hz=min_hz)
 
 
 class Outputs:
@@ -217,51 +255,34 @@ class _class_or_instance:
 
 
 class PureModuleConfig(ModuleConfig):
-    """Deployment-side contracts and health reporting knobs.
+    """Deployment-side module-wide contracts and health mechanics.
 
-    Semantic tolerances (``max_age``, ``tolerance``) live in the module's
-    sampler declarations; *rates* live here because sim, replay, and the
-    robot legitimately differ.
+    Per-port contracts live in the module's class declaration only —
+    samplers (``tick(expect_hz=30)``, ``latest(max_missing_ratio=...)``)
+    and ``contract(min_hz=...)`` on ``Out`` ports. Per-port *deployment*
+    overrides were tried and removed (no consumer; three ways to say one
+    thing) — re-add when a real deployment needs them. This config
+    carries what genuinely varies per deployment::
+
+        Follower(
+            contracts={"max_drop_ratio": 0.8},
+            health={"warmup_s": 1.0},
+        )
     """
 
-    expected_hz: dict[str, float] = Field(default_factory=dict)
-    """Expected arrival rate per input — checked once after warmup, then
-    continuously (violation below 50% of expected)."""
+    contracts: ModuleContracts = Field(default_factory=ModuleContracts)
+    """Module-wide promises: ``min_output_hz``, ``max_drop_ratio``,
+    ``max_tick_latency_s``, global ``max_missing_ratio``."""
 
-    min_output_hz: float | None = None
-    """Contract: rate of ticks that emit at least one output. Absolute —
-    the liveness floor that ratio contracts can't provide."""
-
-    max_drop_ratio: float | None = None
-    """Contract: fraction of viable ticks skipped by backpressure.
-    Scale-free "the step keeps up" — independent of deployment rates."""
-
-    max_tick_latency_s: float | None = None
-    """Contract: p99 end-to-end latency, trigger arrival to outputs
-    published. Meaningful under every backpressure policy (under
-    ``Unbounded`` queue growth shows up here first)."""
-
-    max_missing_ratio: float = Field(0.5, gt=0.0, le=1.0)
-    """Per-input staleness contract: fraction of resolved ticks where the
-    input was missing before it's flagged."""
-
-    ratio_min_samples: int = Field(10, ge=1)
-    """Ratio contracts only evaluate on windows with at least this many
-    samples — tiny windows make ratios noise, zero traffic makes them
-    vacuously pass."""
-
-    health_interval_s: float = 1.0
-    health_warmup_s: float = 5.0
-    unhealthy_log_every_s: float = 10.0
-    stall_after_s: float = 5.0
-    health_stream: bool = True
+    health: HealthConfig = Field(default_factory=HealthConfig)
+    """Reporting mechanics: ``interval_s``, ``warmup_s``,
+    ``unhealthy_log_every_s``, ``stall_after_s``, ``ratio_min_samples``,
+    ``stream``."""
 
     max_pending_ticks: int = 64
     """Cap on live ticks awaiting interpolation brackets — bounds memory
     when an ``interpolate()`` input dies; evictions count as
     ``drops_blocked``. Offline ``over()`` is uncapped (exact)."""
-    """Append 1 Hz aggregated Health snapshots to a ``_health`` stream in
-    the module store (live-only on NullStore, recorded on SqliteStore)."""
 
 
 class PureModule(Module):
@@ -282,6 +303,23 @@ class PureModule(Module):
     ``Unbounded()`` for must-process-everything consumers (recorders,
     indexers) or ``Bounded(n)``/``DropNew(n)`` in between. The instance is
     a template — each ``start()`` gets a fresh ``clone()``."""
+
+    input_sources: dict[str, Any] | None = None
+    """Per-input source overrides for the live runner — the live↔stored switch.
+
+    Set before ``start()``: ``{input_name: source}`` where a source is
+    anything with ``.observable()`` (a :class:`ReplayStream` for
+    wall-clock-paced recordings, a stored memory2 stream for
+    fast-as-possible feeding) or a raw RxPY observable. Inputs not listed
+    keep their pub/sub port. Sources emitting :class:`Observation` keep
+    their recorded timestamps; raw payloads are stamped like port arrivals
+    (``msg.ts`` if present, else now). A module with *every* input sourced
+    needs no transports at all::
+
+        m = Navigator()
+        m.input_sources = {"pose": db.replay(speed=2.0).streams.pose}
+        m.start()   # same module, fed from a recording, paced 2x
+    """
 
     def step(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - overridden
         raise NotImplementedError(f"{type(self).__name__} must define step()")
@@ -306,6 +344,9 @@ class PureModule(Module):
         outs: dict[str, type] = {}
         samplers: dict[str, Sampler] = {}
         trigger: str | None = None
+        expect_hz: dict[str, float] = {}
+        missing_ratio: dict[str, float] = {}
+        out_min_hz: dict[str, float] = {}
 
         for name, ann in hints.items():
             if get_origin(ann) is typing.Annotated:
@@ -336,8 +377,17 @@ class PureModule(Module):
                     samplers[name] = sampler
                 else:
                     samplers[name] = latest()
+                declared = sampler if isinstance(sampler, Sampler) else None
+                if declared is not None:
+                    if declared.expect_hz is not None:
+                        expect_hz[name] = declared.expect_hz
+                    if declared.max_missing_ratio is not None:
+                        missing_ratio[name] = declared.max_missing_ratio
             elif origin is Out:
                 outs[name] = (get_args(ann) or (object,))[0]
+                marker = inspect.getattr_static(cls, name, None)
+                if isinstance(marker, OutContract) and marker.min_hz is not None:
+                    out_min_hz[name] = marker.min_hz
 
         if trigger is None:
             raise TypeError(
@@ -389,6 +439,9 @@ class PureModule(Module):
             params=tuple(params),
             stateful=stateful,
             uses_out=uses_out,
+            expect_hz=expect_hz,
+            missing_ratio=missing_ratio,
+            out_min_hz=out_min_hz,
         )
 
     # -- binding & dispatch -----------------------------------------------------
@@ -583,7 +636,7 @@ class PureModule(Module):
             name: store.stream(name, port.type) for name, port in self.outputs.items()
         }
 
-        health_stream = store.stream("_health", dict) if cfg.health_stream else None
+        health_stream = store.stream("_health", dict) if cfg.health.stream else None
 
         def _sink(h: Health) -> None:
             assert health_stream is not None
@@ -593,16 +646,12 @@ class PureModule(Module):
 
         monitor = HealthMonitor(
             str(self),
-            expected_hz=cfg.expected_hz,
-            min_output_hz=cfg.min_output_hz,
-            max_drop_ratio=cfg.max_drop_ratio,
-            max_tick_latency_s=cfg.max_tick_latency_s,
-            max_missing_ratio=cfg.max_missing_ratio,
-            ratio_min_samples=cfg.ratio_min_samples,
-            interval_s=cfg.health_interval_s,
-            warmup_s=cfg.health_warmup_s,
-            unhealthy_log_every_s=cfg.unhealthy_log_every_s,
-            stall_after_s=cfg.stall_after_s,
+            contracts=cfg.contracts,
+            health=cfg.health,
+            # per-port contracts come from the class declaration (the plan)
+            expected_hz=plan.expect_hz,
+            out_min_hz=plan.out_min_hz,
+            missing_ratio_by_input=plan.missing_ratio,
             sink=_sink if health_stream is not None else None,
         )
         self.health_monitor = monitor
@@ -615,24 +664,52 @@ class PureModule(Module):
             buffer_len=lambda: len(ticks), pending_len=lambda: len(machine.pending)
         )
 
+        sources = dict(self.input_sources or {})
+        unknown_sources = set(sources) - set(plan.ins)
+        if unknown_sources:
+            raise TypeError(
+                f"{type(self).__name__}.input_sources has unknown inputs "
+                f"{sorted(unknown_sources)} — declared: {sorted(plan.ins)}"
+            )
+
+        def _ingest(name: str, item: Any) -> None:
+            """Feed one arrival — a raw payload (port/replay) or an Observation."""
+            if isinstance(item, Observation):
+                obs = item  # sourced from a store: keep the recorded ts
+                self._streams[name].append(obs.data, ts=obs.ts)
+            else:
+                ts = getattr(item, "ts", None) or time.time()
+                self._streams[name].append(item, ts=ts)
+                obs = Observation(ts=ts, data_type=type(item), _data=item)
+            monitor.on_input(name)
+            q.put((name, obs))
+
+        def _source_error(name: str, e: Exception) -> None:
+            logger.exception("%s: input source %r failed: %s", self, name, e)
+
         for name, port in self.inputs.items():
             if name not in plan.ins:
                 continue
-
-            def _on_msg(msg: Any, _name: str = name) -> None:
-                ts = getattr(msg, "ts", None) or time.time()
-                self._streams[_name].append(msg, ts=ts)
-                monitor.on_input(_name)
-                q.put((_name, Observation(ts=ts, data_type=type(msg), _data=msg)))
-
-            self.register_disposable(Disposable(port.subscribe(_on_msg)))
+            source = sources.get(name)
+            if source is None:
+                self.register_disposable(
+                    Disposable(port.subscribe(functools.partial(_ingest, name)))
+                )
+            else:
+                observable = source.observable() if hasattr(source, "observable") else source
+                self.register_disposable(
+                    observable.subscribe(
+                        on_next=functools.partial(_ingest, name),
+                        on_error=functools.partial(_source_error, name),
+                    )
+                )
 
         def _align_loop() -> None:
             """Drain raw events fast; resolve + bind ticks; never blocks on step."""
             blocked_seen = 0
             while True:
                 try:
-                    item = q.get(timeout=cfg.health_interval_s)
+                    item = q.get(timeout=cfg.health.interval_s)
                 except queue.Empty:
                     monitor.maybe_report()
                     continue
@@ -661,7 +738,7 @@ class PureModule(Module):
             state = self.initial_state
             while True:
                 try:
-                    tobs, kwargs, ages = ticks.take(timeout=cfg.health_interval_s)
+                    tobs, kwargs, ages = ticks.take(timeout=cfg.health.interval_s)
                 except TimeoutError:
                     monitor.maybe_report()
                     continue

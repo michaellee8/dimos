@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 import threading
 from typing import TYPE_CHECKING, Any
 
+from pydantic import BaseModel, Field
+
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:
@@ -60,6 +62,37 @@ logger = setup_logger()
 OK = "OK"
 DEGRADED = "DEGRADED"
 STALLED = "STALLED"
+
+
+class ModuleContracts(BaseModel):
+    """Module-wide contracts: the tick loop's promises, not any one port's."""
+
+    min_output_hz: float | None = Field(default=None, gt=0.0)
+    """Absolute liveness floor: rate of ticks that emit at least one output."""
+
+    max_drop_ratio: float | None = Field(default=None, gt=0.0, le=1.0)
+    """Scale-free "the step keeps up": fraction of viable ticks skipped by backpressure."""
+
+    max_tick_latency_s: float | None = Field(default=None, gt=0.0)
+    """p99 end-to-end latency, trigger arrival to outputs published."""
+
+    max_missing_ratio: float = Field(default=0.5, gt=0.0, le=1.0)
+    """Global default per-input missing threshold (per-input contracts override)."""
+
+
+class HealthConfig(BaseModel):
+    """Monitor mechanics — how health is measured and reported, not what it promises."""
+
+    interval_s: float = Field(default=1.0, gt=0.0)
+    warmup_s: float = Field(default=5.0, ge=0.0)
+    unhealthy_log_every_s: float = Field(default=10.0, gt=0.0)
+    stall_after_s: float = Field(default=5.0, gt=0.0)
+    ratio_min_samples: int = Field(default=10, ge=1)
+    """Ratio/latency contracts only evaluate on windows with at least this
+    many samples — tiny windows are noise, zero traffic passes vacuously."""
+
+    stream: bool = True
+    """Append snapshots to a ``_health`` stream in the module store."""
 
 
 def _percentile(values: list[float], q: float) -> float:
@@ -107,41 +140,45 @@ class HealthMonitor:
         self,
         name: str,
         *,
+        contracts: ModuleContracts | None = None,
+        health: HealthConfig | None = None,
         expected_hz: dict[str, float] | None = None,
-        min_output_hz: float | None = None,
-        max_drop_ratio: float | None = None,
-        max_tick_latency_s: float | None = None,
-        max_missing_ratio: float = 0.5,
-        ratio_min_samples: int = 10,
-        interval_s: float = 1.0,
-        warmup_s: float = 5.0,
-        unhealthy_log_every_s: float = 10.0,
-        stall_after_s: float = 5.0,
+        out_min_hz: dict[str, float] | None = None,
+        missing_ratio_by_input: dict[str, float] | None = None,
         rate_tolerance: float = 0.5,
         sink: Callable[[Health], None] | None = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
+        """``contracts`` = module-wide promises; ``health`` = reporting
+        mechanics; the three dicts are the *resolved* per-port contracts
+        (class declarations already merged with deployment overrides by
+        the caller)."""
         import time
+
+        contracts = contracts if contracts is not None else ModuleContracts()
+        cfg = health if health is not None else HealthConfig()
 
         self.name = name
         self.expected_hz = dict(expected_hz or {})
-        self.min_output_hz = min_output_hz
-        self.max_drop_ratio = max_drop_ratio
-        self.max_tick_latency_s = max_tick_latency_s
-        self.max_missing_ratio = max_missing_ratio
+        self.min_output_hz = contracts.min_output_hz
+        self.out_min_hz = dict(out_min_hz or {})
+        self.max_drop_ratio = contracts.max_drop_ratio
+        self.max_tick_latency_s = contracts.max_tick_latency_s
+        self.max_missing_ratio = contracts.max_missing_ratio
+        self.missing_ratio_by_input = dict(missing_ratio_by_input or {})
         # Ratio contracts are vacuous on tiny windows (3 drops of 4 ticks =
         # 75%) and at zero traffic — they only evaluate at this many samples.
         # Absolute contracts (min_output_hz, expected_hz) remain the liveness floor.
-        self.ratio_min_samples = ratio_min_samples
-        self.interval_s = interval_s
-        self.warmup_s = warmup_s
-        self.unhealthy_log_every_s = unhealthy_log_every_s
+        self.ratio_min_samples = cfg.ratio_min_samples
+        self.interval_s = cfg.interval_s
+        self.warmup_s = cfg.warmup_s
+        self.unhealthy_log_every_s = cfg.unhealthy_log_every_s
         self.rate_tolerance = rate_tolerance
         self.sink = sink
         self.clock = clock if clock is not None else time.time
         # A stall must persist this many reporting windows before we call it —
         # a single zero-step window is normal for a step slower than the interval.
-        self._stall_windows = max(1, round(stall_after_s / interval_s))
+        self._stall_windows = max(1, round(cfg.stall_after_s / cfg.interval_s))
         self._zero_step_windows = 0
         self._zero_resolve_windows = 0
 
@@ -284,6 +321,10 @@ class HealthMonitor:
             emitted_hz = win.emitted / dt
             if emitted_hz < self.min_output_hz:
                 v.append(f"output {emitted_hz:.1f} Hz < contract {self.min_output_hz:g} Hz")
+        for name, min_hz in self.out_min_hz.items():
+            port_hz = win.outputs.get(name, 0) / dt
+            if port_hz < min_hz:
+                v.append(f"output '{name}' at {port_hz:.1f} Hz < contract {min_hz:g} Hz")
         if self.max_drop_ratio is not None and win.queued >= self.ratio_min_samples:
             dropped = max(0, win.queued - win.stepped - self._buffer_len())
             ratio = dropped / win.queued
@@ -300,7 +341,8 @@ class HealthMonitor:
                     f"{self.max_tick_latency_s * 1000:.0f} ms"
                 )
         for name, n in win.missing.items():
-            if win.resolved >= self.ratio_min_samples and n / win.resolved > self.max_missing_ratio:
+            threshold = self.missing_ratio_by_input.get(name, self.max_missing_ratio)
+            if win.resolved >= self.ratio_min_samples and n / win.resolved > threshold:
                 v.append(f"input '{name}' missing on {n}/{win.resolved} ticks (stale or dead?)")
         return v
 

@@ -55,8 +55,9 @@ recordings capture health next to the frames it explains), log on state
 transitions only, alert on declared contracts. The real SLO is output
 freshness and rate; drop counters are diagnosis. Contracts split
 deliberately: semantic tolerances (`max_age`, `tolerance`) belong in the
-declaration because they're algorithm truths; rates (`expected_hz`,
-`min_output_hz`) belong in deployment config because sim, replay, and
+declaration because they're algorithm truths; rate *overrides*
+(`inputs={...}`, `outputs={...}`, `contracts={...}`) belong in deployment
+config because sim, replay, and
 the robot legitimately differ.
 
 ### Contracts on inputs vs outputs
@@ -78,12 +79,12 @@ output contract — input expectations really earn their keep at the
 *edges*, where the producer (a sensor driver) has no health of its own
 and the first consumer hosts its contract. The graph-era resolution is
 to attach rate contracts to *streams* (declared once, checked at the
-producer when possible, at the first consumer otherwise); per-module
-`expected_hz` is the pragmatic stand-in until then.
+producer when possible, at the first consumer otherwise);
+per-module input expectations are the pragmatic stand-in until then.
 
 ### Absolute vs ratio vs latency contracts
 
-Absolute rates (`min_output_hz`, `expected_hz`) bake the deployment's
+Absolute rates (`contracts.min_output_hz`, per-input `expect_hz`) bake the deployment's
 sensor rates into the contract; ratio contracts (`max_drop_ratio`,
 `max_missing_ratio`) are scale-free — "the step keeps up, with headroom"
 survives a camera swap unchanged. But ratios are vacuous at zero traffic
@@ -98,12 +99,27 @@ felt consequence is latency. Hence `max_tick_latency_s` instead: p99 of
 trigger-arrival → outputs-published, meaningful under every policy,
 subsuming depth (which stays an exported gauge for diagnosis).
 
-Two known refinements deferred until needed: the health *state* should
-arguably be driven by output contracts only (inputs below expectation
-while outputs still meet contract is "at risk", not degraded — today
-both trip `DEGRADED`); and `min_output_hz` should become per-port
-(`{"cmd": 10}`) once real multi-output modules exist — partial emission
-makes a single number wrong for deliberately sparse ports like alerts.
+Per-port contracts are **class declarations only**: samplers take
+`expect_hz`/`max_missing_ratio`, `Out` ports take `contract(min_hz=...)`
+as their default value — the rates the module was built for, declared
+where the port is. Per-port *deployment* overrides (an `inputs=`/
+`outputs=` config layer with shorthand coercion) were built and then
+removed: three ways to declare one thing, a precedence rule, and a
+typing wart, for a feature with no consumer — YAGNI. Re-adding is cheap
+if a real deployment needs it (the monitor consumes resolved dicts
+either way). Per-port `contract(min_hz=...)` resolves the former
+deferred item — `contracts.min_output_hz` counted ticks emitting
+*anything*, which deliberately sparse ports made meaningless.
+
+Deployment config keeps what genuinely varies per deployment, structured
+not flat: `contracts` (module-wide promises) and `health` (reporting
+mechanics) — sub-models living in `health.py`, consumed by
+`HealthMonitor` directly, one source of truth.
+
+One refinement still deferred: the health *state* should arguably be
+driven by output contracts only (inputs below expectation while outputs
+still meet contract is "at risk", not degraded — today both trip
+`DEGRADED`).
 
 ## Replay fidelity under drops (planned: record tick rows)
 

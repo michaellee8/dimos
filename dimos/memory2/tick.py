@@ -168,7 +168,24 @@ def interp_data(a: Any, b: Any, alpha: float, t: float) -> Any:
 
 
 class Sampler(ABC):
-    """How to read one input's value at a tick time *t* from its buffer."""
+    """How to read one input's value at a tick time *t* from its buffer.
+
+    Samplers also carry the input's *declared health contracts*
+    (``expect_hz``, ``max_missing_ratio``) — class-level defaults that
+    deployment config may override per key. Alignment ignores them; the
+    health monitor reads them off the plan.
+    """
+
+    expect_hz: float | None = None
+    max_missing_ratio: float | None = None
+
+    def _init_contracts(self, expect_hz: float | None, max_missing_ratio: float | None) -> None:
+        if expect_hz is not None and expect_hz <= 0:
+            raise ValueError(f"expect_hz must be > 0, got {expect_hz}")
+        if max_missing_ratio is not None and not (0.0 < max_missing_ratio <= 1.0):
+            raise ValueError(f"max_missing_ratio must be in (0, 1], got {max_missing_ratio}")
+        self.expect_hz = expect_hz
+        self.max_missing_ratio = max_missing_ratio
 
     @abstractmethod
     def sample(self, buf: list[Observation[Any]], t: float, exhausted: bool) -> Any:
@@ -195,6 +212,9 @@ def _ts_list(buf: list[Observation[Any]]) -> list[float]:
 class Tick(Sampler):
     """Marks the input whose observations fire the ticks."""
 
+    def __init__(self, expect_hz: float | None = None) -> None:
+        self._init_contracts(expect_hz, None)
+
     def sample(self, buf: list[Observation[Any]], t: float, exhausted: bool) -> Any:
         raise RuntimeError("Tick sampler is never sampled — it drives the clock")
 
@@ -202,10 +222,16 @@ class Tick(Sampler):
 class Latest(Sampler):
     """Newest observation with ``ts <= t``; MISSING if none (or older than max_age)."""
 
-    def __init__(self, max_age: float | None = None) -> None:
+    def __init__(
+        self,
+        max_age: float | None = None,
+        expect_hz: float | None = None,
+        max_missing_ratio: float | None = None,
+    ) -> None:
         if max_age is not None and max_age <= 0:
             raise ValueError(f"latest(max_age) requires max_age > 0, got {max_age}")
         self.max_age = max_age
+        self._init_contracts(expect_hz, max_missing_ratio)
 
     def sample(self, buf: list[Observation[Any]], t: float, exhausted: bool) -> Any:
         i = bisect.bisect_right(_ts_list(buf), t) - 1
@@ -229,10 +255,16 @@ class Interpolate(Sampler):
     nearest observation within ``tolerance`` seconds is used as-is.
     """
 
-    def __init__(self, tolerance: float = 0.5) -> None:
+    def __init__(
+        self,
+        tolerance: float = 0.5,
+        expect_hz: float | None = None,
+        max_missing_ratio: float | None = None,
+    ) -> None:
         if tolerance <= 0:
             raise ValueError(f"interpolate(tolerance) requires tolerance > 0, got {tolerance}")
         self.tolerance = tolerance
+        self._init_contracts(expect_hz, max_missing_ratio)
 
     def sample(self, buf: list[Observation[Any]], t: float, exhausted: bool) -> Any:
         ts = _ts_list(buf)
@@ -265,10 +297,15 @@ class Interpolate(Sampler):
 class Window(Sampler):
     """All observations with ``t - seconds < ts <= t``, as a list (may be empty)."""
 
-    def __init__(self, seconds: float) -> None:
+    def __init__(
+        self,
+        seconds: float,
+        expect_hz: float | None = None,
+    ) -> None:
         if seconds <= 0:
             raise ValueError(f"window(seconds) requires seconds > 0, got {seconds}")
         self.seconds = seconds
+        self._init_contracts(expect_hz, None)
 
     def sample(self, buf: list[Observation[Any]], t: float, exhausted: bool) -> Any:
         ts = _ts_list(buf)
@@ -283,29 +320,43 @@ class Window(Sampler):
         return f"Window(seconds={self.seconds})"
 
 
-def tick() -> Any:
+def tick(expect_hz: float | None = None) -> Any:
     """This input fires the ticks — the module steps once per observation.
 
     Declared as a port default: ``image: In[Image] = tick()``. Exactly one
-    input must be the tick. (Typed ``Any`` so it can sit on an ``In[X]``
-    annotation, pydantic-``Field()`` style.)
+    input must be the tick. ``expect_hz`` declares the input's expected
+    arrival rate as a class-level health contract (deployment config
+    overrides). (Typed ``Any`` so it can sit on an ``In[X]`` annotation,
+    pydantic-``Field()`` style.)
     """
-    return Tick()
+    return Tick(expect_hz=expect_hz)
 
 
-def latest(max_age: float | None = None) -> Any:
-    """Sample this input as the newest observation at the tick time (hold)."""
-    return Latest(max_age)
+def latest(
+    max_age: float | None = None,
+    expect_hz: float | None = None,
+    max_missing_ratio: float | None = None,
+) -> Any:
+    """Sample this input as the newest observation at the tick time (hold).
+
+    ``expect_hz``/``max_missing_ratio`` declare class-level health
+    contracts for this input (deployment config overrides per key).
+    """
+    return Latest(max_age, expect_hz=expect_hz, max_missing_ratio=max_missing_ratio)
 
 
-def interpolate(tolerance: float = 0.5) -> Any:
+def interpolate(
+    tolerance: float = 0.5,
+    expect_hz: float | None = None,
+    max_missing_ratio: float | None = None,
+) -> Any:
     """Sample this input by interpolating to the tick time (lerp/slerp)."""
-    return Interpolate(tolerance)
+    return Interpolate(tolerance, expect_hz=expect_hz, max_missing_ratio=max_missing_ratio)
 
 
-def window(seconds: float) -> Any:
+def window(seconds: float, expect_hz: float | None = None) -> Any:
     """Sample this input as the list of observations in the trailing window."""
-    return Window(seconds)
+    return Window(seconds, expect_hz=expect_hz)
 
 
 # -- The machine -------------------------------------------------------------

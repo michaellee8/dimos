@@ -336,7 +336,7 @@ class Follower(PureModule):
     def step(self, image: Image, pose: PoseStamped) -> Twist:
         return chase(image, pose)
 
-blueprint.add(Follower, expected_hz={"image": 30, "pose": 50}, min_output_hz=10)
+blueprint.add(Follower, contracts={"min_output_hz": 10})
 ```
 
 Two deployment choices matter:
@@ -351,6 +351,56 @@ Two deployment choices matter:
   step, dropping two thirds of ticks is the system working as designed.
   `Unbounded()` gives recorder semantics: never drop.
 
+Multi-output modules need nothing extra live — each output publishes on
+its own port, and partial emission just means a port stays quiet that
+tick. Consumers subscribe independently:
+
+```python skip
+m = Navigator()                       # the multi-output module from above
+m.cmd.subscribe(controller.on_cmd)    # fires every tick
+m.alerts.subscribe(notifier.send)     # fires only when step assigned it
+m.start()
+```
+
+## Switching inputs: live ↔ recorded
+
+The same *deployed* module — live runner, backpressure, health contracts
+and all — can be fed from a recording instead of its ports. Set
+`input_sources` before `start()`; inputs not listed keep their port, and
+a module with every input sourced needs **no transports at all**:
+
+```python skip
+m = Navigator()
+m.input_sources = {"pose": db.replay(speed=2.0).streams.pose}  # paced, 2x
+# or: m.input_sources = {"pose": db.streams.pose}  # fast-as-possible
+m.start()
+```
+
+Captured from a real run of both modes over the same five poses:
+
+```
+== live: ports, one consumer per output ==
+cmd port got 5: last = 'forward x=2.5'
+alerts port got 2: ['boundary at x=2.0 (t=1781258336.6)', 'boundary at x=2.5 (t=1781258336.7)']
+== same class, fed from a recording (no transports) ==
+cmd got 5: last = 'forward x=2.5'
+alerts got 2: ['boundary at x=2.0 (t=101.5)', 'boundary at x=2.5 (t=102.0)']
+```
+
+Note the timestamps: sourced inputs keep their **recorded** time, so
+alignment, `ts`, and `max_age` behave exactly as they did on the robot.
+This differs from `over()` on purpose — `over()` is the pull-based exact
+path for development; `input_sources` exercises the *real live machinery*
+(threads, backpressure policy, health contracts) against recorded data.
+The full matrix:
+
+| Mode                                   | Inputs         | Pacing             | Use it for                                              |
+|----------------------------------------|----------------|--------------------|---------------------------------------------------------|
+| `over(...)`                            | stored streams | none (pull)        | development, exact deterministic replay                 |
+| ports                                  | pub/sub        | sensor-driven      | the robot                                               |
+| `input_sources` + stored stream        | recording      | fast-as-possible   | integration-testing the live path                       |
+| `input_sources` + `db.replay(speed=…)` | recording      | wall-clock × speed | rehearsing contracts & backpressure against a recording |
+
 ## Contracts, not log spam
 
 Your module contains **zero health code** — health is judged against
@@ -361,12 +411,23 @@ unacceptable". The other contracts are rates, and they're two numbers in
 the module config — deployment-side, because the robot, sim, and replay
 legitimately differ:
 
+Per-port rates are declared on the class, where the port is::
+
+```python skip
+class Follower(PureModule):
+    frame: In[Image] = tick(expect_hz=30)   # "the camera arrives at 30 Hz"
+    cmd: Out[Twist] = contract(min_hz=10)   # "this port emits at >= 10 Hz"
+    ...
+```
+
+while module-wide contracts and mechanics come from deployment config:
+
 ```python skip
 module = Follower(
-    expected_hz={"frame": 30},   # "the camera should arrive at 30 Hz"
-    min_output_hz=10.0,          # "I must emit commands at >= 10 Hz"
-    max_drop_ratio=0.5,          # "skip at most half my frames" (scale-free)
-    max_tick_latency_s=0.1,      # "commands come from <= 100ms-old frames"
+    contracts={
+        "max_drop_ratio": 0.5,       # "skip at most half my frames" (scale-free)
+        "max_tick_latency_s": 0.1,   # "commands come from <= 100ms-old frames"
+    },
 )
 module.start()
 ```
@@ -504,11 +565,11 @@ deployment choice, not module code.
 Backpressure: live, resolved ticks flow through a `BackpressureBuffer`
 between the alignment thread and the step thread —
 
-| Policy | Semantics |
-|---|---|
-| `KeepLast()` (default) | controller: always step the freshest tick, count the skipped |
-| `Unbounded()` | recorder/indexer: never drop, memory-bounded only by consumption |
-| `Bounded(n)` / `DropNew(n)` | bounded queue dropping oldest / rejecting newest |
+| Policy                      | Semantics                                                        |
+|-----------------------------|------------------------------------------------------------------|
+| `KeepLast()` (default)      | controller: always step the freshest tick, count the skipped     |
+| `Unbounded()`               | recorder/indexer: never drop, memory-bounded only by consumption |
+| `Bounded(n)` / `DropNew(n)` | bounded queue dropping oldest / rejecting newest                 |
 
 Every queue in the path is bounded: the tick buffer by policy, alignment
 buffers by pruning, and ticks waiting for interpolation brackets by
@@ -527,13 +588,41 @@ ticks resolving (interpolate input dead?)".
 
 The contracts:
 
-| Config | Contract | Kind |
-|---|---|---|
-| `expected_hz={"pose": 50}` | input arrives at its declared rate | absolute (liveness) |
-| `min_output_hz=10` | ticks emit outputs at this rate | absolute (liveness) |
-| `max_drop_ratio=0.8` | step keeps up: ≤ this fraction of viable ticks skipped by backpressure | ratio (scale-free) |
-| `max_missing_ratio=0.5` | per input: ≤ this fraction of ticks with the input missing | ratio (scale-free) |
-| `max_tick_latency_s=0.2` | p99 trigger-arrival → outputs-published; covers queue growth under any policy | latency |
+Per-port contracts are class declarations; module-wide contracts and
+mechanics are deployment config:
+
+| Declared                                  | Contract                                                                      | Kind                |
+|-------------------------------------------|-------------------------------------------------------------------------------|---------------------|
+| `tick(expect_hz=30)` / `latest(expect_hz=…)` | input arrives at its declared rate                                        | absolute (liveness) |
+| `latest(max_missing_ratio=0.3)`           | per input: ≤ this fraction of ticks with the input missing                    | ratio (scale-free)  |
+| `cmd: Out[T] = contract(min_hz=10)`       | this output port emits at its rate                                            | absolute, per port  |
+| `contracts={"min_output_hz": 10}`         | ticks emit *any* output at this rate                                          | absolute (liveness) |
+| `contracts={"max_drop_ratio": 0.8}`       | step keeps up: ≤ this fraction of viable ticks skipped by backpressure        | ratio (scale-free)  |
+| `contracts={"max_tick_latency_s": 0.2}`   | p99 trigger-arrival → outputs-published; covers queue growth under any policy | latency             |
+| `health={"warmup_s": 5, "interval_s": 1}` | not contracts — reporting mechanics (warmup, throttle, stall window, samples) | —                   |
+
+Per-input and per-output contracts can also be declared **on the class
+itself**, right where the port is declared — samplers take `expect_hz` /
+`max_missing_ratio`, and an `Out` port takes a `contract()` default:
+
+```python skip
+class Follower(PureModule):
+    image: In[Image] = tick(expect_hz=30)
+    pose: In[PoseStamped] = interpolate(expect_hz=50)
+    gps: In[str] = latest(max_age=2.0, max_missing_ratio=0.9)  # flaky is fine
+
+    cmd_vel: Out[Twist] = contract(min_hz=10)   # the robot's heartbeat
+    alerts: Out[str]                            # sparse by design — no contract
+```
+
+These are the rates the module was built for, declared once where the
+port is. (Per-port *deployment* overrides were tried and removed — three
+ways to say one thing with no consumer; module-wide `contracts=` and
+`health=` remain the deployment knobs, and per-port overrides can return
+if a real deployment needs them.) Per-output contracts fix the
+multi-output gap: `contracts.min_output_hz` counts ticks that emitted
+*anything*, which a deliberately sparse `alerts` port would drag down —
+`contract(min_hz=...)` checks each port on its own.
 
 Ratio and latency contracts only evaluate on windows with at least
 `ratio_min_samples` samples — tiny windows make ratios noise, and at zero
