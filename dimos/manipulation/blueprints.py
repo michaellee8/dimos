@@ -38,7 +38,10 @@ from dimos.core.transport import LCMTransport
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
 from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.manipulation.pick_and_place_module import PickAndPlaceModule
-from dimos.manipulation.sim_presets import xarm7_mujoco_scene_preset
+from dimos.manipulation.sim_presets import (
+    r1pro_mujoco_scene_preset,
+    xarm7_mujoco_scene_preset,
+)
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -536,8 +539,50 @@ xarm_perception_sim_agent = autoconnect(
 )
 
 
+# --- R1Pro MuJoCo sim PREVIEW (no planning/perception/agent yet) --------------
+# A minimal "see the robot in the scene" blueprint: the dual-arm R1Pro stands at
+# the desk in the dimos_office scene, holding its home pose, with the head
+# scan_camera streaming to Rerun. Run: dimos run r1pro-sim-preview
+# (set DIMOS_SCENE_PACKAGE_PATH=data/scene_packages/dimos_office).
+_r1pro_sim_preset = r1pro_mujoco_scene_preset()
+_r1pro_sim_cfg = _catalog_r1pro_bimanual(
+    name="arm",
+    adapter_type="sim_mujoco",
+    **_r1pro_sim_preset.robot_config_kwargs,
+)
+
+r1pro_sim_preview = autoconnect(
+    MujocoSimModule.blueprint(
+        **_r1pro_sim_preset.mujoco_module_kwargs,
+        headless=False,
+        dof=18,
+        camera_name="scan_camera",
+        base_frame_id="head_link",
+        enable_pointcloud=False,
+        fps=5,
+    ),
+    ControlCoordinator.blueprint(
+        tick_rate=100.0,
+        publish_joint_state=True,
+        joint_state_frame_id="coordinator",
+        hardware=[_r1pro_sim_cfg.to_hardware_component()],
+        tasks=[_r1pro_sim_cfg.to_task_config()],
+    ),
+    RerunBridgeModule.blueprint(
+        blueprint=_xarm_perception_rerun_blueprint,
+        memory_limit="5%",
+        max_hz={"world/color_image": 2.0, "world/depth_image": 2.0},
+    ),
+).transports(
+    {
+        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+    }
+)
+
+
 __all__ = [
     "dual_xarm6_planner",
+    "r1pro_sim_preview",
     "xarm6_planner_only",
     "xarm7_planner_coordinator",
     "xarm7_planner_coordinator_agent",
