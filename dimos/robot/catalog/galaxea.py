@@ -33,6 +33,10 @@ from dimos.utils.data import LfsPath
 R1PRO_PKG = LfsPath("r1pro_urdf")
 # Full-body URDF (mobile base + torso + both arms): 46 links / 28 joints.
 R1PRO_FULL_MODEL_PATH = R1PRO_PKG / "urdf" / "r1pro.urdf"
+# MuJoCo sim asset (dual-arm: 18 actuated joints + 2 grippers + head scan_camera),
+# generated from the full URDF by data/r1pro_urdf/tools/make_r1pro_mjcf.py.
+R1PRO_SIM_MJCF_PATH = R1PRO_PKG / "mujoco" / "r1pro_dual.xml"
+R1PRO_SIM_MESHDIR = R1PRO_PKG / "mujoco" / "assets"
 # Arm-only URDF (left arm + gripper + wrist camera, rooted at left_arm_base_link):
 # 12 links / 7 revolute joints. ~4x fewer link transforms to render/update per frame,
 # which is what the viser gizmo preview and 10Hz render push to the browser.

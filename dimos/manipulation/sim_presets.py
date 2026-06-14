@@ -22,6 +22,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from dimos.robot.catalog.galaxea import R1PRO_SIM_MESHDIR, R1PRO_SIM_MJCF_PATH
 from dimos.robot.catalog.ufactory import XARM7_SIM_PATH
 from dimos.simulation.scene_assets.spec import ScenePackage, load_scene_package
 
@@ -72,6 +73,57 @@ def xarm7_mujoco_scene_preset(
             "render_geom_groups": (0, 1, 2, 3),
         },
     )
+
+
+# R1Pro is a full-height floor-standing robot (shoulders ~1.45m); it leans at the
+# torso to reach a desk. Home = all-zeros (arms hang, torso upright); tuned in
+# later phases. Faces +Y toward the desk; base on the floor.
+_R1PRO_SCENE_HOME_JOINTS = (0.0,) * 18  # 4 torso + 7 left arm + 7 right arm
+_R1PRO_SCENE_YAW = math.radians(90.0)
+_R1PRO_TABLE_STANDOFF_M = 0.5
+_R1PRO_FLOOR_Z = 0.0
+
+
+def r1pro_mujoco_scene_preset(
+    scene_package_env: str = "DIMOS_SCENE_PACKAGE_PATH",
+) -> MujocoSimPreset:
+    """Dual-arm R1Pro spawned at the manipulation desk in a scene package."""
+    package = _scene_package_from_env(scene_package_env)
+    if package is None:
+        raise ValueError(
+            "r1pro_mujoco_scene_preset requires a scene package; "
+            "set DIMOS_SCENE_PACKAGE_PATH (e.g. data/scene_packages/dimos_office)"
+        )
+    robot_mjcf = str(R1PRO_SIM_MJCF_PATH)
+    spawn_xy, spawn_z = _r1pro_scene_spawn(package)
+    return MujocoSimPreset(
+        robot_config_kwargs={
+            "address": robot_mjcf,
+            # NOTE: planning base_pose alignment with the spawned MuJoCo pose is
+            # handled in the RoboPlan integration phase (Phase 4).
+            "base_pose": _base_pose(spawn_xy, spawn_z, _R1PRO_SCENE_YAW),
+            "home_joints": list(_R1PRO_SCENE_HOME_JOINTS),
+        },
+        mujoco_module_kwargs={
+            "scene_xml": str(package.mujoco_scene_path),
+            "robot_mjcf": robot_mjcf,
+            "robot_meshdir": str(R1PRO_SIM_MESHDIR),
+            "scene_entities": package.entities,
+            "spawn_xy": spawn_xy,
+            "spawn_z": spawn_z,
+            "spawn_yaw": _R1PRO_SCENE_YAW,
+            "initial_joint_positions": list(_R1PRO_SCENE_HOME_JOINTS),
+            "render_geom_groups": (0, 1, 2, 3),
+        },
+    )
+
+
+def _r1pro_scene_spawn(package: ScenePackage) -> tuple[tuple[float, float], float]:
+    table = _find_table_entity(package)
+    pose = table.get("initial_pose", {})
+    table_x = float(pose.get("x", 0.0))
+    table_y = float(pose.get("y", 0.0))
+    return ((table_x, table_y - _R1PRO_TABLE_STANDOFF_M), _R1PRO_FLOOR_Z)
 
 
 def _scene_package_from_env(env_name: str) -> ScenePackage | None:
@@ -129,4 +181,8 @@ def _base_pose(xy: tuple[float, float], z: float, yaw: float) -> list[float]:
     ]
 
 
-__all__ = ["MujocoSimPreset", "xarm7_mujoco_scene_preset"]
+__all__ = [
+    "MujocoSimPreset",
+    "r1pro_mujoco_scene_preset",
+    "xarm7_mujoco_scene_preset",
+]
