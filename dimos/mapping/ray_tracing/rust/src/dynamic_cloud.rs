@@ -42,6 +42,7 @@ pub struct DynamicCloud {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // decode path is exercised by tests, not the binary
 pub enum DecodeError {
     Truncated { needed: usize, got: usize },
     InvalidUtf8(std::str::Utf8Error),
@@ -169,6 +170,7 @@ impl DynamicCloud {
         Ok(buf)
     }
 
+    #[allow(dead_code)] // decode path is exercised by tests, not the binary
     pub fn decode(data: &[u8]) -> Result<Self, DecodeError> {
         if data.len() < HEADER_SIZE {
             return Err(DecodeError::Truncated {
