@@ -36,7 +36,7 @@ from collections.abc import AsyncIterator, Iterator
 import math
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from reactivex.disposable import Disposable
@@ -97,7 +97,7 @@ def make_room_points(half_size: float = 20.0, density: float = 0.15) -> np.ndarr
         column_y = column_center_y + column_radius * np.sin(grid_angle.ravel())
         points.append(np.column_stack([column_x, column_y, grid_z.ravel()]))
 
-    return np.concatenate(points).astype(np.float32)
+    return cast("np.ndarray", np.concatenate(points).astype(np.float32))
 
 
 def make_pose(x: float, y: float, z: float, yaw: float) -> Pose:
@@ -118,12 +118,12 @@ def _yaw_rotation(yaw: float) -> np.ndarray:
 
 def world_to_body(points_world: np.ndarray, position: np.ndarray, yaw: float) -> np.ndarray:
     rotation = _yaw_rotation(yaw).T
-    return (points_world - position) @ rotation.T
+    return cast("np.ndarray", (points_world - position) @ rotation.T)
 
 
 def body_to_world(points_body: np.ndarray, position: np.ndarray, yaw: float) -> np.ndarray:
     rotation = _yaw_rotation(yaw)
-    return points_body @ rotation.T + position
+    return cast("np.ndarray", points_body @ rotation.T + position)
 
 
 # A trajectory waypoint: (timestamp, true_position, true_yaw, drifted_position,
@@ -442,7 +442,7 @@ class GraphCapture(Module):
         return list(self._closure_events)
 
 
-# --- Recording-DB (mem2.db) replay --------------------------------------------
+# Recording-DB (mem2.db) replay
 
 # One shared read-only store per db path.
 _recording_stores: dict[str, SqliteStore] = {}
