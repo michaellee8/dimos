@@ -29,7 +29,7 @@ struct Section {
     std::atomic<uint64_t> total_ns{0};
     std::atomic<uint64_t> max_ns{0};
 
-    explicit Section(const char* n);
+    explicit Section(const char* section_name);
 
     void add(uint64_t ns) {
         count.fetch_add(1, std::memory_order_relaxed);
@@ -42,11 +42,11 @@ struct Section {
 };
 
 inline std::vector<Section*>& registry() {
-    static std::vector<Section*> r;
-    return r;
+    static std::vector<Section*> sections;
+    return sections;
 }
 
-inline Section::Section(const char* n) : name(n) {
+inline Section::Section(const char* section_name) : name(section_name) {
     registry().push_back(this);
 }
 
@@ -55,7 +55,7 @@ struct Scope {
     std::chrono::steady_clock::time_point t0;
     bool active;
 
-    explicit Scope(Section& s) : sec(s), active(fastlio_debug) {
+    explicit Scope(Section& section) : sec(section), active(fastlio_debug) {
         if (active) {
             t0 = std::chrono::steady_clock::now();
         }
@@ -91,22 +91,22 @@ inline void maybe_flush(std::chrono::steady_clock::time_point now) {
     auto dt_ms = std::chrono::duration<double, std::milli>(now - last).count();
     last = now;
 
-    for (Section* s : registry()) {
-        uint64_t c = s->count.exchange(0, std::memory_order_relaxed);
-        uint64_t tot = s->total_ns.exchange(0, std::memory_order_relaxed);
-        uint64_t mx = s->max_ns.exchange(0, std::memory_order_relaxed);
-        if (c == 0) {
-            std::fprintf(stderr, "[timing] %-24s n=0\n", s->name);
+    for (Section* section : registry()) {
+        uint64_t count = section->count.exchange(0, std::memory_order_relaxed);
+        uint64_t tot = section->total_ns.exchange(0, std::memory_order_relaxed);
+        uint64_t mx = section->max_ns.exchange(0, std::memory_order_relaxed);
+        if (count == 0) {
+            std::fprintf(stderr, "[timing] %-24s n=0\n", section->name);
             continue;
         }
-        double mean_us = static_cast<double>(tot) / static_cast<double>(c) / 1e3;
+        double mean_us = static_cast<double>(tot) / static_cast<double>(count) / 1e3;
         double max_us = static_cast<double>(mx) / 1e3;
         double total_ms = static_cast<double>(tot) / 1e6;
-        double rate_hz = static_cast<double>(c) * 1000.0 / dt_ms;
+        double rate_hz = static_cast<double>(count) * 1000.0 / dt_ms;
         std::fprintf(stderr,
                      "[timing] %-24s n=%5lu rate=%7.1fHz mean=%8.3fus max=%9.3fus tot=%7.2fms\n",
-                     s->name,
-                     static_cast<unsigned long>(c),
+                     section->name,
+                     static_cast<unsigned long>(count),
                      rate_hz, mean_us, max_us, total_ms);
     }
 }

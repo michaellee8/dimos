@@ -112,12 +112,12 @@ static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
     pc.fields.resize(4);
 
     auto make_field = [](const std::string& name, int32_t offset) {
-        sensor_msgs::PointField f;
-        f.name = name;
-        f.offset = offset;
-        f.datatype = sensor_msgs::PointField::FLOAT32;
-        f.count = 1;
-        return f;
+        sensor_msgs::PointField field;
+        field.name = name;
+        field.offset = offset;
+        field.datatype = sensor_msgs::PointField::FLOAT32;
+        field.count = 1;
+        return field;
     };
 
     pc.fields[0] = make_field("x", 0);
@@ -131,12 +131,12 @@ static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
     pc.data_length = pc.row_step;
     pc.data.resize(pc.data_length);
 
-    for (int i = 0; i < num_points; ++i) {
-        float* dst = reinterpret_cast<float*>(pc.data.data() + i * 16);
-        dst[0] = cloud->points[i].x;
-        dst[1] = cloud->points[i].y;
-        dst[2] = cloud->points[i].z;
-        dst[3] = cloud->points[i].intensity;
+    for (int point_idx = 0; point_idx < num_points; ++point_idx) {
+        float* dst = reinterpret_cast<float*>(pc.data.data() + point_idx * 16);
+        dst[0] = cloud->points[point_idx].x;
+        dst[1] = cloud->points[point_idx].y;
+        dst[2] = cloud->points[point_idx].z;
+        dst[3] = cloud->points[point_idx].intensity;
     }
 
     g_lcm->publish(chan, &pc);
@@ -158,8 +158,8 @@ static void publish_odometry(const custom_messages::Odometry& odom, double times
     msg.pose.pose.orientation.z = odom.pose.pose.orientation.z;
     msg.pose.pose.orientation.w = odom.pose.pose.orientation.w;
 
-    for (int i = 0; i < 36; ++i) {
-        msg.pose.covariance[i] = odom.pose.covariance[i];
+    for (int idx = 0; idx < 36; ++idx) {
+        msg.pose.covariance[idx] = odom.pose.covariance[idx];
     }
 
     // Twist zeroed — FAST-LIO doesn't output velocity.
@@ -201,28 +201,30 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
 
     if (data->data_type == DATA_TYPE_CARTESIAN_HIGH) {
         auto* pts = reinterpret_cast<const LivoxLidarCartesianHighRawPoint*>(data->data);
-        for (uint16_t i = 0; i < dot_num; ++i) {
+        for (uint16_t point_idx = 0; point_idx < dot_num; ++point_idx) {
             custom_messages::CustomPoint cp;
-            cp.x = static_cast<double>(pts[i].x) / 1000.0;   // mm → m
-            cp.y = static_cast<double>(pts[i].y) / 1000.0;
-            cp.z = static_cast<double>(pts[i].z) / 1000.0;
-            cp.reflectivity = pts[i].reflectivity;
-            cp.tag = pts[i].tag;
+            cp.x = static_cast<double>(pts[point_idx].x) / 1000.0;   // mm → m
+            cp.y = static_cast<double>(pts[point_idx].y) / 1000.0;
+            cp.z = static_cast<double>(pts[point_idx].z) / 1000.0;
+            cp.reflectivity = pts[point_idx].reflectivity;
+            cp.tag = pts[point_idx].tag;
             cp.line = 0;  // Mid-360: single line
-            cp.offset_time = static_cast<uli>((ts_ns - g_frame_start_ns) + i * point_interval_ns);
+            cp.offset_time =
+                static_cast<uli>((ts_ns - g_frame_start_ns) + point_idx * point_interval_ns);
             g_accumulated_points.push_back(cp);
         }
     } else if (data->data_type == DATA_TYPE_CARTESIAN_LOW) {
         auto* pts = reinterpret_cast<const LivoxLidarCartesianLowRawPoint*>(data->data);
-        for (uint16_t i = 0; i < dot_num; ++i) {
+        for (uint16_t point_idx = 0; point_idx < dot_num; ++point_idx) {
             custom_messages::CustomPoint cp;
-            cp.x = static_cast<double>(pts[i].x) / 100.0;   // cm → m
-            cp.y = static_cast<double>(pts[i].y) / 100.0;
-            cp.z = static_cast<double>(pts[i].z) / 100.0;
-            cp.reflectivity = pts[i].reflectivity;
-            cp.tag = pts[i].tag;
+            cp.x = static_cast<double>(pts[point_idx].x) / 100.0;   // cm → m
+            cp.y = static_cast<double>(pts[point_idx].y) / 100.0;
+            cp.z = static_cast<double>(pts[point_idx].z) / 100.0;
+            cp.reflectivity = pts[point_idx].reflectivity;
+            cp.tag = pts[point_idx].tag;
             cp.line = 0;
-            cp.offset_time = static_cast<uli>((ts_ns - g_frame_start_ns) + i * point_interval_ns);
+            cp.offset_time =
+                static_cast<uli>((ts_ns - g_frame_start_ns) + point_idx * point_interval_ns);
             g_accumulated_points.push_back(cp);
         }
     }
@@ -244,7 +246,7 @@ static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
         static auto last_wall = clk::now();
         auto now_wall = clk::now();
         uint64_t prev = last_pkt_ts_ns.exchange(pkt_ts_ns);
-        uint64_t n = imu_pkt_count.fetch_add(1) + 1;
+        uint64_t pkt_count = imu_pkt_count.fetch_add(1) + 1;
         if (prev != 0 && pkt_ts_ns > prev) {
             uint64_t sensor_gap_us = (pkt_ts_ns - prev) / 1000;
             uint64_t wall_gap_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -256,13 +258,13 @@ static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
                 imu_gap_count.fetch_add(1);
                 fprintf(stderr, "[imu-gap] sensor_gap=%.1fms wall_gap=%.1fms pkt#%llu\n",
                         sensor_gap_us / 1000.0, wall_gap_us / 1000.0,
-                        static_cast<unsigned long long>(n));
+                        static_cast<unsigned long long>(pkt_count));
             }
         }
         last_wall = now_wall;
-        if (n % 1000 == 0) {
+        if (pkt_count % 1000 == 0) {
             fprintf(stderr, "[imu-stats] pkts=%llu gaps>15ms=%llu max_sensor_gap=%.1fms\n",
-                    static_cast<unsigned long long>(n),
+                    static_cast<unsigned long long>(pkt_count),
                     static_cast<unsigned long long>(imu_gap_count.load()),
                     max_sensor_gap_us.load() / 1000.0);
         }
@@ -272,7 +274,7 @@ static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
     auto* imu_pts = reinterpret_cast<const LivoxLidarImuRawPoint*>(data->data);
     uint16_t dot_num = data->dot_num;
 
-    for (uint16_t i = 0; i < dot_num; ++i) {
+    for (uint16_t point_idx = 0; point_idx < dot_num; ++point_idx) {
         auto imu_msg = boost::make_shared<custom_messages::Imu>();
         imu_msg->header.stamp = custom_messages::Time().fromSec(ts);
         imu_msg->header.seq = 0;
@@ -282,23 +284,23 @@ static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
         imu_msg->orientation.y = 0.0;
         imu_msg->orientation.z = 0.0;
         imu_msg->orientation.w = 1.0;
-        for (int j = 0; j < 9; ++j)
-            imu_msg->orientation_covariance[j] = 0.0;
+        for (int cov_idx = 0; cov_idx < 9; ++cov_idx)
+            imu_msg->orientation_covariance[cov_idx] = 0.0;
 
-        imu_msg->angular_velocity.x = static_cast<double>(imu_pts[i].gyro_x);
-        imu_msg->angular_velocity.y = static_cast<double>(imu_pts[i].gyro_y);
-        imu_msg->angular_velocity.z = static_cast<double>(imu_pts[i].gyro_z);
-        for (int j = 0; j < 9; ++j)
-            imu_msg->angular_velocity_covariance[j] = 0.0;
+        imu_msg->angular_velocity.x = static_cast<double>(imu_pts[point_idx].gyro_x);
+        imu_msg->angular_velocity.y = static_cast<double>(imu_pts[point_idx].gyro_y);
+        imu_msg->angular_velocity.z = static_cast<double>(imu_pts[point_idx].gyro_z);
+        for (int cov_idx = 0; cov_idx < 9; ++cov_idx)
+            imu_msg->angular_velocity_covariance[cov_idx] = 0.0;
 
         // Point-LIO expects accel in g (EKF does its own scaling). SDK already
         // reports g, so feed raw — scaling by GRAVITY_MS2 would double-scale and
         // trip the satu_acc check at rest.
-        imu_msg->linear_acceleration.x = static_cast<double>(imu_pts[i].acc_x);
-        imu_msg->linear_acceleration.y = static_cast<double>(imu_pts[i].acc_y);
-        imu_msg->linear_acceleration.z = static_cast<double>(imu_pts[i].acc_z);
-        for (int j = 0; j < 9; ++j)
-            imu_msg->linear_acceleration_covariance[j] = 0.0;
+        imu_msg->linear_acceleration.x = static_cast<double>(imu_pts[point_idx].acc_x);
+        imu_msg->linear_acceleration.y = static_cast<double>(imu_pts[point_idx].acc_y);
+        imu_msg->linear_acceleration.z = static_cast<double>(imu_pts[point_idx].acc_z);
+        for (int cov_idx = 0; cov_idx < 9; ++cov_idx)
+            imu_msg->linear_acceleration_covariance[cov_idx] = 0.0;
 
         g_fastlio->feed_imu(imu_msg);
     }
@@ -456,7 +458,7 @@ int main(int argc, char** argv) {
         std::vector<custom_messages::CustomPoint> points;
         uint64_t frame_start = 0;
         {
-            timing::Scope s(t_emit_check);
+            timing::Scope scope(t_emit_check);
             std::lock_guard<std::mutex> lock(g_pc_mutex);
             if (now - *last_emit >= frame_interval) {
                 if (!g_accumulated_points.empty()) {
@@ -475,16 +477,16 @@ int main(int argc, char** argv) {
             lidar_msg->header.frame_id = "livox_frame";
             lidar_msg->timebase = frame_start;
             lidar_msg->lidar_id = 0;
-            for (int i = 0; i < 3; i++) lidar_msg->rsvd[i] = 0;
+            for (int idx = 0; idx < 3; idx++) lidar_msg->rsvd[idx] = 0;
             lidar_msg->point_num = static_cast<uli>(points.size());
             lidar_msg->points = std::move(points);
-            timing::Scope s(t_feed_lidar);
+            timing::Scope scope(t_feed_lidar);
             fast_lio.feed_lidar(lidar_msg);
         }
 
         // One FAST-LIO IESKF step (cheap when queues empty).
         {
-            timing::Scope s(t_process);
+            timing::Scope scope(t_process);
             fast_lio.process();
         }
 
@@ -499,15 +501,15 @@ int main(int argc, char** argv) {
             // so build it only when a publish is due.
             if (lidar_due) {
                 auto body_cloud = ([&]() {
-                    timing::Scope s(t_get_world_cloud);
+                    timing::Scope scope(t_get_world_cloud);
                     return fast_lio.get_body_cloud();
                 })();
                 if (body_cloud && !body_cloud->empty()) {
                     auto filtered = ([&]() {
-                        timing::Scope s(t_filter_cloud);
+                        timing::Scope scope(t_filter_cloud);
                         return filter_cloud<PointType>(body_cloud, filter_cfg);
                     })();
-                    timing::Scope s(t_publish_lidar);
+                    timing::Scope scope(t_publish_lidar);
                     publish_lidar(filtered, ts);
                     last_pc_publish = now;
                 }
@@ -515,7 +517,7 @@ int main(int argc, char** argv) {
 
             // Pose + covariance at odom_freq.
             if (!g_odometry_topic.empty() && now - *last_odom_publish >= odom_interval) {
-                timing::Scope s(t_publish_odom);
+                timing::Scope scope(t_publish_odom);
                 publish_odometry(fast_lio.get_odometry(), ts);
                 last_odom_publish = now;
             }

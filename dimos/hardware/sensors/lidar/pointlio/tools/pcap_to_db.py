@@ -134,24 +134,24 @@ class _Rec(Module):
             self._offset = self._resolve_offset(raw_ts)
         return max(raw_ts + self._offset, last_ts + _EPS)
 
-    async def handle_pointlio_odometry(self, v: Odometry) -> None:
+    async def handle_pointlio_odometry(self, msg: Odometry) -> None:
         # `is not None`, not `or`: a real sensor ts of 0.0 must not fall back to
         # wall time (would misclassify the stream's clock in _resolve_offset).
-        raw_ts_raw = getattr(v, "ts", None)
+        raw_ts_raw = getattr(msg, "ts", None)
         raw_ts = raw_ts_raw if raw_ts_raw is not None else time.time()
         ts = self._aligned_ts(raw_ts, self._last_odom_ts)
         self._last_odom_ts = ts
-        pose = getattr(v, "pose", None)
+        pose = getattr(msg, "pose", None)
         pose_inner = getattr(pose, "pose", None) if pose is not None else None
-        self._os.append(v, ts=ts, pose=pose_inner)
+        self._os.append(msg, ts=ts, pose=pose_inner)
         self._odom_count += 1
 
-    async def handle_pointlio_lidar(self, v: PointCloud2) -> None:
-        raw_ts_raw = getattr(v, "ts", None)
+    async def handle_pointlio_lidar(self, msg: PointCloud2) -> None:
+        raw_ts_raw = getattr(msg, "ts", None)
         raw_ts = raw_ts_raw if raw_ts_raw is not None else time.time()
         ts = self._aligned_ts(raw_ts, self._last_lidar_ts)
         self._last_lidar_ts = ts
-        self._ls.append(v, ts=ts)
+        self._ls.append(msg, ts=ts)
         self._lidar_count += 1
 
 
@@ -170,7 +170,7 @@ def _db_ref_start_ts(db_path: Path) -> float:
             if table.startswith("_") or table.startswith("sqlite_"):
                 continue
             try:
-                cols = [c[1] for c in con.execute(f"PRAGMA table_info('{table}')").fetchall()]
+                cols = [col[1] for col in con.execute(f"PRAGMA table_info('{table}')").fetchall()]
                 if "ts" not in cols:
                     continue
                 row = con.execute(f"SELECT MIN(ts) FROM '{table}'").fetchone()
@@ -321,9 +321,9 @@ def _run_outer(args: argparse.Namespace) -> int:
     # root inner can write it (SQLite WAL refuses cross-uid writes). Restored below.
     if db_existed:
         for suffix in ("", "-wal", "-shm"):
-            p = Path(f"{db_path}{suffix}")
-            if p.exists():
-                _ns(["chown", "0:0", str(p)], check=False)
+            sidecar = Path(f"{db_path}{suffix}")
+            if sidecar.exists():
+                _ns(["chown", "0:0", str(sidecar)], check=False)
 
     _setup_netns(
         args.drv_ns, args.lidar_ns, args.veth_drv, args.veth_lidar, args.host_ip, args.lidar_ip
@@ -398,9 +398,9 @@ def _run_outer(args: argparse.Namespace) -> int:
         # files back to the invoking user.
         uid, gid = os.getuid(), os.getgid()
         for suffix in ("", "-wal", "-shm"):
-            p = Path(f"{db_path}{suffix}")
-            if p.exists():
-                _ns(["chown", f"{uid}:{gid}", str(p)], check=False)
+            sidecar = Path(f"{db_path}{suffix}")
+            if sidecar.exists():
+                _ns(["chown", f"{uid}:{gid}", str(sidecar)], check=False)
 
     o_cnt, o_min, o_max = _table_stats(db_path, "pointlio_odometry")
     l_cnt = _table_stats(db_path, "pointlio_lidar")[0]

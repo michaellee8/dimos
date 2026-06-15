@@ -103,7 +103,8 @@ class PointLioConfig(NativeModuleConfig):
     # FAST-LIO YAML config (relative to config/ dir, or absolute path)
     # C++ binary reads YAML directly via yaml-cpp
     config: Annotated[
-        Path, validate_as(...).transform(lambda p: p if p.is_absolute() else _CONFIG_DIR / p)
+        Path,
+        validate_as(...).transform(lambda path: path if path.is_absolute() else _CONFIG_DIR / path),
     ] = Path("default.yaml")
 
     debug: bool = False
@@ -223,16 +224,16 @@ class PointLio(NativeModule, perception.Lidar, perception.Odometry):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                 sock.bind((host_ip, 0))
-        except OSError as e:
+        except OSError as err:
             _logger.error(
-                f"PointLio: Cannot bind UDP socket on host_ip={host_ip!r}: {e}\n"
+                f"PointLio: Cannot bind UDP socket on host_ip={host_ip!r}: {err}\n"
                 f"  Another process may be using the Livox SDK ports.\n"
                 f"  → Check: ss -ulnp | grep {host_ip}"
             )
             raise RuntimeError(
-                f"PointLio: Cannot bind UDP on {host_ip}: {e}. "
+                f"PointLio: Cannot bind UDP on {host_ip}: {err}. "
                 f"Check if another Livox/PointLio process is running."
-            ) from e
+            ) from err
 
         _logger.info(
             "PointLio network check passed",
