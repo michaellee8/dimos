@@ -12,57 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run FAST-LIO over a .pcap and write its outputs into a .db.
+"""Record live FAST-LIO output into a .db while a virtual sensor replays a pcap.
 
-Given a Livox Mid-360 pcap capture, this streams the pcap through the FastLio2
-native module and writes two streams into a memory2 SQLite database:
+FastLio2 runs in **live SDK mode** and this tool records its two output streams
+into a memory2 SQLite database for ``--duration`` seconds:
 
 * ``fastlio_odometry`` -- the IESKF pose at the native odom rate (~30 Hz).
 * ``fastlio_lidar`` -- the registered (deskewed, odom-frame) point cloud at the
   native pointcloud rate (~10 Hz).
 
-The ``--db`` is optional. With no existing db the tool builds one **from
-scratch** (omit ``--db`` and it defaults to ``<pcap>.db`` next to the pcap).
-With an existing db the two streams are appended and time-aligned onto the db's
-clock, so FAST-LIO output can be compared against whatever it already holds.
+There is no in-process pcap reader: the packets come from the live Livox SDK
+path, fed by ``virtual_mid360`` — a fake Mid-360 on a virtual NIC that replays a
+recorded pcap with a synthesized SDK2 handshake. FastLio2 connects to it exactly
+as it would to real hardware and never knows the sensor is synthetic. The netns
+setup + sensor are orchestrated by ``tools/replay_via_virtual_mid360.sh``, which
+drives this tool as its consumer; that wrapper is the normal entry point.
 
-This mirrors the Point-LIO ``pcap_to_db.py`` tool, with one deliberate
-difference: FAST-LIO is *not* bit-deterministic (OpenMP reduction order), so the
-replay runs ``deterministic_clock=False`` -- the feeder paces packets at
-wall-clock realtime, exactly as the live SDK delivers them, and publish
-timestamps come from the pcap's capture clock. A 20-minute recording therefore
-takes ~20 minutes of wall time to replay.
+The db is appended in place: the two fastlio streams are time-aligned onto the
+db's existing clock (so they line up with whatever else it holds), and an
+existing ``fastlio_odometry`` / ``fastlio_lidar`` pair aborts the run unless
+``--force`` is given. ``--time-offset`` overrides the auto-derived clock shift.
 
-If either stream already exists in the db the run aborts, unless ``--force`` is
-given, in which case the existing ``fastlio_odometry`` and ``fastlio_lidar``
-streams are dropped before the new ones are written.
+Usage (normally via the wrapper)::
 
-Timing conversion
------------------
-With ``deterministic_clock=False`` FAST-LIO publishes with the pcap packet
-clock, which for a real recording is the original capture's *unix wall time* --
-the same clock the db's other streams already use. So the common case needs no
-shift. The offset is auto-derived from the two clocks:
+    bash tools/replay_via_virtual_mid360.sh <pcap> <out.db> <duration> [config.yaml]
 
-* db + replay on the same clock family (both wall, or both sensor): offset 0.
-* cross-clock (e.g. a deterministic sensor-clock replay into a wall-clock db):
-  start-align by shifting the replay's first ts onto the db's earliest ts.
-* db has no existing timestamped rows: offset 0.
+Direct (only useful inside the consumer netns, fed by an external sensor)::
 
-Pass ``--time-offset`` to override the auto choice.
-
-Usage (from the dimos5 venv)::
-
-    source .venv/bin/activate
-
-    # Build a fresh db from scratch (no existing db needed); defaults to
-    # <pcap>.db next to the pcap.
     python -m dimos.hardware.sensors.lidar.fastlio2.tools.pcap_to_db \
-        --pcap /path/to/capture.pcap
-
-    # Or append into an existing recording db for comparison.
-    python -m dimos.hardware.sensors.lidar.fastlio2.tools.pcap_to_db \
-        --pcap /path/to/capture.pcap --db /path/to/memory.db
+        --db /path/to/memory.db --duration 200
 """
 
 from __future__ import annotations
@@ -78,10 +56,8 @@ from dimos.hardware.sensors.lidar.fastlio2.recorder import FastLio2Recorder
 
 # Below this an absolute timestamp is sensor-boot seconds, not unix wall time.
 _SENSOR_CLOCK_MAX = 1e8
-# Poll the db on this cadence while the replay drains the pcap.
+# Poll cadence while recording the live stream.
 _POLL_SEC = 1.0
-# Stop after the odom stream has been stagnant this long (pcap fully drained).
-_STAGNANT_SEC = 6.0
 
 
 def _db_ref_start_ts(db_path: Path) -> float:
@@ -131,17 +107,16 @@ def _table_stats(db_path: Path, table: str) -> tuple[int, float, float]:
 
 
 def _run(args: argparse.Namespace) -> int:
-    pcap_path = Path(args.pcap).expanduser().resolve()
-    if not pcap_path.exists():
-        print(f"[pcap_to_db] missing pcap: {pcap_path}", file=sys.stderr)
+    # FastLio2 runs in live SDK mode, fed by an external sensor — virtual_mid360
+    # replaying a pcap over a veth (see tools/replay_via_virtual_mid360.sh). We
+    # record whatever the SDK receives into the db for --duration seconds.
+    if not args.db:
+        print("[pcap_to_db] --db is required", file=sys.stderr)
         return 2
-    if args.max_sensor_sec < 0:
-        print("[pcap_to_db] --max-sensor-sec must be >= 0", file=sys.stderr)
+    if args.duration <= 0:
+        print("[pcap_to_db] --duration must be > 0", file=sys.stderr)
         return 2
-    # --db is optional: with no existing db, build one from scratch. When
-    # omitted the output defaults to <pcap>.db next to the pcap, so a fresh
-    # db can be generated with just --pcap.
-    db_path = Path(args.db).expanduser().resolve() if args.db else pcap_path.with_suffix(".db")
+    db_path = Path(args.db).expanduser().resolve()
     db_existed = db_path.exists()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -178,7 +153,7 @@ def _run(args: argparse.Namespace) -> int:
     else:
         offset_desc = f"auto: db wall-clock (R0={ref_start_ts:.2f})"
     print(
-        f"[pcap_to_db] pcap={pcap_path.name} db={db_path.name} "
+        f"[pcap_to_db] src=virtual_mid360 (live SDK) db={db_path.name} "
         f"({'append' if db_existed else 'new'}) "
         f"odom_freq={args.odom_freq}Hz offset={offset_desc}",
         flush=True,
@@ -187,8 +162,6 @@ def _run(args: argparse.Namespace) -> int:
     fastlio_kwargs: dict[str, object] = dict(
         frame_id="world",
         odom_freq=args.odom_freq,
-        replay_pcap=pcap_path,
-        deterministic_clock=False,
         debug=False,
     )
     # Omit config to fall back to the module default (config/mid360.yaml).
@@ -211,31 +184,10 @@ def _run(args: argparse.Namespace) -> int:
     coord = ModuleCoordinator.build(blueprint)
 
     t0 = time.time()
-    last_max = 0.0
-    first_max: float | None = None
-    stagnant_since: float | None = None
     try:
-        while True:
+        while time.time() - t0 < args.duration:
             time.sleep(_POLL_SEC)
-            cnt, min_ts, max_ts = _table_stats(db_path, "fastlio_odometry")
-            if cnt == 0:
-                continue
-            if first_max is None:
-                first_max = min_ts
-            if args.max_sensor_sec > 0 and (max_ts - first_max) >= args.max_sensor_sec:
-                print(
-                    f"[pcap_to_db] reached --max-sensor-sec={args.max_sensor_sec:.1f}s",
-                    flush=True,
-                )
-                break
-            if max_ts == last_max:
-                if stagnant_since is None:
-                    stagnant_since = time.time()
-                elif time.time() - stagnant_since > _STAGNANT_SEC:
-                    break
-            else:
-                last_max = max_ts
-                stagnant_since = None
+        print(f"[pcap_to_db] reached --duration={args.duration:.1f}s", flush=True)
     finally:
         coord.stop()
 
@@ -253,13 +205,17 @@ def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--pcap", required=True, help="Livox Mid-360 pcap capture")
     parser.add_argument(
         "--db",
-        default=None,
-        help="target memory2 SQLite db. If it exists, fastlio streams are appended/aligned "
-        "onto its clock; if it doesn't, a fresh db is built from scratch. "
-        "Omit to default to <pcap>.db next to the pcap.",
+        required=True,
+        help="target memory2 SQLite db. fastlio streams are appended + time-aligned "
+        "onto its clock (or it's created fresh if absent).",
+    )
+    parser.add_argument(
+        "--duration",
+        type=float,
+        required=True,
+        help="record for this many seconds of wall time, then stop",
     )
     parser.add_argument(
         "--odom-freq",
@@ -272,12 +228,6 @@ def main(argv: list[str]) -> int:
         type=str,
         default=None,
         help="FAST-LIO yaml (relative to config/ or absolute); omit for the module default",
-    )
-    parser.add_argument(
-        "--max-sensor-sec",
-        type=float,
-        default=0.0,
-        help="stop after this many seconds of sensor time (0 = whole pcap)",
     )
     parser.add_argument(
         "--time-offset",
