@@ -12,52 +12,63 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Record live FAST-LIO output into a .db while a virtual sensor replays a pcap.
+"""Replay a Livox Mid-360 pcap through FAST-LIO and record its output to a .db.
 
-FastLio2 runs in **live SDK mode** and this tool records its two output streams
-into a memory2 SQLite database for ``--duration`` seconds:
+The pcap is replayed over the wire by ``virtual_mid360`` — a fake Mid-360 on a
+virtual NIC that synthesizes the Livox SDK2 handshake — and FastLio2 connects to
+it in live SDK mode, exactly as it would to real hardware (there is no in-process
+pcap reader). This tool orchestrates the whole thing behind a simple CLI:
 
-* ``fastlio_odometry`` -- the IESKF pose at the native odom rate (~30 Hz).
-* ``fastlio_lidar`` -- the registered (deskewed, odom-frame) point cloud at the
-  native pointcloud rate (~10 Hz).
+* ``pcap_to_db --pcap capture.pcap``            -> writes ``capture.db`` from scratch
+* ``pcap_to_db --pcap capture.pcap --db mem2.db`` -> appends into an existing db
 
-There is no in-process pcap reader: the packets come from the live Livox SDK
-path, fed by ``virtual_mid360`` — a fake Mid-360 on a virtual NIC that replays a
-recorded pcap with a synthesized SDK2 handshake. FastLio2 connects to it exactly
-as it would to real hardware and never knows the sensor is synthetic. The netns
-setup + sensor are orchestrated by ``tools/replay_via_virtual_mid360.sh``, which
-drives this tool as its consumer; that wrapper is the normal entry point.
+It records two streams — ``fastlio_odometry`` and ``fastlio_lidar`` — and
+time-aligns them onto the db's clock (``--time-offset`` overrides the auto
+choice; ``--force`` overwrites pre-existing fastlio streams). Replay runs at
+real time and stops automatically when the pcap is drained.
 
-The db is appended in place: the two fastlio streams are time-aligned onto the
-db's existing clock (so they line up with whatever else it holds), and an
-existing ``fastlio_odometry`` / ``fastlio_lidar`` pair aborts the run unless
-``--force`` is given. ``--time-offset`` overrides the auto-derived clock shift.
+It stands up two network namespaces joined by a veth (the fake lidar in one, the
+FastLio2 consumer in the other), which needs root: set ``$SUDO`` to a
+privilege-escalation command that runs ``ip``/``pkill``/``chown`` without a
+password prompt (default ``sudo``). Netns/veth names default to
+``fl_drv``/``fl_lidar`` + ``veth-fl-*`` (distinct from pointlio's harness so the
+two can run at once); override via ``$DRV_NS``/``$LIDAR_NS``/``$VETH_*``.
 
-Usage (normally via the wrapper)::
+Build the virtual_mid360 binary once::
 
-    bash tools/replay_via_virtual_mid360.sh <pcap> <out.db> <duration> [config.yaml]
-
-Direct (only useful inside the consumer netns, fed by an external sensor)::
-
-    python -m dimos.hardware.sensors.lidar.fastlio2.tools.pcap_to_db \
-        --db /path/to/memory.db --duration 200
+    (cd dimos/hardware/sensors/lidar/livox/virtual_mid360 && nix build .#default)
 """
 
 from __future__ import annotations
 
 import argparse
-import math
+import json
+import os
 from pathlib import Path
 import sqlite3
+import subprocess
 import sys
 import time
 
 from dimos.hardware.sensors.lidar.fastlio2.recorder import FastLio2Recorder
 
-# Below this an absolute timestamp is sensor-boot seconds, not unix wall time.
-_SENSOR_CLOCK_MAX = 1e8
-# Poll cadence while recording the live stream.
+# Poll cadence while recording.
 _POLL_SEC = 1.0
+# Stop once the odom stream has been stagnant this long (pcap fully replayed).
+_STAGNANT_SEC = 6.0
+
+# Privilege-escalation command + network namespace / veth names. The lidar ns
+# runs virtual_mid360; the drv ns runs the FastLio2 consumer. Defaults are
+# distinct from pointlio's harness so both can run concurrently.
+_SUDO = os.environ.get("SUDO", "sudo")
+_DRV_NS = os.environ.get("DRV_NS", "fl_drv")
+_LIDAR_NS = os.environ.get("LIDAR_NS", "fl_lidar")
+_VETH_DRV = os.environ.get("VETH_DRV", "veth-fl-drv")
+_VETH_LIDAR = os.environ.get("VETH_LIDAR", "veth-fl-lidar")
+_HOST_IP = "192.168.1.5"
+_LIDAR_IP = "192.168.1.155"
+_REPO = Path(__file__).resolve().parents[6]
+_VM_BIN = _REPO / "dimos/hardware/sensors/lidar/livox/virtual_mid360/result/bin/virtual_mid360"
 
 
 def _db_ref_start_ts(db_path: Path) -> float:
@@ -75,8 +86,8 @@ def _db_ref_start_ts(db_path: Path) -> float:
             if table.startswith("_") or table.startswith("sqlite_"):
                 continue
             try:
-                # vec0/rtree virtual tables (sqlite-vec etc.) raise "no such
-                # module" here when the extension isn't loaded -- skip them.
+                # vec0/rtree virtual tables raise "no such module" when the
+                # extension isn't loaded -- skip them.
                 cols = [c[1] for c in con.execute(f"PRAGMA table_info('{table}')").fetchall()]
                 if "ts" not in cols:
                     continue
@@ -106,18 +117,152 @@ def _table_stats(db_path: Path, table: str) -> tuple[int, float, float]:
         con.close()
 
 
-def _run(args: argparse.Namespace) -> int:
-    # FastLio2 runs in live SDK mode, fed by an external sensor — virtual_mid360
-    # replaying a pcap over a veth (see tools/replay_via_virtual_mid360.sh). We
-    # record whatever the SDK receives into the db for --duration seconds.
-    if not args.db:
-        print("[pcap_to_db] --db is required", file=sys.stderr)
+# ---------------------------------------------------------------------------
+# Orchestrator: set up the netns + fake sensor, drive the consumer, tear down.
+# ---------------------------------------------------------------------------
+
+
+def _sudo(*args: str, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run([_SUDO, *args], check=check)
+
+
+def _teardown_netns() -> None:
+    _sudo("pkill", "-9", "-f", "result/bin/virtual_mid360", check=False)
+    _sudo("ip", "netns", "del", _DRV_NS, check=False)
+    _sudo("ip", "netns", "del", _LIDAR_NS, check=False)
+    _sudo("ip", "link", "del", _VETH_DRV, check=False)
+
+
+def _setup_netns() -> None:
+    _teardown_netns()
+    _sudo("ip", "netns", "add", _DRV_NS)
+    _sudo("ip", "netns", "add", _LIDAR_NS)
+    _sudo("ip", "link", "add", _VETH_DRV, "type", "veth", "peer", "name", _VETH_LIDAR)
+    _sudo("ip", "link", "set", _VETH_DRV, "netns", _DRV_NS)
+    _sudo("ip", "link", "set", _VETH_LIDAR, "netns", _LIDAR_NS)
+    _sudo("ip", "netns", "exec", _DRV_NS, "ip", "addr", "add", f"{_HOST_IP}/24", "dev", _VETH_DRV)
+    _sudo(
+        "ip", "netns", "exec", _LIDAR_NS, "ip", "addr", "add", f"{_LIDAR_IP}/24", "dev", _VETH_LIDAR
+    )
+    for ns in (_DRV_NS, _LIDAR_NS):
+        _sudo("ip", "netns", "exec", ns, "ip", "link", "set", "lo", "up")
+        _sudo("ip", "netns", "exec", ns, "ip", "link", "set", "lo", "multicast", "on")
+        _sudo("ip", "netns", "exec", ns, "ip", "route", "add", "224.0.0.0/4", "dev", "lo")
+    _sudo("ip", "netns", "exec", _DRV_NS, "ip", "link", "set", _VETH_DRV, "up")
+    _sudo("ip", "netns", "exec", _LIDAR_NS, "ip", "link", "set", _VETH_LIDAR, "up")
+    _sudo("ip", "netns", "exec", _DRV_NS, "ip", "link", "set", _VETH_DRV, "multicast", "on")
+    _sudo("ip", "netns", "exec", _LIDAR_NS, "ip", "link", "set", _VETH_LIDAR, "multicast", "on")
+    _sudo(
+        "ip",
+        "netns",
+        "exec",
+        _LIDAR_NS,
+        "ip",
+        "route",
+        "add",
+        "255.255.255.255/32",
+        "dev",
+        _VETH_LIDAR,
+    )
+    # Mid-360 multicasts point/IMU to 224.1.1.5 — egress the virtual NIC.
+    _sudo(
+        "ip", "netns", "exec", _LIDAR_NS, "ip", "route", "add", "224.1.1.5/32", "dev", _VETH_LIDAR
+    )
+
+
+def _orchestrate(args: argparse.Namespace) -> int:
+    pcap = Path(args.pcap).expanduser().resolve()
+    if not pcap.exists():
+        print(f"[pcap_to_db] missing pcap: {pcap}", file=sys.stderr)
         return 2
-    if args.duration <= 0:
-        print("[pcap_to_db] --duration must be > 0", file=sys.stderr)
+    if not _VM_BIN.exists():
+        print(
+            f"[pcap_to_db] missing virtual_mid360 binary at {_VM_BIN}\n"
+            f"  build it: (cd {_VM_BIN.parents[1]} && nix build .#default)",
+            file=sys.stderr,
+        )
         return 2
+    db = Path(args.db).expanduser().resolve() if args.db else pcap.with_suffix(".db")
+    db.parent.mkdir(parents=True, exist_ok=True)
+    print(
+        f"[pcap_to_db] {pcap.name} -> {db.name} "
+        f"({'append' if db.exists() else 'new'}) via virtual_mid360 (live SDK)",
+        flush=True,
+    )
+
+    consumer: subprocess.Popen[bytes] | None = None
+    _setup_netns()
+    try:
+        # FastLio2 consumer in the drv netns (re-exec self as the recorder).
+        cmd = [
+            _SUDO,
+            "ip",
+            "netns",
+            "exec",
+            _DRV_NS,
+            "env",
+            f"PYTHONPATH={_REPO}",
+            sys.executable,
+            "-m",
+            "dimos.hardware.sensors.lidar.fastlio2.tools.pcap_to_db",
+            "--_consume",
+            "--db",
+            str(db),
+            "--duration",
+            str(args.duration),
+            "--odom-freq",
+            str(args.odom_freq),
+        ]
+        if args.config:
+            cmd += ["--config", args.config]
+        if args.force:
+            cmd += ["--force"]
+        if args.time_offset is not None:
+            cmd += ["--time-offset", str(args.time_offset)]
+        consumer = subprocess.Popen(cmd)
+        time.sleep(5)  # let the coordinator boot + open the SDK sockets
+
+        # Fake lidar in the lidar netns, replaying the pcap over the wire.
+        vm_cfg = json.dumps(
+            {
+                "topics": {},
+                "config": {"pcap": str(pcap), "rate": 1.0, "delay": 2.0, "lidar_netns": _LIDAR_NS},
+            }
+        )
+        vm = subprocess.Popen(
+            [_SUDO, "ip", "netns", "exec", _LIDAR_NS, str(_VM_BIN)], stdin=subprocess.PIPE
+        )
+        assert vm.stdin is not None
+        vm.stdin.write((vm_cfg + "\n").encode())
+        vm.stdin.close()
+
+        consumer.wait()
+        rc = consumer.returncode
+    finally:
+        if consumer is not None and consumer.poll() is None:
+            consumer.terminate()
+            try:
+                consumer.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                consumer.kill()
+        _teardown_netns()
+
+    # The consumer ran as root inside the netns, so the db is root-owned —
+    # hand it back to the invoking user.
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(str(db) + suffix)
+        if p.exists():
+            _sudo("chown", f"{os.getuid()}:{os.getgid()}", str(p), check=False)
+    return rc
+
+
+# ---------------------------------------------------------------------------
+# Consumer: FastLio2 live SDK + recorder. Runs inside the drv netns.
+# ---------------------------------------------------------------------------
+
+
+def _consume(args: argparse.Namespace) -> int:
     db_path = Path(args.db).expanduser().resolve()
-    db_existed = db_path.exists()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     from dimos.core.coordination.blueprints import autoconnect
@@ -144,27 +289,10 @@ def _run(args: argparse.Namespace) -> int:
 
     ref_start_ts = _db_ref_start_ts(db_path)
     time_offset = float("nan") if args.time_offset is None else args.time_offset
-    if not math.isnan(time_offset):
-        offset_desc = f"explicit {time_offset:+.3f}s"
-    elif ref_start_ts < 0.0:
-        offset_desc = "auto: db empty -> 0"
-    elif ref_start_ts < _SENSOR_CLOCK_MAX:
-        offset_desc = f"auto: db sensor-clock (R0={ref_start_ts:.2f})"
-    else:
-        offset_desc = f"auto: db wall-clock (R0={ref_start_ts:.2f})"
-    print(
-        f"[pcap_to_db] src=virtual_mid360 (live SDK) db={db_path.name} "
-        f"({'append' if db_existed else 'new'}) "
-        f"odom_freq={args.odom_freq}Hz offset={offset_desc}",
-        flush=True,
-    )
 
     fastlio_kwargs: dict[str, object] = dict(
-        frame_id="world",
-        odom_freq=args.odom_freq,
-        debug=False,
+        frame_id="world", odom_freq=args.odom_freq, debug=False
     )
-    # Omit config to fall back to the module default (config/mid360.yaml).
     if args.config:
         fastlio_kwargs["config"] = Path(args.config)
     fastlio = FastLio2.blueprint(**fastlio_kwargs).remappings(
@@ -176,27 +304,40 @@ def _run(args: argparse.Namespace) -> int:
     blueprint = autoconnect(
         fastlio,
         FastLio2Recorder.blueprint(
-            db_path=str(db_path),
-            ref_start_ts=ref_start_ts,
-            time_offset=time_offset,
+            db_path=str(db_path), ref_start_ts=ref_start_ts, time_offset=time_offset
         ),
     ).global_config(n_workers=4, robot_model="mid360_fastlio2_pcap_to_db")
     coord = ModuleCoordinator.build(blueprint)
 
     t0 = time.time()
+    last_max = 0.0
+    stagnant_since: float | None = None
     try:
         while time.time() - t0 < args.duration:
             time.sleep(_POLL_SEC)
-        print(f"[pcap_to_db] reached --duration={args.duration:.1f}s", flush=True)
+            _cnt, _min_ts, max_ts = _table_stats(db_path, "fastlio_odometry")
+            if max_ts == 0.0:
+                continue  # no data yet — sensor still warming up
+            if max_ts == last_max:
+                # Stream stopped advancing → the pcap has been fully replayed.
+                if stagnant_since is None:
+                    stagnant_since = time.time()
+                elif time.time() - stagnant_since > _STAGNANT_SEC:
+                    print("[pcap_to_db] replay drained", flush=True)
+                    break
+            else:
+                last_max = max_ts
+                stagnant_since = None
+        else:
+            print(f"[pcap_to_db] reached --duration cap {args.duration:.0f}s", flush=True)
     finally:
         coord.stop()
 
     o_cnt, o_min, o_max = _table_stats(db_path, "fastlio_odometry")
     l_cnt = _table_stats(db_path, "fastlio_lidar")[0]
-    span = o_max - o_min
     print(
         f"[pcap_to_db] done odom={o_cnt} lidar={l_cnt} "
-        f"ts=[{o_min:.3f}, {o_max:.3f}] span={span:.1f}s "
+        f"ts=[{o_min:.3f}, {o_max:.3f}] span={o_max - o_min:.1f}s "
         f"wall={time.time() - t0:.1f}s",
         flush=True,
     )
@@ -205,23 +346,12 @@ def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--pcap", default=None, help="Livox Mid-360 pcap capture to replay")
     parser.add_argument(
         "--db",
-        required=True,
-        help="target memory2 SQLite db. fastlio streams are appended + time-aligned "
-        "onto its clock (or it's created fresh if absent).",
-    )
-    parser.add_argument(
-        "--duration",
-        type=float,
-        required=True,
-        help="record for this many seconds of wall time, then stop",
-    )
-    parser.add_argument(
-        "--odom-freq",
-        type=float,
-        default=30.0,
-        help="FAST-LIO odometry publish rate in Hz (default 30)",
+        default=None,
+        help="target memory2 SQLite db; defaults to <pcap>.db. Existing fastlio "
+        "streams are time-aligned onto its clock (use --force to overwrite them).",
     )
     parser.add_argument(
         "--config",
@@ -230,17 +360,41 @@ def main(argv: list[str]) -> int:
         help="FAST-LIO yaml (relative to config/ or absolute); omit for the module default",
     )
     parser.add_argument(
+        "--odom-freq",
+        type=float,
+        default=30.0,
+        help="FAST-LIO odometry publish rate in Hz (default 30)",
+    )
+    parser.add_argument(
         "--time-offset",
         type=float,
         default=None,
         help="seconds added to every output ts; omit to auto-derive from the db clock",
     )
     parser.add_argument(
+        "--duration",
+        type=float,
+        default=3600.0,
+        help="safety cap in seconds; replay normally stops when the pcap is drained",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="overwrite existing fastlio_odometry/fastlio_lidar streams in the db",
     )
-    return _run(parser.parse_args(argv))
+    # Internal: the in-netns recorder half, spawned by the orchestrator.
+    parser.add_argument("--_consume", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+
+    if args._consume:
+        if not args.db:
+            print("[pcap_to_db] --_consume requires --db", file=sys.stderr)
+            return 2
+        return _consume(args)
+    if not args.pcap:
+        print("[pcap_to_db] --pcap is required", file=sys.stderr)
+        return 2
+    return _orchestrate(args)
 
 
 if __name__ == "__main__":
