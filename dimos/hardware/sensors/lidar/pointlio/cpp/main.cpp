@@ -160,13 +160,13 @@ static void publish_odometry(const custom_messages::Odometry& odom, double times
         msg.pose.covariance[idx] = odom.pose.covariance[idx];
     }
 
-    // Twist zeroed — Point-LIO doesn't output velocity.
-    msg.twist.twist.linear.x = 0;
-    msg.twist.twist.linear.y = 0;
-    msg.twist.twist.linear.z = 0;
-    msg.twist.twist.angular.x = 0;
-    msg.twist.twist.angular.y = 0;
-    msg.twist.twist.angular.z = 0;
+    // Velocity from Point-LIO's IESKF state (its key output over FAST-LIO).
+    msg.twist.twist.linear.x = odom.twist.twist.linear.x;
+    msg.twist.twist.linear.y = odom.twist.twist.linear.y;
+    msg.twist.twist.linear.z = odom.twist.twist.linear.z;
+    msg.twist.twist.angular.x = odom.twist.twist.angular.x;
+    msg.twist.twist.angular.y = odom.twist.twist.angular.y;
+    msg.twist.twist.angular.z = odom.twist.twist.angular.z;
     std::memset(msg.twist.covariance, 0, sizeof(msg.twist.covariance));
 
     g_lcm->publish(g_odometry_topic, &msg);
