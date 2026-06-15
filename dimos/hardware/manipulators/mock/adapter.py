@@ -188,12 +188,12 @@ class MockAdapter:
         self._cartesian_position.update(pose)
         return True
 
-    def read_gripper_position(self) -> float | None:
-        """Return mock gripper position."""
+    def read_gripper_position(self, side: int = 0) -> float | None:
+        """Return mock gripper position (side ignored — single gripper)."""
         return self._gripper_position
 
-    def write_gripper_position(self, position: float) -> bool:
-        """Set mock gripper position."""
+    def write_gripper_position(self, position: float, side: int = 0) -> bool:
+        """Set mock gripper position (side ignored — single gripper)."""
         self._gripper_position = position
         return True
 

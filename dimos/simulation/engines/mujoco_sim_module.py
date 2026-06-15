@@ -148,9 +148,10 @@ class MujocoSimModule(
         super().__init__(**kwargs)
         self._engine: MujocoEngine | None = None
         self._shm: ManipShmWriter | None = None
-        self._gripper_idx: int | None = None
-        self._gripper_ctrl_range: tuple[float, float] = (0.0, 1.0)
-        self._gripper_joint_range: tuple[float, float] = (0.0, 1.0)
+        # Per-side gripper maps (side -> value): side 0 = left/single, side 1 = right.
+        self._gripper_idx: dict[int, int] = {}
+        self._gripper_ctrl_range: dict[int, tuple[float, float]] = {}
+        self._gripper_joint_range: dict[int, tuple[float, float]] = {}
         self._stop_event = threading.Event()
         self._publish_thread: threading.Thread | None = None
         self._camera_info_base: CameraInfo | None = None
@@ -245,20 +246,36 @@ class MujocoSimModule(
                 JointState(position=self.config.initial_joint_positions)
             )
 
-        # Detect gripper (extra joint beyond dof).
+        # Detect gripper(s) — the actuated joints beyond the dof arm joints. The R1Pro
+        # has TWO (left + right); detect each by name so the side mapping is robust. Other
+        # robots have one, mapped to side 0. The engine index resolves its own actuator
+        # (command) and qpos (state), so one index per side suffices.
         dof = self.config.dof
         joint_names = list(self._engine.joint_names)
-        if len(joint_names) > dof:
-            ctrl_range = self._engine.get_actuator_ctrl_range(dof)
-            joint_range = self._engine.get_joint_range(dof)
+        gripper_side_by_name = {
+            "left_gripper_finger_joint1": 0,
+            "right_gripper_finger_joint1": 1,
+        }
+        for idx in range(dof, len(joint_names)):
+            name = joint_names[idx]
+            side = gripper_side_by_name.get(name)
+            if side is None:
+                # Single-gripper robot (e.g. xArm): first joint beyond dof -> side 0.
+                if 0 in self._gripper_idx or idx != dof:
+                    continue
+                side = 0
+            ctrl_range = self._engine.get_actuator_ctrl_range(idx)
+            joint_range = self._engine.get_joint_range(idx)
             if ctrl_range is None or joint_range is None:
-                raise ValueError(f"Gripper joint at index {dof} missing ctrl/joint range in MJCF")
-            self._gripper_idx = dof
-            self._gripper_ctrl_range = ctrl_range
-            self._gripper_joint_range = joint_range
+                raise ValueError(f"Gripper '{name}' (idx {idx}) missing ctrl/joint range in MJCF")
+            self._gripper_idx[side] = idx
+            self._gripper_ctrl_range[side] = ctrl_range
+            self._gripper_joint_range[side] = joint_range
             logger.info(
                 "MujocoSimModule: gripper detected",
-                idx=dof,
+                side=side,
+                name=name,
+                idx=idx,
                 ctrl_range=ctrl_range,
                 joint_range=joint_range,
             )
@@ -416,11 +433,11 @@ class MujocoSimModule(
         if vel_cmd is not None:
             engine.write_joint_command(JointState(velocity=vel_cmd.tolist()))
 
-        if self._gripper_idx is not None:
-            gripper_cmd = shm.read_gripper_command()
+        for side, idx in self._gripper_idx.items():
+            gripper_cmd = shm.read_gripper_command(side)
             if gripper_cmd is not None:
-                ctrl_value = self._gripper_joint_to_ctrl(gripper_cmd)
-                engine.set_position_target(self._gripper_idx, ctrl_value)
+                ctrl_value = self._gripper_joint_to_ctrl(gripper_cmd, side)
+                engine.set_position_target(idx, ctrl_value)
 
     def _publish_shm_state(self, engine: MujocoEngine) -> None:
         """Post-step hook: publish joint state to SHM."""
@@ -432,15 +449,15 @@ class MujocoSimModule(
             velocities=engine.joint_velocities,
             efforts=engine.joint_efforts,
         )
-        if self._gripper_idx is not None:
-            positions = engine.joint_positions
-            if self._gripper_idx < len(positions):
-                shm.write_gripper_state(positions[self._gripper_idx])
+        positions = engine.joint_positions
+        for side, idx in self._gripper_idx.items():
+            if idx < len(positions):
+                shm.write_gripper_state(positions[idx], side)
 
-    def _gripper_joint_to_ctrl(self, joint_position: float) -> float:
-        """Map joint-space gripper position to actuator control value."""
-        jlo, jhi = self._gripper_joint_range
-        clo, chi = self._gripper_ctrl_range
+    def _gripper_joint_to_ctrl(self, joint_position: float, side: int = 0) -> float:
+        """Map joint-space gripper position to actuator control value for the side."""
+        jlo, jhi = self._gripper_joint_range[side]
+        clo, chi = self._gripper_ctrl_range[side]
         clamped = max(jlo, min(jhi, joint_position))
         if jhi == jlo:
             return clo

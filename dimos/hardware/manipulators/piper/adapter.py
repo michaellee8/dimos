@@ -442,8 +442,8 @@ class PiperAdapter(ManipulatorAdapter):
         # Cartesian control not commonly supported in Piper SDK
         return False
 
-    def read_gripper_position(self) -> float | None:
-        """Read gripper position (percentage -> meters)."""
+    def read_gripper_position(self, side: int = 0) -> float | None:
+        """Read gripper position (percentage -> meters). Side ignored — single gripper."""
         if not self._sdk:
             return None
 
@@ -459,8 +459,8 @@ class PiperAdapter(ManipulatorAdapter):
 
         return None
 
-    def write_gripper_position(self, position: float) -> bool:
-        """Write gripper position (meters -> percentage)."""
+    def write_gripper_position(self, position: float, side: int = 0) -> bool:
+        """Write gripper position (meters -> percentage). Side ignored — single gripper."""
         if not self._sdk:
             return False
 

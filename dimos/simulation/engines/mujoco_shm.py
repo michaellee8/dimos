@@ -62,7 +62,7 @@ _shm_sizes = {
     "eff": _joint_array_size,
     "pos_t": _joint_array_size,
     "vel_t": _joint_array_size,
-    "grp": 2 * _FLOAT_BYTES,  # [gripper_position, gripper_target]
+    "grp": 4 * _FLOAT_BYTES,  # per side: [lpos, ltgt, rpos, rtgt]; xArm uses side 0 only
     "seq": _NUM_SEQ_COUNTERS * _FLOAT_BYTES,  # int64 counters
     "ctl": _NUM_CTRL_FIELDS * _INT32_BYTES,  # [ready, stop, command_mode, num_joints]
 }
@@ -74,7 +74,9 @@ SEQ_EFFORTS = 2
 SEQ_POSITION_CMD = 3
 SEQ_VELOCITY_CMD = 4
 SEQ_GRIPPER_STATE = 5
-SEQ_GRIPPER_CMD = 6
+SEQ_GRIPPER_CMD = 6  # left / side 0 command
+SEQ_GRIPPER_CMD_R = 7  # right / side 1 command (spare counter; _NUM_SEQ_COUNTERS == 8)
+_GRIPPER_CMD_SEQ = (SEQ_GRIPPER_CMD, SEQ_GRIPPER_CMD_R)
 
 # Control indices.
 CTRL_READY = 0
@@ -191,7 +193,7 @@ class ManipShmWriter:
         self.shm = ManipShmSet.create(key)
         self._last_pos_cmd_seq = 0
         self._last_vel_cmd_seq = 0
-        self._last_gripper_cmd_seq = 0
+        self._last_gripper_cmd_seq = [0, 0]  # per side (0 = left, 1 = right)
         # Zero everything.
         for buf in self.shm.as_list():
             np.ndarray((buf.size,), dtype=np.uint8, buffer=buf.buf)[:] = 0
@@ -213,9 +215,9 @@ class ManipShmWriter:
         self._increment_seq(SEQ_VELOCITIES)
         self._increment_seq(SEQ_EFFORTS)
 
-    def write_gripper_state(self, position: float) -> None:
-        arr = self._array(self.shm.grp, 2, np.float64)
-        arr[0] = position
+    def write_gripper_state(self, position: float, side: int = 0) -> None:
+        arr = self._array(self.shm.grp, 4, np.float64)
+        arr[2 * side] = position
         self._increment_seq(SEQ_GRIPPER_STATE)
 
     def read_position_command(self, num_joints: int) -> NDArray[np.float64] | None:
@@ -237,13 +239,15 @@ class ManipShmWriter:
         result: NDArray[np.float64] = arr[:num_joints].copy()
         return result
 
-    def read_gripper_command(self) -> float | None:
-        seq = self._get_seq(SEQ_GRIPPER_CMD)
-        if seq <= self._last_gripper_cmd_seq:
+    def read_gripper_command(self, side: int = 0) -> float | None:
+        """Return the side's gripper target if a new command arrived since last call
+        (per-side seq gate, so the gripper stays un-driven until first commanded)."""
+        seq = self._get_seq(_GRIPPER_CMD_SEQ[side])
+        if seq <= self._last_gripper_cmd_seq[side]:
             return None
-        self._last_gripper_cmd_seq = seq
-        arr = self._array(self.shm.grp, 2, np.float64)
-        return float(arr[1])
+        self._last_gripper_cmd_seq[side] = seq
+        arr = self._array(self.shm.grp, 4, np.float64)
+        return float(arr[2 * side + 1])
 
     def read_command_mode(self) -> int:
         return int(self._control()[CTRL_COMMAND_MODE])
@@ -313,9 +317,9 @@ class ManipShmReader:
         arr = np.ndarray((MAX_JOINTS,), dtype=np.float64, buffer=self.shm.eff.buf)
         return [float(x) for x in arr[:num_joints]]
 
-    def read_gripper_position(self) -> float:
-        arr = np.ndarray((2,), dtype=np.float64, buffer=self.shm.grp.buf)
-        return float(arr[0])
+    def read_gripper_position(self, side: int = 0) -> float:
+        arr = np.ndarray((4,), dtype=np.float64, buffer=self.shm.grp.buf)
+        return float(arr[2 * side])
 
     def write_position_command(self, positions: list[float]) -> None:
         n = min(len(positions), MAX_JOINTS)
@@ -331,10 +335,10 @@ class ManipShmReader:
         self._set_command_mode(CMD_MODE_VELOCITY)
         self._increment_seq(SEQ_VELOCITY_CMD)
 
-    def write_gripper_command(self, position: float) -> None:
-        arr = np.ndarray((2,), dtype=np.float64, buffer=self.shm.grp.buf)
-        arr[1] = position
-        self._increment_seq(SEQ_GRIPPER_CMD)
+    def write_gripper_command(self, position: float, side: int = 0) -> None:
+        arr = np.ndarray((4,), dtype=np.float64, buffer=self.shm.grp.buf)
+        arr[2 * side + 1] = position
+        self._increment_seq(_GRIPPER_CMD_SEQ[side])
 
     def is_ready(self) -> bool:
         return bool(self._control()[CTRL_READY] == 1)

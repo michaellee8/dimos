@@ -415,10 +415,10 @@ class OpenArmAdapter:
     def write_cartesian_position(self, pose: dict[str, float], velocity: float = 1.0) -> bool:
         return False
 
-    def read_gripper_position(self) -> float | None:
+    def read_gripper_position(self, side: int = 0) -> float | None:
         return None
 
-    def write_gripper_position(self, position: float) -> bool:
+    def write_gripper_position(self, position: float, side: int = 0) -> bool:
         return False
 
     def read_force_torque(self) -> list[float] | None:

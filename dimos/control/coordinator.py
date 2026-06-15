@@ -67,6 +67,9 @@ if TYPE_CHECKING:
 
 logger = setup_logger()
 
+# Gripper side name -> SHM/adapter side index (0 = left/single gripper, 1 = right).
+_GRIPPER_SIDE_INDEX = {"left": 0, "right": 1}
+
 
 @dataclass
 class TaskConfig:
@@ -570,13 +573,18 @@ class ControlCoordinator(Module):
             return getattr(task, method)(**kwargs)
 
     @rpc
-    def set_gripper_position(self, hardware_id: str, position: float) -> bool:
+    def set_gripper_position(
+        self, hardware_id: str, position: float, side: str | int = "left"
+    ) -> bool:
         """Set gripper position on a specific hardware device.
 
         Args:
             hardware_id: ID of the hardware with the gripper
             position: Gripper position in meters
+            side: Which gripper — "left"/"right" or an index (0=left/single, 1=right).
+                Single-gripper robots ignore it (only side 0 exists).
         """
+        side_idx = _GRIPPER_SIDE_INDEX.get(side, 0) if isinstance(side, str) else int(side)
         with self._hardware_lock:
             hw = self._hardware.get(hardware_id)
             if hw is None:
@@ -585,22 +593,26 @@ class ControlCoordinator(Module):
             if isinstance(hw, ConnectedTwistBase):
                 logger.warning(f"Hardware '{hardware_id}' is a twist base, no gripper support")
                 return False
-            return hw.adapter.write_gripper_position(position)
+            return hw.command_gripper(position, side_idx)
 
     @rpc
-    def get_gripper_position(self, hardware_id: str) -> float | None:
+    def get_gripper_position(
+        self, hardware_id: str, side: str | int = "left"
+    ) -> float | None:
         """Get gripper position from a specific hardware device.
 
         Args:
             hardware_id: ID of the hardware with the gripper
+            side: Which gripper — "left"/"right" or an index (0=left/single, 1=right).
         """
+        side_idx = _GRIPPER_SIDE_INDEX.get(side, 0) if isinstance(side, str) else int(side)
         with self._hardware_lock:
             hw = self._hardware.get(hardware_id)
             if hw is None:
                 return None
             if isinstance(hw, ConnectedTwistBase):
                 return None
-            return hw.adapter.read_gripper_position()
+            return hw.adapter.read_gripper_position(side_idx)
 
     @rpc
     def start(self) -> None:

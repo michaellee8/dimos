@@ -246,12 +246,13 @@ def r1pro_bimanual(
         },
     }
     if add_gripper:
-        # Single (left) gripper for now: the MuJoCo sim drives the first gripper
-        # actuator (left, at index dof). The right gripper needs the per-side
-        # SHM/adapter extension (follow-on). Finger range is [0 closed, 0.05 open].
+        # Both grippers, in SIDE ORDER: list position 0 -> left (SHM side 0), 1 -> right
+        # (SHM side 1). The MuJoCo sim drives gripper actuators 18 (left) / 19 (right);
+        # the control stack routes per-side by this list order. Finger range is
+        # [0 closed, 0.05 open].
         defaults["gripper"] = GripperConfig(
             type="r1pro",
-            joints=["left_gripper"],
+            joints=["left_gripper", "right_gripper"],
             open_position=0.05,
             close_position=0.0,
         )

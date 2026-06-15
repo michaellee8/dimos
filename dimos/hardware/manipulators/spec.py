@@ -214,12 +214,14 @@ class ManipulatorAdapter(Protocol):
         """
         ...
 
-    def read_gripper_position(self) -> float | None:
-        """Read gripper position (meters). None if no gripper."""
+    def read_gripper_position(self, side: int = 0) -> float | None:
+        """Read gripper position (meters) for the side (0=left/single, 1=right).
+        None if that gripper is absent."""
         ...
 
-    def write_gripper_position(self, position: float) -> bool:
-        """Command gripper position. False if no gripper."""
+    def write_gripper_position(self, position: float, side: int = 0) -> bool:
+        """Command gripper position for the side (0=left/single, 1=right).
+        False if that gripper is absent."""
         ...
 
     def read_force_torque(self) -> list[float] | None:

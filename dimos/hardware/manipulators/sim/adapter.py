@@ -72,6 +72,7 @@ class ShmMujocoAdapter:
         self._error_code = 0
         self._error_message = ""
         self._has_gripper = False
+        self._num_grippers = 0  # 1 for single-gripper arms, 2 for dual-arm (R1Pro)
         self._effort_mode_warned = False
 
     def connect(self) -> bool:
@@ -102,10 +103,16 @@ class ShmMujocoAdapter:
             time.sleep(_READY_WAIT_POLL_S)
 
         num_joints = self._shm.num_joints()
-        self._has_gripper = num_joints > self._dof
+        self._num_grippers = max(0, num_joints - self._dof)
+        self._has_gripper = self._num_grippers > 0
         self._connected = True
         self._servos_enabled = True
-        logger.info("ShmMujocoAdapter connected", dof=self._dof, gripper=self._has_gripper)
+        logger.info(
+            "ShmMujocoAdapter connected",
+            dof=self._dof,
+            gripper=self._has_gripper,
+            num_grippers=self._num_grippers,
+        )
         return True
 
     def disconnect(self) -> None:
@@ -222,15 +229,15 @@ class ShmMujocoAdapter:
     def write_cartesian_position(self, pose: dict[str, float], velocity: float = 1.0) -> bool:
         return False
 
-    def read_gripper_position(self) -> float | None:
-        if not self._has_gripper or self._shm is None:
+    def read_gripper_position(self, side: int = 0) -> float | None:
+        if self._shm is None or side >= self._num_grippers:
             return None
-        return self._shm.read_gripper_position()
+        return self._shm.read_gripper_position(side)
 
-    def write_gripper_position(self, position: float) -> bool:
-        if not self._has_gripper or self._shm is None:
+    def write_gripper_position(self, position: float, side: int = 0) -> bool:
+        if self._shm is None or side >= self._num_grippers:
             return False
-        self._shm.write_gripper_command(position)
+        self._shm.write_gripper_command(position, side)
         return True
 
     def read_force_torque(self) -> list[float] | None:

@@ -253,16 +253,16 @@ class A750Adapter:
         self._trace("write_cartesian_position", pose=pose, velocity=velocity)
         return self._connected
 
-    def read_gripper_position(self) -> float | None:
-        """Read gripper finger position as offset from center in meters."""
+    def read_gripper_position(self, side: int = 0) -> float | None:
+        """Read gripper finger position as offset from center (m). Side ignored — single gripper."""
         if not self._connected:
             return None
 
         state = self._robot.get_current_state()
         return state.gripper.pos_m  # type: ignore[no-any-return]
 
-    def write_gripper_position(self, position: float) -> bool:
-        """Command gripper position."""
+    def write_gripper_position(self, position: float, side: int = 0) -> bool:
+        """Command gripper position (side ignored — single gripper)."""
         if not self._enabled:
             return False
 

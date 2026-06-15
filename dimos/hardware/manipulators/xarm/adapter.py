@@ -303,8 +303,8 @@ class XArmAdapter(ManipulatorAdapter):
         )
         return code == 0
 
-    def read_gripper_position(self) -> float | None:
-        """Read gripper position (mm -> meters)."""
+    def read_gripper_position(self, side: int = 0) -> float | None:
+        """Read gripper position (mm -> meters). Side ignored — single gripper."""
         if not self._arm:
             return None
 
@@ -315,8 +315,8 @@ class XArmAdapter(ManipulatorAdapter):
             return pos * MM_TO_M
         return None
 
-    def write_gripper_position(self, position: float) -> bool:
-        """Write gripper position (meters -> mm)."""
+    def write_gripper_position(self, position: float, side: int = 0) -> bool:
+        """Write gripper position (meters -> mm). Side ignored — single gripper."""
         if not self._arm:
             return False
 

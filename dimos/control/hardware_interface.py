@@ -118,15 +118,14 @@ class ConnectedHardware:
             for i, name in enumerate(self._arm_joint_names)
         }
 
-        # Append gripper joint(s) via adapter gripper method
-        if self._gripper_joints:
-            gripper_pos = self._adapter.read_gripper_position()
-            for gj in self._gripper_joints:
-                result[gj] = JointState(
-                    position=gripper_pos if gripper_pos is not None else 0.0,
-                    velocity=0.0,
-                    effort=0.0,
-                )
+        # Append gripper joint(s) per side (list order: 0 = left/single, 1 = right).
+        for side_idx, gj in enumerate(self._gripper_joints):
+            gripper_pos = self._adapter.read_gripper_position(side_idx)
+            result[gj] = JointState(
+                position=gripper_pos if gripper_pos is not None else 0.0,
+                velocity=0.0,
+                effort=0.0,
+            )
 
         return result
 
@@ -183,15 +182,24 @@ class ConnectedHardware:
             case _:
                 arm_ok = False
 
-        # Send gripper joints via adapter gripper method
+        # Send gripper joints per side (list order: 0 = left/single, 1 = right).
         gripper_ok = True
-        for gj in self._gripper_joints:
+        for side_idx, gj in enumerate(self._gripper_joints):
             if gj in self._last_commanded:
                 gripper_ok = (
-                    self._adapter.write_gripper_position(self._last_commanded[gj]) and gripper_ok
+                    self._adapter.write_gripper_position(self._last_commanded[gj], side=side_idx)
+                    and gripper_ok
                 )
 
         return arm_ok and gripper_ok
+
+    def command_gripper(self, position: float, side: int = 0) -> bool:
+        """Command a gripper side directly AND record it as the last command, so the
+        per-tick write_command loop keeps holding it (otherwise an active arm
+        trajectory would re-write the gripper from its stale last value)."""
+        if 0 <= side < len(self._gripper_joints):
+            self._last_commanded[self._gripper_joints[side]] = position
+        return self._adapter.write_gripper_position(position, side=side)
 
     def _initialize_last_commanded(self) -> None:
         """Initialize last_commanded with current hardware positions."""
@@ -201,11 +209,10 @@ class ConnectedHardware:
                 for i, name in enumerate(self._arm_joint_names):
                     self._last_commanded[name] = current[i]
 
-                # Initialize gripper joint(s) from adapter
-                if self._gripper_joints:
-                    gripper_pos = self._adapter.read_gripper_position()
-                    for gj in self._gripper_joints:
-                        self._last_commanded[gj] = gripper_pos if gripper_pos is not None else 0.0
+                # Initialize gripper joint(s) from adapter, per side.
+                for side_idx, gj in enumerate(self._gripper_joints):
+                    gripper_pos = self._adapter.read_gripper_position(side_idx)
+                    self._last_commanded[gj] = gripper_pos if gripper_pos is not None else 0.0
 
                 self._initialized = True
                 return
