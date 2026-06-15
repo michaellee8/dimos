@@ -58,13 +58,10 @@ find_package(yaml-cpp REQUIRED)
 # glog (iVox map backend — include/ivox/ivox3d.h needs glog)
 find_package(glog REQUIRED)
 
-find_library(LIVOX_SDK livox_lidar_sdk_shared)
-if(NOT LIVOX_SDK)
-  message(FATAL_ERROR "Livox SDK2 not found. Available via nix flake in lidar/livox/")
+# Shared native-module helper (dimos_native_module.hpp) lives in lidar/common.
+if(NOT COMMON_DIR)
+  set(COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../common)
 endif()
-get_filename_component(LIVOX_SDK_LIB_DIR ${LIVOX_SDK} DIRECTORY)
-get_filename_component(LIVOX_SDK_PREFIX ${LIVOX_SDK_LIB_DIR} DIRECTORY)
-set(LIVOX_SDK_INCLUDE_DIR ${LIVOX_SDK_PREFIX}/include)
 
 add_executable(pointlio_native
   main.cpp
@@ -72,10 +69,6 @@ add_executable(pointlio_native
   ${FASTLIO_DIR}/src/Estimator.cpp
   ${FASTLIO_DIR}/src/parameters.cpp
 )
-
-if(NOT LIVOX_COMMON_DIR)
-  set(LIVOX_COMMON_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../common)
-endif()
 
 target_include_directories(pointlio_native PRIVATE
   ${FASTLIO_DIR}/include
@@ -86,13 +79,11 @@ target_include_directories(pointlio_native PRIVATE
   ${EIGEN3_INCLUDE_DIR}
   ${PCL_INCLUDE_DIRS}
   ${CMAKE_CURRENT_SOURCE_DIR}
-  ${LIVOX_COMMON_DIR}
-  ${LIVOX_SDK_INCLUDE_DIR}
+  ${COMMON_DIR}
 )
 
 target_link_libraries(pointlio_native PRIVATE
   ${LCM_LIBRARIES}
-  ${LIVOX_SDK}
   ${PCL_LIBRARIES}
   yaml-cpp::yaml-cpp
   glog::glog

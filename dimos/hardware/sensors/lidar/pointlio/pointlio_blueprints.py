@@ -14,19 +14,23 @@
 
 
 from dimos.core.coordination.blueprints import autoconnect
+from dimos.hardware.sensors.lidar.livox.module import Mid360
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
 from dimos.mapping.voxels import VoxelGridMapper
 from dimos.visualization.vis_module import vis_module
 
 voxel_size = 0.05
 
-
+# Mid360 owns the Livox SDK and publishes imu + lidar; PointLio consumes those
+# (auto-wired by stream name/type) and publishes odometry.
 mid360_pointlio = autoconnect(
+    Mid360.blueprint(),
     PointLio.blueprint(),
     vis_module("rerun"),
-).global_config(n_workers=2, robot_model="mid360_pointlio")
+).global_config(n_workers=3, robot_model="mid360_pointlio")
 
 mid360_pointlio_voxels = autoconnect(
+    Mid360.blueprint(),
     PointLio.blueprint(),
     VoxelGridMapper.blueprint(voxel_size=voxel_size, carve_columns=False),
     vis_module(
@@ -37,4 +41,4 @@ mid360_pointlio_voxels = autoconnect(
             },
         },
     ),
-).global_config(n_workers=3, robot_model="mid360_pointlio_voxels")
+).global_config(n_workers=4, robot_model="mid360_pointlio_voxels")
