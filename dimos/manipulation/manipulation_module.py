@@ -509,6 +509,15 @@ class ManipulationModule(Module):
         self._error_message = msg
         return False
 
+    def _clear_planning_fault(self) -> None:
+        """Clear a planning FAULT back to IDLE so a retry can plan again. Used between
+        grasp candidates: one candidate failing to plan must not block the next. No-op
+        while executing (don't clobber a live trajectory)."""
+        with self._lock:
+            if self._state == ManipulationState.FAULT:
+                self._state = ManipulationState.IDLE
+                self._error_message = ""
+
     def _dismiss_preview(self, robot_id: WorldRobotID) -> None:
         """Hide the preview ghost if the world supports it."""
         if self._world_monitor is None:

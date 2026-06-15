@@ -193,12 +193,16 @@ class PickAndPlaceModule(ManipulationModule):
                 "No world monitor available",
             )
         count = self._world_monitor.clear_perception_obstacles()
-        # Keep ground-truth detections: they live ONLY in the snapshot (there is no
-        # live perception cache to re-populate from), so clearing obstacles must not
-        # drop them or a follow-up pick/place loses the objects. Live-perception runs
-        # still clear, since the next scan refreshes the snapshot from the cache.
-        if not self.config.ground_truth_objects:
-            self._detection_snapshot = []
+        # Ground-truth objects are the KNOWN SCENE, not transient perception: keep the
+        # detections (they live only in the snapshot, with no live cache to refresh from)
+        # AND re-seed them in the planning world so they stay visible/avoided. pick()
+        # already drops just the target object for its approach, so a blanket clear here
+        # would only make the whole desk vanish. Live-perception runs still clear fully
+        # (the next scan refreshes from the cache).
+        if self.config.ground_truth_objects:
+            self._seed_ground_truth_obstacles(self._detection_snapshot)
+            return SkillResult.ok("Ground-truth objects kept (clear is a no-op in sim)")
+        self._detection_snapshot = []
         return SkillResult.ok(f"Cleared {count} perception obstacle(s) from planning world")
 
     @rpc
@@ -739,8 +743,11 @@ then refreshes perception obstacles.
                 f"Planning approach to pre-grasp with {chosen} arm "
                 f"(attempt {i + 1}/{max_attempts})..."
             )
-            if not self._plan_arm_to_pose(pre_grasp_pose, chosen, rname, grasp_tcp=True, grasp_roll=grasp_roll):
+            if not self._plan_arm_to_pose(
+                pre_grasp_pose, chosen, rname, grasp_tcp=True, grasp_roll=grasp_roll
+            ):
                 logger.info(f"Grasp candidate {i + 1} approach planning failed, trying next")
+                self._clear_planning_fault()  # so the next candidate can plan
                 continue  # Try next candidate
 
             # 3. Open gripper before approach
@@ -782,6 +789,16 @@ then refreshes perception obstacles.
                 f"Pick complete — grasped '{object_name}' with the {chosen} arm"
             )
 
+        # The pick failed: the target was never grasped, so put its obstacle back (it was
+        # dropped to plan the approach) — otherwise the object vanishes from the viz on a
+        # failed attempt. Also clear the FAULT so the next command can plan.
+        if (
+            self.config.ground_truth_objects
+            and target_det is not None
+            and self._world_monitor is not None
+        ):
+            self._seed_ground_truth_obstacles([target_det])
+        self._clear_planning_fault()
         return SkillResult.fail(
             "GRASP_ATTEMPTS_EXHAUSTED",
             f"All {max_attempts} grasp attempts failed for '{object_name}'",

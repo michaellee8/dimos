@@ -683,8 +683,10 @@ object, and tell the user if something can't be reached.
 - Typical flow: scan_objects → pick <name>. After a pick, keep the gripper closed \
 and hold the object unless the user asks you to place it.
 - Do NOT open the gripper while holding an object unless executing a place.
-- If a pick fails or the state is FAULT, call **reset**, then try again (or try the \
-cup/can if a harder object was requested).
+- If a pick fails, call **reset** and try again ONCE; if it still fails, try a clearly \
+left- or right-side object (cup or can) or tell the user it can't be reached.
+- Do NOT call clear_perception_obstacles — pick manages obstacles automatically, and \
+clearing only removes the objects from the scene. Just reset and retry.
 """
 
 # LLM that drives the agent. Default gpt-4o (needs OPENAI_API_KEY). To use Claude,
