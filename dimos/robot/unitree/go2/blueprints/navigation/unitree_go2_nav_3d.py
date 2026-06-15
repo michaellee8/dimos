@@ -20,6 +20,7 @@ The go2's built-in lidar and odometry are remapped aside and unused for
 navigation. The map, paths, and robot pose all live in fastlio's world frame.
 """
 
+import functools
 import os
 from typing import Any
 
@@ -41,22 +42,19 @@ voxel_size = 0.1
 go2_lidar_height = 0.5
 
 
-def _downsampled(stride: int) -> Any:
+def _downsample(msg: Any, stride: int) -> Any:
     """Stride a cloud before rendering. Cuts viewer encode and stream weight.
 
     The full-rate cloud still goes to the planner over LCM. This only thins
-    what the bridge sends to the viewer.
+    what the bridge sends to the viewer. Module-level so it stays picklable
+    when the vis config is shipped to the worker process.
     """
-
-    def render(msg: Any) -> Any:
-        points = msg.points_f32()
-        if len(points) == 0:
-            return None
-        if len(points) <= stride:
-            return msg
-        return PointCloud2.from_numpy(points[::stride], frame_id=msg.frame_id)
-
-    return render
+    points = msg.points_f32()
+    if len(points) == 0:
+        return None
+    if len(points) <= stride:
+        return msg
+    return PointCloud2.from_numpy(points[::stride], frame_id=msg.frame_id)
 
 
 def _render_path(msg: Any) -> Any:
@@ -93,8 +91,8 @@ _nav_rerun_config = {
     "static": {"world/tf/body": _static_robot_body},
     "visual_override": {
         **rerun_config["visual_override"],
-        "world/global_map": _downsampled(8),
-        "world/local_map": _downsampled(3),
+        "world/global_map": functools.partial(_downsample, stride=8),
+        "world/local_map": functools.partial(_downsample, stride=3),
         "world/path": _render_path,
         "world/camera_info": None,
         "world/color_image": None,
