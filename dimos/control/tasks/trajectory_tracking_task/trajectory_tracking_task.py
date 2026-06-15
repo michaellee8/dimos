@@ -71,9 +71,11 @@ GainProfile = Literal["default", "aggressive"]
 class TrajectoryTrackingTaskConfig:
     joint_names: list[str] = field(default_factory=lambda: ["base/vx", "base/vy", "base/wz"])
     priority: int = 20
-    # Per-robot gains/limits (plant fit). Defaults to the FlowBase; the Go2
-    # (or any characterized base) passes a config built from its artifact.
+    # Per-robot gains/limits (plant fit). Defaults to the FlowBase. Either
+    # inject a TrackingConfig directly, or set ``artifact_path`` to load one
+    # from a characterization JSON (lazily, on the first start_path).
     tracking: TrackingConfig = FLOWBASE_TRACKING
+    artifact_path: str | None = None
     # Cruise-speed cap for the trajectory profile; the generator clamps it
     # to the planning margins regardless.
     max_speed: float | None = None
@@ -103,6 +105,11 @@ class TrajectoryTrackingTask(BaseControlTask):
         self._name = name
         self._config = config
         self._tracking = config.tracking
+        # Artifact (if any) is loaded LAZILY on the first start_path so a
+        # missing/not-yet-characterized file never breaks coordinator startup
+        # (the task is inactive until a run begins). Mirrors precision_follower.
+        self._artifact_path = config.artifact_path
+        self._artifact_loaded = False
         self._joint_names_list = list(config.joint_names)
         self._joint_names = frozenset(config.joint_names)
         self._kp = self._tracking.kp(config.gain_profile)
@@ -300,10 +307,26 @@ class TrajectoryTrackingTask(BaseControlTask):
             )
         return True
 
+    def _ensure_artifact_loaded(self) -> None:
+        """Load the characterization artifact on first use and rebuild the
+        gains/compensator from it. Deferred from __init__ so startup never
+        depends on the file existing."""
+        if self._artifact_loaded or not self._artifact_path:
+            return
+        self._tracking = tracking_config_from_artifact_path(self._artifact_path)
+        self._kp = self._tracking.kp(self._config.gain_profile)
+        if self._compensator is not None:
+            self._compensator = FeedforwardGainCompensator(self._tracking.feedforward_config())
+        self._artifact_loaded = True
+        logger.info(
+            f"TrajectoryTrackingTask '{self._name}' loaded artifact ({self._tracking.provenance})"
+        )
+
     def start_path(self, path: Path, current_odom: PoseStamped) -> bool:
         if path is None or len(path.poses) < 2:
             logger.warning(f"TrajectoryTrackingTask '{self._name}': invalid path")
             return False
+        self._ensure_artifact_loaded()
         del current_odom  # pose flows in through compute()'s CoordinatorState
         self._trajectory = TimedTrajectory.from_path(
             path,
@@ -364,17 +387,14 @@ class TrajectoryTrackingTaskParams(BaseConfig):
 
 def create_task(cfg: Any, hardware: Any) -> TrajectoryTrackingTask:
     params = TrajectoryTrackingTaskParams.model_validate(cfg.params)
-    tracking = (
-        tracking_config_from_artifact_path(params.artifact_path)
-        if params.artifact_path
-        else FLOWBASE_TRACKING
-    )
+    # The artifact is loaded lazily on start_path (see _ensure_artifact_loaded),
+    # so a missing file never blocks coordinator startup.
     return TrajectoryTrackingTask(
         cfg.name,
         TrajectoryTrackingTaskConfig(
             joint_names=cfg.joint_names,
             priority=cfg.priority,
-            tracking=tracking,
+            artifact_path=params.artifact_path,
             max_speed=params.max_speed,
             gain_profile=params.gain_profile,
             compensate_gain=params.compensate_gain,

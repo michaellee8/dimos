@@ -30,6 +30,7 @@ from dimos.control.tasks.trajectory_tracking_task.constants import (
 from dimos.control.tasks.trajectory_tracking_task.trajectory_tracking_task import (
     TrajectoryTrackingTask,
     TrajectoryTrackingTaskConfig,
+    create_task,
 )
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -312,6 +313,24 @@ def test_go2_artifact_config_derives_sane_gains() -> None:
     assert tracking.k_hat.x == pytest.approx(GO2_PLANT_FITTED.vx.K)
     assert "go2" in tracking.provenance
     assert tracking.plan_max_vel.x > 0.0 and tracking.a_lat_max > 0.0
+
+
+def test_missing_artifact_does_not_break_creation() -> None:
+    """Regression: a task pointed at a not-yet-created artifact must still be
+    constructible (inactive) so its mere presence in a coordinator never
+    blocks startup — the file is only required when a run actually begins."""
+
+    class _Cfg:
+        name = "trajectory_tracker"
+        joint_names = list(_JOINTS)
+        priority = 10
+        params = {"artifact_path": "/does/not/exist.json"}
+
+    task = create_task(_Cfg(), None)
+    assert not task.is_active()
+    # Only start_path (an actual run) should touch the file.
+    with pytest.raises(FileNotFoundError):
+        task.start_path(_line_path(2.0), _pose(0.0, 0.0))
 
 
 def test_go2_artifact_config_tracks_in_sim() -> None:
