@@ -25,7 +25,10 @@ from __future__ import annotations
 import math
 from pathlib import Path
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from pydantic import Field
 
 from dimos.agents.annotation import skill
 from dimos.agents.skill_result import SkillResult
@@ -71,8 +74,27 @@ _FAR_OCCLUSION_XY_THRESHOLD = 0.8
 _TALL_OBJECT_MIN_HEIGHT = 0.06
 
 
+@dataclass
+class _GroundTruthDetection:
+    """Lightweight ground-truth 'detection' (duck-typed for the pick pipeline,
+    which only needs name/center/size/detections_count). Used in sim where YOLO
+    is unreliable on synthetic objects; the sim already knows every object pose."""
+
+    name: str
+    center: Vector3
+    size: Vector3
+    object_id: str = ""
+    detections_count: int = 1
+
+
 class PickAndPlaceModuleConfig(ManipulationModuleConfig):
     """Configuration for PickAndPlaceModule (adds GraspGen settings)."""
+
+    # Sim ground-truth objects (name/position/dimensions) used as 'detections' when
+    # real perception is unavailable/unreliable; scan_objects() returns these. The
+    # 'manip_table'/table entry is ignored (it's not graspable). Empty = use the
+    # real perception (objects port) instead.
+    ground_truth_objects: list[dict[str, Any]] = Field(default_factory=list)
 
     # GraspGen Docker settings
     graspgen_docker_image: str = "dimos-graspgen:latest"
@@ -500,6 +522,25 @@ class PickAndPlaceModule(ManipulationModule):
 
         return SkillResult.ok("\n".join(lines))
 
+    def _ground_truth_detections(self) -> list[_GroundTruthDetection]:
+        """Build sim ground-truth detections from config (skips the table/floor)."""
+        dets: list[_GroundTruthDetection] = []
+        for spec in self.config.ground_truth_objects:
+            raw = str(spec.get("name", ""))
+            name = raw.replace("manip_", "")
+            if not name or "table" in name or name == "floor":
+                continue
+            pos, dim = spec["position"], spec["dimensions"]
+            dets.append(
+                _GroundTruthDetection(
+                    name=name,
+                    center=Vector3(float(pos[0]), float(pos[1]), float(pos[2])),
+                    size=Vector3(float(dim[0]), float(dim[1]), float(dim[2])),
+                    object_id=raw,
+                )
+            )
+        return dets
+
     @skill
     def scan_objects(
         self,
@@ -519,6 +560,18 @@ then refreshes perception obstacles.
         init_result = self.go_init(robot_name)
         if not init_result.is_success():
             return init_result
+
+        # Sim ground-truth: the sim knows every object pose, so use those directly
+        # (YOLO is unreliable on synthetic objects). The objects are already in the
+        # planning world as static obstacles; this just exposes them for pick/place.
+        if self.config.ground_truth_objects:
+            self._detection_snapshot = self._ground_truth_detections()
+            dets = self._detection_snapshot
+            if not dets:
+                return SkillResult.ok("No objects in scene")
+            lines = [f"Detected {len(dets)} object(s):"]
+            lines += [f"  - {d.name}: ({d.center.x:.3f}, {d.center.y:.3f}, {d.center.z:.3f})" for d in dets]
+            return SkillResult.ok("\n".join(lines))
 
         obstacles = self.refresh_obstacles(min_duration)
 

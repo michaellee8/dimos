@@ -590,8 +590,59 @@ r1pro_sim_preview = autoconnect(
 )
 
 
+# --- R1Pro agentic pick-and-place sim ------------------------------------------
+# PickAndPlaceModule (pick/place/scan skills) + MuJoCo sim + ground-truth "scan"
+# (YOLO is unreliable on the synthetic objects; the sim knows their poses) + viser.
+# The left arm has a working gripper (the right is a follow-on). McpServer exposes
+# the skills; add McpClient (gpt-4o) in the -agent variant.
+_r1pro_pick_cfg = _catalog_r1pro_bimanual(
+    name="arm",
+    adapter_type="sim_mujoco",
+    add_gripper=True,
+    **_r1pro_sim_preset.robot_config_kwargs,
+)
+
+r1pro_perception_sim = autoconnect(
+    PickAndPlaceModule.blueprint(
+        robots=[_r1pro_pick_cfg.to_robot_model_config()],
+        planning_timeout=10.0,
+        world_backend="roboplan",
+        planner_name="roboplan",
+        kinematics_name="pink",
+        visualization=_R1PRO_BIMANUAL_VIZ,
+        # Only the table is a startup collision obstacle (the graspable objects sit
+        # close to the robot body and would make the home pose collide -> go_init
+        # fails). The objects are ground-truth detections instead.
+        static_obstacles=[o for o in r1pro_scene_obstacles() if "table" in o["name"]],
+        ground_truth_objects=r1pro_scene_obstacles(),
+    ),
+    MujocoSimModule.blueprint(
+        **_r1pro_sim_preset.mujoco_module_kwargs,
+        headless=False,
+        dof=18,
+        camera_name="scan_camera",
+        base_frame_id="head_link",
+        enable_pointcloud=False,
+        fps=5,
+    ),
+    ControlCoordinator.blueprint(
+        tick_rate=100.0,
+        publish_joint_state=True,
+        joint_state_frame_id="coordinator",
+        hardware=[_r1pro_pick_cfg.to_hardware_component()],
+        tasks=[_r1pro_pick_cfg.to_task_config()],
+    ),
+    McpServer.blueprint(),
+).transports(
+    {
+        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+    }
+)
+
+
 __all__ = [
     "dual_xarm6_planner",
+    "r1pro_perception_sim",
     "r1pro_sim_preview",
     "xarm6_planner_only",
     "xarm7_planner_coordinator",
