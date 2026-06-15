@@ -75,6 +75,11 @@ _FAR_OCCLUSION_XY_THRESHOLD = 0.8
 # plunging deep and colliding with the object body.
 _TALL_OBJECT_MIN_HEIGHT = 0.06
 
+# Empirical grasp correction: the gripper was consistently knocking objects ~3cm to one
+# side, so shift every (ground-truth) grasp this far along +X (the robot's right, since
+# it faces +Y). Flip the sign or zero it if it over/under-corrects.
+_GRASP_RIGHT_OFFSET_M = 0.03
+
 
 @dataclass
 class _GroundTruthDetection:
@@ -442,15 +447,17 @@ class PickAndPlaceModule(ManipulationModule):
 
         if self.config.ground_truth_objects:
             # Exact pose known: grasp the TRUE CENTER (the occlusion shift below would put
-            # the fingers off the object's edge and push it). Add a small toward-base nudge
+            # the fingers off the object's edge and push it), plus a fixed +X correction so
+            # the gripper stops knocking objects to one side. Add a small toward-base nudge
             # as a SECOND candidate so objects at the arm's reach edge are still graspable;
             # the center is tried first (best grip).
-            poses = [_grasp_at(cx, cy)]
-            rel_x, rel_y = cx - bx, cy - by
+            gx0 = cx + _GRASP_RIGHT_OFFSET_M
+            poses = [_grasp_at(gx0, cy)]
+            rel_x, rel_y = gx0 - bx, cy - by
             d = (rel_x**2 + rel_y**2) ** 0.5
             if d > 1e-3:
                 nudge = min(0.03, max(0.0, min(det.size.x, det.size.y) / 2.0 - 0.01))
-                poses.append(_grasp_at(cx - rel_x / d * nudge, cy - rel_y / d * nudge))
+                poses.append(_grasp_at(gx0 - rel_x / d * nudge, cy - rel_y / d * nudge))
             logger.info(
                 f"Ground-truth grasp for '{object_name}': center=({cx:.3f},{cy:.3f},{gz:.3f}), "
                 f"{len(poses)} candidate(s), "
