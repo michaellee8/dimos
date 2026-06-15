@@ -87,7 +87,7 @@ class PointLioConfig(NativeModuleConfig):
     odom_parent_frame_id: str = FRAME_ODOM
     odom_frame_id: str = "base_link"
 
-    # FAST-LIO internal processing rates
+    # Point-LIO internal processing rates
     msr_freq: float = 50.0
     main_freq: float = 5000.0
 
@@ -100,7 +100,7 @@ class PointLioConfig(NativeModuleConfig):
     sor_mean_k: int = 50
     sor_stddev: float = 1.0
 
-    # FAST-LIO YAML config (relative to config/ dir, or absolute path)
+    # Point-LIO YAML config (relative to config/ dir, or absolute path)
     # C++ binary reads YAML directly via yaml-cpp
     config: Annotated[
         Path,
@@ -127,7 +127,7 @@ class PointLioConfig(NativeModuleConfig):
     cli_exclude: frozenset[str] = frozenset({"config", "odom_parent_frame_id"})
 
     def model_post_init(self, __context: object) -> None:
-        """Resolve the FAST-LIO YAML config to an absolute config_path."""
+        """Resolve the Point-LIO YAML config to an absolute config_path."""
         super().model_post_init(__context)
         cfg = self.config
         if not cfg.is_absolute():

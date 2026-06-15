@@ -1,14 +1,14 @@
 // Copyright 2026 Dimensional Inc.
 // SPDX-License-Identifier: Apache-2.0
 //
-// FAST-LIO2 + Livox Mid-360 native module for dimos NativeModule framework.
+// Point-LIO + Livox Mid-360 native module for dimos NativeModule framework.
 //
-// Binds Livox SDK2 directly into FAST-LIO-NON-ROS: SDK callbacks feed
-// CustomMsg/Imu to FastLio, which performs EKF-LOAM SLAM.  Sensor-frame
-// (mid360_link) point clouds and odometry are published on LCM.
+// Binds Livox SDK2 directly into the Point-LIO core: SDK callbacks feed
+// CustomMsg/Imu to the IESKF estimator, which performs LiDAR-inertial SLAM.
+// Sensor-frame (mid360_link) point clouds and odometry are published on LCM.
 //
 // Usage:
-//   ./fastlio2_native \
+//   ./pointlio_native \
 //       --lidar '/lidar#sensor_msgs.PointCloud2' \
 //       --odometry '/odometry#nav_msgs.Odometry' \
 //       --config_path /path/to/default.yaml \
@@ -43,7 +43,7 @@
 #include "sensor_msgs/PointCloud2.hpp"
 #include "sensor_msgs/PointField.hpp"
 
-// FAST-LIO (header-only core, compiled sources linked via CMake)
+// Point-LIO (header-only core, compiled sources linked via CMake)
 #include "fast_lio.hpp"
 #include "fast_lio_debug.hpp"
 
@@ -91,7 +91,7 @@ using dimos::time_from_seconds;
 using dimos::make_header;
 
 // Publish the lidar point cloud in the sensor body frame (g_frame_id).
-// `cloud` is FAST-LIO's undistorted scan in the sensor's own frame
+// `cloud` is Point-LIO's undistorted scan in the sensor's own frame
 // (get_body_cloud), so points are published as-is with no world registration.
 static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
                           const std::string& topic = "") {
@@ -162,7 +162,7 @@ static void publish_odometry(const custom_messages::Odometry& odom, double times
         msg.pose.covariance[idx] = odom.pose.covariance[idx];
     }
 
-    // Twist zeroed — FAST-LIO doesn't output velocity.
+    // Twist zeroed — Point-LIO doesn't output velocity.
     msg.twist.twist.linear.x = 0;
     msg.twist.twist.linear.y = 0;
     msg.twist.twist.linear.z = 0;
@@ -316,7 +316,7 @@ static void on_info_change(const uint32_t handle, const LivoxLidarInfo* info,
     std::memcpy(ip, info->lidar_ip, 16);
 
     if (fastlio_debug) {
-        printf("[fastlio2] Device connected: handle=%u type=%u sn=%s ip=%s\n",
+        printf("[pointlio] Device connected: handle=%u type=%u sn=%s ip=%s\n",
                handle, info->dev_type, sn, ip);
     }
 
@@ -340,14 +340,14 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // FAST-LIO config path
+    // Point-LIO config path
     std::string config_path = mod.arg("config_path", "");
     if (config_path.empty()) {
         fprintf(stderr, "Error: --config_path <path> is required\n");
         return 1;
     }
 
-    // FAST-LIO internal processing rates
+    // Point-LIO internal processing rates
     double msr_freq = mod.arg_float("msr_freq", 50.0f);
     double main_freq = mod.arg_float("main_freq", 5000.0f);
 
@@ -364,7 +364,7 @@ int main(int argc, char** argv) {
     filter_cfg.sor_mean_k = mod.arg_int("sor_mean_k", 50);
     filter_cfg.sor_stddev = mod.arg_float("sor_stddev", 1.0f);
 
-    // Propagates to the FAST-LIO core via the `fastlio_debug` global.
+    // Propagates to the Point-LIO core via the `fastlio_debug` global.
     bool debug = mod.arg_bool("debug", false);
     fastlio_debug = debug;
 
@@ -383,17 +383,17 @@ int main(int argc, char** argv) {
     ports.host_log_data   = mod.arg_int("host_log_data_port", port_defaults.host_log_data);
 
     if (debug) {
-        printf("[fastlio2] Starting FAST-LIO2 + Livox Mid-360 native module\n");
-        printf("[fastlio2] lidar topic: %s\n",
+        printf("[pointlio] Starting Point-LIO + Livox Mid-360 native module\n");
+        printf("[pointlio] lidar topic: %s\n",
                g_lidar_topic.empty() ? "(disabled)" : g_lidar_topic.c_str());
-        printf("[fastlio2] odometry topic: %s\n",
+        printf("[pointlio] odometry topic: %s\n",
                g_odometry_topic.empty() ? "(disabled)" : g_odometry_topic.c_str());
-        printf("[fastlio2] config: %s\n", config_path.c_str());
-        printf("[fastlio2] host_ip: %s  lidar_ip: %s  frequency: %.1f Hz\n",
+        printf("[pointlio] config: %s\n", config_path.c_str());
+        printf("[pointlio] host_ip: %s  lidar_ip: %s  frequency: %.1f Hz\n",
                host_ip.c_str(), lidar_ip.c_str(), g_frequency);
-        printf("[fastlio2] pointcloud_freq: %.1f Hz  odom_freq: %.1f Hz\n",
+        printf("[pointlio] pointcloud_freq: %.1f Hz  odom_freq: %.1f Hz\n",
                pointcloud_freq, odom_freq);
-        printf("[fastlio2] voxel_size: %.3f  sor_mean_k: %d  sor_stddev: %.1f\n",
+        printf("[pointlio] voxel_size: %.3f  sor_mean_k: %d  sor_stddev: %.1f\n",
                filter_cfg.voxel_size, filter_cfg.sor_mean_k, filter_cfg.sor_stddev);
     }
 
@@ -407,10 +407,10 @@ int main(int argc, char** argv) {
     }
     g_lcm = &lcm;
 
-    if (debug) printf("[fastlio2] Initializing FAST-LIO...\n");
+    if (debug) printf("[pointlio] Initializing Point-LIO...\n");
     FastLio fast_lio(config_path, msr_freq, main_freq);
     g_fastlio = &fast_lio;
-    if (debug) printf("[fastlio2] FAST-LIO initialized.\n");
+    if (debug) printf("[pointlio] Point-LIO initialized.\n");
 
     // Main-loop state. Body lives in `run_main_iter`, driven by the wall-paced
     // main thread.
@@ -453,7 +453,7 @@ int main(int argc, char** argv) {
         }
 
         // At frame rate: drain accumulated points into a CustomMsg and feed
-        // FAST-LIO. Hold g_pc_mutex across the rate-limit check AND swap so the
+        // Point-LIO. Hold g_pc_mutex across the rate-limit check AND swap so the
         // clock + accumulator are observed atomically (no packet slips between).
         std::vector<custom_messages::CustomPoint> points;
         uint64_t frame_start = 0;
@@ -484,7 +484,7 @@ int main(int argc, char** argv) {
             fast_lio.feed_lidar(lidar_msg);
         }
 
-        // One FAST-LIO IESKF step (cheap when queues empty).
+        // One Point-LIO IESKF step (cheap when queues empty).
         {
             timing::Scope scope(t_process);
             fast_lio.process();
@@ -539,7 +539,7 @@ int main(int argc, char** argv) {
         LivoxLidarSdkUninit();
         return 1;
     }
-    if (debug) printf("[fastlio2] SDK started, waiting for device...\n");
+    if (debug) printf("[pointlio] SDK started, waiting for device...\n");
 
     while (g_running.load()) {
         auto loop_start = std::chrono::high_resolution_clock::now();
@@ -556,11 +556,11 @@ int main(int argc, char** argv) {
         }
     }
 
-    if (debug) printf("[fastlio2] Shutting down...\n");
+    if (debug) printf("[pointlio] Shutting down...\n");
     g_fastlio = nullptr;
     LivoxLidarSdkUninit();
     g_lcm = nullptr;
 
-    if (debug) printf("[fastlio2] Done.\n");
+    if (debug) printf("[pointlio] Done.\n");
     return 0;
 }
