@@ -683,9 +683,17 @@ and hold the object unless the user asks you to place it.
 cup/can if a harder object was requested).
 """
 
+# Claude (Anthropic) drives the agent — needs ANTHROPIC_API_KEY + langchain-anthropic.
+# init_chat_model parses the "anthropic:" prefix; swap the model id if your account
+# doesn't have this exact one (e.g. "anthropic:claude-3-5-sonnet-latest").
+_R1PRO_AGENT_MODEL = "anthropic:claude-sonnet-4-5-20250929"
+
 r1pro_perception_sim_agent = autoconnect(
     r1pro_perception_sim,
-    McpClient.blueprint(system_prompt=_R1PRO_PERCEPTION_AGENT_SYSTEM_PROMPT),
+    McpClient.blueprint(
+        system_prompt=_R1PRO_PERCEPTION_AGENT_SYSTEM_PROMPT,
+        model=_R1PRO_AGENT_MODEL,
+    ),
 )
 
 
