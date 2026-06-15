@@ -48,17 +48,17 @@ _go2_joints = make_twist_base_joints("go2")
 
 # Default Go2 characterization artifact (TuningConfig JSON). Both the
 # precision_follower and the trajectory_tracker load their plant model +
-# envelope from it; override per run with
-#   -o coordinator.tasks[<i>].params.artifact_path=<full/path/to.json>
-# NOTE: the holonomic trajectory_tracker needs an artifact with a REAL vy
-# fit (not the placeholder vy=vx) — point it at a fresh Go2 characterization
-# that excites the lateral axis.
+# envelope from it. Task params are NOT reachable by `dimos run -o` (that
+# only overrides module config fields, not the baked-in task list) — so to
+# use a fresh fit, update this constant. The holonomic trajectory_tracker
+# needs an artifact with a REAL vy fit (lateral axis excited), which the
+# standard `unitree-go2-characterization` run produces.
 _GO2_ARTIFACT = str(
     get_project_root()
     / "data"
     / "characterization"
     / "go2"
-    / "go2_config_hw_concrete_2026-05-28_normal.json"
+    / "go2_config_hw_concrete_2026-06-15_850e4b205.json"
 )
 
 

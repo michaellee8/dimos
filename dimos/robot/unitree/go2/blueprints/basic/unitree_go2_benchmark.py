@@ -98,8 +98,8 @@ unitree_go2_benchmark = _make(unitree_go2_coordinator, gait_tag="default")
 # ``unitree-go2-characterization-rage`` for a consistent measurement.
 unitree_go2_benchmark_rage = _make(unitree_go2_coordinator_rage, gait_tag="rage")
 # Trajtrack arm — routes runs through the coordinator's trajectory_tracker
-# task (FF + per-axis P, built from the Go2 artifact). Pass the fresh
-# real-vy Go2 fit via -o coordinator.tasks[3].params.artifact_path=<json>.
+# task (FF + per-axis P, built from the Go2 artifact = _GO2_ARTIFACT in the
+# coordinator). Pass the SAME artifact to the scorer with -o benchmarker.config.
 unitree_go2_benchmark_trajtrack = _make(
     unitree_go2_coordinator, gait_tag="trajtrack", trajtrack=True
 )
