@@ -69,7 +69,14 @@ from dimos.msgs.nav_msgs.Path import Path as NavPath
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.std_msgs.Int8 import Int8
 from dimos.robot.unitree.keyboard_teleop import GATE_ADVANCE, GATE_QUIT, GATE_SKIP
-from dimos.utils.benchmarking.paths import circle, single_corner, square, straight_line
+from dimos.utils.benchmarking.paths import (
+    circle,
+    rounded_square,
+    single_corner,
+    smooth_corner,
+    square,
+    straight_line,
+)
 from dimos.utils.benchmarking.plant import ROBOT_PLANT_PROFILES, RobotPlantProfile
 from dimos.utils.benchmarking.scoring import ExecutedTrajectory, TrajectoryTick, score_run
 from dimos.utils.benchmarking.tuning import (
@@ -90,6 +97,7 @@ from dimos.utils.path_utils import get_project_root
 _JOINT_STATE_TOPIC = "/coordinator/joint_state"
 _PATH_FOLLOWER_TASK_NAME = "path_follower"  # bare/ff/profile arms
 _PRECISION_FOLLOWER_TASK_NAME = "precision_follower"  # rg arm
+_TRAJECTORY_TRACKER_TASK_NAME = "trajectory_tracker"  # trajtrack arm
 
 _ARRIVED_STATES = frozenset({"arrived", "completed"})
 _FAILED_STATES = frozenset({"aborted"})
@@ -364,11 +372,19 @@ def _run_baseline(
 
 
 def _path_set() -> dict:
-    """Real-space-constrained fixed path set (locked — do not widen)."""
+    """Real-space-constrained fixed path set.
+
+    Sharp corners (single_corner, square) keep the infinite-curvature 90°
+    geometry; their curved counterparts (smooth_corner, rounded_square)
+    fillet the vertices so a tracker can hold them at speed. Running both
+    gives the sharp-vs-curved comparison at one corner and around a loop.
+    """
     return {
         "straight_line": straight_line(),
         "single_corner": single_corner(leg_length=2.0, angle_deg=90.0),
+        "smooth_corner": smooth_corner(leg_length=2.0, angle_deg=90.0, arc_radius=0.5),
         "square": square(side=2.0),
+        "rounded_square": rounded_square(side=2.0, arc_radius=0.5),
         "circle": circle(radius=1.0),
     }
 
@@ -384,6 +400,7 @@ def _run_ladder(
     coord_rpc: RPCClient,
     recorder: _JointStateRecorder,
     use_rg: bool = False,
+    use_trajtrack: bool = False,
     gate_input: Callable[[str], str] = input,
     gate_keys_label: str = "ENTER=run  s=skip  q=quit",
     k_angular_values: list[float] | None = None,
@@ -405,8 +422,15 @@ def _run_ladder(
 
     # The RG arm runs against the precision_follower task — a path-follower
     # subclass that owns its own solve_profile() recompute on e_max
-    # updates. Benchmarker just picks the task name; no RG math here.
-    task_name = _PRECISION_FOLLOWER_TASK_NAME if use_rg else _PATH_FOLLOWER_TASK_NAME
+    # updates. The trajtrack arm runs against the trajectory_tracker task
+    # (time-parameterized FF + per-axis P). Benchmarker just picks the task
+    # name; the control law lives in the operator coord.
+    if use_trajtrack:
+        task_name = _TRAJECTORY_TRACKER_TASK_NAME
+    elif use_rg:
+        task_name = _PRECISION_FOLLOWER_TASK_NAME
+    else:
+        task_name = _PATH_FOLLOWER_TASK_NAME
 
     points: list[OperatingPoint] = []
     runs: list[dict] = []  # for the XY trajectory overlay
@@ -617,6 +641,11 @@ class BenchmarkerConfig(ModuleConfig):
     # the operator coord's precision_follower owns its own artifact +
     # solve_profile() recompute reacting to KeyboardTeleop's e_max stream).
     rg: bool = False
+    # OPT-IN: route runs through the trajectory_tracker task (trajtrack
+    # arm — time-parameterized FF + per-axis P with plant-gain inversion;
+    # gains from the vendored FlowBase fit, see
+    # dimos/control/tasks/trajectory_tracking_task/constants.py).
+    trajtrack: bool = False
     # OPT-IN: output directory for plots + standalone-arm JSONs (the
     # input config artifact augmentation always lands at args.config).
     out_dir: str | None = None
@@ -692,7 +721,14 @@ class Benchmarker(Module):
         tolerances = [float(t) for t in cfg.tolerances.split(",")]
         arm = (
             "+".join(
-                x for x, on in (("ff", cfg.ff), ("profile", cfg.profile), ("rg", cfg.rg)) if on
+                x
+                for x, on in (
+                    ("ff", cfg.ff),
+                    ("profile", cfg.profile),
+                    ("rg", cfg.rg),
+                    ("trajtrack", cfg.trajtrack),
+                )
+                if on
             )
             or "bare"
         )
@@ -770,6 +806,7 @@ class Benchmarker(Module):
                 coord_rpc=coord_rpc,
                 recorder=recorder,
                 use_rg=cfg.rg,
+                use_trajtrack=cfg.trajtrack,
                 gate_input=gate_input,
                 gate_keys_label=gate_keys_label,
                 k_angular_values=k_angular_values,
@@ -871,6 +908,13 @@ def main() -> None:
         "e_max from KeyboardTeleop's 0-9 keys; default OFF)",
     )
     ap.add_argument(
+        "--trajtrack",
+        action="store_true",
+        help="OPT-IN arm: route runs through the trajectory_tracker task "
+        "(time-parameterized FF + per-axis P with plant-gain inversion; "
+        "default OFF)",
+    )
+    ap.add_argument(
         "--out",
         default=None,
         help=f"output dir for plots + standalone-arm JSON (default: {DEFAULT_OUT_DIR}/<robot_id>/)",
@@ -887,6 +931,7 @@ def main() -> None:
         ff=args.ff,
         profile=args.profile,
         rg=args.rg,
+        trajtrack=args.trajtrack,
         out_dir=args.out,
     )
     instance.start()

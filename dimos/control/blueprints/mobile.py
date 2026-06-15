@@ -60,6 +60,11 @@ from dimos.robot.unitree.g1.config import G1_LOCAL_PLANNER_PRECOMPUTED_PATHS
 from dimos.robot.unitree.keyboard_teleop import KeyboardTeleop
 from dimos.utils.benchmarking.benchmark import Benchmarker
 from dimos.utils.benchmarking.characterization_recorder import CharacterizationRecorder
+from dimos.utils.benchmarking.plant import (
+    FLOWBASE_CMD_MAX_ACC,
+    FLOWBASE_CMD_MAX_VEL,
+    FLOWBASE_PLANT_FITTED,
+)
 from dimos.utils.path_utils import get_project_root
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 from dimos.visualization.rerun.websocket_server import RerunWebSocketServer
@@ -228,9 +233,7 @@ def _make_flowbase_nav(lookahead_distance: float, *, record_db: str = "nav_recor
                 planner="simple",
                 record=True,
                 nav_record={
-                    "db_path": os.path.join(
-                        os.environ.get("DIMOS_RUN_LOG_DIR", "."), record_db
-                    )
+                    "db_path": os.path.join(os.environ.get("DIMOS_RUN_LOG_DIR", "."), record_db)
                 },
                 vehicle_height=0.5,  # FlowBase platform clearance — tune if needed
                 max_speed=0.8,  # conservative starting point
@@ -395,9 +398,18 @@ coordinator_sim_fopdt = (
 # joint_state under the `base/*` prefix (instead of `sim/*`) so that
 # `characterization --robot flowbase` can validate the full LCM/gate/topic
 # plumbing against a simulated plant with NO real robot connected.
+#
+# The plant is the vendored 2026-06-09 FlowBase fit with the firmware-style
+# command limiter, ticking at the coordinator's 100 Hz, so controller
+# behavior in this sim is representative of the real base.
 coordinator_sim_fopdt_flowbase = (
     autoconnect(
-        FopdtPlantConnection.blueprint(),
+        FopdtPlantConnection.blueprint(
+            plant_params=FLOWBASE_PLANT_FITTED,
+            tick_rate_hz=100.0,
+            cmd_max_vel=FLOWBASE_CMD_MAX_VEL,
+            cmd_max_acc=FLOWBASE_CMD_MAX_ACC,
+        ),
         ControlCoordinator.blueprint(
             hardware=[
                 HardwareComponent(
@@ -418,6 +430,14 @@ coordinator_sim_fopdt_flowbase = (
                 TaskConfig(
                     name="path_follower",
                     type="path_follower",
+                    joint_names=_base_joints,
+                    priority=20,
+                ),
+                # FF + per-axis P trajectory tracker (trajtrack arm).
+                # Inactive until the Benchmarker RPCs configure + start_path.
+                TaskConfig(
+                    name="trajectory_tracker",
+                    type="trajectory_tracking",
                     joint_names=_base_joints,
                     priority=20,
                 ),
@@ -611,6 +631,16 @@ coordinator_flowbase_benchmark = ControlCoordinator.blueprint(
                 "lookahead_dist": _FLOWBASE_LOOKAHEAD,
             },
         ),
+        # Trajtrack arm — time-parameterized FF + per-axis P tracker with
+        # plant-gain inversion. Gains/limits trace to
+        # dimos/control/tasks/trajectory_tracking_task/constants.py
+        # (computed from the vendored 2026-06-09 fit).
+        TaskConfig(
+            name="trajectory_tracker",
+            type="trajectory_tracking",
+            joint_names=_base_joints,
+            priority=10,
+        ),
     ],
 ).transports(
     {
@@ -620,15 +650,18 @@ coordinator_flowbase_benchmark = ControlCoordinator.blueprint(
 )
 
 
-def _make_flowbase_benchmark(rg: bool, tag: str):
+def _make_flowbase_benchmark(rg: bool, tag: str, trajtrack: bool = False):
     """Compose the FlowBase benchmark bundle. ``rg=False`` is the bare baseline
     arm (routes runs through ``path_follower``); ``rg=True`` routes through
-    ``precision_follower``. Recordings land at
-    ``<repo>/data/benchmark/flowbase/`` (tag differentiates baseline vs rg)."""
+    ``precision_follower``; ``trajtrack=True`` routes through
+    ``trajectory_tracker``. Recordings land at
+    ``<repo>/data/benchmark/flowbase/`` (tag differentiates the arms)."""
     return autoconnect(
         coordinator_flowbase_benchmark,
         KeyboardTeleop.blueprint(publish_only_when_active=True),
-        Benchmarker.blueprint(robot="flowbase", mode="hw", gate_source="stream", rg=rg),
+        Benchmarker.blueprint(
+            robot="flowbase", mode="hw", gate_source="stream", rg=rg, trajtrack=trajtrack
+        ),
         CharacterizationRecorder.blueprint(
             robot_id="flowbase",
             tag=tag,
@@ -646,6 +679,9 @@ def _make_flowbase_benchmark(rg: bool, tag: str):
 
 flowbase_benchmark = _make_flowbase_benchmark(rg=False, tag="benchmark")
 flowbase_benchmark_rg = _make_flowbase_benchmark(rg=True, tag="benchmark_rg")
+flowbase_benchmark_trajtrack = _make_flowbase_benchmark(
+    rg=False, tag="benchmark_trajtrack", trajtrack=True
+)
 
 
 __all__ = [
@@ -661,4 +697,5 @@ __all__ = [
     "coordinator_sim_fopdt_flowbase",
     "flowbase_benchmark",
     "flowbase_benchmark_rg",
+    "flowbase_benchmark_trajtrack",
 ]

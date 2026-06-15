@@ -65,6 +65,7 @@ all_blueprints = {
     "dual-xarm6-planner": "dimos.manipulation.blueprints:dual_xarm6_planner",
     "flowbase-benchmark": "dimos.control.blueprints.mobile:flowbase_benchmark",
     "flowbase-benchmark-rg": "dimos.control.blueprints.mobile:flowbase_benchmark_rg",
+    "flowbase-benchmark-trajtrack": "dimos.control.blueprints.mobile:flowbase_benchmark_trajtrack",
     "keyboard-teleop-a750": "dimos.robot.manipulators.a750.blueprints:keyboard_teleop_a750",
     "keyboard-teleop-openarm": "dimos.robot.manipulators.openarm.blueprints:keyboard_teleop_openarm",
     "keyboard-teleop-openarm-mock": "dimos.robot.manipulators.openarm.blueprints:keyboard_teleop_openarm_mock",
