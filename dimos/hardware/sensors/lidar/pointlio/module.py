@@ -35,7 +35,6 @@ import ipaddress
 import os
 from pathlib import Path
 import socket
-import time
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic import Field
@@ -168,7 +167,10 @@ class PointLio(NativeModule, perception.Lidar, perception.Odometry):
                     msg.pose.orientation.z,
                     msg.pose.orientation.w,
                 ),
-                ts=msg.ts or time.time(),
+                # Match the odometry message's own timestamp exactly so the TF
+                # and the pose can't drift apart. No `or time.time()` fallback: a
+                # real ts of 0.0 must not be silently replaced with wall time.
+                ts=msg.ts,
             )
         )
 
