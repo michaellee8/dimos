@@ -55,9 +55,21 @@ def _default_pcap_path() -> Path:
 
 def _stop_when_parent_dies(cmd: list[str], grace_sec: float) -> list[str]:
     """Wrap cmd so it's reaped if this recorder dies — including via SIGKILL,
-    which it can't intercept — otherwise tcpdump would outlive its session."""
+    which it can't intercept — otherwise tcpdump would outlive its session.
+
+    The kills fall back to an unconfined AppArmor label: tcpdump's profile
+    rejects signals from a confined (e.g. vscode-labeled) sender with EPERM, so
+    a plain kill silently fails there — `sudo -n aa-exec -p unconfined` re-issues
+    it from a label tcpdump accepts (a no-op where AppArmor isn't in the way)."""
     parent_pid = os.getpid()
     quoted = " ".join(shlex.quote(arg) for arg in cmd)
+
+    def _kill(sig: str) -> str:
+        return (
+            f'kill -{sig} "$child" 2>/dev/null'
+            f' || sudo -n aa-exec -p unconfined -- kill -{sig} "$child" 2>/dev/null'
+        )
+
     # Foreground waits on tcpdump so a startup failure propagates its exit code.
     script = textwrap.dedent(f"""
         {quoted} &
@@ -66,9 +78,9 @@ def _stop_when_parent_dies(cmd: list[str], grace_sec: float) -> list[str]:
             while kill -0 {parent_pid} 2>/dev/null; do
                 sleep 0.5
             done
-            kill -INT "$child" 2>/dev/null
+            {_kill("INT")}
             sleep {grace_sec}
-            kill -KILL "$child" 2>/dev/null
+            {_kill("KILL")}
         ) &
         watcher=$!
         wait "$child"
@@ -297,9 +309,7 @@ class Mid360PcapRecorder(Module):
             return
         timeout = self.config.stop_timeout
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(pgid, sig)
-            except ProcessLookupError:
+            if not self._signal_group(pgid, sig):
                 break
             try:
                 proc.wait(timeout=timeout)
@@ -311,3 +321,30 @@ class Mid360PcapRecorder(Module):
         else:
             proc.wait()
         logger.info(f"Mid360PcapRecorder stopped  path={self.config.pcap_path}")
+
+    def _signal_group(self, pgid: int, sig: signal.Signals) -> bool:
+        """Signal the tcpdump process group; False if it's already gone.
+
+        tcpdump's AppArmor profile rejects signals from a confined (e.g.
+        vscode-labeled) sender with EPERM, so a plain killpg silently fails
+        there — fall back to re-issuing from an unconfined label, the same
+        escape the `kd` command uses. No-op where AppArmor isn't in the way."""
+        try:
+            os.killpg(pgid, sig)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            pass
+        # kill -<signum> -- -<pgid>  (negative pid = the whole group)
+        aa = shutil.which("aa-exec")
+        if aa is None:
+            return True
+        cmd = [aa, "-p", "unconfined", "--", "kill", f"-{int(sig)}", "--", f"-{pgid}"]
+        if os.geteuid() != 0 and shutil.which("sudo"):
+            cmd = ["sudo", "-n", *cmd]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=3.0)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        return True
