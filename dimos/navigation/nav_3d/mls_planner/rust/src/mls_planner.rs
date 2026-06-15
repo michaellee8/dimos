@@ -43,6 +43,9 @@ pub struct Config {
     #[serde(default = "default_wall_penalty_weight")]
     #[validate(range(min = 0.0))]
     pub wall_penalty_weight: f32,
+    /// Ground-plane distance from goal at which the planner stops replanning.
+    #[validate(range(exclusive_min = 0.0))]
+    pub goal_tolerance: f32,
 }
 
 fn default_robot_radius_m() -> f32 {
@@ -475,6 +478,7 @@ mod region_tests {
             node_step_threshold_m: 0.25,
             robot_radius_m: 0.0,
             wall_penalty_weight: 1.0,
+            goal_tolerance: 0.3,
         }
     }
 

@@ -554,6 +554,7 @@ mod tests {
             node_step_threshold_m: 0.25,
             robot_radius_m: 0.2,
             wall_penalty_weight: 4.0,
+            goal_tolerance: 0.3,
         };
         plan(plg, start, goal, &config)
     }

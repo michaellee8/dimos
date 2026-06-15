@@ -56,6 +56,9 @@ impl MLSPlanner {
             node_step_threshold_m,
             robot_radius_m,
             wall_penalty_weight,
+            // Only the binary's replan loop reads goal_tolerance. This
+            // in-process binding plans on demand and never consults it.
+            goal_tolerance: 1.0,
         };
         config
             .validate()

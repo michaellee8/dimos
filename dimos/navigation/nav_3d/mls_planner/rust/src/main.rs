@@ -11,7 +11,7 @@ use lcm_msgs::geometry_msgs::{Point, Pose, PoseStamped, Quaternion};
 use lcm_msgs::nav_msgs::Path;
 use lcm_msgs::sensor_msgs::{PointCloud2, PointField};
 use lcm_msgs::std_msgs::{Header, Time};
-use tracing::{debug, info};
+use tracing::debug;
 
 #[derive(Module)]
 struct MlsPlanner {
@@ -49,6 +49,7 @@ struct MlsPlanner {
 
     planner: Planner,
     latest_start: Option<(f32, f32, f32)>,
+    active_goal: Option<(f32, f32, f32)>,
     pending_local: Option<PointCloud2>,
     pending_bounds: Option<PoseStamped>,
     last_path_at: Option<Instant>,
@@ -126,16 +127,22 @@ impl MlsPlanner {
             z_max: bounds_msg.pose.orientation.z as f32,
         };
 
+        let update_start = Instant::now();
         self.planner.update_region(&points, &bounds, &self.config);
+        let update_ms = update_start.elapsed().as_secs_f64() * 1e3;
 
+        let publish_start = Instant::now();
         self.publish_graph().await;
+        let publish_ms = publish_start.elapsed().as_secs_f64() * 1e3;
 
         debug!(
+            update_ms,
+            publish_ms,
             local_points = points.len(),
-            voxels = self.planner.voxel_count(),
-            nodes = self.planner.graph().nodes.len(),
-            "local region processed",
+            "local region processed"
         );
+
+        self.maybe_replan().await;
     }
 
     async fn publish_graph(&self) {
@@ -157,23 +164,39 @@ impl MlsPlanner {
         publish_path(&self.node_edges, &edges_path).await;
     }
 
+    /// Store-only: record the latest start pose. Replanning happens on map
+    /// updates in `maybe_replan`, not here.
     async fn on_start_pose(&mut self, msg: PoseStamped) {
         let p = &msg.pose.position;
         self.latest_start = Some((p.x as f32, p.y as f32, p.z as f32));
-        // Drop any previous plan so the visualizer doesn't show a stale path
-        // rooted at the old start.
-        info!("canceling any active path, start pose changed");
-        publish_path(&self.path, &empty_path(&self.config.world_frame, now())).await;
     }
 
+    /// Arm the active goal, or clear it on a non-finite goal (the cancel
+    /// signal). Plans once on arrival so a fresh click is acted on immediately
+    /// rather than waiting for the next map update. Subsequent replanning is
+    /// map-driven in `maybe_replan`. A goal arrives once per click, so this is
+    /// not the odometry-rate external trigger the refactor removed.
     async fn on_goal_pose(&mut self, msg: PoseStamped) {
-        let Some(start) = self.latest_start else {
-            tracing::warn!("MLSPlanner received goal before start; skipping");
-            return;
-        };
-
         let p = &msg.pose.position;
         let goal = (p.x as f32, p.y as f32, p.z as f32);
+        self.active_goal = if goal.0.is_finite() && goal.1.is_finite() && goal.2.is_finite() {
+            Some(goal)
+        } else {
+            None
+        };
+        self.maybe_replan().await;
+    }
+
+    /// Replan from the stored start to the active goal on fresh map data. Pure
+    /// glue: it gates and does IO, all planning lives in `Planner::plan`.
+    async fn maybe_replan(&mut self) {
+        let (Some(start), Some(goal)) = (self.latest_start, self.active_goal) else {
+            return;
+        };
+        if is_at_goal(start, goal, self.config.goal_tolerance) {
+            self.active_goal = None;
+            return;
+        }
 
         let plan_start = Instant::now();
         let waypoints = match self.planner.plan(start, goal, &self.config) {
@@ -199,6 +222,11 @@ impl MlsPlanner {
         );
         publish_path(&self.path, &path_msg).await;
     }
+}
+
+/// True when start is within `tol` of goal in the ground plane.
+fn is_at_goal(start: (f32, f32, f32), goal: (f32, f32, f32), tol: f32) -> bool {
+    (start.0 - goal.0).hypot(start.1 - goal.1) < tol
 }
 
 fn same_stamp(a: &Time, b: &Time) -> bool {
