@@ -232,6 +232,66 @@ def smooth_corner(
     return _path_from_xy(xs, ys)
 
 
+def rounded_square(side: float = 2.0, arc_radius: float = 0.5, step: float = 0.05) -> Path:
+    """Closed square with filleted corners — the curved counterpart to
+    :func:`square`.
+
+    Each 90° vertex is replaced by a quarter-circle arc of radius
+    ``arc_radius``, so the path has bounded curvature (kappa = 1/arc_radius)
+    everywhere instead of the infinite curvature of a sharp corner. Lets a
+    trajectory tracker hold the geometry at speed without slowing to a stop
+    at the vertices. Straight legs are shortened by ``arc_radius`` at each
+    end to make room for the arcs. Same traversal sense as ``square``
+    (origin → +x → +y → -x → -y), starting at the midpoint of the bottom
+    edge so the start lies on a straight segment.
+    """
+    if arc_radius > side / 2.0:
+        raise ValueError("arc_radius must be <= side/2")
+    leg = side - 2.0 * arc_radius  # straight portion of each edge
+
+    # Corner centers (inset by arc_radius from each true vertex).
+    corners = [
+        (side - arc_radius, arc_radius),  # bottom-right
+        (side - arc_radius, side - arc_radius),  # top-right
+        (arc_radius, side - arc_radius),  # top-left
+        (arc_radius, arc_radius),  # bottom-left
+    ]
+    # Outgoing direction of each leg (after the corner before it).
+    leg_dirs = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)]
+
+    xs: list[float] = []
+    ys: list[float] = []
+    n_arc = max(2, round((math.pi / 2.0) * arc_radius / step))
+
+    # Start at the midpoint of the bottom edge, heading +x.
+    px, py = side / 2.0, 0.0
+    xs.append(px)
+    ys.append(py)
+    # First half-leg up to the bottom-right corner arc.
+    half_leg = (side / 2.0) - arc_radius
+    for i in range(1, max(1, round(half_leg / step)) + 1):
+        xs.append(px + i * step)
+        ys.append(0.0)
+
+    for k in range(4):
+        cx, cy = corners[k]
+        # Quarter-circle arc around this corner: start angle points from the
+        # center back toward the incoming leg, sweeping +90° (left turn).
+        start_angle = math.atan2(ys[-1] - cy, xs[-1] - cx)
+        for i in range(1, n_arc + 1):
+            a = start_angle + (math.pi / 2.0) * i / n_arc
+            xs.append(cx + arc_radius * math.cos(a))
+            ys.append(cy + arc_radius * math.sin(a))
+        # Straight leg out to the next corner (or back to start on the last).
+        dx, dy = leg_dirs[(k + 1) % 4]
+        ex, ey = xs[-1], ys[-1]
+        run = leg if k < 3 else half_leg
+        for i in range(1, max(1, round(run / step)) + 1):
+            xs.append(ex + i * step * dx)
+            ys.append(ey + i * step * dy)
+    return _path_from_xy(xs, ys)
+
+
 def sidestep_1m(distance: float = 1.0, n_points: int = 20) -> Path:
     """End up ``distance`` m to the left of start, facing forward.
 
@@ -412,8 +472,10 @@ __all__ = [
     "figure_eight",
     "multi_trajectory_to_svg",
     "path_to_svg",
+    "rounded_square",
     "single_corner",
     "slalom",
+    "smooth_corner",
     "square",
     "straight_line",
     "trajectory_to_svg",

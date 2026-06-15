@@ -47,6 +47,7 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.utils.benchmarking.plant import (
     GO2_PLANT_FITTED,
+    CommandLimiter,
     TwistBasePlantParams,
     TwistBasePlantSim,
 )
@@ -63,6 +64,10 @@ class FopdtPlantConnectionConfig(ModuleConfig):
     integrates and republishes odom — matches the coordinator's tick
     rate by convention so the sim ticks at the same cadence as control.
     ``frame_id`` is stamped on published PoseStamped messages.
+
+    ``cmd_max_vel`` / ``cmd_max_acc`` (set together, command units)
+    enable a firmware-style command limiter in front of the plant —
+    e.g. the FlowBase Ruckig limits — so saturation is reproduced in sim.
     """
 
     plant_params: TwistBasePlantParams = GO2_PLANT_FITTED
@@ -71,6 +76,8 @@ class FopdtPlantConnectionConfig(ModuleConfig):
     initial_y: float = 0.0
     initial_yaw: float = 0.0
     frame_id: str = "odom"
+    cmd_max_vel: tuple[float, float, float] | None = None
+    cmd_max_acc: tuple[float, float, float] | None = None
 
 
 class FopdtPlantConnection(Module):
@@ -93,7 +100,14 @@ class FopdtPlantConnection(Module):
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._plant = TwistBasePlantSim(self.config.plant_params)
+        if (self.config.cmd_max_vel is None) != (self.config.cmd_max_acc is None):
+            raise ValueError("cmd_max_vel and cmd_max_acc must be set together")
+        limiter = (
+            CommandLimiter(max_vel=self.config.cmd_max_vel, max_acc=self.config.cmd_max_acc)
+            if self.config.cmd_max_vel is not None and self.config.cmd_max_acc is not None
+            else None
+        )
+        self._plant = TwistBasePlantSim(self.config.plant_params, limiter=limiter)
         self._stop_event = Event()
 
     @rpc

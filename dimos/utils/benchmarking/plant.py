@@ -116,7 +116,9 @@ class FOPDTChannel:
         self._y = 0.0
 
     def reset(self, dt: float) -> None:
-        self._delay_samples = max(1, int(self.params.L / dt))
+        # step() appends before reading the head, so a buffer of N slots
+        # delays by N-1 ticks; size for int(L/dt) ticks of dead time.
+        self._delay_samples = max(1, int(self.params.L / dt) + 1)
         self._delay_buf = deque([0.0] * self._delay_samples, maxlen=self._delay_samples)
         self._y = 0.0
 
@@ -137,16 +139,46 @@ class TwistBasePlantParams:
     wz: FopdtChannelParams
 
 
+class CommandLimiter:
+    """Ruckig-style per-axis velocity + acceleration limiter in COMMAND units.
+
+    Mirrors the limiter that lives inside the FlowBase firmware, applied to
+    the commanded twist BEFORE the plant dynamics. Trajectories planned
+    within the physical margins never engage it; the sim reproduces the
+    saturation behavior when they do.
+    """
+
+    def __init__(self, max_vel: tuple[float, float, float], max_acc: tuple[float, float, float]):
+        self.max_vel = max_vel
+        self.max_acc = max_acc
+        self._prev = [0.0, 0.0, 0.0]
+
+    def reset(self) -> None:
+        self._prev = [0.0, 0.0, 0.0]
+
+    def step(self, cmds: tuple[float, float, float], dt: float) -> tuple[float, float, float]:
+        out = []
+        for i, cmd in enumerate(cmds):
+            target = max(-self.max_vel[i], min(self.max_vel[i], cmd))
+            dv_max = self.max_acc[i] * dt
+            dv = max(-dv_max, min(dv_max, target - self._prev[i]))
+            self._prev[i] += dv
+            out.append(self._prev[i])
+        return out[0], out[1], out[2]
+
+
 class TwistBasePlantSim:
     """Unicycle kinematic sim with FOPDT velocity response per channel.
 
     Body-frame velocities `(vx, vy, wz)` are commanded; the plant produces
     actual velocities (filtered + delayed) that drive a unicycle integrator
-    in the world frame.
+    in the world frame. An optional ``limiter`` clamps the commands first
+    (command units), reproducing a firmware-side rate limiter.
     """
 
-    def __init__(self, params: TwistBasePlantParams) -> None:
+    def __init__(self, params: TwistBasePlantParams, limiter: CommandLimiter | None = None) -> None:
         self.params = params
+        self.limiter = limiter
         self.ch_vx = FOPDTChannel(params.vx)
         self.ch_vy = FOPDTChannel(params.vy)
         self.ch_wz = FOPDTChannel(params.wz)
@@ -162,8 +194,12 @@ class TwistBasePlantSim:
         self.vx = self.vy = self.wz = 0.0
         for ch in (self.ch_vx, self.ch_vy, self.ch_wz):
             ch.reset(dt)
+        if self.limiter is not None:
+            self.limiter.reset()
 
     def step(self, cmd_vx: float, cmd_vy: float, cmd_wz: float, dt: float) -> None:
+        if self.limiter is not None:
+            cmd_vx, cmd_vy, cmd_wz = self.limiter.step((cmd_vx, cmd_vy, cmd_wz), dt)
         self.vx = self.ch_vx.step(cmd_vx, dt)
         self.vy = self.ch_vy.step(cmd_vy, dt)
         self.wz = self.ch_wz.step(cmd_wz, dt)
@@ -198,6 +234,38 @@ GO2_PLANT_FITTED = TwistBasePlantParams(
     vy=GO2_VX_RISE,  # placeholder; Go2 doesn't strafe in default gait
     wz=GO2_WZ_RISE,
 )
+
+
+# --- Vendored fitted FOPDT plant for the FlowBase ------------------------
+#
+# Source: concrete surface, default mode, real FlowBase over LCM SI,
+# characterized 2026-06-09 (git 704a591f5, methodology v2, 17 fit points).
+# Artifact: data/characterization/flowbase/
+#   flowbase_config_hw_concrete_2026-06-09_704a591f5.json
+#
+# K is actuation-side (the robot genuinely moves K x the command; odometry
+# is honest) — caused by a kinematic inconsistency in the sealed firmware.
+# All compensation lives controller-side.
+
+FLOWBASE_VX_FIT = FopdtChannelParams(K=0.778, tau=0.288, L=0.010)
+FLOWBASE_VY_FIT = FopdtChannelParams(K=0.773, tau=0.267, L=0.033)
+FLOWBASE_WZ_FIT = FopdtChannelParams(K=2.929, tau=0.607, L=0.017)
+
+FLOWBASE_PLANT_FITTED = TwistBasePlantParams(
+    vx=FLOWBASE_VX_FIT,
+    vy=FLOWBASE_VY_FIT,
+    wz=FLOWBASE_WZ_FIT,
+)
+
+# FlowBase firmware Ruckig limiter, COMMAND units (x, y, yaw). Physical
+# limits are K x these. max_vel == max_accel in the firmware config.
+FLOWBASE_CMD_MAX_VEL: tuple[float, float, float] = (0.8, 0.8, 3.0)
+FLOWBASE_CMD_MAX_ACC: tuple[float, float, float] = FLOWBASE_CMD_MAX_VEL
+
+
+def flowbase_command_limiter() -> CommandLimiter:
+    """Limiter matching the FlowBase firmware's Ruckig config."""
+    return CommandLimiter(max_vel=FLOWBASE_CMD_MAX_VEL, max_acc=FLOWBASE_CMD_MAX_ACC)
 
 
 # --- Per-robot profile (single source of truth for robot specifics) -----
@@ -323,15 +391,13 @@ GO2_PLANT_PROFILE = RobotPlantProfile(
 # adapter's read_odometry. No new blueprint, no bridge, no Connection
 # module needed — just this profile entry.
 #
-# Envelope values are placeholders pending real characterization. The
-# vy channel is excited (FlowBase strafes natively) so vy is in the
-# excited_channels tuple. sim_plant reuses the Go2 FOPDT shape until a
-# FlowBase-specific fit lands — the values are noise for `--mode hw`.
+# The vy channel is excited (FlowBase strafes natively) so vy is in the
+# excited_channels tuple. sim_plant is the vendored 2026-06-09 hw fit.
 FLOWBASE_PLANT_PROFILE = RobotPlantProfile(
     name="FlowBase",
     robot_id="flowbase",
     blueprint="coordinator-flowbase-keyboard-teleop",
-    sim_blueprint="coordinator-sim-fopdt",
+    sim_blueprint="coordinator-sim-fopdt-flowbase",
     joint_prefix="base",  # coordinator_flowbase uses make_twist_base_joints("base")
     vx_max=0.8,
     wz_max=1.2,
@@ -353,7 +419,7 @@ FLOWBASE_PLANT_PROFILE = RobotPlantProfile(
     step_s=6.0,
     pre_roll_s=1.0,
     max_dist_m=4.0,
-    sim_plant=GO2_PLANT_FITTED,  # placeholder until FlowBase has its own fit
+    sim_plant=FLOWBASE_PLANT_FITTED,
 )
 
 # Conservative SHAKEOUT profile for the FIRST on-hardware run of the tall,
@@ -393,8 +459,14 @@ ROBOT_PLANT_PROFILES: dict[str, RobotPlantProfile] = {
 
 
 __all__ = [
+    "FLOWBASE_CMD_MAX_ACC",
+    "FLOWBASE_CMD_MAX_VEL",
+    "FLOWBASE_PLANT_FITTED",
     "FLOWBASE_PLANT_PROFILE",
     "FLOWBASE_SLOW_PLANT_PROFILE",
+    "FLOWBASE_VX_FIT",
+    "FLOWBASE_VY_FIT",
+    "FLOWBASE_WZ_FIT",
     "GO2_PLANT_FITTED",
     "GO2_PLANT_PROFILE",
     "GO2_VX_RISE",
@@ -402,6 +474,7 @@ __all__ = [
     "ROBOT_PLANT_PROFILES",
     "AmplitudeFit",
     "ChannelEnvelope",
+    "CommandLimiter",
     "FOPDTChannel",
     "FloorProbeResult",
     "FopdtChannelParams",
@@ -409,4 +482,5 @@ __all__ = [
     "TwistBasePlantParams",
     "TwistBasePlantSim",
     "VelocityEnvelope",
+    "flowbase_command_limiter",
 ]
