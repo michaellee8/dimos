@@ -34,7 +34,7 @@ mapping:
     satu_gyro: 35.0
     acc_norm: 1.0           # IMU accel unit: g
     plane_thr: 0.1
-    filter_size_surf: 0.5   # pre-KF scan downsample leaf size (m), used iff space_down_sample
+    filter_size_surf: 0.2   # pre-KF scan downsample leaf size (m), used iff space_down_sample
     filter_size_map: 0.5
     ivox_grid_resolution: 2.0   # iVox local-map grid (m)
     ivox_nearby_type: 6         # NEARBY6

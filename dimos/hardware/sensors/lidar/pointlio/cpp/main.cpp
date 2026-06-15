@@ -42,8 +42,8 @@
 #include "sensor_msgs/PointField.hpp"
 
 // Point-LIO (header-only core, compiled sources linked via CMake)
-#include "fast_lio.hpp"
-#include "fast_lio_debug.hpp"
+#include "pointlio.hpp"
+#include "pointlio_debug.hpp"
 
 using livox_common::GRAVITY_MS2;
 using livox_common::DATA_TYPE_IMU;
@@ -284,7 +284,7 @@ static void on_info_change(const uint32_t handle, const LivoxLidarInfo* info, vo
     char ip[17] = {};
     std::memcpy(ip, info->lidar_ip, 16);
 
-    if (fastlio_debug) {
+    if (pointlio_debug) {
         printf("[pointlio] Device connected: handle=%u type=%u sn=%s ip=%s\n", handle, info->dev_type, sn, ip);
     }
 
@@ -331,9 +331,9 @@ int main(int argc, char** argv) {
     filter_cfg.outlier_neighbor_count = mod.arg_int("outlier_neighbor_count", 50);
     filter_cfg.outlier_std_threshold = mod.arg_float("outlier_std_threshold", 1.0f);
 
-    // Propagates to the Point-LIO core via the `fastlio_debug` global.
+    // Propagates to the Point-LIO core via the `pointlio_debug` global.
     bool debug = mod.arg_bool("debug", false);
-    fastlio_debug = debug;
+    pointlio_debug = debug;
 
     // SDK network ports (defaults from SdkPorts struct in livox_sdk_config.hpp)
     livox_common::SdkPorts ports;
@@ -426,7 +426,7 @@ int main(int argc, char** argv) {
             for (int idx = 0; idx < 3; idx++) { lidar_msg->rsvd[idx] = 0; }
             lidar_msg->point_num = static_cast<uli>(num_points);
             lidar_msg->points = std::move(points);
-            if (fastlio_debug) {
+            if (pointlio_debug) {
                 fprintf(stderr, "[pointlio] feed_lidar frame: %zu points\n", num_points);
             }
             point_lio.feed_lidar(lidar_msg);
@@ -449,7 +449,7 @@ int main(int argc, char** argv) {
                     auto filtered = raw_cloud ? body_cloud : filter_cloud<PointType>(body_cloud, filter_cfg);
                     publish_lidar(filtered, ts);
                     last_pc_publish = now;
-                    if (fastlio_debug) {
+                    if (pointlio_debug) {
                         fprintf(stderr, "[pointlio] publish lidar: %zu points  pose=(%.3f, %.3f, %.3f)\n", filtered ? filtered->size() : 0, pose[0], pose[1], pose[2]);
                     }
                 }
@@ -459,7 +459,7 @@ int main(int argc, char** argv) {
             if (!g_odometry_topic.empty() && now - *last_odom_publish >= odom_interval) {
                 publish_odometry(point_lio.get_odometry(), ts);
                 last_odom_publish = now;
-                if (fastlio_debug) {
+                if (pointlio_debug) {
                     fprintf(stderr, "[pointlio] publish odom: pose=(%.3f, %.3f, %.3f)\n", pose[0], pose[1], pose[2]);
                 }
             }
