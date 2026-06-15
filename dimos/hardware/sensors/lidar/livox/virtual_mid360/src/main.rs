@@ -1,14 +1,8 @@
 // Fake Livox Mid-360 — replays a recorded pcap over a virtual NIC and synthesizes
 // the Livox SDK2 control handshake so an unmodified, live-mode pointlio ingests it
-// through the real Livox SDK as if from a live sensor.
-//
-// Inverse of pointlio's in-process `cpp/pcap_replay.hpp` (--replay_pcap), which
-// bypasses the network. This exercises the full live stack: SDK discovery +
-// control handshake, then point/IMU UDP off a (virtual) wire.
-//
-// Runs inside the "lidar" network namespace (see setup_commands()); the unmodified
-// pointlio runs in the peer "drv" namespace. On any failure the error names the
-// exact command to run, then asks the user to re-run the module.
+// through the real Livox SDK as if from a live sensor. Runs in the "lidar" netns
+// (peer "drv" runs pointlio); on a setup failure the error prints the exact
+// netns/veth commands to run.
 
 use dimos_module::{run, LcmTransport, Module};
 use serde::Deserialize;
@@ -30,9 +24,6 @@ const PORT_STATUS: u16 = 56200;
 const DST_POINT: u16 = 56301;
 const DST_IMU: u16 = 56401;
 const DST_STATUS: u16 = 56201;
-// Mid-360 multicasts point/IMU data to this group (the SDK joins it). Add a
-// route (224.1.1.5/32 dev <lidar-veth>) so it egresses the virtual NIC.
-const MCAST_DATA: Ipv4Addr = Ipv4Addr::new(224, 1, 1, 5);
 // cmd_id whose ACK means the host finished configuring -> start streaming
 const CMD_WORKMODE: u16 = 0x0100;
 
@@ -50,27 +41,30 @@ struct Config {
     #[validate(range(min = 0.0, max = 3600.0))]
     delay: f64,
     /// IP the fake lidar sends from (must be assigned to this netns's veth).
-    #[serde(default = "default_lidar_ip")]
+    /// Network-specific — required, no default.
     lidar_ip: String,
     /// Host IP the recorded data is delivered to (where pointlio's SDK listens).
-    #[serde(default = "default_host_ip")]
+    /// Machine-specific — required, no default.
     host_ip: String,
-    /// Network namespace the fake lidar must run inside.
-    #[serde(default = "default_netns")]
+    /// Network namespace the fake lidar runs inside (named in the setup-help
+    /// error). Deployment-specific — required, no default.
     lidar_netns: String,
+    /// Multicast group the point/IMU streams are sent to. A real Mid-360
+    /// multicasts these and the Livox SDK joins whatever `multicast_ip` is in
+    /// its host config; 224.1.1.5 is the Livox default (what pointlio uses), so
+    /// it's the default here. Override only to match a consumer configured with
+    /// a different `multicast_ip`. (Needs a `<group>/32 dev <lidar-veth>` route.)
+    #[serde(default = "default_mcast_data")]
+    mcast_data: String,
 }
 
 fn one() -> f64 {
     1.0
 }
-fn default_lidar_ip() -> String {
-    "192.168.1.155".into()
-}
-fn default_host_ip() -> String {
-    "192.168.1.5".into()
-}
-fn default_netns() -> String {
-    "lidar".into()
+// 224.1.1.5 is the Livox Mid-360 default multicast_ip (a genuine Livox default,
+// unlike the lidar/host IP + netns, which are deployment-specific and required).
+fn default_mcast_data() -> String {
+    "224.1.1.5".into()
 }
 
 #[derive(Module)]
@@ -196,13 +190,14 @@ fn ensure_interface(cfg: &Config) -> Result<Ipv4Addr, String> {
         .lidar_ip
         .parse()
         .map_err(|_| format!("invalid lidar_ip '{}'", cfg.lidar_ip))?;
-    // Probe: can we bind the lidar control port on lidar_ip? If not, the veth/netns
-    // isn't set up (or we're in the wrong namespace).
+    // If we can't bind the control port on lidar_ip, the veth/netns isn't set up
+    // (or we're in the wrong namespace).
     let probe = UdpSocket::bind(SocketAddrV4::new(lidar_ip, CMD_PORT));
     if probe.is_err() {
         let ns = &cfg.lidar_netns;
         let lip = &cfg.lidar_ip;
         let hip = &cfg.host_ip;
+        let mcast = &cfg.mcast_data;
         return Err(format!(
             "cannot bind {lip}:{CMD_PORT} — the virtual network interface isn't set up \
              (or this process isn't in the '{ns}' netns).\n\
@@ -220,7 +215,7 @@ fn ensure_interface(cfg: &Config) -> Result<Ipv4Addr, String> {
              sudo ip netns exec drv   ip link set veth-drv multicast on\n  \
              sudo ip netns exec {ns} ip link set veth-lidar multicast on\n  \
              sudo ip netns exec {ns} ip route add 255.255.255.255/32 dev veth-lidar\n  \
-             sudo ip netns exec {ns} ip route add 224.1.1.5/32 dev veth-lidar  # point/IMU multicast\n  \
+             sudo ip netns exec {ns} ip route add {mcast}/32 dev veth-lidar  # point/IMU multicast\n  \
              sudo ip netns exec drv   ip route add 224.0.0.0/4 dev lo  # LCM (dimos transport)\n  \
              sudo ip netns exec {ns} ip route add 224.0.0.0/4 dev lo  # LCM (dimos transport)\n\
              \nThen launch this module inside the lidar netns:\n  \
@@ -236,14 +231,24 @@ impl VirtualMid360 {
         let lidar_ip = match ensure_interface(cfg) {
             Ok(ip) => ip,
             Err(msg) => {
-                // Actionable error: print the fix command, then exit non-zero so the
-                // coordinator surfaces it and the user can re-run after setup.
+                // Exit non-zero so the coordinator surfaces the fix command.
                 tracing::error!("{msg}");
                 eprintln!("\n[virtual_mid360] {msg}\n");
                 std::process::exit(2);
             }
         };
         let host_ip: Ipv4Addr = cfg.host_ip.parse().expect("host_ip validated bindable");
+        let mcast_data: Ipv4Addr = match cfg.mcast_data.parse() {
+            Ok(ip) => ip,
+            Err(_) => {
+                eprintln!(
+                    "[virtual_mid360] invalid mcast_data '{}' — expected an IPv4 multicast \
+                     address matching the consumer's Livox multicast_ip (default 224.1.1.5).",
+                    cfg.mcast_data
+                );
+                std::process::exit(2);
+            }
+        };
 
         let packets = match parse_pcap(&cfg.pcap) {
             Ok(p) if !p.is_empty() => Arc::new(p),
@@ -269,14 +274,16 @@ impl VirtualMid360 {
         let rate = cfg.rate;
         let delay = cfg.delay;
 
-        // Role 1: discovery responder (:56000 broadcast) — synthesize the 0x0000 ACK.
+        // discovery responder (:56000 broadcast) — synthesize the 0x0000 ACK
         spawn_discovery(lidar_ip, stop.clone());
-        // Role 2: control responder (:56100) — synthesize per-cmd ACKs; arm streaming
-        // when the host issues the work-mode/config command (0x0100).
+        // control responder (:56100) — synthesize per-cmd ACKs; arm streaming
+        // when the host issues the work-mode/config command (0x0100)
         spawn_control(lidar_ip, armed.clone(), stop.clone());
-        // Role 3: data streamer — point/IMU/status, paced at `rate`, timestamps rewritten
-        // to now, armed by the handshake (with `delay` as a startup floor / fallback).
-        spawn_stream(lidar_ip, host_ip, packets, rate, delay, armed, stop);
+        // data streamer — point/IMU/status, paced at `rate`, timestamps rewritten
+        // to now, armed by the handshake (`delay` as a startup floor / fallback)
+        spawn_stream(
+            lidar_ip, host_ip, mcast_data, packets, rate, delay, armed, stop,
+        );
         tracing::info!(lidar = %lidar_ip, host = %host_ip, rate, delay, "virtual_mid360 started");
     }
 }
@@ -355,9 +362,11 @@ fn spawn_control(lidar_ip: Ipv4Addr, armed: Arc<AtomicBool>, stop: Arc<AtomicBoo
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_stream(
     lidar_ip: Ipv4Addr,
     host_ip: Ipv4Addr,
+    mcast_data: Ipv4Addr,
     packets: Arc<Vec<Pkt>>,
     rate: f64,
     delay: f64,
@@ -407,12 +416,12 @@ fn spawn_stream(
             if stop.load(Ordering::Relaxed) {
                 break;
             }
-            // The Mid-360 MULTICASTS point/IMU to MCAST_DATA:port (the SDK joins that
+            // The Mid-360 MULTICASTS point/IMU to mcast_data:port (the SDK joins that
             // group — confirmed via `ss -ulnp` showing 224.1.1.5:56301/56401); status
             // is unicast to the host. Sending point/IMU unicast is silently dropped.
             let (sock, dst_ip, dst) = match p.src_port {
-                PORT_POINT => (&point, MCAST_DATA, DST_POINT),
-                PORT_IMU => (&imu, MCAST_DATA, DST_IMU),
+                PORT_POINT => (&point, mcast_data, DST_POINT),
+                PORT_IMU => (&imu, mcast_data, DST_IMU),
                 PORT_STATUS => (&status, host_ip, DST_STATUS),
                 _ => continue,
             };

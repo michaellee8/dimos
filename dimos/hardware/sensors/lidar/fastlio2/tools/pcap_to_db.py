@@ -48,14 +48,15 @@ from pathlib import Path
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 
 from dimos.hardware.sensors.lidar.fastlio2.recorder import FastLio2Recorder
 
 # Poll cadence while recording.
 _POLL_SEC = 1.0
-# Stop once the odom stream has been stagnant this long (pcap fully replayed).
-_STAGNANT_SEC = 6.0
+# Let FastLio2 drain its scan backlog after the pcap finishes before stopping.
+_DRAIN_SEC = 10.0
 
 # Privilege-escalation command + network namespace / veth names. The lidar ns
 # runs virtual_mid360; the drv ns runs the FastLio2 consumer. Defaults are
@@ -191,6 +192,10 @@ def _orchestrate(args: argparse.Namespace) -> int:
     )
 
     consumer: subprocess.Popen[bytes] | None = None
+    tmp = Path(tempfile.gettempdir())
+    stopfile = tmp / f"pcap_to_db_stop.{os.getpid()}"
+    vmlog = tmp / f"pcap_to_db_vm.{os.getpid()}.log"
+    stopfile.unlink(missing_ok=True)
     _setup_netns()
     try:
         # FastLio2 consumer in the drv netns (re-exec self as the recorder).
@@ -206,6 +211,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
             "-m",
             "dimos.hardware.sensors.lidar.fastlio2.tools.pcap_to_db",
             "--_consume",
+            "--_stopfile",
+            str(stopfile),
             "--db",
             str(db),
             "--duration",
@@ -219,6 +226,14 @@ def _orchestrate(args: argparse.Namespace) -> int:
             cmd += ["--force"]
         if args.time_offset is not None:
             cmd += ["--time-offset", str(args.time_offset)]
+        # SQLite won't let root write a db owned by another user, and the
+        # recorder runs as root inside the netns. So if we're appending into an
+        # existing (user-owned) db, take ownership for the run — the chown back
+        # to the caller at the end restores it.
+        for suffix in ("", "-wal", "-shm"):
+            q = Path(str(db) + suffix)
+            if q.exists():
+                _sudo("chown", "0:0", str(q), check=False)
         consumer = subprocess.Popen(cmd)
         time.sleep(5)  # let the coordinator boot + open the SDK sockets
 
@@ -226,18 +241,48 @@ def _orchestrate(args: argparse.Namespace) -> int:
         vm_cfg = json.dumps(
             {
                 "topics": {},
-                "config": {"pcap": str(pcap), "rate": 1.0, "delay": 2.0, "lidar_netns": _LIDAR_NS},
+                "config": {
+                    "pcap": str(pcap),
+                    "rate": 1.0,
+                    "delay": 2.0,
+                    "lidar_ip": _LIDAR_IP,
+                    "host_ip": _HOST_IP,
+                    "lidar_netns": _LIDAR_NS,
+                },
             }
         )
-        vm = subprocess.Popen(
-            [_SUDO, "ip", "netns", "exec", _LIDAR_NS, str(_VM_BIN)], stdin=subprocess.PIPE
-        )
-        assert vm.stdin is not None
-        vm.stdin.write((vm_cfg + "\n").encode())
-        vm.stdin.close()
+        with open(vmlog, "wb") as vmerr:
+            vm = subprocess.Popen(
+                [_SUDO, "ip", "netns", "exec", _LIDAR_NS, str(_VM_BIN)],
+                stdin=subprocess.PIPE,
+                stderr=vmerr,
+            )
+            assert vm.stdin is not None
+            vm.stdin.write((vm_cfg + "\n").encode())
+            vm.stdin.close()
 
-        consumer.wait()
-        rc = consumer.returncode
+            # virtual_mid360 streams the pcap exactly once, then logs "data
+            # stream finished". Wait for that (bounded by --duration), let
+            # FastLio2 drain its scan backlog, then stop the recorder via the
+            # stop-file. (Stagnation-watching the db is unreliable: a diverging
+            # FastLio2 keeps emitting long after the sensor goes quiet.)
+            deadline = time.time() + args.duration
+            while time.time() < deadline:
+                if vm.poll() is not None:
+                    break
+                try:
+                    if b"data stream finished" in vmlog.read_bytes():
+                        break
+                except OSError:
+                    pass
+                time.sleep(1.0)
+        time.sleep(_DRAIN_SEC)
+        stopfile.touch()
+        try:
+            consumer.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            consumer.terminate()
+        rc = consumer.returncode or 0
     finally:
         if consumer is not None and consumer.poll() is None:
             consumer.terminate()
@@ -246,6 +291,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
             except subprocess.TimeoutExpired:
                 consumer.kill()
         _teardown_netns()
+        stopfile.unlink(missing_ok=True)
+        vmlog.unlink(missing_ok=True)
 
     # The consumer ran as root inside the netns, so the db is root-owned —
     # hand it back to the invoking user.
@@ -309,25 +356,17 @@ def _consume(args: argparse.Namespace) -> int:
     ).global_config(n_workers=4, robot_model="mid360_fastlio2_pcap_to_db")
     coord = ModuleCoordinator.build(blueprint)
 
+    # The orchestrator drives the lifetime: it watches virtual_mid360 finish
+    # streaming, lets the backlog drain, then touches the stop-file. --duration
+    # is just a safety cap.
+    stopfile = Path(args._stopfile) if args._stopfile else None
     t0 = time.time()
-    last_max = 0.0
-    stagnant_since: float | None = None
     try:
         while time.time() - t0 < args.duration:
             time.sleep(_POLL_SEC)
-            _cnt, _min_ts, max_ts = _table_stats(db_path, "fastlio_odometry")
-            if max_ts == 0.0:
-                continue  # no data yet — sensor still warming up
-            if max_ts == last_max:
-                # Stream stopped advancing → the pcap has been fully replayed.
-                if stagnant_since is None:
-                    stagnant_since = time.time()
-                elif time.time() - stagnant_since > _STAGNANT_SEC:
-                    print("[pcap_to_db] replay drained", flush=True)
-                    break
-            else:
-                last_max = max_ts
-                stagnant_since = None
+            if stopfile is not None and stopfile.exists():
+                print("[pcap_to_db] stop signalled", flush=True)
+                break
         else:
             print(f"[pcap_to_db] reached --duration cap {args.duration:.0f}s", flush=True)
     finally:
@@ -384,6 +423,7 @@ def main(argv: list[str]) -> int:
     )
     # Internal: the in-netns recorder half, spawned by the orchestrator.
     parser.add_argument("--_consume", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--_stopfile", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
 
     if args._consume:

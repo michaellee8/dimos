@@ -34,7 +34,9 @@ from dimos.visualization.vis_module import vis_module
 # Set pcap to a recorded Mid-360 capture before running, e.g.:
 #   dimos run virtual-mid360-fastlio --VirtualMid360.pcap /path/to/capture.pcap
 demo_virtual_mid360_fastlio = autoconnect(
-    VirtualMid360.blueprint(pcap=""),
+    VirtualMid360.blueprint(
+        pcap="", lidar_ip="192.168.1.155", host_ip="192.168.1.5", lidar_netns="fl_lidar"
+    ),
     FastLio2.blueprint(),
     vis_module("rerun"),
 ).global_config(n_workers=3, robot_model="virtual_mid360_fastlio")
