@@ -18,6 +18,9 @@ Point-LIO runs the IESKF over Imu + PointCloud2 streams (e.g. from the Mid360
 module) — no Livox SDK in this module, the sensor lives elsewhere. Publishes
 odometry (with covariance + velocity) in the sensor frame.
 
+The PointCloud2 must carry a per-point time field (`t`, uint32 ns offset from
+the header stamp) for motion compensation; the Mid360 module publishes it.
+
 Usage::
 
     from dimos.core.coordination.blueprints import autoconnect
@@ -54,10 +57,6 @@ class PointLioConfig(NativeModuleConfig):
     cwd: str | None = "cpp"
     executable: str = "result/bin/pointlio_native"
     build_command: str | None = "nix build .#pointlio_native"
-
-    # Sensor-frame scan rate (Hz). Only used to estimate per-point deskew time,
-    # since the incoming PointCloud2 carries no per-point timestamps.
-    frequency: float = 10.0
 
     # Sensor frame for the odometry header.
     frame_id: str = "mid360_link"

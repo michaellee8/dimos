@@ -48,19 +48,21 @@ static float g_frequency = 10.0f;
 
 // Frame accumulator
 static std::mutex g_pc_mutex;
-static std::vector<float> g_accumulated_xyz;       // interleaved x,y,z
+static std::vector<float> g_accumulated_xyz;        // interleaved x,y,z
 static std::vector<float> g_accumulated_intensity;  // per-point intensity
-static double g_frame_timestamp = 0.0;
+static std::vector<uint32_t> g_accumulated_time;    // per-point ns offset from frame start
+static double g_frame_timestamp = 0.0;              // frame start (seconds, for header)
+static uint64_t g_frame_timestamp_ns = 0;           // frame start (raw ns, for exact offsets)
 static bool g_frame_has_timestamp = false;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-static double get_timestamp_ns(const LivoxLidarEthernetPacket* pkt) {
+static uint64_t get_timestamp_ns(const LivoxLidarEthernetPacket* pkt) {
     uint64_t ns = 0;
     std::memcpy(&ns, pkt->timestamp, sizeof(uint64_t));
-    return static_cast<double>(ns);
+    return ns;
 }
 
 using dimos::time_from_seconds;
@@ -72,8 +74,11 @@ using dimos::make_header;
 
 static void publish_pointcloud(const std::vector<float>& xyz,
                                const std::vector<float>& intensity,
+                               const std::vector<uint32_t>& time_offset,
                                double timestamp) {
-    if (!g_lcm || xyz.empty()) return;
+    if (!g_lcm || xyz.empty()) {
+        return;
+    }
 
     int num_points = static_cast<int>(xyz.size()) / 3;
 
@@ -84,25 +89,28 @@ static void publish_pointcloud(const std::vector<float>& xyz,
     pc.is_bigendian = 0;
     pc.is_dense = 1;
 
-    // Fields: x, y, z (float32), intensity (float32)
-    pc.fields_length = 4;
-    pc.fields.resize(4);
+    // Fields: x, y, z, intensity (float32) + t (uint32, ns offset from the
+    // header stamp). Per-point time is what timestamp-sensitive consumers (e.g.
+    // Point-LIO) need for motion compensation.
+    pc.fields_length = 5;
+    pc.fields.resize(5);
 
-    auto make_field = [](const std::string& name, int32_t offset) {
+    auto make_field = [](const std::string& name, int32_t offset, int8_t datatype) {
         sensor_msgs::PointField f;
         f.name = name;
         f.offset = offset;
-        f.datatype = sensor_msgs::PointField::FLOAT32;
+        f.datatype = datatype;
         f.count = 1;
         return f;
     };
 
-    pc.fields[0] = make_field("x", 0);
-    pc.fields[1] = make_field("y", 4);
-    pc.fields[2] = make_field("z", 8);
-    pc.fields[3] = make_field("intensity", 12);
+    pc.fields[0] = make_field("x", 0, sensor_msgs::PointField::FLOAT32);
+    pc.fields[1] = make_field("y", 4, sensor_msgs::PointField::FLOAT32);
+    pc.fields[2] = make_field("z", 8, sensor_msgs::PointField::FLOAT32);
+    pc.fields[3] = make_field("intensity", 12, sensor_msgs::PointField::FLOAT32);
+    pc.fields[4] = make_field("t", 16, sensor_msgs::PointField::UINT32);
 
-    pc.point_step = 16;  // 4 floats * 4 bytes
+    pc.point_step = 20;  // 4 floats + 1 uint32
     pc.row_step = pc.point_step * num_points;
 
     // Pack point data
@@ -110,11 +118,13 @@ static void publish_pointcloud(const std::vector<float>& xyz,
     pc.data.resize(pc.data_length);
 
     for (int i = 0; i < num_points; ++i) {
-        float* dst = reinterpret_cast<float*>(pc.data.data() + i * 16);
-        dst[0] = xyz[i * 3 + 0];
-        dst[1] = xyz[i * 3 + 1];
-        dst[2] = xyz[i * 3 + 2];
-        dst[3] = intensity[i];
+        uint8_t* row = pc.data.data() + i * pc.point_step;
+        float* f = reinterpret_cast<float*>(row);
+        f[0] = xyz[i * 3 + 0];
+        f[1] = xyz[i * 3 + 1];
+        f[2] = xyz[i * 3 + 2];
+        f[3] = intensity[i];
+        std::memcpy(row + 16, &time_offset[i], sizeof(uint32_t));
     }
 
     g_lcm->publish(g_lidar_topic, &pc);
@@ -128,16 +138,31 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
                            LivoxLidarEthernetPacket* data, void* /*client_data*/) {
     if (!g_running.load() || data == nullptr) return;
 
-    double ts_ns = get_timestamp_ns(data);
-    double ts = ts_ns / 1e9;
+    uint64_t ts_ns = get_timestamp_ns(data);
     uint16_t dot_num = data->dot_num;
+    if (dot_num == 0) {
+        return;
+    }
 
     std::lock_guard<std::mutex> lock(g_pc_mutex);
 
     if (!g_frame_has_timestamp) {
-        g_frame_timestamp = ts;
+        g_frame_timestamp = static_cast<double>(ts_ns) / 1e9;
+        g_frame_timestamp_ns = ts_ns;
         g_frame_has_timestamp = true;
     }
+
+    // Per-point sampling interval within this packet (ns), matching the Livox
+    // driver: point_interval = time_interval[0.1us] * 100 / dot_num. A point's
+    // time is the packet timestamp plus its index * interval; we store it as a
+    // ns offset from the frame start (clamped non-negative for any reordering).
+    const uint64_t point_interval_ns =
+        static_cast<uint64_t>(data->time_interval) * 100 / dot_num;
+    auto time_offset = [&](uint16_t i) -> uint32_t {
+        const uint64_t point_ns = ts_ns + static_cast<uint64_t>(i) * point_interval_ns;
+        const uint64_t offset = point_ns > g_frame_timestamp_ns ? point_ns - g_frame_timestamp_ns : 0;
+        return static_cast<uint32_t>(offset);
+    };
 
     if (data->data_type == DATA_TYPE_CARTESIAN_HIGH) {
         auto* pts = reinterpret_cast<const LivoxLidarCartesianHighRawPoint*>(data->data);
@@ -147,6 +172,7 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
             g_accumulated_xyz.push_back(static_cast<float>(pts[i].y) / 1000.0f);
             g_accumulated_xyz.push_back(static_cast<float>(pts[i].z) / 1000.0f);
             g_accumulated_intensity.push_back(static_cast<float>(pts[i].reflectivity) / 255.0f);
+            g_accumulated_time.push_back(time_offset(i));
         }
     } else if (data->data_type == DATA_TYPE_CARTESIAN_LOW) {
         auto* pts = reinterpret_cast<const LivoxLidarCartesianLowRawPoint*>(data->data);
@@ -156,6 +182,7 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
             g_accumulated_xyz.push_back(static_cast<float>(pts[i].y) / 100.0f);
             g_accumulated_xyz.push_back(static_cast<float>(pts[i].z) / 100.0f);
             g_accumulated_intensity.push_back(static_cast<float>(pts[i].reflectivity) / 255.0f);
+            g_accumulated_time.push_back(time_offset(i));
         }
     }
 }
@@ -311,6 +338,7 @@ int main(int argc, char** argv) {
             // Swap out the accumulated data
             std::vector<float> xyz;
             std::vector<float> intensity;
+            std::vector<uint32_t> time_offset;
             double ts = 0.0;
 
             {
@@ -318,13 +346,14 @@ int main(int argc, char** argv) {
                 if (!g_accumulated_xyz.empty()) {
                     xyz.swap(g_accumulated_xyz);
                     intensity.swap(g_accumulated_intensity);
+                    time_offset.swap(g_accumulated_time);
                     ts = g_frame_timestamp;
                     g_frame_has_timestamp = false;
                 }
             }
 
             if (!xyz.empty()) {
-                publish_pointcloud(xyz, intensity, ts);
+                publish_pointcloud(xyz, intensity, time_offset, ts);
             }
 
             last_emit = now;

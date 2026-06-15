@@ -45,9 +45,7 @@ static PointLio* g_point_lio = nullptr;
 static std::string g_odometry_topic;
 static std::string g_frame_id;        // odometry header frame (sensor frame)
 static std::string g_child_frame_id;  // odometry child frame
-// 1/frequency in ns: used to estimate per-point offset_time, since the incoming
-// PointCloud2 carries no per-point timestamps.
-static double g_frame_period_ns = 1e8;
+static bool g_warned_lidar_fields = false;
 
 using dimos::make_header;
 
@@ -116,7 +114,30 @@ struct InputHandler {
     void on_lidar(const lcm::ReceiveBuffer*, const std::string&, const sensor_msgs::PointCloud2* msg) {
         if (!g_running.load() || g_point_lio == nullptr) { return; }
         const uint32_t num_points = msg->width * msg->height;
-        if (num_points == 0 || msg->point_step < 16) { return; }
+        if (num_points == 0) { return; }
+
+        // Locate fields by name. Point-LIO is timestamp-sensitive, so the
+        // per-point time field `t` (uint32 ns offset from the header stamp,
+        // published by the Mid360 module) is required — without it there's no
+        // motion compensation, so refuse the cloud rather than guess.
+        int off_x = -1, off_y = -1, off_z = -1, off_intensity = -1, off_t = -1;
+        for (size_t k = 0; k < msg->fields.size(); ++k) {
+            const auto& field = msg->fields[k];
+            if (field.name == "x" && field.datatype == sensor_msgs::PointField::FLOAT32) { off_x = field.offset; }
+            else if (field.name == "y" && field.datatype == sensor_msgs::PointField::FLOAT32) { off_y = field.offset; }
+            else if (field.name == "z" && field.datatype == sensor_msgs::PointField::FLOAT32) { off_z = field.offset; }
+            else if (field.name == "intensity" && field.datatype == sensor_msgs::PointField::FLOAT32) { off_intensity = field.offset; }
+            else if (field.name == "t" && field.datatype == sensor_msgs::PointField::UINT32) { off_t = field.offset; }
+        }
+        if (off_x < 0 || off_y < 0 || off_z < 0 || off_t < 0) {
+            if (!g_warned_lidar_fields) {
+                fprintf(stderr,
+                        "[pointlio] ERROR: PointCloud2 missing required float32 x/y/z and uint32 `t` "
+                        "(per-point time) fields; dropping clouds. Publish from the Mid360 module.\n");
+                g_warned_lidar_fields = true;
+            }
+            return;
+        }
 
         const double ts = stamp_to_sec(msg->header.stamp);
         auto lidar = boost::make_shared<custom_messages::CustomMsg>();
@@ -129,20 +150,21 @@ struct InputHandler {
         lidar->point_num = num_points;
         lidar->points.resize(num_points);
 
-        // No per-point time in the PointCloud2 — spread offset_time uniformly
-        // across the frame (points are in scan order) for approximate deskew.
-        const double step_ns = g_frame_period_ns / static_cast<double>(num_points);
         const uint8_t* base = msg->data.data();
         for (uint32_t i = 0; i < num_points; ++i) {
-            const float* p = reinterpret_cast<const float*>(base + i * msg->point_step);
+            const uint8_t* row = base + i * msg->point_step;
             auto& cp = lidar->points[i];
-            cp.x = static_cast<double>(p[0]);
-            cp.y = static_cast<double>(p[1]);
-            cp.z = static_cast<double>(p[2]);
-            cp.reflectivity = static_cast<unsigned short>(p[3]);
+            cp.x = static_cast<double>(*reinterpret_cast<const float*>(row + off_x));
+            cp.y = static_cast<double>(*reinterpret_cast<const float*>(row + off_y));
+            cp.z = static_cast<double>(*reinterpret_cast<const float*>(row + off_z));
+            cp.reflectivity = off_intensity < 0
+                ? 0
+                : static_cast<unsigned short>(*reinterpret_cast<const float*>(row + off_intensity));
             cp.tag = 0;
             cp.line = 0;
-            cp.offset_time = static_cast<uli>(i * step_ns);
+            uint32_t offset_ns = 0;
+            std::memcpy(&offset_ns, row + off_t, sizeof(uint32_t));
+            cp.offset_time = static_cast<uli>(offset_ns);
         }
         g_point_lio->feed_lidar(lidar);
         if (pointlio_debug) {
@@ -174,7 +196,6 @@ int main(int argc, char** argv) {
 
     const double msr_freq = mod.arg_float("msr_freq", 50.0f);
     const double main_freq = mod.arg_float("main_freq", 5000.0f);
-    g_frame_period_ns = 1e9 / mod.arg_float("frequency", 10.0f);
     g_frame_id = mod.arg_required("frame_id");
     g_child_frame_id = mod.arg_required("body_frame_id");
     const double odom_freq = mod.arg_float("odom_freq", 50.0f);
