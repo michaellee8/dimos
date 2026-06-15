@@ -12,14 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""tcpdump-based recorder for raw Livox Mid-360 UDP — the input for VirtualMid360.
-
-Captures only the Mid-360's UDP traffic (point/IMU/status) off the wire into a
-pcap, so it can be replayed later with the VirtualMid360 module. It records
-nothing else — no dimos streams, no db, just the raw Livox packets. Needs
-CAP_NET_RAW (grant tcpdump once: `sudo setcap cap_net_raw,cap_net_admin=eip
-$(which tcpdump)`).
-"""
+"""tcpdump-based recorder for raw Livox Mid-360"""
 
 from __future__ import annotations
 
@@ -108,28 +101,14 @@ def _stop_when_parent_dies(cmd: list[str], grace_sec: float) -> list[str]:
 
 
 class Mid360PcapRecorderConfig(ModuleConfig):
-    """Where/how to capture; the pcap defaults to recordings/mid360_<stamp>.pcap."""
-
     pcap_path: Path = Field(default_factory=_default_pcap_path)
-    # Capture interface. Machine-specific, so it defaults from DIMOS_PCAP_IFACE
-    # (falling back to enp2s0) rather than hardcoding a host-only value.
-    iface: str = Field(default_factory=lambda: os.environ.get("DIMOS_PCAP_IFACE", "enp2s0"))
-    # The Mid-360's IP — network-specific, so required (no default). Only its
-    # UDP is captured (`src host <lidar_ip> and udp`).
+    iface: str = Field(default_factory=lambda: os.environ.get("DIMOS_MID360_PCAP_IFACE", ""))
     lidar_ip: str
     snaplen: int = 2048
-    # Grace period per stop signal (SIGINT -> SIGTERM -> SIGKILL) at teardown.
     stop_timeout: float = 5.0
 
 
 class Mid360PcapRecorder(Module):
-    """Records the raw Livox Mid-360 UDP stream to a pcap via tcpdump.
-
-    Owns nothing but the tcpdump process: on start() it captures every UDP
-    packet from the lidar into pcap_path; on stop() it flushes + tears it down.
-    The result replays bit-for-bit through VirtualMid360.
-    """
-
     config: Mid360PcapRecorderConfig
 
     # tcpdump fails fast (EPERM, bad iface) within a few ms; pause so poll() catches it.
