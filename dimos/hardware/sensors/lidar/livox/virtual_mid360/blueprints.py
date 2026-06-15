@@ -14,7 +14,7 @@
 
 """PointLio fed by a VirtualMid360 replaying a recorded pcap (live SDK path).
 
-Each module reads its own config from env vars (VIRTUAL_MID360_* for the sensor,
+Each module reads its own config from env vars (DIMOS_MID360_* for the sensor,
 DIMOS_POINTLIO_* for PointLio); set the lidar/host IPs so the two ends agree.
 """
 

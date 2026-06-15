@@ -48,22 +48,20 @@ class VirtualMid360Config(NativeModuleConfig):
     executable: str = "result/bin/virtual_mid360"
     build_command: str | None = "nix build .#default"
 
-    # pcap/lidar_ip/host_ip/lidar_netns default from VIRTUAL_MID360_* env vars so
+    # pcap/lidar_ip/host_ip/lidar_netns default from DIMOS_MID360_* env vars so
     # blueprints needn't restate them. pcap/lidar_ip/host_ip are required — empty
     # makes the binary error.
-    pcap: str = Field(default_factory=lambda: os.environ.get("VIRTUAL_MID360_PCAP", ""))
+    pcap: str = Field(default_factory=lambda: os.environ.get("DIMOS_MID360_PCAP", ""))
     # Replay speed; 1.0 = original timing.
     rate: float = 1.0
     # Seconds to wait before streaming begins.
     delay: float = 0.0
     # IP the fake lidar sends from (on this netns's veth).
-    lidar_ip: str = Field(default_factory=lambda: os.environ.get("VIRTUAL_MID360_LIDAR_IP", ""))
+    lidar_ip: str = Field(default_factory=lambda: os.environ.get("DIMOS_MID360_LIDAR_IP", ""))
     # Host IP the data is delivered to (where the SDK listens).
-    host_ip: str = Field(default_factory=lambda: os.environ.get("VIRTUAL_MID360_HOST_IP", ""))
+    host_ip: str = Field(default_factory=lambda: os.environ.get("DIMOS_MID360_HOST_IP", ""))
     # Network namespace the fake lidar runs in.
-    lidar_netns: str = Field(
-        default_factory=lambda: os.environ.get("VIRTUAL_MID360_NETNS", "lidar")
-    )
+    lidar_netns: str = Field(default_factory=lambda: os.environ.get("DIMOS_MID360_NETNS", "lidar"))
     # Multicast group for point/IMU. 224.1.1.5 is the Livox default the SDK joins.
     mcast_data: str = "224.1.1.5"
 
