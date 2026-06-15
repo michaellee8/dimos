@@ -590,16 +590,25 @@ class ManipulationModule(Module):
         return result
 
     def _grasp_tcp_to_tip(
-        self, pose: Pose, tool: tuple[np.ndarray, np.ndarray, np.ndarray]
+        self,
+        pose: Pose,
+        tool: tuple[np.ndarray, np.ndarray, np.ndarray],
+        grasp_roll: float = 0.0,
     ) -> Pose:
         """Convert a fingertip-TCP target pose into the wrist (tip-link) pose the IK
         solves for: align the gripper approach axis (home wrist->fingertip) to the
         pose's local +Z, keep the natural wrist roll, and back off the wrist by the
-        tip->TCP offset so the fingertips land on the requested position."""
+        tip->TCP offset so the fingertips land on the requested position. ``grasp_roll``
+        (radians) rolls the gripper about the vertical so the finger axis can be aligned
+        to an object's narrow dimension (the natural roll leaves it along world X)."""
         r_tip_home, approach_home_world, t_local = tool
         r_tcp = pose.orientation.to_rotation_matrix()
         approach = r_tcp @ np.array([0.0, 0.0, 1.0])  # gripper points along local +Z
         r_tip = self._min_rotation(approach_home_world, approach) @ r_tip_home
+        if grasp_roll:
+            c, s = np.cos(grasp_roll), np.sin(grasp_roll)
+            r_z = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+            r_tip = r_z @ r_tip
         p_tcp = np.array([pose.position.x, pose.position.y, pose.position.z])
         p_tip = p_tcp - r_tip @ t_local
         return Pose(Vector3(*p_tip), Quaternion.from_rotation_matrix(r_tip))
@@ -661,6 +670,7 @@ class ManipulationModule(Module):
         arm: str,
         robot_name: RobotName | None = None,
         grasp_tcp: bool = True,
+        grasp_roll: float = 0.0,
     ) -> bool:
         """Plan a single-arm grasp/place motion via the multi-target ("planning groups")
         path: drive the chosen ``arm``'s tip to ``pose`` (fingertip-TCP retargeted per arm
@@ -691,7 +701,7 @@ class ManipulationModule(Module):
         if grasp_tcp:
             tool = self._grasp_tool_frame(robot_id, config, arm)
             if tool is not None:
-                wrist = self._grasp_tcp_to_tip(pose, tool)
+                wrist = self._grasp_tcp_to_tip(pose, tool, grasp_roll)
         pose_targets: dict[str, Pose] = {active_tip: wrist}
 
         # Idle arm: pin its tip at its current FK pose so it holds steady (torso free).

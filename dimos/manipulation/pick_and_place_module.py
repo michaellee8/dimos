@@ -135,6 +135,7 @@ class PickAndPlaceModule(ManipulationModule):
         # with the same hand/orientation.
         self._last_pick_pose: Pose | None = None
         self._last_pick_arm: str = "left"
+        self._last_grasp_roll: float = 0.0  # gripper roll used for the last pick
 
         # Snapshotted detections from the last scan_objects/refresh call.
         # The live detection cache is volatile (labels change every frame),
@@ -426,32 +427,42 @@ class PickAndPlaceModule(ManipulationModule):
         bx, by = base_xy
         xy_dist = ((cx - bx) ** 2 + (cy - by) ** 2) ** 0.5
 
-        # Distance-adaptive occlusion offset:
-        # Near (< 0.8m): small inset — grasp shifted well toward robot (front surface)
-        # Far (>= 0.8m): larger inset — less toward-robot shift (grasp closer to true center)
+        # Grasp height: tall objects grasped in the upper third (avoid plunging deep).
+        obj_height = det.size.z
+        gz = cz + obj_height * 0.2 if obj_height > _TALL_OBJECT_MIN_HEIGHT else cz
+
+        def _grasp_at(px: float, py: float) -> Pose:
+            rx, ry = px - bx, py - by
+            orient = self._grasp_orientation(rx, ry, (rx**2 + ry**2) ** 0.5)
+            return Pose(Vector3(px, py, gz), orient)
+
+        if self.config.ground_truth_objects:
+            # Exact pose known: grasp the TRUE CENTER (the occlusion shift below would put
+            # the fingers off the object's edge and push it). Add a small toward-base nudge
+            # as a SECOND candidate so objects at the arm's reach edge are still graspable;
+            # the center is tried first (best grip).
+            poses = [_grasp_at(cx, cy)]
+            rel_x, rel_y = cx - bx, cy - by
+            d = (rel_x**2 + rel_y**2) ** 0.5
+            if d > 1e-3:
+                nudge = min(0.03, max(0.0, min(det.size.x, det.size.y) / 2.0 - 0.01))
+                poses.append(_grasp_at(cx - rel_x / d * nudge, cy - rel_y / d * nudge))
+            logger.info(
+                f"Ground-truth grasp for '{object_name}': center=({cx:.3f},{cy:.3f},{gz:.3f}), "
+                f"{len(poses)} candidate(s), "
+                f"size=({det.size.x:.3f},{det.size.y:.3f},{det.size.z:.3f})"
+            )
+            return poses
+
+        # Real perception: distance-adaptive occlusion offset (depth-error compensation).
         inset = 0.01 if xy_dist < _FAR_OCCLUSION_XY_THRESHOLD else 0.05
         gx, gy = self._occlusion_offset(det.center, det.size, inset=inset, base_xy=base_xy)
-
-        # For tall objects, grasp in the upper third instead of center
-        # to avoid plunging deep and colliding with the object.
-        obj_height = det.size.z
-        if obj_height > _TALL_OBJECT_MIN_HEIGHT:
-            gz = cz + obj_height * 0.2  # shift up ~20% from center (upper third)
-        else:
-            gz = cz
-
-        grasp_rel_x, grasp_rel_y = gx - bx, gy - by  # grasp relative to robot base
-        grasp_dist = (grasp_rel_x**2 + grasp_rel_y**2) ** 0.5
-        orientation = self._grasp_orientation(grasp_rel_x, grasp_rel_y, grasp_dist)
-        pose = Pose(Vector3(gx, gy, gz), orientation)
-
         logger.info(
             f"Heuristic grasp for '{object_name}': center=({cx:.3f}, {cy:.3f}, {cz:.3f}), "
-            f"grasp=({gx:.3f}, {gy:.3f}, {gz:.3f}), xy_dist={xy_dist:.2f}m, "
-            f"inset={inset:.2f}m, "
+            f"grasp=({gx:.3f}, {gy:.3f}, {gz:.3f}), xy_dist={xy_dist:.2f}m, inset={inset:.2f}m, "
             f"size=({det.size.x:.3f}, {det.size.y:.3f}, {det.size.z:.3f})"
         )
-        return [pose]
+        return [_grasp_at(gx, gy)]
 
     def _resolve_object_position(self, object_name: str) -> tuple[float, float, float] | None:
         """Resolve an object name to its detected center position.
@@ -681,15 +692,31 @@ then refreshes perception obstacles.
                 f"No grasp poses found for '{object_name}'. Object may not be detected.",
             )
 
-        # Detected objects are added to the planning world as collision obstacles.
-        # The target object is its own grasp's obstacle, and at the folded
-        # camera-over-desk observation pose an arm link can sit inside a detection's
-        # (inflated) box — both produce COLLISION_AT_START and abort the pick. The
-        # grasp poses are already captured above, and the obstacle monitor only
-        # re-adds on an explicit scan (not continuously), so dropping the perception
-        # obstacles here lets the approach plan and holds for the rest of the pick.
-        # (This is the documented COLLISION_AT_START recovery, applied automatically.)
-        self.clear_perception_obstacles()
+        target_det = self._find_object_in_detections(object_name, object_id)
+
+        # Roll the gripper so its finger axis lines up with the object's NARROW horizontal
+        # dimension (the natural roll leaves it along world X). Without this, a wider-than-
+        # gripper axis is gripped and the object is pushed instead of pinched.
+        grasp_roll = (
+            math.pi / 2.0
+            if (target_det is not None and target_det.size.y < target_det.size.x)
+            else 0.0
+        )
+        self._last_grasp_roll = grasp_roll
+
+        # Detected objects are planning-world obstacles. The TARGET object is its own
+        # grasp's obstacle and must be dropped so the gripper can reach it. For a
+        # ground-truth scan, drop ONLY the target (the others stay visible in the viz and
+        # are avoided during the approach); the grasp center is exact, so no folded
+        # observation pose puts an arm link inside another box. Real perception still
+        # clears everything (the folded camera-over-desk pose can sit inside a detection).
+        if self.config.ground_truth_objects and self._world_monitor is not None:
+            if target_det is not None:
+                self._world_monitor.remove_object_obstacle(
+                    target_det.object_id or target_det.name
+                )
+        else:
+            self.clear_perception_obstacles()
 
         # Lift if EE is low before approaching
         lift = self._lift_if_low(rname)
@@ -712,7 +739,7 @@ then refreshes perception obstacles.
                 f"Planning approach to pre-grasp with {chosen} arm "
                 f"(attempt {i + 1}/{max_attempts})..."
             )
-            if not self._plan_arm_to_pose(pre_grasp_pose, chosen, rname, grasp_tcp=True):
+            if not self._plan_arm_to_pose(pre_grasp_pose, chosen, rname, grasp_tcp=True, grasp_roll=grasp_roll):
                 logger.info(f"Grasp candidate {i + 1} approach planning failed, trying next")
                 continue  # Try next candidate
 
@@ -728,7 +755,7 @@ then refreshes perception obstacles.
 
             # 5. Move to grasp pose
             logger.info("Moving to grasp position...")
-            if not self._plan_arm_to_pose(grasp_pose, chosen, rname, grasp_tcp=True):
+            if not self._plan_arm_to_pose(grasp_pose, chosen, rname, grasp_tcp=True, grasp_roll=grasp_roll):
                 return SkillResult.fail("PLANNING_FAILED", "Grasp pose planning failed")
             exec_result = self._preview_execute_wait(rname)
             if not exec_result.is_success():
@@ -741,7 +768,7 @@ then refreshes perception obstacles.
 
             # 7. Retract to pre-grasp
             logger.info("Retracting with object...")
-            if not self._plan_arm_to_pose(pre_grasp_pose, chosen, rname, grasp_tcp=True):
+            if not self._plan_arm_to_pose(pre_grasp_pose, chosen, rname, grasp_tcp=True, grasp_roll=grasp_roll):
                 return SkillResult.fail("PLANNING_FAILED", "Retract planning failed")
             exec_result = self._preview_execute_wait(rname)
             if not exec_result.is_success():
@@ -823,7 +850,7 @@ then refreshes perception obstacles.
         logger.info(
             f"Planning approach to place ({x:.3f}, {y:.3f}, {z:.3f}) with {chosen} arm..."
         )
-        if not self._plan_arm_to_pose(pre_place_pose, chosen, rname, grasp_tcp=True):
+        if not self._plan_arm_to_pose(pre_place_pose, chosen, rname, grasp_tcp=True, grasp_roll=self._last_grasp_roll):
             return SkillResult.fail("PLANNING_FAILED", "Pre-place approach planning failed")
 
         exec_result = self._preview_execute_wait(rname)
@@ -832,7 +859,7 @@ then refreshes perception obstacles.
 
         # 2. Lower to place position
         logger.info("Lowering to place position...")
-        if not self._plan_arm_to_pose(place_pose, chosen, rname, grasp_tcp=True):
+        if not self._plan_arm_to_pose(place_pose, chosen, rname, grasp_tcp=True, grasp_roll=self._last_grasp_roll):
             return SkillResult.fail("PLANNING_FAILED", "Place pose planning failed")
         exec_result = self._preview_execute_wait(rname)
         if not exec_result.is_success():
@@ -845,7 +872,7 @@ then refreshes perception obstacles.
 
         # 4. Retract
         logger.info("Retracting...")
-        if not self._plan_arm_to_pose(pre_place_pose, chosen, rname, grasp_tcp=True):
+        if not self._plan_arm_to_pose(pre_place_pose, chosen, rname, grasp_tcp=True, grasp_roll=self._last_grasp_roll):
             return SkillResult.fail("PLANNING_FAILED", "Retract planning failed")
         exec_result = self._preview_execute_wait(rname)
         if not exec_result.is_success():
