@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+import getpass
 import os
 from pathlib import Path
 import re
@@ -68,6 +69,9 @@ def _stop_when_parent_dies(cmd: list[str], grace_sec: float) -> list[str]:
         return (
             f'kill -{sig} "$child" 2>/dev/null'
             f' || sudo -n aa-exec -p unconfined -- kill -{sig} "$child" 2>/dev/null'
+            f' || echo "[mid360_record] FAILED to {sig} tcpdump pid $child'
+            f" (AppArmor blocked it + sudo -n could not escalate) — it is ORPHANED."
+            f' Kill it: sudo aa-exec -p unconfined -- kill -9 $child" >&2'
         )
 
     # Foreground waits on tcpdump so a startup failure propagates its exit code.
@@ -318,9 +322,13 @@ class Mid360PcapRecorder(Module):
                 logger.warning(
                     f"tcpdump did not exit on {sig.name}; escalating  path={self.config.pcap_path}"
                 )
+        # The bash wrapper can die while a confined tcpdump survives its
+        # AppArmor-blocked signal (the unconfined fallback couldn't escalate) —
+        # so check tcpdump directly rather than trusting proc.wait().
+        if self._tcpdump_pid() is not None:
+            self._scream_orphaned()
         else:
-            proc.wait()
-        logger.info(f"Mid360PcapRecorder stopped  path={self.config.pcap_path}")
+            logger.info(f"Mid360PcapRecorder stopped  path={self.config.pcap_path}")
 
     def _signal_group(self, pgid: int, sig: signal.Signals) -> bool:
         """Signal the tcpdump process group; False if it's already gone.
@@ -348,3 +356,51 @@ class Mid360PcapRecorder(Module):
         except (OSError, subprocess.TimeoutExpired):
             pass
         return True
+
+    def _tcpdump_pid(self) -> int | None:
+        """PID of a tcpdump still writing our pcap, or None — used to detect an
+        orphan that survived the stop because its signal was AppArmor-blocked."""
+        path = str(Path(self.config.pcap_path).expanduser())
+        try:
+            result = subprocess.run(
+                ["pgrep", "-af", "tcpdump"], capture_output=True, text=True, timeout=2.0
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        for line in result.stdout.splitlines():
+            if path in line:
+                try:
+                    return int(line.split(None, 1)[0])
+                except (ValueError, IndexError):
+                    continue
+        return None
+
+    def _scream_orphaned(self) -> None:
+        """Loudly report a tcpdump that outlived the stop, with the exact fix."""
+        pid = self._tcpdump_pid()
+        aa = shutil.which("aa-exec") or "/usr/sbin/aa-exec"
+        kill = shutil.which("kill") or "/usr/bin/kill"
+        user = getpass.getuser()
+        # Narrow sudoers rule: passwordless for ONLY the unconfined kill.
+        rule = f"{user} ALL=(root) NOPASSWD: {aa} -p unconfined -- {kill} *"
+        banner = textwrap.dedent(f"""
+            ############################################################################
+            [mid360_record] !!! tcpdump SURVIVED THE STOP — capture is ORPHANED !!!
+            ############################################################################
+            tcpdump pid={pid} is STILL RUNNING and writing {self.config.pcap_path}.
+            AppArmor's tcpdump profile rejected the kill from this (confined) process,
+            and the unconfined fallback could not escalate (sudo -n needs a password,
+            or aa-exec is missing). It will NOT be reaped on its own.
+
+            Kill it now:
+                sudo {aa} -p unconfined -- {kill} -9 {pid}
+
+            To let the recorder kill it itself next time — passwordless for ONLY this
+            unconfined kill, not all sudo — install a narrow sudoers rule:
+                echo '{rule}' | sudo tee /etc/sudoers.d/dimos-mid360-pcap-kill
+                sudo chmod 440 /etc/sudoers.d/dimos-mid360-pcap-kill
+            (Verify the paths match `command -v aa-exec` and `command -v kill`.)
+            ############################################################################
+        """).strip()
+        logger.error(banner)
+        print(banner, flush=True)
