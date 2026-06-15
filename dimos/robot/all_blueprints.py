@@ -63,6 +63,7 @@ all_blueprints = {
     "galaxea-viser-planner-coordinator-agent": "dimos.manipulation.blueprints:galaxea_viser_planner_coordinator_agent",
     "keyboard-teleop-a750": "dimos.robot.manipulators.a750.blueprints:keyboard_teleop_a750",
     "r1pro-perception-sim": "dimos.manipulation.blueprints:r1pro_perception_sim",
+    "r1pro-perception-sim-agent": "dimos.manipulation.blueprints:r1pro_perception_sim_agent",
     "r1pro-sim-preview": "dimos.manipulation.blueprints:r1pro_sim_preview",
     "keyboard-teleop-openarm": "dimos.robot.manipulators.openarm.blueprints:keyboard_teleop_openarm",
     "keyboard-teleop-openarm-mock": "dimos.robot.manipulators.openarm.blueprints:keyboard_teleop_openarm_mock",

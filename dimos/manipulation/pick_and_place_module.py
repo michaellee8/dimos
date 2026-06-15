@@ -188,7 +188,12 @@ class PickAndPlaceModule(ManipulationModule):
                 "No world monitor available",
             )
         count = self._world_monitor.clear_perception_obstacles()
-        self._detection_snapshot = []
+        # Keep ground-truth detections: they live ONLY in the snapshot (there is no
+        # live perception cache to re-populate from), so clearing obstacles must not
+        # drop them or a follow-up pick/place loses the objects. Live-perception runs
+        # still clear, since the next scan refreshes the snapshot from the cache.
+        if not self.config.ground_truth_objects:
+            self._detection_snapshot = []
         return SkillResult.ok(f"Cleared {count} perception obstacle(s) from planning world")
 
     @rpc
