@@ -189,6 +189,7 @@ class HealthMonitor:
         self._warmup_done = False
         self._state = OK
         self._state_since = self._t0
+        self._latest: Health | None = None
         self._win = _Window()
         self._total_inputs: dict[str, int] = {}
         self._step_ms: deque[float] = deque(maxlen=256)
@@ -281,6 +282,7 @@ class HealthMonitor:
         self._transition(state, violations, now)
 
         health = Health(ts=now, state=state, violations=tuple(violations), metrics=metrics)
+        self._latest = health
         if self.sink is not None:
             try:
                 self.sink(health)
@@ -399,6 +401,11 @@ class HealthMonitor:
     @property
     def state(self) -> str:
         return self._state
+
+    @property
+    def latest(self) -> Health | None:
+        """The most recent snapshot, or ``None`` before the first report."""
+        return self._latest
 
     def counters(self) -> dict[str, Any]:
         """Current window counters — for tests and debugging."""

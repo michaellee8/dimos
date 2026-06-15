@@ -285,6 +285,51 @@ class PureModuleConfig(ModuleConfig):
     ``drops_blocked``. Offline ``over()`` is uncapped (exact)."""
 
 
+class HealthView:
+    """Read-only health surface for a running module — ``module.health``.
+
+    Wraps the internal :class:`HealthMonitor` and the ``_health`` stream so
+    callers never touch either directly. ``state``/``latest`` are in-process
+    (a supervisor, readiness probe, or test assertion); ``stream`` and
+    ``subscribe`` ride the module's store — discarded on a ``NullStore``,
+    recorded next to the data on a ``SqliteStore``.
+    """
+
+    __slots__ = ("_monitor", "_stream")
+
+    def __init__(self, monitor: HealthMonitor, stream: Any | None) -> None:
+        self._monitor = monitor
+        self._stream = stream
+
+    @property
+    def state(self) -> str:
+        """Current state: ``'OK'`` | ``'DEGRADED'`` | ``'STALLED'``."""
+        return self._monitor.state
+
+    @property
+    def latest(self) -> Health | None:
+        """The most recent snapshot, or ``None`` before the first report."""
+        return self._monitor.latest
+
+    @property
+    def stream(self) -> Any | None:
+        """The ``_health`` memory2 stream (``None`` if ``health.stream`` is off).
+
+        An ordinary stream: ``.live()`` to tail, ``.before(t).to_list()`` to
+        query a recording. ``None`` when health snapshots are disabled.
+        """
+        return self._stream
+
+    def subscribe(self, on_health: Any) -> Any:
+        """Subscribe to live snapshots. Raises if ``health.stream`` is off."""
+        if self._stream is None:
+            raise RuntimeError(
+                "health snapshots are disabled (config.health.stream=False) — "
+                "nothing to subscribe to"
+            )
+        return self._stream.live().subscribe(on_health)
+
+
 class PureModule(Module):
     """Base class for modules implementing a pure ``step`` over aligned inputs.
 
@@ -324,6 +369,21 @@ class PureModule(Module):
     def step(self, *args: Any, **kwargs: Any) -> Any:  # pragma: no cover - overridden
         raise NotImplementedError(f"{type(self).__name__} must define step()")
 
+    @property
+    def health(self) -> HealthView:
+        """Read-only health surface (see :class:`HealthView`).
+
+        Available only after ``start()`` — a pure ``over()`` run has no
+        runtime to monitor.
+        """
+        view: HealthView | None = getattr(self, "_health_view", None)
+        if view is None:
+            raise RuntimeError(
+                f"{type(self).__name__}.health is available only after start() "
+                f"(no health monitor on an offline over() run)"
+            )
+        return view
+
     # -- plan -----------------------------------------------------------------
 
     @classmethod
@@ -360,9 +420,10 @@ class PureModule(Module):
                 continue
             origin = get_origin(ann)
             if origin is In:
-                if name in ("ts", "state", "out"):
+                if name in ("ts", "state", "out", "health"):
                     raise TypeError(
-                        f"{cls.__name__}.{name}: 'ts', 'state' and 'out' are reserved names"
+                        f"{cls.__name__}.{name}: 'ts', 'state', 'out' and 'health' "
+                        f"are reserved names"
                     )
                 ins[name] = (get_args(ann) or (object,))[0]
                 sampler = inspect.getattr_static(cls, name, None)
@@ -384,6 +445,11 @@ class PureModule(Module):
                     if declared.max_missing_ratio is not None:
                         missing_ratio[name] = declared.max_missing_ratio
             elif origin is Out:
+                if name == "health":
+                    raise TypeError(
+                        f"{cls.__name__}.{name}: 'health' is a reserved name "
+                        f"(shadows module.health)"
+                    )
                 outs[name] = (get_args(ann) or (object,))[0]
                 marker = inspect.getattr_static(cls, name, None)
                 if isinstance(marker, OutContract) and marker.min_hz is not None:
@@ -629,14 +695,16 @@ class PureModule(Module):
         plan = self._plan()
         cfg = self.config
 
-        store = self.register_disposable(self.make_store())
+        store = self._store = self.register_disposable(self.make_store())
         store.start()
         self._streams = {name: store.stream(name, port.type) for name, port in self.inputs.items()}
         self._out_streams = {
             name: store.stream(name, port.type) for name, port in self.outputs.items()
         }
 
-        health_stream = store.stream("_health", dict) if cfg.health.stream else None
+        health_stream = self._health_stream = (
+            store.stream("_health", dict) if cfg.health.stream else None
+        )
 
         def _sink(h: Health) -> None:
             assert health_stream is not None
@@ -655,6 +723,7 @@ class PureModule(Module):
             sink=_sink if health_stream is not None else None,
         )
         self.health_monitor = monitor
+        self._health_view = HealthView(monitor, health_stream)
 
         q: queue.SimpleQueue[Any] = queue.SimpleQueue()
         self._queue = q

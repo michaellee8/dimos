@@ -713,6 +713,78 @@ def test_class_contracts_reach_the_monitor(store: MemoryStore) -> None:
         _reset_rx_pool()
 
 
+def test_health_reserved_as_in_port_name() -> None:
+    class BadIn(PureModule):
+        health: In[int] = tick()  # type: ignore[misc]
+
+        def step(self, health: int) -> int:
+            return health
+
+    with pytest.raises(TypeError, match="reserved"):
+        BadIn._plan()
+
+
+def test_health_reserved_as_out_port_name() -> None:
+    class BadOut(PureModule):
+        frame: In[int] = tick()
+        health: Out[int]  # type: ignore[misc]
+
+        def step(self, frame: int) -> dict[str, int]:
+            return {"health": frame}
+
+    with pytest.raises(TypeError, match="reserved"):
+        BadOut._plan()
+
+
+@pytest.mark.tool
+def test_health_facade_unavailable_before_start() -> None:
+    module = Contracted()
+    try:
+        with pytest.raises(RuntimeError, match="only after start"):
+            _ = module.health
+    finally:
+        module.stop()
+        _reset_rx_pool()
+
+
+@pytest.mark.tool
+def test_health_facade_exposes_state_stream_and_subscribe(store: MemoryStore) -> None:
+    module = Contracted()
+    module.input_sources = {  # empty sourced inputs: no transports needed
+        "frame": store.stream("frame", int),
+        "gps": store.stream("gps", str),
+    }
+    try:
+        module.start()
+        assert module.health.state == "OK"  # fresh module is healthy
+        assert module.health.latest is None  # no report emitted yet
+        assert module.health.stream is module._health_stream  # the real _health stream
+        seen: list[Any] = []
+        disp = module.health.subscribe(seen.append)  # live subscribe wires up
+        disp.dispose()
+    finally:
+        module.stop()
+        _reset_rx_pool()
+
+
+@pytest.mark.tool
+def test_health_subscribe_raises_when_stream_disabled(store: MemoryStore) -> None:
+    module = Contracted(health={"stream": False})
+    module.input_sources = {
+        "frame": store.stream("frame", int),
+        "gps": store.stream("gps", str),
+    }
+    try:
+        module.start()
+        assert module.health.stream is None
+        with pytest.raises(RuntimeError, match="disabled"):
+            module.health.subscribe(lambda _: None)
+        assert module.health.state == "OK"  # state still readable
+    finally:
+        module.stop()
+        _reset_rx_pool()
+
+
 @pytest.mark.tool
 def test_input_sources_unknown_name_raises() -> None:
     class Echo(PureModule):

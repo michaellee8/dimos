@@ -13,32 +13,32 @@ A `PureModule` splits the same job into three declarations:
   `interpolate()`, `window()`;
 - **what it computes** — `step()`, a pure function of the aligned inputs.
 
-```diagon mode=GraphDAG
-camera -> align
-pose -> align
-imu -> align
-align -> tick
-tick -> step
-step -> outputs
+<details>
+<summary>diagram source</summary>
+
+```pikchr fold output=assets/pure_modules_dag.svg
+color = white
+fill = none
+down
+
+Align: box "align" rad 5px fit wid 200% ht 170%
+arrow
+Step: box "step" rad 5px fit wid 170% ht 170%
+arrow
+Out: box "outputs" rad 5px fit wid 170% ht 170%
+
+Cam:  box "camera" rad 5px fit wid 170% ht 170% with .s at (Align.n.x - 1.1in, Align.n.y + 0.6in)
+Pose: box "pose"   rad 5px fit wid 170% ht 170% with .s at (Align.n.x,         Align.n.y + 0.6in)
+Imu:  box "imu"    rad 5px fit wid 170% ht 170% with .s at (Align.n.x + 1.1in, Align.n.y + 0.6in)
+
+arrow from Cam.s  to Align.nw
+arrow from Pose.s to Align.n
+arrow from Imu.s  to Align.ne
 ```
 
-```results
-┌──────┐┌────┐┌───┐
-│camera││pose││imu│
-└┬─────┘└┬───┘└┬──┘
-┌▽───────▽─────▽┐
-│align          │
-└┬──────────────┘
-┌▽───┐
-│tick│
-└┬───┘
-┌▽───┐
-│step│
-└┬───┘
-┌▽──────┐
-│outputs│
-└───────┘
-```
+</details>
+
+![output](assets/pure_modules_dag.svg)
 
 Because `step` never touches ports, threads, or `self`, the same class runs
 **live** on pub/sub ports and **offline** over stored
@@ -467,12 +467,12 @@ livable: a healthy module skipping two thirds of its frames under
 `KeepLast` backpressure logs **nothing** — expected drops are counters,
 not warnings.
 
-When logs aren't enough, the same information is queryable:
-`module.health_monitor.state` gives the current `OK`/`DEGRADED`/`STALLED`
-in process, and a `_health` stream in the module store receives an
-aggregated metrics snapshot every second (drop rates by reason, step
-p50/p99, input staleness, observed Hz) — subscribe to it live, or deploy
-with a `SqliteStore` and the health history is recorded *next to the data
+When logs aren't enough, the same information is queryable through
+`module.health`: `module.health.state` gives the current
+`OK`/`DEGRADED`/`STALLED` in process, and `module.health.subscribe(cb)`
+tails a `_health` stream that receives an aggregated metrics snapshot every
+second (drop rates by reason, step p50/p99, input staleness, observed Hz).
+Deploy with a `SqliteStore` and that stream is recorded *next to the data
 it explains*, so a post-incident notebook can plot the drop ratio against
 the very frames that were dropped.
 
