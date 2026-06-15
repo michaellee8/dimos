@@ -93,3 +93,6 @@ recording*.db
 # Scene packages are pulled from LFS (data/.lfs/scene_packages.tar.gz), not tracked loose
 /data/scene_packages/*
 !/data/scene_packages/README.md
+
+# Personal scratch dir: local driver scripts, diagnostics, renders. Never tracked.
+/.local/
