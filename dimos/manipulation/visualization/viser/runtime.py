@@ -120,14 +120,22 @@ def _branded_background_image() -> object | None:
             )
             if logo_path.exists():
                 logo = Image.open(logo_path).convert("RGBA")
-                scale = (w * 0.55) / logo.width
+                # Scale by width only (keeps the logo's native aspect ratio) and seat it in
+                # the upper third rather than dead center.
+                logo_width_frac = 0.72  # fraction of the canvas width the logo spans
+                logo_center_y_frac = 0.30  # vertical center, 0 = top .. 1 = bottom
+                scale = (w * logo_width_frac) / logo.width
                 logo = logo.resize(
                     (max(1, int(logo.width * scale)), max(1, int(logo.height * scale)))
                 )
                 logo.putalpha(logo.split()[3].point(lambda v: int(v * 0.85)))  # slightly soften
                 canvas = Image.fromarray(bg, "RGB").convert("RGBA")
                 canvas.alpha_composite(
-                    logo, ((w - logo.width) // 2, (h - logo.height) // 2)
+                    logo,
+                    (
+                        (w - logo.width) // 2,
+                        int(h * logo_center_y_frac - logo.height / 2),
+                    ),
                 )
                 bg = np.asarray(canvas.convert("RGB"))
         except Exception as exc:  # noqa: BLE001 - logo is optional; keep the gradient
