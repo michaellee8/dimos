@@ -599,12 +599,19 @@ class ManipulationModule(Module):
         p_tip = p_tcp - r_tip @ t_local
         return Pose(Vector3(*p_tip), Quaternion.from_rotation_matrix(r_tip))
 
-    def plan_to_pose(self, pose: Pose, robot_name: RobotName | None = None) -> bool:
+    def plan_to_pose(
+        self, pose: Pose, robot_name: RobotName | None = None, grasp_tcp: bool = False
+    ) -> bool:
         """Plan motion to pose. Use preview_path() then execute().
 
         Args:
-            pose: Target end-effector pose
+            pose: Target end-effector (planning tip) pose.
             robot_name: Robot to plan for (required if multiple robots configured)
+            grasp_tcp: Treat ``pose`` as a fingertip-grasp TCP target and retarget the
+                IK to the planning tip (only for robots with ``grasp_tcp_links``; see
+                _grasp_tcp_to_tip). Default False keeps the documented end-effector-link
+                semantics, so internal motions (go_init waypoint, lift, move_to_pose)
+                are unaffected. pick()/place() set this True.
         """
         if self._kinematics is None or (r := self._begin_planning(robot_name)) is None:
             return False
@@ -615,10 +622,14 @@ class ManipulationModule(Module):
         if current is None:
             return self._fail("No joint state")
 
-        # For robots whose planning tip is the wrist, retarget to the fingertips.
-        tool = self._grasp_tool_frame(robot_id, self._world_monitor.world.get_robot_config(robot_id))
-        if tool is not None:
-            pose = self._grasp_tcp_to_tip(pose, tool)
+        # Grasp/place targets are fingertip poses; retarget to the wrist tip the IK
+        # solves for. Other motions already pass wrist poses, so leave them alone.
+        if grasp_tcp:
+            tool = self._grasp_tool_frame(
+                robot_id, self._world_monitor.world.get_robot_config(robot_id)
+            )
+            if tool is not None:
+                pose = self._grasp_tcp_to_tip(pose, tool)
 
         target_pose = PoseStamped(
             frame_id="world",

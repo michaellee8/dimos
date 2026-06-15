@@ -659,7 +659,7 @@ then refreshes perception obstacles.
             pre_grasp_pose = self._compute_pre_grasp_pose(grasp_pose, offset)
 
             logger.info(f"Planning approach to pre-grasp (attempt {i + 1}/{max_attempts})...")
-            if not self.plan_to_pose(pre_grasp_pose, rname):
+            if not self.plan_to_pose(pre_grasp_pose, rname, grasp_tcp=True):
                 logger.info(f"Grasp candidate {i + 1} approach planning failed, trying next")
                 continue  # Try next candidate
 
@@ -675,7 +675,7 @@ then refreshes perception obstacles.
 
             # 5. Move to grasp pose
             logger.info("Moving to grasp position...")
-            if not self.plan_to_pose(grasp_pose, rname):
+            if not self.plan_to_pose(grasp_pose, rname, grasp_tcp=True):
                 return SkillResult.fail("PLANNING_FAILED", "Grasp pose planning failed")
             exec_result = self._preview_execute_wait(rname)
             if not exec_result.is_success():
@@ -688,7 +688,7 @@ then refreshes perception obstacles.
 
             # 7. Retract to pre-grasp
             logger.info("Retracting with object...")
-            if not self.plan_to_pose(pre_grasp_pose, rname):
+            if not self.plan_to_pose(pre_grasp_pose, rname, grasp_tcp=True):
                 return SkillResult.fail("PLANNING_FAILED", "Retract planning failed")
             exec_result = self._preview_execute_wait(rname)
             if not exec_result.is_success():
@@ -757,7 +757,7 @@ then refreshes perception obstacles.
 
         # 1. Move to pre-place
         logger.info(f"Planning approach to place position ({x:.3f}, {y:.3f}, {z:.3f})...")
-        if not self.plan_to_pose(pre_place_pose, rname):
+        if not self.plan_to_pose(pre_place_pose, rname, grasp_tcp=True):
             return SkillResult.fail("PLANNING_FAILED", "Pre-place approach planning failed")
 
         exec_result = self._preview_execute_wait(rname)
@@ -766,7 +766,7 @@ then refreshes perception obstacles.
 
         # 2. Lower to place position
         logger.info("Lowering to place position...")
-        if not self.plan_to_pose(place_pose, rname):
+        if not self.plan_to_pose(place_pose, rname, grasp_tcp=True):
             return SkillResult.fail("PLANNING_FAILED", "Place pose planning failed")
         exec_result = self._preview_execute_wait(rname)
         if not exec_result.is_success():
@@ -779,7 +779,7 @@ then refreshes perception obstacles.
 
         # 4. Retract
         logger.info("Retracting...")
-        if not self.plan_to_pose(pre_place_pose, rname):
+        if not self.plan_to_pose(pre_place_pose, rname, grasp_tcp=True):
             return SkillResult.fail("PLANNING_FAILED", "Retract planning failed")
         exec_result = self._preview_execute_wait(rname)
         if not exec_result.is_success():
