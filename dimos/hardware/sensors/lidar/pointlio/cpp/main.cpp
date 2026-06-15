@@ -60,7 +60,9 @@ static double get_publish_ts() {
 
 static std::string g_lidar_topic;
 static std::string g_odometry_topic;
-static std::string g_frame_id;        // required via --frame_id static std::string g_child_frame_id;   // required via --child_frame_id static float g_frequency = 10.0f;
+static std::string g_frame_id;          // required via --frame_id
+static std::string g_child_frame_id;     // required via --child_frame_id
+static float g_frequency = 10.0f;
 
 // Frame accumulator (Livox SDK raw → CustomMsg)
 static std::mutex g_pc_mutex;
@@ -182,18 +184,21 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
         auto* pts = reinterpret_cast<const LivoxLidarCartesianHighRawPoint*>(data->data);
         for (uint16_t point_idx = 0; point_idx < dot_num; ++point_idx) {
             custom_messages::CustomPoint cp;
-            cp.x = static_cast<double>(pts[point_idx].x) / 1000.0;   // mm → m cp.y = static_cast<double>(pts[point_idx].y) / 1000.0;
+            cp.x = static_cast<double>(pts[point_idx].x) / 1000.0;   // mm → m
+            cp.y = static_cast<double>(pts[point_idx].y) / 1000.0;
             cp.z = static_cast<double>(pts[point_idx].z) / 1000.0;
             cp.reflectivity = pts[point_idx].reflectivity;
             cp.tag = pts[point_idx].tag;
-            cp.line = 0;  // Mid-360: single line cp.offset_time = static_cast<uli>((ts_ns - g_frame_start_ns) + point_idx * point_interval_ns);
+            cp.line = 0;  // Mid-360: single line
+            cp.offset_time = static_cast<uli>((ts_ns - g_frame_start_ns) + point_idx * point_interval_ns);
             g_accumulated_points.push_back(cp);
         }
     } else if (data->data_type == DATA_TYPE_CARTESIAN_LOW) {
         auto* pts = reinterpret_cast<const LivoxLidarCartesianLowRawPoint*>(data->data);
         for (uint16_t point_idx = 0; point_idx < dot_num; ++point_idx) {
             custom_messages::CustomPoint cp;
-            cp.x = static_cast<double>(pts[point_idx].x) / 100.0;   // cm → m cp.y = static_cast<double>(pts[point_idx].y) / 100.0;
+            cp.x = static_cast<double>(pts[point_idx].x) / 100.0;   // cm → m
+            cp.y = static_cast<double>(pts[point_idx].y) / 100.0;
             cp.z = static_cast<double>(pts[point_idx].z) / 100.0;
             cp.reflectivity = pts[point_idx].reflectivity;
             cp.tag = pts[point_idx].tag;
@@ -496,8 +501,11 @@ int main(int argc, char** argv) {
     }
 
     if (debug) { printf("[pointlio] Shutting down...\n"); }
-    g_point_lio = nullptr;
+    // Uninit (stops + joins the SDK callback threads) BEFORE clearing the
+    // pointers those callbacks read, so an in-flight on_imu_data/on_point_cloud
+    // can't race the assignment and dereference a null g_point_lio / g_lcm.
     LivoxLidarSdkUninit();
+    g_point_lio = nullptr;
     g_lcm = nullptr;
 
     if (debug) { printf("[pointlio] Done.\n"); }
