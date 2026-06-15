@@ -74,31 +74,26 @@ class PointLioConfig(NativeModuleConfig):
     cwd: str | None = "cpp"
     executable: str = "result/bin/pointlio_native"
     build_command: str | None = "nix build .#pointlio_native"
-    # lidar_ip is required (network-specific); from the config or
-    # DIMOS_POINTLIO_LIDAR_IP. host_ip is optional — start() derives the local
-    # NIC on the lidar's subnet when unset (or via DIMOS_POINTLIO_HOST_IP).
+    # lidar_ip required; host_ip optional (auto-derived from lidar_ip's subnet).
+    # Both fall back to DIMOS_POINTLIO_LIDAR_IP / DIMOS_POINTLIO_HOST_IP.
     host_ip: str | None = Field(default_factory=lambda: os.environ.get("DIMOS_POINTLIO_HOST_IP"))
     lidar_ip: str | None = Field(default_factory=lambda: os.environ.get("DIMOS_POINTLIO_LIDAR_IP"))
     frequency: float = 10.0
 
-    # frame_id is the header frame for BOTH the point cloud and the odometry
-    # message (the Mid-360 sensor frame). The TF published by the module is a
-    # separate body_start_frame_id -> body_frame_id transform.
+    # Sensor frame for the cloud + odometry headers.
     frame_id: str = "mid360_link"
-    # TF publish frames (body_start -> body): the sensor pose expressed as the
-    # body_frame pose in the body_start frame.
+    # Published TF: body_start_frame_id -> body_frame_id.
     body_start_frame_id: str = FRAME_ODOM
     body_frame_id: str = "base_link"
 
-    # Point-LIO internal processing rates
+    # Point-LIO internal processing rates (Hz)
     msr_freq: float = 50.0
     main_freq: float = 5000.0
 
     pointcloud_freq: float = 10.0
     odom_freq: float = 30.0
 
-    # Published-cloud cleanup. raw_cloud=True publishes the unfiltered scan
-    # (skips both downsample and outlier removal).
+    # raw_cloud=True publishes the unfiltered scan (no downsample/outlier removal).
     raw_cloud: bool = False
     # Voxel-grid downsample leaf size (m); 0 keeps full resolution.
     voxel_size: float = 0.1
@@ -171,9 +166,8 @@ class PointLio(NativeModule, perception.Lidar, perception.Odometry):
                     msg.pose.orientation.z,
                     msg.pose.orientation.w,
                 ),
-                # Match the odometry message's own timestamp exactly so the TF
-                # and the pose can't drift apart. No `or time.time()` fallback: a
-                # real ts of 0.0 must not be silently replaced with wall time.
+                # Match the odometry ts exactly; no `or time.time()` fallback (a
+                # real ts of 0.0 must not become wall time).
                 ts=msg.ts,
             )
         )
@@ -191,9 +185,8 @@ class PointLio(NativeModule, perception.Lidar, perception.Odometry):
             )
         local_ips = [ip for ip, _iface in get_local_ips()]
 
-        # host_ip is optional — it's just the local NIC facing the lidar. When
-        # it's unset (or not one of our IPs) derive it as the local IP on the
-        # lidar's /24.
+        # host_ip optional: derive the local NIC on lidar_ip's /24 when unset or
+        # not one of our IPs.
         configured = self.config.host_ip
         if configured and configured in local_ips:
             host_ip = configured
