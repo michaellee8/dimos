@@ -23,7 +23,12 @@ import math
 import numpy as np
 import pytest
 
-from dimos.control.tasks.trajectory_tracking_task.constants import PLAN_MAX_ACC, PLAN_MAX_VEL
+from dimos.control.tasks.trajectory_tracking_task.config import ProfileLimits
+from dimos.control.tasks.trajectory_tracking_task.constants import (
+    A_LAT_MAX,
+    PLAN_MAX_ACC,
+    PLAN_MAX_VEL,
+)
 from dimos.control.tasks.trajectory_tracking_task.trajectory_generator import (
     TimedTrajectory,
     TrapezoidalProfile,
@@ -36,6 +41,12 @@ from dimos.msgs.nav_msgs.Path import Path
 _DT = 0.01  # dense sampling at the coordinator tick rate
 _PLAN_V = min(PLAN_MAX_VEL.x, PLAN_MAX_VEL.y)
 _PLAN_A = min(PLAN_MAX_ACC.x, PLAN_MAX_ACC.y)
+# FlowBase limits — these tests exercise the generator's flowbase behavior.
+_LIMITS = ProfileLimits(PLAN_MAX_VEL, PLAN_MAX_ACC, A_LAT_MAX)
+
+
+def _traj(path: Path, **kwargs: object) -> TimedTrajectory:
+    return TimedTrajectory.from_path(path, _LIMITS, **kwargs)  # type: ignore[arg-type]
 
 
 def _pose(x: float, y: float, yaw: float = 0.0) -> PoseStamped:
@@ -80,7 +91,7 @@ def test_trapezoid_degenerates_to_triangle() -> None:
 
 
 def test_profile_never_exceeds_planning_margins() -> None:
-    trajectory = TimedTrajectory.from_path(_line_path(4.0))
+    trajectory = _traj(_line_path(4.0))
     speeds = _speeds(trajectory)
     assert float(speeds.max()) <= _PLAN_V + 1e-9
     accel = np.abs(np.diff(speeds)) / _DT
@@ -88,21 +99,21 @@ def test_profile_never_exceeds_planning_margins() -> None:
 
 
 def test_max_speed_caps_but_never_raises() -> None:
-    slow = TimedTrajectory.from_path(_line_path(4.0), max_speed=0.2)
+    slow = _traj(_line_path(4.0), max_speed=0.2)
     assert slow.max_speed == pytest.approx(0.2)
-    fast = TimedTrajectory.from_path(_line_path(4.0), max_speed=10.0)
+    fast = _traj(_line_path(4.0), max_speed=10.0)
     assert fast.max_speed <= _PLAN_V
 
 
 def test_velocity_is_c1_continuous() -> None:
-    trajectory = TimedTrajectory.from_path(_line_path(2.0), max_speed=0.5)
+    trajectory = _traj(_line_path(2.0), max_speed=0.5)
     speeds = _speeds(trajectory)
     # C1: no velocity jump anywhere exceeds one accel-limited tick.
     assert float(np.abs(np.diff(speeds)).max()) <= _PLAN_A * _DT + 1e-9
 
 
 def test_endpoint_holds_past_duration() -> None:
-    trajectory = TimedTrajectory.from_path(_line_path(2.0), max_speed=0.5)
+    trajectory = _traj(_line_path(2.0), max_speed=0.5)
     end = trajectory.sample(trajectory.duration + 100.0)
     assert end.x == pytest.approx(2.0)
     assert end.vx_world == pytest.approx(0.0)
@@ -110,7 +121,7 @@ def test_endpoint_holds_past_duration() -> None:
 
 
 def test_tangent_heading_follows_path() -> None:
-    trajectory = TimedTrajectory.from_path(_l_path(), max_speed=0.3)
+    trajectory = _traj(_l_path(), max_speed=0.3)
     start = trajectory.sample(0.0)
     end = trajectory.end_sample()
     assert start.yaw == pytest.approx(0.0, abs=1e-6)
@@ -119,9 +130,7 @@ def test_tangent_heading_follows_path() -> None:
 
 def test_fixed_heading_mode() -> None:
     heading = 0.7
-    trajectory = TimedTrajectory.from_path(
-        _l_path(), max_speed=0.3, heading_mode="fixed", fixed_heading=heading
-    )
+    trajectory = _traj(_l_path(), max_speed=0.3, heading_mode="fixed", fixed_heading=heading)
     for t in np.arange(0.0, trajectory.duration, 0.1):
         sample = trajectory.sample(float(t))
         assert sample.yaw == pytest.approx(heading)
@@ -137,8 +146,8 @@ def _interior_min_speed(trajectory: TimedTrajectory, margin_s: float = 1.5) -> f
 def test_straight_holds_cruise_corner_slows() -> None:
     """A straight path holds cruise in the interior; a path with a sharp
     corner dips well below cruise where the curvature spikes."""
-    straight = TimedTrajectory.from_path(_line_path(2.0), max_speed=0.5)
-    corner = TimedTrajectory.from_path(_l_path(1.0), max_speed=0.5)
+    straight = _traj(_line_path(2.0), max_speed=0.5)
+    corner = _traj(_l_path(1.0), max_speed=0.5)
     assert _interior_min_speed(straight) == pytest.approx(0.5, abs=0.02)
     assert _interior_min_speed(corner) < 0.3
 
@@ -146,7 +155,7 @@ def test_straight_holds_cruise_corner_slows() -> None:
 def test_straight_profile_is_unimodal_trapezoid() -> None:
     """No curvature -> the curvature-aware profile reduces to a trapezoid:
     speed rises to cruise, holds, falls — never dips in the middle."""
-    speeds = _speeds(TimedTrajectory.from_path(_line_path(4.0), max_speed=0.5))
+    speeds = _speeds(_traj(_line_path(4.0), max_speed=0.5))
     peak = int(np.argmax(speeds))
     assert np.all(np.diff(speeds[: peak + 1]) >= -1e-9)  # non-decreasing up to peak
     assert np.all(np.diff(speeds[peak:]) <= 1e-9)  # non-increasing after
@@ -158,10 +167,8 @@ def test_sharp_corner_slows_more_than_rounded() -> None:
     benchmark comparison."""
     from dimos.utils.benchmarking.paths import single_corner, smooth_corner
 
-    sharp = TimedTrajectory.from_path(single_corner(leg_length=2.0, angle_deg=90.0), max_speed=0.5)
-    rounded = TimedTrajectory.from_path(
-        smooth_corner(leg_length=2.0, angle_deg=90.0, arc_radius=0.5), max_speed=0.5
-    )
+    sharp = _traj(single_corner(leg_length=2.0, angle_deg=90.0), max_speed=0.5)
+    rounded = _traj(smooth_corner(leg_length=2.0, angle_deg=90.0, arc_radius=0.5), max_speed=0.5)
     assert _interior_min_speed(sharp) < _interior_min_speed(rounded)
 
 
@@ -179,6 +186,6 @@ def test_rounded_square_is_closed_and_bounded() -> None:
 
 def test_rejects_empty_path_and_bad_mode() -> None:
     with pytest.raises(ValueError):
-        TimedTrajectory.from_path(Path(frame_id="world", poses=[]))
+        _traj(Path(frame_id="world", poses=[]))
     with pytest.raises(ValueError):
-        TimedTrajectory.from_path(_line_path(), heading_mode="spiral")
+        _traj(_line_path(), heading_mode="spiral")

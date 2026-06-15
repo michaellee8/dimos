@@ -45,15 +45,11 @@ from dimos.control.task import (
     ResourceClaim,
 )
 from dimos.control.tasks.feedforward_gain_compensator import FeedforwardGainCompensator
-from dimos.control.tasks.trajectory_tracking_task.constants import (
-    DEADTIME,
-    FB_CLAMP_LINEAR,
-    FB_CLAMP_YAW,
-    KP_AGGRESSIVE,
-    KP_DEFAULT,
-    AxisTriple,
-    flowbase_feedforward_config,
+from dimos.control.tasks.trajectory_tracking_task.config import (
+    TrackingConfig,
+    tracking_config_from_artifact_path,
 )
+from dimos.control.tasks.trajectory_tracking_task.constants import FLOWBASE_TRACKING
 from dimos.control.tasks.trajectory_tracking_task.trajectory_generator import (
     TimedTrajectory,
     TrajectorySample,
@@ -70,22 +66,20 @@ TrajectoryTrackingState = Literal["idle", "tracking", "holding", "arrived", "abo
 
 GainProfile = Literal["default", "aggressive"]
 
-_GAIN_PROFILES: dict[str, AxisTriple] = {
-    "default": KP_DEFAULT,
-    "aggressive": KP_AGGRESSIVE,
-}
-
 
 @dataclass
 class TrajectoryTrackingTaskConfig:
     joint_names: list[str] = field(default_factory=lambda: ["base/vx", "base/vy", "base/wz"])
     priority: int = 20
+    # Per-robot gains/limits (plant fit). Defaults to the FlowBase; the Go2
+    # (or any characterized base) passes a config built from its artifact.
+    tracking: TrackingConfig = FLOWBASE_TRACKING
     # Cruise-speed cap for the trajectory profile; the generator clamps it
-    # to the 85% planning margins regardless.
+    # to the planning margins regardless.
     max_speed: float | None = None
     gain_profile: GainProfile = "default"
     # Plant-gain inversion (u_cmd = u_phys / K_hat). On by default — the
-    # FlowBase genuinely moves K x the command.
+    # base genuinely moves K x the command.
     compensate_gain: bool = True
     heading_mode: Literal["tangent", "fixed"] = "tangent"
     fixed_heading: float = 0.0
@@ -108,11 +102,12 @@ class TrajectoryTrackingTask(BaseControlTask):
             )
         self._name = name
         self._config = config
+        self._tracking = config.tracking
         self._joint_names_list = list(config.joint_names)
         self._joint_names = frozenset(config.joint_names)
-        self._kp = _GAIN_PROFILES[config.gain_profile]
+        self._kp = self._tracking.kp(config.gain_profile)
         self._compensator: FeedforwardGainCompensator | None = (
-            FeedforwardGainCompensator(flowbase_feedforward_config())
+            FeedforwardGainCompensator(self._tracking.feedforward_config())
             if config.compensate_gain
             else None
         )
@@ -212,9 +207,9 @@ class TrajectoryTrackingTask(BaseControlTask):
         ey_body = -sin_yaw * ex_world + cos_yaw * ey_world
         e_yaw = angle_diff(reference.yaw, yaw)
         return (
-            _clamp(self._kp.x * ex_body, FB_CLAMP_LINEAR),
-            _clamp(self._kp.y * ey_body, FB_CLAMP_LINEAR),
-            _clamp(self._kp.yaw * e_yaw, FB_CLAMP_YAW),
+            _clamp(self._kp.x * ex_body, self._tracking.fb_clamp_linear),
+            _clamp(self._kp.y * ey_body, self._tracking.fb_clamp_linear),
+            _clamp(self._kp.yaw * e_yaw, self._tracking.fb_clamp_yaw),
         )
 
     def _tracking_command(
@@ -223,9 +218,10 @@ class TrajectoryTrackingTask(BaseControlTask):
         assert self._trajectory is not None
         # Per-axis dead-time preview: each axis sees the reference velocity
         # it should be producing L seconds from now.
-        ref_x = self._trajectory.sample(t_elapsed + DEADTIME.x)
-        ref_y = self._trajectory.sample(t_elapsed + DEADTIME.y)
-        ref_yaw = self._trajectory.sample(t_elapsed + DEADTIME.yaw)
+        deadtime = self._tracking.deadtime
+        ref_x = self._trajectory.sample(t_elapsed + deadtime.x)
+        ref_y = self._trajectory.sample(t_elapsed + deadtime.y)
+        ref_yaw = self._trajectory.sample(t_elapsed + deadtime.yaw)
         ref_now = self._trajectory.sample(t_elapsed)
 
         yaw = pose[2] if pose is not None else ref_now.yaw
@@ -281,15 +277,15 @@ class TrajectoryTrackingTask(BaseControlTask):
         if speed is not None:
             self._config.max_speed = speed
         if gain_profile is not None:
-            if gain_profile not in _GAIN_PROFILES:
+            if gain_profile not in ("default", "aggressive"):
                 logger.warning(f"unknown gain_profile {gain_profile!r}")
                 return False
             self._config.gain_profile = gain_profile  # type: ignore[assignment]
-            self._kp = _GAIN_PROFILES[gain_profile]
+            self._kp = self._tracking.kp(gain_profile)
         if compensate_gain is not None:
             self._config.compensate_gain = compensate_gain
             self._compensator = (
-                FeedforwardGainCompensator(flowbase_feedforward_config())
+                FeedforwardGainCompensator(self._tracking.feedforward_config())
                 if compensate_gain
                 else None
             )
@@ -311,6 +307,7 @@ class TrajectoryTrackingTask(BaseControlTask):
         del current_odom  # pose flows in through compute()'s CoordinatorState
         self._trajectory = TimedTrajectory.from_path(
             path,
+            limits=self._tracking.profile_limits,
             max_speed=self._config.max_speed,
             heading_mode=self._config.heading_mode,
             fixed_heading=self._config.fixed_heading,
@@ -351,6 +348,10 @@ def _clamp(value: float, limit: float) -> float:
 
 
 class TrajectoryTrackingTaskParams(BaseConfig):
+    # Path to a characterization artifact (TuningConfig JSON). When set, the
+    # gains/limits are built from it (the Go2 / any-base path); when None the
+    # task uses the vendored FlowBase config.
+    artifact_path: str | None = None
     max_speed: float | None = None
     gain_profile: GainProfile = "default"
     compensate_gain: bool = True
@@ -363,11 +364,17 @@ class TrajectoryTrackingTaskParams(BaseConfig):
 
 def create_task(cfg: Any, hardware: Any) -> TrajectoryTrackingTask:
     params = TrajectoryTrackingTaskParams.model_validate(cfg.params)
+    tracking = (
+        tracking_config_from_artifact_path(params.artifact_path)
+        if params.artifact_path
+        else FLOWBASE_TRACKING
+    )
     return TrajectoryTrackingTask(
         cfg.name,
         TrajectoryTrackingTaskConfig(
             joint_names=cfg.joint_names,
             priority=cfg.priority,
+            tracking=tracking,
             max_speed=params.max_speed,
             gain_profile=params.gain_profile,
             compensate_gain=params.compensate_gain,

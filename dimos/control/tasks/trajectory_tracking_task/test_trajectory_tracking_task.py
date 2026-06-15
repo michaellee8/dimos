@@ -182,12 +182,16 @@ def test_configure_tolerates_follower_kwargs() -> None:
 
 
 def _run_closed_loop(
-    task: TrajectoryTrackingTask, path: Path, max_ticks: int = 6000
+    task: TrajectoryTrackingTask,
+    path: Path,
+    max_ticks: int = 6000,
+    plant: TwistBasePlantSim | None = None,
 ) -> tuple[TwistBasePlantSim, list[tuple[float, float, float]], int]:
     """Tick task + plant together (coordinator-style); returns the plant,
     per-tick (cross_track, along_track, yaw) errors vs the reference, and
-    the tick count."""
-    plant = TwistBasePlantSim(FLOWBASE_PLANT_FITTED, limiter=flowbase_command_limiter())
+    the tick count. Defaults to the FlowBase plant + firmware limiter."""
+    if plant is None:
+        plant = TwistBasePlantSim(FLOWBASE_PLANT_FITTED, limiter=flowbase_command_limiter())
     start = path.poses[0]
     start_yaw = start.orientation.euler[2]
     plant.reset(start.position.x, start.position.y, start_yaw, _DT)
@@ -284,3 +288,51 @@ def test_rounded_corners_beat_sharp_corners() -> None:
     # start waypoint (rounded_square starts mid-edge, not at the origin).
     start = rounded_path.poses[0]
     assert math.hypot(rounded_plant.x - start.position.x, rounded_plant.y - start.position.y) < 0.03
+
+
+# --- Go2: artifact-driven config (same controller, different robot) -------
+
+
+def test_go2_artifact_config_derives_sane_gains() -> None:
+    """A TrackingConfig built from a Go2 characterization artifact derives
+    its gains/limits from the Go2 fit + envelope (not the FlowBase)."""
+    from dimos.control.tasks.trajectory_tracking_task.config import TrackingConfig
+    from dimos.utils.benchmarking.plant import GO2_PLANT_FITTED
+    from dimos.utils.benchmarking.tuning import Provenance, derive_config
+
+    artifact = derive_config(
+        GO2_PLANT_FITTED,
+        Provenance(robot_id="go2", surface="concrete", mode="default", sim_or_hw="sim"),
+    )
+    tracking = TrackingConfig.from_artifact(artifact)
+    # kp = 1/(4 zeta^2 tau) from the Go2 plant tau, not the FlowBase's.
+    assert tracking.kp_default.x == pytest.approx(1.0 / (4.0 * GO2_PLANT_FITTED.vx.tau), rel=1e-6)
+    assert tracking.kp_default.yaw == pytest.approx(1.0 / (4.0 * GO2_PLANT_FITTED.wz.tau), rel=1e-6)
+    assert tracking.deadtime.yaw == pytest.approx(GO2_PLANT_FITTED.wz.L)
+    assert tracking.k_hat.x == pytest.approx(GO2_PLANT_FITTED.vx.K)
+    assert "go2" in tracking.provenance
+    assert tracking.plan_max_vel.x > 0.0 and tracking.a_lat_max > 0.0
+
+
+def test_go2_artifact_config_tracks_in_sim() -> None:
+    """End-to-end: the artifact-driven config drives the controller against
+    the Go2 FOPDT plant (no firmware limiter). Validates the plumbing — the
+    vy axis uses the provisional placeholder fit until a real Go2 lateral
+    characterization lands."""
+    from dimos.control.tasks.trajectory_tracking_task.config import TrackingConfig
+    from dimos.utils.benchmarking.plant import GO2_PLANT_FITTED
+    from dimos.utils.benchmarking.tuning import Provenance, derive_config
+
+    artifact = derive_config(
+        GO2_PLANT_FITTED,
+        Provenance(robot_id="go2", surface="concrete", mode="default", sim_or_hw="sim"),
+    )
+    tracking = TrackingConfig.from_artifact(artifact)
+    task = TrajectoryTrackingTask(
+        "go2_tracker",
+        TrajectoryTrackingTaskConfig(joint_names=list(_JOINTS), tracking=tracking, max_speed=0.5),
+    )
+    plant = TwistBasePlantSim(GO2_PLANT_FITTED)  # Go2 has no firmware Ruckig limiter
+    _, errors, _ = _run_closed_loop(task, _line_path(2.0), plant=plant)
+    assert task.get_state() == "arrived"
+    assert max(abs(e[0]) for e in errors) < 0.03  # cross-track

@@ -35,11 +35,7 @@ import math
 
 import numpy as np
 
-from dimos.control.tasks.trajectory_tracking_task.constants import (
-    A_LAT_MAX,
-    PLAN_MAX_ACC,
-    PLAN_MAX_VEL,
-)
+from dimos.control.tasks.trajectory_tracking_task.config import ProfileLimits
 from dimos.control.tasks.velocity_profiler import VelocityProfiler
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -180,7 +176,7 @@ class ArcLengthProfile:
 
 
 def _build_speed_profile(
-    points: np.ndarray, cum_dist: np.ndarray, v_max: float, a_max: float
+    points: np.ndarray, cum_dist: np.ndarray, v_max: float, a_max: float, a_lat_max: float
 ) -> ArcLengthProfile | TrapezoidalProfile:
     """Curvature-aware speed profile over the path, rest-to-rest.
 
@@ -208,7 +204,7 @@ def _build_speed_profile(
         max_linear_speed=v_max,
         max_linear_accel=a_max,
         max_linear_decel=a_max,
-        max_centripetal_accel=A_LAT_MAX,
+        max_centripetal_accel=a_lat_max,
         min_speed=_EPS_SPEED,
     )
     v_grid = profiler.compute_profile(grid_path).astype(float)
@@ -252,12 +248,14 @@ class TimedTrajectory:
     @staticmethod
     def from_path(
         path: Path,
+        limits: ProfileLimits,
         max_speed: float | None = None,
         heading_mode: str = "tangent",
         fixed_heading: float = 0.0,
     ) -> TimedTrajectory:
-        """Build from waypoints. ``max_speed`` caps the cruise speed below
-        the planning margin (it can never raise it above PLAN_MAX_VEL)."""
+        """Build from waypoints. ``limits`` (per-robot plan vel/acc + lateral
+        accel) come from the controller's TrackingConfig. ``max_speed`` caps
+        the cruise speed below the planning margin (never raises it)."""
         if heading_mode not in ("tangent", "fixed"):
             raise ValueError(f"unknown heading_mode {heading_mode!r}")
         if len(path.poses) < 1:
@@ -274,11 +272,11 @@ class TimedTrajectory:
         # momentarily load one axis fully, so plan with the tighter of the
         # two linear axes. Curvature-aware: slows into corners so the base
         # can hold the path; reduces to a plain trapezoid on straight paths.
-        v_max = min(PLAN_MAX_VEL.x, PLAN_MAX_VEL.y)
-        a_max = min(PLAN_MAX_ACC.x, PLAN_MAX_ACC.y)
+        v_max = min(limits.plan_max_vel.x, limits.plan_max_vel.y)
+        a_max = min(limits.plan_max_acc.x, limits.plan_max_acc.y)
         if max_speed is not None:
             v_max = min(v_max, max_speed)
-        profile = _build_speed_profile(points, cum_dist, v_max, a_max)
+        profile = _build_speed_profile(points, cum_dist, v_max, a_max, limits.a_lat_max)
 
         if heading_mode == "fixed":
             yaw_start = fixed_heading
@@ -291,7 +289,9 @@ class TimedTrajectory:
         # only used for the fixed-mode swing (start -> fixed heading is the
         # caller's job; here it covers initial-yaw alignment hold).
         yaw_span = abs(angle_diff(yaw_end, yaw_start))
-        yaw_profile = TrapezoidalProfile.plan(yaw_span, PLAN_MAX_VEL.yaw, PLAN_MAX_ACC.yaw)
+        yaw_profile = TrapezoidalProfile.plan(
+            yaw_span, limits.plan_max_vel.yaw, limits.plan_max_acc.yaw
+        )
 
         return TimedTrajectory(
             points, cum_dist, profile, yaw_start, yaw_end, heading_mode, yaw_profile
