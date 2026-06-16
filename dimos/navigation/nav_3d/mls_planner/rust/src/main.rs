@@ -1,6 +1,7 @@
 // Copyright 2026 Dimensional Inc.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use dimos_mls_planner::edges::{edges_to_segments, PlannerGraph};
@@ -11,9 +12,30 @@ use lcm_msgs::geometry_msgs::{Point, Pose, PoseStamped, Quaternion};
 use lcm_msgs::nav_msgs::Path;
 use lcm_msgs::sensor_msgs::{PointCloud2, PointField};
 use lcm_msgs::std_msgs::{Header, Time};
+use tokio::sync::Notify;
 use tracing::debug;
 
+/// A point in the planner's world frame.
+type Xyz = (f32, f32, f32);
+
+/// State shared between the handle loop and the worker. The handle loop writes
+/// the newest value, the worker reads it.
+type Shared<T> = Arc<Mutex<Option<T>>>;
+
+/// A coalesced map input handed from the handle loop to the worker. Only the
+/// newest is kept, so a dropped intermediate frame is harmless.
+enum MapUpdate {
+    Region {
+        cloud: PointCloud2,
+        bounds: PoseStamped,
+    },
+    Global {
+        cloud: PointCloud2,
+    },
+}
+
 #[derive(Module)]
+#[module(setup = spawn_worker)]
 struct MlsPlanner {
     #[input(decode = PointCloud2::decode, handler = on_global_map)]
     global_map: Input<PointCloud2>,
@@ -47,159 +69,226 @@ struct MlsPlanner {
     #[config]
     config: Config,
 
-    planner: Planner,
-    latest_start: Option<(f32, f32, f32)>,
-    active_goal: Option<(f32, f32, f32)>,
+    // Handle-loop-local: pair a local map with its stamp-matching bounds before
+    // handing the matched snapshot to the worker.
     pending_local: Option<PointCloud2>,
     pending_bounds: Option<PoseStamped>,
-    last_path_at: Option<Instant>,
+
+    // Shared with the worker task. The handle loop only writes these and wakes
+    // the worker, so it never blocks on the heavy map processing.
+    pending: Shared<MapUpdate>,
+    latest_start: Shared<Xyz>,
+    active_goal: Shared<Xyz>,
+    wake: Arc<Notify>,
 }
 
 impl MlsPlanner {
-    async fn on_global_map(&mut self, msg: PointCloud2) {
-        let points = match extract_xyz(&msg) {
-            Ok(p) => p,
-            Err(e) => {
-                warn_throttled!(
-                    Duration::from_secs(1),
-                    error = %e,
-                    "Failed to extract lidar points, dropped a cloud.",
-                );
-                return;
-            }
+    /// Spawn the worker that owns the planner graph and does all heavy map
+    /// processing, so the handle loop stays free to drain its inputs.
+    async fn spawn_worker(&mut self) {
+        let worker = Worker {
+            pending: Arc::clone(&self.pending),
+            latest_start: Arc::clone(&self.latest_start),
+            active_goal: Arc::clone(&self.active_goal),
+            wake: Arc::clone(&self.wake),
+            config: self.config.clone(),
+            surface_map: self.surface_map.clone(),
+            nodes: self.nodes.clone(),
+            node_edges: self.node_edges.clone(),
+            path: self.path.clone(),
         };
-        if points.is_empty() {
-            return;
-        }
+        tokio::spawn(worker.run());
+    }
 
-        self.planner.update_global_map(&points, &self.config);
-
-        self.publish_graph().await;
-
-        debug!(
-            global_map_points = points.len(),
-            voxels = self.planner.voxel_count(),
-            surface_cells = self.planner.surface().count(),
-            nodes = self.planner.graph().nodes.len(),
-            edges = self.planner.graph().node_edges.len(),
-            "global_map processed",
-        );
+    async fn on_global_map(&mut self, msg: PointCloud2) {
+        self.hand_off(MapUpdate::Global { cloud: msg });
     }
 
     async fn on_local_map(&mut self, msg: PointCloud2) {
         self.pending_local = Some(msg);
-        self.try_region_update().await;
+        self.try_pair();
     }
 
     async fn on_region_bounds(&mut self, msg: PoseStamped) {
         self.pending_bounds = Some(msg);
-        self.try_region_update().await;
+        self.try_pair();
     }
 
-    /// Run the incremental update once a local map and its bounds with
-    /// matching stamps are both in hand.
-    async fn try_region_update(&mut self) {
+    /// Hand a local map and its stamp-matching bounds to the worker once both
+    /// are in hand. Cheap stamp compare. Runs on the handle loop.
+    fn try_pair(&mut self) {
         let (Some(bounds_msg), Some(cloud)) = (&self.pending_bounds, &self.pending_local) else {
             return;
         };
         if !same_stamp(&bounds_msg.header.stamp, &cloud.header.stamp) {
             return;
         }
-        let bounds_msg = self.pending_bounds.take().expect("checked above");
+        let bounds = self.pending_bounds.take().expect("checked above");
         let cloud = self.pending_local.take().expect("checked above");
-
-        let points = match extract_xyz(&cloud) {
-            Ok(p) => p,
-            Err(e) => {
-                warn_throttled!(
-                    Duration::from_secs(1),
-                    error = %e,
-                    "Failed to extract local map points, dropped a region update.",
-                );
-                return;
-            }
-        };
-        let bounds = RegionBounds {
-            origin_x: bounds_msg.pose.position.x as f32,
-            origin_y: bounds_msg.pose.position.y as f32,
-            radius: bounds_msg.pose.orientation.x as f32,
-            z_min: bounds_msg.pose.orientation.y as f32,
-            z_max: bounds_msg.pose.orientation.z as f32,
-        };
-
-        let update_start = Instant::now();
-        self.planner.update_region(&points, &bounds, &self.config);
-        let update_ms = update_start.elapsed().as_secs_f64() * 1e3;
-
-        let publish_start = Instant::now();
-        self.publish_graph().await;
-        let publish_ms = publish_start.elapsed().as_secs_f64() * 1e3;
-
-        debug!(
-            update_ms,
-            publish_ms,
-            local_points = points.len(),
-            "local region processed"
-        );
-
-        self.maybe_replan().await;
+        self.hand_off(MapUpdate::Region { cloud, bounds });
     }
 
-    async fn publish_graph(&self) {
-        let voxel_size = self.config.voxel_size;
-        let frame = &self.config.world_frame;
-        let graph = self.planner.graph();
-
-        let surface_points: Vec<(f32, f32, f32)> = self
-            .planner
-            .surface()
-            .map(|(ix, iy, iz)| surface_point_xyz(ix, iy, iz, voxel_size))
-            .collect();
-        publish_cloud(&self.surface_map, &surface_points, frame, now()).await;
-
-        let node_points: Vec<(f32, f32, f32)> = graph.nodes.iter().map(|n| n.pos).collect();
-        publish_cloud(&self.nodes, &node_points, frame, now()).await;
-
-        let edges_path = build_segments_path(graph, voxel_size, frame, now());
-        publish_path(&self.node_edges, &edges_path).await;
+    /// Store the newest map input (coalescing over any unprocessed one) and
+    /// wake the worker.
+    fn hand_off(&self, update: MapUpdate) {
+        *self.pending.lock().expect("pending mutex") = Some(update);
+        self.wake.notify_one();
     }
 
-    /// Store-only: record the latest start pose. Replanning happens on map
-    /// updates in `maybe_replan`, not here.
+    /// Store-only: record the latest start pose. The worker reads it when it
+    /// replans. No wake here, so odometry never drives replanning.
     async fn on_start_pose(&mut self, msg: PoseStamped) {
         let p = &msg.pose.position;
-        self.latest_start = Some((p.x as f32, p.y as f32, p.z as f32));
+        *self.latest_start.lock().expect("start mutex") =
+            Some((p.x as f32, p.y as f32, p.z as f32));
     }
 
     /// Arm the active goal, or clear it on a non-finite goal (the cancel
-    /// signal). Plans once on arrival so a fresh click is acted on immediately
-    /// rather than waiting for the next map update. Subsequent replanning is
-    /// map-driven in `maybe_replan`. A goal arrives once per click, so this is
-    /// not the odometry-rate external trigger the refactor removed.
+    /// signal), then wake the worker so a fresh click replans immediately
+    /// against the current graph. A goal arrives once per click, so this is not
+    /// the odometry-rate external trigger the refactor removed.
     async fn on_goal_pose(&mut self, msg: PoseStamped) {
         let p = &msg.pose.position;
         let goal = (p.x as f32, p.y as f32, p.z as f32);
-        self.active_goal = if goal.0.is_finite() && goal.1.is_finite() && goal.2.is_finite() {
-            Some(goal)
-        } else {
-            None
-        };
-        self.maybe_replan().await;
+        *self.active_goal.lock().expect("goal mutex") =
+            (goal.0.is_finite() && goal.1.is_finite() && goal.2.is_finite()).then_some(goal);
+        self.wake.notify_one();
+    }
+}
+
+/// Owns the planner graph and does every map mutation, graph publish, and
+/// replan off the handle loop. Woken by the handlers via `wake`.
+struct Worker {
+    pending: Shared<MapUpdate>,
+    latest_start: Shared<Xyz>,
+    active_goal: Shared<Xyz>,
+    wake: Arc<Notify>,
+    config: Config,
+    surface_map: Output<PointCloud2>,
+    nodes: Output<PointCloud2>,
+    node_edges: Output<Path>,
+    path: Output<Path>,
+}
+
+impl Worker {
+    async fn run(self) {
+        let mut planner = Planner::default();
+        let mut last_path_at: Option<Instant> = None;
+        loop {
+            self.wake.notified().await;
+            // Coalesced: take the newest map input, dropping any intermediates.
+            let update = self.pending.lock().expect("pending mutex").take();
+            if let Some(update) = update {
+                self.apply_update(&mut planner, update).await;
+            }
+            self.maybe_replan(&mut planner, &mut last_path_at).await;
+        }
     }
 
-    /// Replan from the stored start to the active goal on fresh map data. Pure
-    /// glue: it gates and does IO, all planning lives in `Planner::plan`.
-    async fn maybe_replan(&mut self) {
-        let (Some(start), Some(goal)) = (self.latest_start, self.active_goal) else {
+    /// Mutate the graph from a map update, then publish the graph artifacts.
+    /// The CPU-bound section runs under `block_in_place` so the runtime can
+    /// still schedule the handle loop on another thread.
+    async fn apply_update(&self, planner: &mut Planner, update: MapUpdate) {
+        let messages = tokio::task::block_in_place(|| self.ingest(planner, update));
+        if let Some((surface, node_cloud, edges)) = messages {
+            publish_cloud(&self.surface_map, &surface).await;
+            publish_cloud(&self.nodes, &node_cloud).await;
+            publish_path(&self.node_edges, &edges).await;
+        }
+    }
+
+    /// Pure-CPU half of `apply_update`: extract points, update the graph, and
+    /// build the artifact messages. Returns `None` if the cloud was unusable.
+    fn ingest(
+        &self,
+        planner: &mut Planner,
+        update: MapUpdate,
+    ) -> Option<(PointCloud2, PointCloud2, Path)> {
+        match update {
+            MapUpdate::Region { cloud, bounds } => {
+                let points = match extract_xyz(&cloud) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn_throttled!(
+                            Duration::from_secs(1),
+                            error = %e,
+                            "Failed to extract local map points, dropped a region update.",
+                        );
+                        return None;
+                    }
+                };
+                let bounds = RegionBounds {
+                    origin_x: bounds.pose.position.x as f32,
+                    origin_y: bounds.pose.position.y as f32,
+                    radius: bounds.pose.orientation.x as f32,
+                    z_min: bounds.pose.orientation.y as f32,
+                    z_max: bounds.pose.orientation.z as f32,
+                };
+
+                let update_start = Instant::now();
+                planner.update_region(&points, &bounds, &self.config);
+                debug!(
+                    update_ms = update_start.elapsed().as_secs_f64() * 1e3,
+                    local_points = points.len(),
+                    "local region processed"
+                );
+            }
+            MapUpdate::Global { cloud } => {
+                let points = match extract_xyz(&cloud) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn_throttled!(
+                            Duration::from_secs(1),
+                            error = %e,
+                            "Failed to extract lidar points, dropped a cloud.",
+                        );
+                        return None;
+                    }
+                };
+                if points.is_empty() {
+                    return None;
+                }
+                planner.update_global_map(&points, &self.config);
+                debug!(global_map_points = points.len(), "global_map processed");
+            }
+        }
+        Some(self.build_graph_messages(planner))
+    }
+
+    fn build_graph_messages(&self, planner: &Planner) -> (PointCloud2, PointCloud2, Path) {
+        let voxel_size = self.config.voxel_size;
+        let frame = &self.config.world_frame;
+        let graph = planner.graph();
+
+        let surface_points: Vec<Xyz> = planner
+            .surface()
+            .map(|(ix, iy, iz)| surface_point_xyz(ix, iy, iz, voxel_size))
+            .collect();
+        let surface = build_pc2_xyz(&surface_points, frame, now());
+
+        let node_points: Vec<Xyz> = graph.nodes.iter().map(|n| n.pos).collect();
+        let node_cloud = build_pc2_xyz(&node_points, frame, now());
+
+        let edges = build_segments_path(graph, voxel_size, frame, now());
+        (surface, node_cloud, edges)
+    }
+
+    /// Replan from the latest start to the active goal. Pure glue: it gates and
+    /// does IO, all planning lives in `Planner::plan`.
+    async fn maybe_replan(&self, planner: &mut Planner, last_path_at: &mut Option<Instant>) {
+        let start = *self.latest_start.lock().expect("start mutex");
+        let goal = *self.active_goal.lock().expect("goal mutex");
+        let (Some(start), Some(goal)) = (start, goal) else {
             return;
         };
         if is_at_goal(start, goal, self.config.goal_tolerance) {
-            self.active_goal = None;
+            *self.active_goal.lock().expect("goal mutex") = None;
             return;
         }
 
         let plan_start = Instant::now();
-        let waypoints = match self.planner.plan(start, goal, &self.config) {
+        let waypoints = tokio::task::block_in_place(|| planner.plan(start, goal, &self.config));
+        let waypoints = match waypoints {
             Some(wp) => wp,
             None => {
                 tracing::warn!(?start, ?goal, "no path between start and goal");
@@ -209,10 +298,8 @@ impl MlsPlanner {
         };
         let plan_ms = plan_start.elapsed().as_secs_f64() * 1e3;
         let produced = Instant::now();
-        let since_last_ms = self
-            .last_path_at
-            .map_or(-1.0, |t| (produced - t).as_secs_f64() * 1e3);
-        self.last_path_at = Some(produced);
+        let since_last_ms = last_path_at.map_or(-1.0, |t| (produced - t).as_secs_f64() * 1e3);
+        *last_path_at = Some(produced);
 
         let stamp = now();
         let path_msg = build_path_from_waypoints(&waypoints, &self.config.world_frame, stamp);
@@ -225,7 +312,7 @@ impl MlsPlanner {
 }
 
 /// True when start is within `tol` of goal in the ground plane.
-fn is_at_goal(start: (f32, f32, f32), goal: (f32, f32, f32), tol: f32) -> bool {
+fn is_at_goal(start: Xyz, goal: Xyz, tol: f32) -> bool {
     (start.0 - goal.0).hypot(start.1 - goal.1) < tol
 }
 
@@ -233,14 +320,8 @@ fn same_stamp(a: &Time, b: &Time) -> bool {
     a.sec == b.sec && a.nsec == b.nsec
 }
 
-async fn publish_cloud(
-    out: &Output<PointCloud2>,
-    points: &[(f32, f32, f32)],
-    frame_id: &str,
-    stamp: Time,
-) {
-    let cloud = build_pc2_xyz(points, frame_id, stamp);
-    if let Err(e) = out.publish(&cloud).await {
+async fn publish_cloud(out: &Output<PointCloud2>, cloud: &PointCloud2) {
+    if let Err(e) = out.publish(cloud).await {
         error_throttled!(
             Duration::from_secs(1),
             error = %e,

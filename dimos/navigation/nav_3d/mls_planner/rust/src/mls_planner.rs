@@ -17,7 +17,7 @@ use crate::surfaces::{
 };
 use crate::voxel::{voxelize, VoxelKey};
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub world_frame: String,
