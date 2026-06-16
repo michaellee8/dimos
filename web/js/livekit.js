@@ -38,7 +38,7 @@ export async function setupLiveKit(sessionId) {
     // adaptiveStream pauses/downgrades subscribed video whose attached element
     // is hidden or zero-size — exactly the VR GL-texture <video> (display:none /
     // offscreen). Teleop wants full-rate always, so keep it off.
-    const room = new LK.Room({ adaptiveStream: false, dynacast: true });
+    const room = new LK.Room({ adaptiveStream: false });
     state.room = room;
 
     // Robot camera track → the shared <video> element (same one the WebRTC path
