@@ -14,16 +14,10 @@
 
 """Blueprint: FastLio2 fed by a VirtualMid360 replaying a recorded pcap.
 
-VirtualMid360 stands up a fake Mid-360 on a virtual NIC and replays the pcap
-over the Livox wire protocol; FastLio2 connects to it exactly as it would to
-real hardware (no replay_pcap — it runs in live SDK mode and never knows the
-sensor is synthetic). Use this to re-run a recorded session through the live
-SLAM path, e.g. to reproduce (or rule out) the velocity-spike divergence.
-
-The two talk over UDP on lidar_ip/host_ip, so they need a network where those
-IPs are reachable: the e2e harness runs VirtualMid360 in a `lidar` netns and
-FastLio2 in a `drv` netns joined by a veth carrying lidar_ip. See
-tools/replay_via_virtual_mid360.sh for the full netns setup + a db recording.
+VirtualMid360 replays the pcap over the Livox wire protocol on a virtual NIC;
+FastLio2 connects in live SDK mode, unaware the sensor is synthetic. They talk
+over UDP on lidar_ip/host_ip, so the harness puts them in separate netns joined
+by a veth — see fastlio2/tools/pcap_to_db.py.
 """
 
 from dimos.core.coordination.blueprints import autoconnect

@@ -14,16 +14,9 @@
 
 """Standalone Livox pcap recorder.
 
-Captures the raw Livox Mid-360 UDP packets (point + IMU) to a libpcap file via
-tcpdump. This is the ground-truth sensor input the FastLio2 binary can be
-replayed against bit-for-bit (see fastlio2/tools/pcap_to_db.py).
-
-Decoupled from FAST-LIO on purpose: the lidar driver / SLAM module should not
-own a packet capture. Drop this module into any blueprint that needs the raw
-wire recorded alongside the live run::
-
-    from dimos.hardware.sensors.lidar.livox.pcap_recorder import LivoxPcapRecorder
-    autoconnect(Mid360.blueprint(...), LivoxPcapRecorder.blueprint(pcap_path="raw.pcap"))
+Captures the raw Livox Mid-360 UDP packets to a libpcap file via tcpdump — the
+ground-truth sensor input FastLio2 can be replayed against (see
+fastlio2/tools/pcap_to_db.py). Kept separate from the SLAM module on purpose.
 
 tcpdump needs capture capability once per host:
     sudo setcap cap_net_raw,cap_net_admin=eip $(which tcpdump)
@@ -81,9 +74,7 @@ class LivoxPcapRecorderConfig(ModuleConfig):
     """Where and how to capture the raw Livox UDP stream."""
 
     pcap_path: str | Path = "raw_mid360.pcap"
-    # Capture interface for tcpdump. Machine-specific, so it defaults from the
-    # DIMOS_PCAP_IFACE env var (falling back to enp2s0) to avoid hardcoding a
-    # value that's only correct on one host.
+    # Machine-specific, so defaults from DIMOS_PCAP_IFACE env (fallback enp2s0).
     record_pcap_iface: str = Field(
         default_factory=lambda: os.environ.get("DIMOS_PCAP_IFACE", "enp2s0")
     )
@@ -95,12 +86,7 @@ class LivoxPcapRecorderConfig(ModuleConfig):
 
 
 class LivoxPcapRecorder(Module):
-    """Owns a tcpdump process capturing raw Mid-360 UDP packets to a pcap.
-
-    Single responsibility: write the wire. Pairs with a memory2 recorder that
-    captures the decoded/derived streams; together they make a session that can
-    be replayed offline.
-    """
+    """Owns a tcpdump process capturing raw Mid-360 UDP packets to a pcap."""
 
     config: LivoxPcapRecorderConfig
 

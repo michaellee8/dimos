@@ -14,19 +14,8 @@
 
 """Python NativeModule wrapper for the FAST-LIO2 + Livox Mid-360 binary.
 
-Binds Livox SDK2 directly into FAST-LIO-NON-ROS for real-time LiDAR SLAM.
-Outputs registered (world-frame) point clouds and odometry with covariance.
-
-Usage::
-
-    from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
-    from dimos.core.coordination.blueprints import autoconnect
-
-    from dimos.core.coordination.module_coordinator import ModuleCoordinator
-    ModuleCoordinator.build(autoconnect(
-        FastLio2.blueprint(host_ip="192.168.1.5"),
-        SomeConsumer.blueprint(),
-    )).loop()
+Binds Livox SDK2 into FAST-LIO-NON-ROS for real-time LiDAR SLAM; outputs
+registered (world-frame) point clouds and odometry with covariance.
 """
 
 from __future__ import annotations
@@ -83,9 +72,8 @@ class FastLio2Config(NativeModuleConfig):
     # Converted to init_pose CLI arg [x, y, z, qx, qy, qz, qw] in model_post_init.
     mount: Pose = Pose()
 
-    # Frame IDs for output messages.  "odom" reflects that FastLio2 provides
-    # locally-smooth, continuous odometry (no loop-closure jumps).  PGO
-    # publishes the map→odom correction via TF.
+    # "odom" frame: FastLio2 gives smooth continuous odometry; PGO publishes the
+    # map→odom correction via TF.
     frame_id: str = FRAME_ODOM
     child_frame_id: str = FRAME_BODY
 
@@ -193,7 +181,6 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry):
             local_ips=local_ips,
         )
 
-        # Check if host_ip is actually assigned to this machine.
         if host_ip not in local_ips:
             try:
                 lidar_net = ipaddress.IPv4Network(f"{lidar_ip}/24", strict=False)

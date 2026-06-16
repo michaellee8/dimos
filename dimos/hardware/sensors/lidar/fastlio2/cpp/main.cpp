@@ -64,9 +64,7 @@ static double get_publish_ts() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-// Clock for the main loop's frame/publish rate limiters. Returns an optional
-// for backward-compatibility with callers that check has_value(); the live
-// path always populates it.
+// Steady clock for the main loop's frame/publish rate limiters.
 static std::optional<std::chrono::steady_clock::time_point> virtual_now() {
     return std::chrono::steady_clock::now();
 }
@@ -179,12 +177,8 @@ static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
     pc.data_length = pc.row_step;
     pc.data.resize(pc.data_length);
 
-    // Apply the full init_pose transform (rotation + translation) to point clouds.
-    // FAST-LIO's map origin is at the sensor's initial position.  The rotation
-    // corrects axis direction (e.g. 180° X for upside-down mount) and the
-    // translation shifts the origin so that ground sits at z≈0 (e.g. z=1.2
-    // for a sensor mounted 1.2m above ground).  This matches the odometry
-    // frame, which also gets the full init_pose applied.
+    // Apply init_pose (rotation + translation) to match the odometry frame:
+    // rotation corrects the mount axis, translation shifts the origin to ground z≈0.
     const bool apply_init_pose = has_init_pose();
     for (int i = 0; i < num_points; ++i) {
         float* dst = reinterpret_cast<float*>(pc.data.data() + i * 16);
@@ -408,12 +402,9 @@ int main(int argc, char** argv) {
     double msr_freq = mod.arg_float("msr_freq", 50.0f);
     double main_freq = mod.arg_float("main_freq", 5000.0f);
 
-    // Post-IESKF-update velocity cap. When |v_world| exceeds this value
-    // the EKF state is restored to the last accepted scan with vel=0 and
-    // map_incremental is skipped. Breaks the reinforcing-loop divergence
-    // that gives FAST-LIO multi-km/s velocity runaway on aggressive
-    // motion or large IMU gaps. Zero disables. Defaults sized to the
-    // Go2 quadruped envelope (~3.1 m/s); raise for faster platforms.
+    // Post-IESKF velocity cap: if |v_world| exceeds this, restore the EKF to the
+    // last accepted scan (vel=0) and skip map_incremental, breaking the multi-km/s
+    // divergence runaway on aggressive motion / IMU gaps. Zero disables.
     double max_velocity_norm_ms = mod.arg_float("max_velocity_norm_ms", 0.0f);
 
     // Livox hardware config
@@ -511,11 +502,7 @@ int main(int argc, char** argv) {
     std::optional<std::chrono::steady_clock::time_point> last_pc_publish;
     std::optional<std::chrono::steady_clock::time_point> last_odom_publish;
 
-    // Per-section timing counters for `run_main_iter`. Active only when
-    // --debug is on (Scope's constructor reads `fastlio_debug` and no-ops
-    // otherwise). `timing::maybe_flush(now)` at the bottom prints a per-
-    // section summary every second of wall clock so we can see both how
-    // often each part fires and how long each call takes.
+    // Per-section timing counters for `run_main_iter` (see timing.hpp; --debug only).
     static timing::Section t_iter{"run_main_iter"};
     static timing::Section t_emit_check{"emit.lock+swap"};
     static timing::Section t_feed_lidar{"fast_lio.feed_lidar"};
@@ -526,9 +513,8 @@ int main(int argc, char** argv) {
 
     auto run_main_iter = [&](std::chrono::steady_clock::time_point now) {
         timing::Scope iter_scope(t_iter);
-        // Lazy-seed all rate-limit bookmarks on the first iteration so they
-        // line up with the wall clock and don't fire immediately based on an
-        // arbitrary "since program start" delta.
+        // Lazy-seed the rate-limit bookmarks on the first iteration so they line
+        // up with the wall clock instead of firing immediately.
         auto seed = now;
         if (!last_emit.has_value()) {
             last_emit = seed;
@@ -540,11 +526,9 @@ int main(int argc, char** argv) {
             last_odom_publish = seed;
         }
 
-        // At frame rate: drain accumulated raw points into a CustomMsg
-        // and feed to FAST-LIO. Hold g_pc_mutex across the rate-limit
-        // CHECK as well as the swap so the accumulator is observed
-        // atomically with no other thread able to slip a packet in
-        // between the decision and the swap.
+        // At frame rate, drain accumulated raw points into a CustomMsg and feed
+        // FAST-LIO. Hold g_pc_mutex across the rate-limit check + swap so a
+        // callback can't slip a packet in between the decision and the swap.
         std::vector<custom_messages::CustomPoint> points;
         uint64_t frame_start = 0;
         {
@@ -592,8 +576,7 @@ int main(int argc, char** argv) {
                 return fast_lio.get_world_cloud();
             })();
             if (world_cloud && !world_cloud->empty()) {
-                // Per-scan world-frame cloud at pointcloud_freq, published as-is
-                // (no output-cloud voxel downsampling / outlier removal).
+                // World-frame cloud at pointcloud_freq, published as-is (no downsampling).
                 if (!g_lidar_topic.empty() && now - *last_pc_publish >= pc_interval) {
                     timing::Scope s(t_publish_lidar);
                     publish_lidar(world_cloud, ts);
@@ -613,9 +596,8 @@ int main(int argc, char** argv) {
         timing::maybe_flush(std::chrono::steady_clock::now());
     };
 
-    // Source of point/IMU packets: the Livox SDK opens UDP sockets and
-    // dispatches via callbacks from its own threads. The main thread drives
-    // run_main_iter at main_freq, consuming whatever the SDK queued.
+    // The Livox SDK opens UDP sockets and dispatches via its own callback
+    // threads; the main thread drives run_main_iter, consuming what's queued.
     if (!livox_common::init_livox_sdk(host_ip, lidar_ip, ports, debug)) {
         return 1;
     }

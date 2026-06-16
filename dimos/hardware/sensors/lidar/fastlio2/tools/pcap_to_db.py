@@ -14,25 +14,17 @@
 
 """Replay a Livox Mid-360 pcap through FAST-LIO and record its output to a .db.
 
-The pcap is replayed over the wire by ``virtual_mid360`` — a fake Mid-360 on a
-virtual NIC that synthesizes the Livox SDK2 handshake — and FastLio2 connects to
-it in live SDK mode, exactly as it would to real hardware (there is no in-process
-pcap reader). This tool orchestrates the whole thing behind a simple CLI:
+``virtual_mid360`` replays the pcap over the wire (a fake Mid-360 on a virtual
+NIC) and FastLio2 connects in live SDK mode, exactly as to real hardware:
 
-* ``pcap_to_db --pcap capture.pcap``            -> writes ``capture.db`` from scratch
-* ``pcap_to_db --pcap capture.pcap --db mem2.db`` -> appends into an existing db
+* ``pcap_to_db --pcap capture.pcap``               -> writes ``capture.db``
+* ``pcap_to_db --pcap capture.pcap --db mem2.db``  -> appends into an existing db
 
-It records two streams — ``fastlio_odometry`` and ``fastlio_lidar`` — and
-time-aligns them onto the db's clock (``--time-offset`` overrides the auto
-choice; ``--force`` overwrites pre-existing fastlio streams). Replay runs at
-real time and stops automatically when the pcap is drained.
-
-It stands up two network namespaces joined by a veth (the fake lidar in one, the
-FastLio2 consumer in the other), which needs root: set ``$SUDO`` to a
-privilege-escalation command that runs ``ip``/``pkill``/``chown`` without a
-password prompt (default ``sudo``). Netns/veth names default to
-``fl_drv``/``fl_lidar`` + ``veth-fl-*`` (distinct from pointlio's harness so the
-two can run at once); override via ``$DRV_NS``/``$LIDAR_NS``/``$VETH_*``.
+Records ``fastlio_odometry`` + ``fastlio_lidar``, time-aligned onto the db clock
+(``--time-offset`` overrides; ``--force`` overwrites pre-existing fastlio streams).
+Stands up two netns joined by a veth, so it needs root — set ``$SUDO`` to a
+passwordless escalation (default ``sudo``); netns/veth names override via
+``$DRV_NS``/``$LIDAR_NS``/``$VETH_*``.
 
 Build the virtual_mid360 binary once::
 
@@ -58,8 +50,7 @@ _POLL_SEC = 1.0
 # Let FastLio2 drain its scan backlog after the pcap finishes before stopping.
 _DRAIN_SEC = 10.0
 
-# Privilege-escalation command + network namespace / veth names. The lidar ns
-# runs virtual_mid360; the drv ns runs the FastLio2 consumer. Defaults are
+# lidar ns runs virtual_mid360; drv ns runs the FastLio2 consumer. Defaults are
 # distinct from pointlio's harness so both can run concurrently.
 _SUDO = os.environ.get("SUDO", "sudo")
 _DRV_NS = os.environ.get("DRV_NS", "fl_drv")
@@ -226,10 +217,8 @@ def _orchestrate(args: argparse.Namespace) -> int:
             cmd += ["--force"]
         if args.time_offset is not None:
             cmd += ["--time-offset", str(args.time_offset)]
-        # SQLite won't let root write a db owned by another user, and the
-        # recorder runs as root inside the netns. So if we're appending into an
-        # existing (user-owned) db, take ownership for the run — the chown back
-        # to the caller at the end restores it.
+        # SQLite won't let root (the in-netns recorder) write a user-owned db, so
+        # take ownership for the run; the chown back at the end restores it.
         for suffix in ("", "-wal", "-shm"):
             q = Path(str(db) + suffix)
             if q.exists():
@@ -261,11 +250,10 @@ def _orchestrate(args: argparse.Namespace) -> int:
             vm.stdin.write((vm_cfg + "\n").encode())
             vm.stdin.close()
 
-            # virtual_mid360 streams the pcap exactly once, then logs "data
-            # stream finished". Wait for that (bounded by --duration), let
-            # FastLio2 drain its scan backlog, then stop the recorder via the
-            # stop-file. (Stagnation-watching the db is unreliable: a diverging
-            # FastLio2 keeps emitting long after the sensor goes quiet.)
+            # virtual_mid360 streams the pcap once, then logs "data stream
+            # finished"; wait for that (capped by --duration), drain, then stop.
+            # (Watching the db for stagnation is unreliable — a diverging FastLio2
+            # keeps emitting long after the sensor goes quiet.)
             deadline = time.time() + args.duration
             while time.time() < deadline:
                 if vm.poll() is not None:
@@ -356,9 +344,7 @@ def _consume(args: argparse.Namespace) -> int:
     ).global_config(n_workers=4, robot_model="mid360_fastlio2_pcap_to_db")
     coord = ModuleCoordinator.build(blueprint)
 
-    # The orchestrator drives the lifetime: it watches virtual_mid360 finish
-    # streaming, lets the backlog drain, then touches the stop-file. --duration
-    # is just a safety cap.
+    # The orchestrator signals stop via the stop-file; --duration is a safety cap.
     stopfile = Path(args._stopfile) if args._stopfile else None
     t0 = time.time()
     try:

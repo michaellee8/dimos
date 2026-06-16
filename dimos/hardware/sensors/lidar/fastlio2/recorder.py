@@ -12,21 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FAST-LIO output recorder with timestamp rewriting.
-
-Records the two FastLio2 output streams — ``fastlio_odometry`` and
-``fastlio_lidar`` — into a memory2 SQLite db, rewriting *only those streams'*
-timestamps onto the db's clock. This is what makes offline pcap replay line up
-with a live recording: FAST-LIO replayed from a pcap publishes on the pcap's
-capture clock, and this recorder shifts that onto whatever clock the db already
-uses, while leaving every other stream in the db untouched.
-
-The timestamp conversion is the only thing it does beyond a plain recorder, and
-it applies it to fastlio messages exclusively (the two declared inputs), so a
-recording that mixes fastlio replay with already-correct streams stays
-coherent. Used by ``tools/pcap_to_db.py``; also usable directly in a blueprint
-that wires FastLio2's ``odometry``/``lidar`` into this module's inputs.
-"""
+"""Record FAST-LIO's odometry + lidar into a memory2 SQLite db, rewriting only
+those streams' timestamps onto the db clock so offline pcap replay lines up with
+a live recording. Used by tools/pcap_to_db.py."""
 
 from __future__ import annotations
 
@@ -56,13 +44,7 @@ class FastLio2RecorderConfig(ModuleConfig):
 
 
 class FastLio2Recorder(Module):
-    """Record FAST-LIO odometry + lidar into a SQLite db, rewriting their ts.
-
-    Only the fastlio streams declared here are time-converted; nothing else in
-    the db is touched. The offset is auto-derived (same clock family -> 0;
-    cross-clock -> start-align the replay's first ts onto the db's first), or
-    forced via ``time_offset``.
-    """
+    """Offset auto-derives: same clock family -> 0; cross-clock -> start-align."""
 
     config: FastLio2RecorderConfig
     fastlio_odometry: In[Odometry]
@@ -90,8 +72,7 @@ class FastLio2Recorder(Module):
         ref = self.config.ref_start_ts
         if ref < 0.0:
             return 0.0
-        # Same clock family (both wall, or both sensor) -> already aligned.
-        # Cross-clock -> start-align the replay's first ts onto the db's first.
+        # Same clock family -> aligned; cross-clock -> start-align onto db's first.
         if (first_ts > _SENSOR_CLOCK_MAX) == (ref > _SENSOR_CLOCK_MAX):
             return 0.0
         return ref - first_ts
@@ -104,8 +85,7 @@ class FastLio2Recorder(Module):
 
     @staticmethod
     def _raw_ts(v: object) -> float:
-        # A genuine sensor ts of 0.0 is falsy, so guard on None explicitly rather
-        # than `ts or time.time()` (which would misclassify a 0.0 stamp as wall).
+        # Guard on None: a genuine 0.0 ts is falsy, so `ts or time.time()` would drop it.
         ts = getattr(v, "ts", None)
         return ts if ts is not None else time.time()
 
