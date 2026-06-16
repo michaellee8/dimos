@@ -32,7 +32,6 @@ from dimos.learning.collection.episode_monitor import EpisodeStatus
 from dimos.memory2.module import Recorder, RecorderConfig
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.JointState import JointState
-from dimos.teleop.quest.quest_types import Buttons
 
 
 class CollectionRecorderConfig(RecorderConfig):
@@ -47,7 +46,6 @@ class CollectionRecorder(Recorder):
     color_image: In[Image]  # observation (camera)
     joint_state: In[JointState]  # observation + action (measured/next state)
     status: In[EpisodeStatus]  # episode start/save/discard segmentation
-    buttons: In[Buttons]  # raw teleop input (kept for debugging)
 
 
 __all__ = ["CollectionRecorder", "CollectionRecorderConfig"]

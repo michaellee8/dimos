@@ -49,7 +49,9 @@ if TYPE_CHECKING:
 
 class EpisodeExtractor(BaseConfig):
     extractor: Literal["episode_status", "ranges"] = "episode_status"
-    status_stream: str = "episode_status"
+    # Recorded stream name for EpisodeStatus events. Must match the recorder's
+    # `status` In port (CollectionRecorder records it as "status").
+    status_stream: str = "status"
     ranges: list[tuple[float, float]] | None = None
 
 
@@ -63,6 +65,9 @@ class SyncConfig(BaseConfig):
     rate_hz: float
     tolerance_ms: float
     strategy: Literal["nearest", "interp"] = "nearest"
+    # Action = state this many frames ahead (default 1 = next state, for BC).
+    # Trailing frames with no successor are dropped. Set 0 for action==state.
+    action_shift: int = 1
 
 
 class OutputConfig(BaseConfig):
@@ -225,6 +230,9 @@ def iter_episode_samples(
     `obs_keys` / `action_keys` partition `streams` into observation vs
     action. If omitted, every key is treated as observation (used by
     callers that only need raw aligned data).
+
+    With `sync.action_shift > 0` (default 1), each frame's action is taken
+    `action_shift` frames later (next-state target); the tail is dropped.
     """
     if sync.anchor not in streams:
         raise ValueError(f"sync.anchor {sync.anchor!r} not in streams: {sorted(streams)}")
@@ -287,6 +295,9 @@ def iter_episode_samples(
             return None
         return msg_list[best]
 
+    # Buffer the episode in order; the action shift below pairs obs[i] with
+    # action[i + shift].
+    frames: list[Sample] = []
     for t in targets:
         obs_dict: dict[str, np.ndarray] = {}
         act_dict: dict[str, np.ndarray] = {}
@@ -303,7 +314,23 @@ def iter_episode_samples(
                 obs_dict[key] = arr
         if skip:
             continue
-        yield Sample(ts=t, episode_id=episode.id, observation=obs_dict, action=act_dict)
+        frames.append(Sample(ts=t, episode_id=episode.id, observation=obs_dict, action=act_dict))
+
+    shift = max(0, sync.action_shift)
+    if shift == 0 or not action_keys:
+        yield from frames
+        return
+
+    # frame i keeps its obs but takes frame i+shift's action; tail dropped.
+    for i in range(len(frames) - shift):
+        cur = frames[i]
+        nxt = frames[i + shift]
+        yield Sample(
+            ts=cur.ts,
+            episode_id=cur.episode_id,
+            observation=cur.observation,
+            action=nxt.action,
+        )
 
 
 def get_writer(format_name: str) -> Writer:

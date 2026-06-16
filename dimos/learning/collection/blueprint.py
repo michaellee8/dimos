@@ -30,6 +30,7 @@ from dimos.learning.collection.episode_monitor import (
 )
 from dimos.learning.collection.recorder import CollectionRecorder
 from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.teleop.quest.blueprints import (
     teleop_quest_piper,
     teleop_quest_xarm7,
@@ -39,10 +40,9 @@ from dimos.teleop.quest.quest_types import Buttons
 _DEFAULT_BUTTON_MAP = {"start": "A", "save": "B", "discard": "X"}
 
 
-# Transports are written inline per blueprint (not factored into a shared
-# variable) so each recording config is self-contained and readable on its
-# own: buttons drive the episode state machine, color_image is the camera
-# stream, and status carries the canonical EpisodeStatus that DataPrep reads.
+# Transports inline per blueprint so each recording config is self-contained.
+# joint_state is declared explicitly (not left to autoconnect) so it keeps
+# recording if the recorder moves to its own process.
 learning_collect_quest_xarm7 = autoconnect(
     teleop_quest_xarm7,
     RealSenseCamera.blueprint(enable_pointcloud=False),
@@ -52,6 +52,7 @@ learning_collect_quest_xarm7 = autoconnect(
     {
         ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
         ("color_image", Image): LCMTransport("/camera/color_image", Image),
+        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
         ("status", EpisodeStatus): LCMTransport("/learning/episode_status", EpisodeStatus),
     }
 )
@@ -66,6 +67,7 @@ learning_collect_quest_piper = autoconnect(
     {
         ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
         ("color_image", Image): LCMTransport("/camera/color_image", Image),
+        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
         ("status", EpisodeStatus): LCMTransport("/learning/episode_status", EpisodeStatus),
     }
 )

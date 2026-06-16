@@ -189,8 +189,7 @@ class EpisodeMonitorModule(Module):
         return status
 
     def _log_status(self, status: EpisodeStatus) -> None:
-        """Print a one-line operator-facing status to the terminal on every
-        transition — the only live feedback during a collection session."""
+        """One-line operator feedback to the terminal on every transition."""
         verb = {
             "start": "▶ RECORDING episode",
             "save": "✓ SAVED episode",

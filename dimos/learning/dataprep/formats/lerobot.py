@@ -126,8 +126,7 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
         return d / f"episode_{ep_idx:06d}.mp4"
 
     def _open_video(image_key: str, ep_idx: int, frame: np.ndarray) -> Any:
-        # Frames written as-is; cv2.VideoWriter is BGR-native. RGB frames will
-        # encode OK but decode color-swapped. Standardize upstream if needed.
+        # Frames are RGB→BGR converted at write time (see the write loop below).
         h, w = frame.shape[:2]
         path = _episode_path_video(image_key, ep_idx)
         writer = cv2.VideoWriter(str(path), fourcc, fps, (w, h))
@@ -223,7 +222,10 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
             if a.ndim >= 3:
                 if k not in current_video_writers:
                     current_video_writers[k] = _open_video(k, current_episode_index, a)
-                current_video_writers[k].write(a)
+                # Frames are RGB; cv2.VideoWriter is BGR-native — convert or
+                # the MP4 decodes color-swapped.
+                bgr = cv2.cvtColor(a, cv2.COLOR_RGB2BGR) if a.shape[-1] == 3 else a
+                current_video_writers[k].write(bgr)
 
         rel_ts = float(sample.ts) - (current_episode_start_ts or 0.0)
         current_frames.append(
