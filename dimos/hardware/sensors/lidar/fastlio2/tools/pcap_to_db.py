@@ -248,10 +248,9 @@ def _orchestrate(args: argparse.Namespace) -> int:
             vm.stdin.write((vm_cfg + "\n").encode())
             vm.stdin.close()
 
-            # virtual_mid360 streams the pcap once, then logs "data stream
-            # finished"; wait for that (capped by --duration), drain, then stop.
-            # (Watching the db for stagnation is unreliable — a diverging FastLio2
-            # keeps emitting long after the sensor goes quiet.)
+            # virtual_mid360 logs "data stream finished" after one pcap pass; wait
+            # for that (capped by --duration), then drain + stop. (Watching db
+            # stagnation is unreliable — a diverging FastLio2 emits after quiet.)
             deadline = time.time() + args.duration
             while time.time() < deadline:
                 if vm.poll() is not None:
