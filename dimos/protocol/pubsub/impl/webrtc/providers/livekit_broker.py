@@ -122,6 +122,7 @@ class _VideoPublisher:
         self._room: rtc.Room | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._source: rtc.VideoSource | None = None
+        self._publish_task: asyncio.Task | None = None
 
     def bind(self, room: rtc.Room, loop: asyncio.AbstractEventLoop) -> None:
         self._room = room
@@ -143,7 +144,7 @@ class _VideoPublisher:
 
         if self._source is None:
             self._source = rtc.VideoSource(w, h)
-            asyncio.ensure_future(self._publish())  # publish the track once
+            self._publish_task = asyncio.ensure_future(self._publish())
         frame = rtc.VideoFrame(w, h, rtc.VideoBufferType.RGBA, buf)
         self._source.capture_frame(frame)
 
@@ -205,8 +206,8 @@ class LiveKitBrokerProvider(AsyncProviderBase):
     # ─── Connect / Disconnect (loop thread) ──────────────────────────
 
     async def _connect(self) -> None:
-        from livekit import rtc
         import httpx
+        from livekit import rtc
 
         self._http = httpx.AsyncClient(timeout=30.0)
         r = await self._http.post(
