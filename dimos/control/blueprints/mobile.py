@@ -35,10 +35,7 @@ from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.transport import LCMTransport
 from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
-from dimos.msgs.geometry_msgs.Pose import Pose
-from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Twist import Twist
-from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_stack.main import create_nav_stack, nav_stack_rerun_config
@@ -138,14 +135,11 @@ coordinator_flowbase_keyboard_teleop = autoconnect(
 # FlowBase + Livox MID-360 + FastLio2 SLAM + nav stack with click-to-drive in Rerun. The velocity
 # sink is ControlCoordinator + FlowBaseAdapter
 
-_flowbase_mid360_mount = Pose(0.20, -0.20, 0.10, *Quaternion.from_euler(Vector3(0, 0, 0)))
-
 coordinator_flowbase_nav = (
     autoconnect(
         FastLio2.blueprint(
             host_ip=os.getenv("LIDAR_HOST_IP", "192.168.1.5"),
             lidar_ip=os.getenv("LIDAR_IP", "192.168.1.189"),
-            mount=_flowbase_mid360_mount,
             config="default.yaml",
         ),
         create_nav_stack(

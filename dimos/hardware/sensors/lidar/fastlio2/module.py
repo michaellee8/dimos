@@ -44,7 +44,6 @@ from dimos.hardware.sensors.lidar.livox.ports import (
     SDK_POINT_DATA_PORT,
     SDK_PUSH_MSG_PORT,
 )
-from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -67,10 +66,6 @@ class FastLio2Config(NativeModuleConfig):
     host_ip: str = "192.168.1.5"
     lidar_ip: str = "192.168.1.155"
     frequency: float = 10.0
-
-    # Sensor mount pose — position + orientation of the sensor relative to ground.
-    # Converted to init_pose CLI arg [x, y, z, qx, qy, qz, qw] in model_post_init.
-    mount: Pose = Pose()
 
     # "odom" frame: FastLio2 gives smooth continuous odometry; PGO publishes the
     # map→odom correction via TF.
@@ -108,27 +103,15 @@ class FastLio2Config(NativeModuleConfig):
     # Resolved in __post_init__, passed as --config_path to the binary
     config_path: str | None = None
 
-    # init_pose is computed from mount; config is resolved to config_path
-    init_pose: list[float] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-    cli_exclude: frozenset[str] = frozenset({"config", "mount"})
+    cli_exclude: frozenset[str] = frozenset({"config"})
 
     def model_post_init(self, __context: object) -> None:
-        """Resolve config_path and compute init_pose from mount."""
+        """Resolve config_path."""
         super().model_post_init(__context)
         cfg = self.config
         if not cfg.is_absolute():
             cfg = _CONFIG_DIR / cfg
         self.config_path = str(cfg.resolve())
-        m = self.mount
-        self.init_pose = [
-            m.x,
-            m.y,
-            m.z,
-            m.orientation.x,
-            m.orientation.y,
-            m.orientation.z,
-            m.orientation.w,
-        ]
 
 
 class FastLio2(NativeModule, perception.Lidar, perception.Odometry):

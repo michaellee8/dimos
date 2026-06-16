@@ -32,7 +32,6 @@
 #include "livox_sdk_config.hpp"
 
 #include "dimos_native_module.hpp"
-#include "timing.hpp"
 
 // dimos LCM message headers
 #include "geometry_msgs/Quaternion.hpp"
@@ -74,47 +73,6 @@ static std::string g_odometry_topic;
 static std::string g_frame_id;        // required via --frame_id
 static std::string g_child_frame_id;   // required via --child_frame_id
 static float g_frequency = 10.0f;
-
-// Initial pose offset (applied to all SLAM outputs)
-// Position offset
-static double g_init_x = 0.0;
-static double g_init_y = 0.0;
-static double g_init_z = 0.0;
-// Orientation offset as quaternion (identity = no rotation)
-static double g_init_qx = 0.0;
-static double g_init_qy = 0.0;
-static double g_init_qz = 0.0;
-static double g_init_qw = 1.0;
-
-// Helper: quaternion multiply (Hamilton product)  q_out = q1 * q2
-static void quat_mul(double ax, double ay, double az, double aw,
-                     double bx, double by, double bz, double bw,
-                     double& ox, double& oy, double& oz, double& ow) {
-    ow = aw*bw - ax*bx - ay*by - az*bz;
-    ox = aw*bx + ax*bw + ay*bz - az*by;
-    oy = aw*by - ax*bz + ay*bw + az*bx;
-    oz = aw*bz + ax*by - ay*bx + az*bw;
-}
-
-// Helper: rotate a vector by a quaternion  v_out = q * v * q_inv
-static void quat_rotate(double qx, double qy, double qz, double qw,
-                        double vx, double vy, double vz,
-                        double& ox, double& oy, double& oz) {
-    // t = 2 * cross(q_xyz, v)
-    double tx = 2.0 * (qy*vz - qz*vy);
-    double ty = 2.0 * (qz*vx - qx*vz);
-    double tz = 2.0 * (qx*vy - qy*vx);
-    // v_out = v + qw*t + cross(q_xyz, t)
-    ox = vx + qw*tx + (qy*tz - qz*ty);
-    oy = vy + qw*ty + (qz*tx - qx*tz);
-    oz = vz + qw*tz + (qx*ty - qy*tx);
-}
-
-// Check if initial pose is non-identity
-static bool has_init_pose() {
-    return g_init_x != 0.0 || g_init_y != 0.0 || g_init_z != 0.0 ||
-           g_init_qx != 0.0 || g_init_qy != 0.0 || g_init_qz != 0.0 || g_init_qw != 1.0;
-}
 
 // Frame accumulator (Livox SDK raw → CustomMsg)
 static std::mutex g_pc_mutex;
@@ -177,24 +135,11 @@ static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
     pc.data_length = pc.row_step;
     pc.data.resize(pc.data_length);
 
-    // Apply init_pose (rotation + translation) to match the odometry frame:
-    // rotation corrects the mount axis, translation shifts the origin to ground z≈0.
-    const bool apply_init_pose = has_init_pose();
     for (int i = 0; i < num_points; ++i) {
         float* dst = reinterpret_cast<float*>(pc.data.data() + i * 16);
-        if (apply_init_pose) {
-            double rx, ry, rz;
-            quat_rotate(g_init_qx, g_init_qy, g_init_qz, g_init_qw,
-                        cloud->points[i].x, cloud->points[i].y, cloud->points[i].z,
-                        rx, ry, rz);
-            dst[0] = static_cast<float>(rx + g_init_x);
-            dst[1] = static_cast<float>(ry + g_init_y);
-            dst[2] = static_cast<float>(rz + g_init_z);
-        } else {
-            dst[0] = cloud->points[i].x;
-            dst[1] = cloud->points[i].y;
-            dst[2] = cloud->points[i].z;
-        }
+        dst[0] = cloud->points[i].x;
+        dst[1] = cloud->points[i].y;
+        dst[2] = cloud->points[i].z;
         dst[3] = cloud->points[i].intensity;
     }
 
@@ -212,38 +157,13 @@ static void publish_odometry(const custom_messages::Odometry& odom, double times
     msg.header = make_header(g_frame_id, timestamp);
     msg.child_frame_id = g_child_frame_id;
 
-    // Pose (apply initial pose offset: p_out = R_init * p_slam + t_init)
-    if (has_init_pose()) {
-        double rx, ry, rz;
-        quat_rotate(g_init_qx, g_init_qy, g_init_qz, g_init_qw,
-                    odom.pose.pose.position.x,
-                    odom.pose.pose.position.y,
-                    odom.pose.pose.position.z,
-                    rx, ry, rz);
-        msg.pose.pose.position.x = rx + g_init_x;
-        msg.pose.pose.position.y = ry + g_init_y;
-        msg.pose.pose.position.z = rz + g_init_z;
-
-        double ox, oy, oz, ow;
-        quat_mul(g_init_qx, g_init_qy, g_init_qz, g_init_qw,
-                 odom.pose.pose.orientation.x,
-                 odom.pose.pose.orientation.y,
-                 odom.pose.pose.orientation.z,
-                 odom.pose.pose.orientation.w,
-                 ox, oy, oz, ow);
-        msg.pose.pose.orientation.x = ox;
-        msg.pose.pose.orientation.y = oy;
-        msg.pose.pose.orientation.z = oz;
-        msg.pose.pose.orientation.w = ow;
-    } else {
-        msg.pose.pose.position.x = odom.pose.pose.position.x;
-        msg.pose.pose.position.y = odom.pose.pose.position.y;
-        msg.pose.pose.position.z = odom.pose.pose.position.z;
-        msg.pose.pose.orientation.x = odom.pose.pose.orientation.x;
-        msg.pose.pose.orientation.y = odom.pose.pose.orientation.y;
-        msg.pose.pose.orientation.z = odom.pose.pose.orientation.z;
-        msg.pose.pose.orientation.w = odom.pose.pose.orientation.w;
-    }
+    msg.pose.pose.position.x = odom.pose.pose.position.x;
+    msg.pose.pose.position.y = odom.pose.pose.position.y;
+    msg.pose.pose.position.z = odom.pose.pose.position.z;
+    msg.pose.pose.orientation.x = odom.pose.pose.orientation.x;
+    msg.pose.pose.orientation.y = odom.pose.pose.orientation.y;
+    msg.pose.pose.orientation.z = odom.pose.pose.orientation.z;
+    msg.pose.pose.orientation.w = odom.pose.pose.orientation.w;
 
     // Covariance (fixed-size double[36])
     for (int i = 0; i < 36; ++i) {
@@ -435,30 +355,8 @@ int main(int argc, char** argv) {
     ports.host_imu_data   = mod.arg_int("host_imu_data_port", port_defaults.host_imu_data);
     ports.host_log_data   = mod.arg_int("host_log_data_port", port_defaults.host_log_data);
 
-    // Initial pose offset [x, y, z, qx, qy, qz, qw]
-    {
-        std::string init_str = mod.arg("init_pose", "");
-        if (!init_str.empty()) {
-            double vals[7] = {0, 0, 0, 0, 0, 0, 1};
-            int n = 0;
-            size_t pos = 0;
-            while (pos < init_str.size() && n < 7) {
-                size_t comma = init_str.find(',', pos);
-                if (comma == std::string::npos) comma = init_str.size();
-                vals[n++] = std::stod(init_str.substr(pos, comma - pos));
-                pos = comma + 1;
-            }
-            g_init_x = vals[0]; g_init_y = vals[1]; g_init_z = vals[2];
-            g_init_qx = vals[3]; g_init_qy = vals[4]; g_init_qz = vals[5]; g_init_qw = vals[6];
-        }
-    }
-
     if (debug) {
         printf("[fastlio2] Starting FAST-LIO2 + Livox Mid-360 native module\n");
-        if (has_init_pose()) {
-            printf("[fastlio2] init_pose: xyz=(%.3f, %.3f, %.3f) quat=(%.4f, %.4f, %.4f, %.4f)\n",
-                   g_init_x, g_init_y, g_init_z, g_init_qx, g_init_qy, g_init_qz, g_init_qw);
-        }
         printf("[fastlio2] lidar topic: %s\n",
                g_lidar_topic.empty() ? "(disabled)" : g_lidar_topic.c_str());
         printf("[fastlio2] odometry topic: %s\n",
@@ -502,17 +400,7 @@ int main(int argc, char** argv) {
     std::optional<std::chrono::steady_clock::time_point> last_pc_publish;
     std::optional<std::chrono::steady_clock::time_point> last_odom_publish;
 
-    // Per-section timing counters for `run_main_iter` (see timing.hpp; --debug only).
-    static timing::Section t_iter{"run_main_iter"};
-    static timing::Section t_emit_check{"emit.lock+swap"};
-    static timing::Section t_feed_lidar{"fast_lio.feed_lidar"};
-    static timing::Section t_process{"fast_lio.process"};
-    static timing::Section t_get_world_cloud{"fast_lio.get_world_cloud"};
-    static timing::Section t_publish_lidar{"publish_lidar"};
-    static timing::Section t_publish_odom{"publish_odometry"};
-
     auto run_main_iter = [&](std::chrono::steady_clock::time_point now) {
-        timing::Scope iter_scope(t_iter);
         // Lazy-seed the rate-limit bookmarks on the first iteration so they line
         // up with the wall clock instead of firing immediately.
         auto seed = now;
@@ -532,7 +420,6 @@ int main(int argc, char** argv) {
         std::vector<custom_messages::CustomPoint> points;
         uint64_t frame_start = 0;
         {
-            timing::Scope s(t_emit_check);
             std::lock_guard<std::mutex> lock(g_pc_mutex);
             auto check_now = now;
             if (check_now - *last_emit >= frame_interval) {
@@ -556,29 +443,21 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 3; i++) lidar_msg->rsvd[i] = 0;
             lidar_msg->point_num = static_cast<uli>(points.size());
             lidar_msg->points = std::move(points);
-            timing::Scope s(t_feed_lidar);
             fast_lio.feed_lidar(lidar_msg);
         }
 
         // Run one FAST-LIO IESKF step. Cheap when the IMU/lidar queues
         // are empty; the heavy work happens after a feed_lidar above.
-        {
-            timing::Scope s(t_process);
-            fast_lio.process();
-        }
+        fast_lio.process();
 
         // Check for new SLAM results and publish (rate-limited).
         auto pose = fast_lio.get_pose();
         if (!pose.empty() && (pose[0] != 0.0 || pose[1] != 0.0 || pose[2] != 0.0)) {
             double ts = get_publish_ts();
-            auto world_cloud = ([&]() {
-                timing::Scope s(t_get_world_cloud);
-                return fast_lio.get_world_cloud();
-            })();
+            auto world_cloud = fast_lio.get_world_cloud();
             if (world_cloud && !world_cloud->empty()) {
                 // World-frame cloud at pointcloud_freq, published as-is (no downsampling).
                 if (!g_lidar_topic.empty() && now - *last_pc_publish >= pc_interval) {
-                    timing::Scope s(t_publish_lidar);
                     publish_lidar(world_cloud, ts);
                     last_pc_publish = now;
                 }
@@ -586,14 +465,10 @@ int main(int argc, char** argv) {
 
             // Pose + covariance, rate-limited to odom_freq.
             if (!g_odometry_topic.empty() && now - *last_odom_publish >= odom_interval) {
-                timing::Scope s(t_publish_odom);
                 publish_odometry(fast_lio.get_odometry(), ts);
                 last_odom_publish = now;
             }
         }
-
-        // Periodic per-section summary to stderr (no-op when --debug off).
-        timing::maybe_flush(std::chrono::steady_clock::now());
     };
 
     // The Livox SDK opens UDP sockets and dispatches via its own callback
