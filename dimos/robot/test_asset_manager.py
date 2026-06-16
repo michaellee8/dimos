@@ -18,15 +18,19 @@ import subprocess
 
 import pytest
 
-from dimos.robot.asset_manager import (
+from dimos.robot.assets import (
     ArtifactRole,
     RobotAssetDeclaration,
     RobotAssetError,
     RobotAssetManager,
     RobotAssetPackagePath,
     RobotAssetPath,
+    robot_asset_package_paths,
+    robot_asset_xacro_args,
+    set_default_robot_asset_manager,
 )
-from dimos.utils.git_asset_cache import GitAssetCache
+from dimos.robot.assets.declarations import ROBOT_ASSETS
+from dimos.robot.assets.git_cache import GitAssetCache
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -100,3 +104,32 @@ def test_lazy_asset_paths_resolve_only_on_path_operations(asset_manager: RobotAs
 
     assert artifact_path.exists()
     assert (package_path / "package.xml").exists()
+
+
+def test_default_manager_can_be_injected(asset_manager: RobotAssetManager) -> None:
+    set_default_robot_asset_manager(asset_manager)
+    try:
+        assert robot_asset_package_paths("testbot")["testbot_description"].exists()
+        assert robot_asset_xacro_args("testbot") == {}
+    finally:
+        set_default_robot_asset_manager(None)
+
+
+def test_robot_asset_declarations_are_static_and_consistent() -> None:
+    known_roles = {role.value for role in ArtifactRole} | {"urdf_ik"}
+
+    for key, declaration in ROBOT_ASSETS.items():
+        assert key == declaration.model
+        assert declaration.repo_url
+        assert declaration.ref
+        assert declaration.artifacts
+
+        for role, relative_path in declaration.artifacts.items():
+            assert role in known_roles
+            assert relative_path
+            assert not Path(relative_path).is_absolute()
+
+        for package_name, relative_path in declaration.package_roots.items():
+            assert package_name
+            assert relative_path
+            assert not Path(relative_path).is_absolute()

@@ -18,7 +18,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from dimos.robot.asset_manager import RobotAssetPath, robot_asset_package_paths
+from dimos.robot.assets import (
+    RobotAssetPath,
+    robot_asset_package_paths,
+    robot_asset_xacro_args,
+)
 from dimos.robot.config import GripperConfig, RobotConfig
 from dimos.utils.data import LfsPath
 
@@ -67,9 +71,7 @@ def xarm7(
     **overrides: Any,
 ) -> RobotConfig:
     """Create an xArm7 robot configuration."""
-    xacro_args: dict[str, str] = {
-        "dof": "7",
-        "limited": "true",
+    xacro_args = robot_asset_xacro_args("xarm7") | {
         "attach_xyz": f"{x_offset} {y_offset} {z_offset}",
         "attach_rpy": f"0 {pitch} 0",
     }
@@ -119,9 +121,7 @@ def xarm6(
     **overrides: Any,
 ) -> RobotConfig:
     """Create an xArm6 robot configuration."""
-    xacro_args: dict[str, str] = {
-        "dof": "6",
-        "limited": "true",
+    xacro_args = robot_asset_xacro_args("xarm6") | {
         "attach_xyz": f"{x_offset} {y_offset} {z_offset}",
         "attach_rpy": f"0 {pitch} 0",
     }

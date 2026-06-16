@@ -19,7 +19,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-import os
 from pathlib import Path
 from threading import RLock, current_thread
 from typing import TYPE_CHECKING, Any
@@ -237,7 +236,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
 
     def _load_model(self, config: RobotModelConfig) -> Any:
         """Load robot model (URDF/xacro/MJCF) and return model instance."""
-        original_path = Path(os.fspath(config.model_path)).resolve()
+        original_path = config.model_path.resolve()
         if not original_path.exists():
             raise FileNotFoundError(f"Robot model not found: {original_path}")
 
@@ -257,7 +256,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
             # Register package paths (not applicable to MJCF)
             if config.package_paths:
                 for pkg_name, pkg_path in config.package_paths.items():
-                    self._parser.package_map().Add(pkg_name, Path(os.fspath(pkg_path)))
+                    self._parser.package_map().Add(pkg_name, pkg_path)
             else:
                 self._parser.package_map().Add(
                     f"{config.name}_description", prepared_path_obj.parent

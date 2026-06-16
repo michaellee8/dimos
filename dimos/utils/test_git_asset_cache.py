@@ -18,7 +18,7 @@ import subprocess
 
 import pytest
 
-from dimos.utils.git_asset_cache import GitAssetCache, GitAssetCacheWarning
+from dimos.robot.assets.git_cache import GitAssetCache, GitAssetCacheWarning
 
 
 def _git(cwd: Path, *args: str) -> str:

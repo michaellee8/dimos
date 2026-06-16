@@ -12,22 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Compatibility exports for :mod:`dimos.robot.assets.git_cache`."""
+"""Compatibility exports for :mod:`dimos.robot.assets.processing`."""
 
-from dimos.robot.assets.git_cache import (
-    DEFAULT_GIT_ASSET_CACHE_ROOT,
-    DEFAULT_ROBOT_ASSET_CACHE_ROOT,
-    GitAssetCache,
-    GitAssetCacheError,
-    GitAssetCacheWarning,
-    GitAssetCheckout,
+from dimos.robot.assets.processing import (
+    DERIVED_ASSET_CACHE_ROOT,
+    PackageUriMode,
+    normalize_package_paths,
+    render_urdf,
+    resolve_package_uris,
 )
 
 __all__ = [
-    "DEFAULT_GIT_ASSET_CACHE_ROOT",
-    "DEFAULT_ROBOT_ASSET_CACHE_ROOT",
-    "GitAssetCache",
-    "GitAssetCacheError",
-    "GitAssetCacheWarning",
-    "GitAssetCheckout",
+    "DERIVED_ASSET_CACHE_ROOT",
+    "PackageUriMode",
+    "normalize_package_paths",
+    "render_urdf",
+    "resolve_package_uris",
 ]
