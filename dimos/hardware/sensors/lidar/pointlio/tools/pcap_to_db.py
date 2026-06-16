@@ -14,14 +14,17 @@
 
 """Run Point-LIO over a .pcap (via the rust virtual_mid360 replay) → .db.
 
-Point-LIO has no in-process replay anymore; the only replay path is the
-``virtual_mid360`` rust module, which replays a recorded Mid-360 pcap *over the
-wire* so an unmodified live Point-LIO connects to it as real hardware. This tool
-orchestrates that end to end and records Point-LIO's outputs into a memory2
-SQLite database:
+Point-LIO consumes lidar/imu streams, so the replay chain is: the
+``virtual_mid360`` rust module replays a recorded Mid-360 pcap *over the wire*;
+an unmodified ``Mid360`` module connects to it as real hardware and publishes
+lidar/imu; Point-LIO runs on those and emits odometry. This tool orchestrates
+that end to end and records into a memory2 SQLite database:
 
 * ``pointlio_odometry`` — the IESKF pose at the native odom rate.
-* ``pointlio_lidar``    — the sensor-frame point cloud at the native rate.
+* ``pointlio_lidar``    — the Mid-360 sensor-frame cloud (with per-point time).
+
+Pass ``--config`` to swap the Point-LIO YAML and regenerate a db under a
+different tuning.
 
 By default both ends run in the host namespace with ``host_ip``/``lidar_ip``
 aliased on a dummy interface (``--alias-iface``); pass ``--lidar-ns``/``--drv-ns``
@@ -336,6 +339,15 @@ def _run_outer(args: argparse.Namespace) -> int:
         finally:
             store.stop()
 
+    config_path = ""
+    if args.config:
+        cfg = Path(args.config).expanduser()
+        # Absolute / explicitly-relative paths are resolved against CWD here; a
+        # bare name is left for the module to resolve under its config/ dir.
+        config_path = (
+            str(cfg.resolve()) if (cfg.is_absolute() or os.sep in args.config) else args.config
+        )
+
     ref_start_ts = _db_ref_start_ts(db_path)
     vm_bin = _resolve_vm_binary()
     net = (
@@ -394,6 +406,8 @@ def _run_outer(args: argparse.Namespace) -> int:
                 str(db_path),
                 "--odom-freq",
                 str(args.odom_freq),
+                "--config",
+                config_path,
                 "--ref-start-ts",
                 repr(ref_start_ts),
                 "--time-offset",
@@ -481,18 +495,27 @@ def _run_outer(args: argparse.Namespace) -> int:
 def _run_inner(args: argparse.Namespace) -> int:
     from dimos.core.coordination.blueprints import autoconnect
     from dimos.core.coordination.module_coordinator import ModuleCoordinator
+    from dimos.hardware.sensors.lidar.livox.module import Mid360
     from dimos.hardware.sensors.lidar.pointlio.module import PointLio
 
     db_path = Path(args.db)
     time_offset = float("nan") if args.time_offset == "nan" else float(args.time_offset)
 
+    # The Mid-360 module owns the Livox SDK and connects to the virtual_mid360
+    # replay; Point-LIO consumes its lidar/imu streams. The sensor cloud is
+    # remapped to `pointlio_lidar` so both Point-LIO and the recorder see it
+    # (one transport, many subscribers), and Point-LIO's odometry to
+    # `pointlio_odometry`. An optional --config swaps the Point-LIO YAML so a db
+    # can be regenerated under a different tuning.
+    pointlio_kwargs: dict[str, object] = {"odom_freq": args.odom_freq, "debug": False}
+    if args.config:
+        pointlio_kwargs["config"] = Path(args.config)
+
     blueprint = autoconnect(
-        PointLio.blueprint(
-            host_ip=args.host_ip,
-            lidar_ip=args.lidar_ip,
-            odom_freq=args.odom_freq,
-            debug=False,
-        ).remappings(
+        Mid360.blueprint(host_ip=args.host_ip, lidar_ip=args.lidar_ip).remappings(
+            [(Mid360, "lidar", "pointlio_lidar")]
+        ),
+        PointLio.blueprint(**pointlio_kwargs).remappings(
             [
                 (PointLio, "odometry", "pointlio_odometry"),
                 (PointLio, "lidar", "pointlio_lidar"),
@@ -563,6 +586,12 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--odom-freq", type=float, default=30.0, help="Point-LIO odometry rate Hz (default 30)"
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Point-LIO YAML config (absolute, or relative to the module's config/ dir). "
+        "Omit to use the module default. Use to regenerate a db under a different tuning.",
     )
     parser.add_argument(
         "--max-sensor-sec",
