@@ -32,6 +32,7 @@ Example:
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import re
 import shutil
@@ -72,7 +73,7 @@ def prepare_urdf_for_drake(
     Returns:
         Path to the prepared URDF file (may be cached)
     """
-    urdf_path = Path(urdf_path)
+    urdf_path = Path(os.fspath(urdf_path))
     package_paths = package_paths or {}
     xacro_args = xacro_args or {}
 
@@ -127,7 +128,11 @@ def _generate_cache_key(
     # Increment this when adding new processing steps (e.g., stripping transmission blocks)
     processing_version = "v2"
 
-    key_data = f"{processing_version}:{urdf_path}:{mtime}:{sorted(package_paths.items())}:{sorted(xacro_args.items())}:{convert_meshes}"
+    resolved_package_paths = {
+        package_name: Path(os.fspath(package_path)).resolve()
+        for package_name, package_path in package_paths.items()
+    }
+    key_data = f"{processing_version}:{urdf_path}:{mtime}:{sorted(resolved_package_paths.items())}:{sorted(xacro_args.items())}:{convert_meshes}"
     return hashlib.md5(key_data.encode()).hexdigest()[:16]
 
 
@@ -192,7 +197,7 @@ def _resolve_package_uris(
 
         if pkg_name in package_paths:
             # Ensure absolute path for proper resolution
-            pkg_path = Path(package_paths[pkg_name]).resolve()
+            pkg_path = Path(os.fspath(package_paths[pkg_name])).resolve()
             full_path = pkg_path / rel_path
             if full_path.exists():
                 return f"{full_path}{suffix}"

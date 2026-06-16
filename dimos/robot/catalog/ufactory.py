@@ -18,10 +18,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from dimos.robot.asset_manager import RobotAssetPath, robot_asset_package_paths
 from dimos.robot.config import GripperConfig, RobotConfig
 from dimos.utils.data import LfsPath
 
-# Pre-built URDFs for Pinocchio FK (xacro not supported by Pinocchio)
+# Pre-built URDFs for Pinocchio FK. The upstream xarm_ros2 source provides
+# Xacro-only model files, so these generated FK URDFs intentionally stay on LFS.
 XARM6_FK_MODEL = LfsPath("xarm_description/urdf/xarm6/xarm6.urdf")
 XARM7_FK_MODEL = LfsPath("xarm_description/urdf/xarm7/xarm7.urdf")
 
@@ -76,7 +78,7 @@ def xarm7(
 
     defaults: dict[str, Any] = {
         "name": name,
-        "model_path": LfsPath("xarm_description") / "urdf/xarm_device.urdf.xacro",
+        "model_path": RobotAssetPath("xarm7", "urdf"),
         "end_effector_link": "link_tcp" if add_gripper else "link7",
         "adapter_type": adapter_type,
         "address": address,
@@ -84,7 +86,7 @@ def xarm7(
         "base_link": "link_base",
         "home_joints": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "base_pose": [x_offset, y_offset, z_offset, 0, 0, 0, 1],
-        "package_paths": {"xarm_description": LfsPath("xarm_description")},
+        "package_paths": robot_asset_package_paths("xarm7"),
         "xacro_args": xacro_args,
         "auto_convert_meshes": True,
         "collision_exclusion_pairs": XARM_GRIPPER_COLLISION_EXCLUSIONS if add_gripper else [],
@@ -128,7 +130,7 @@ def xarm6(
 
     defaults: dict[str, Any] = {
         "name": name,
-        "model_path": LfsPath("xarm_description") / "urdf/xarm_device.urdf.xacro",
+        "model_path": RobotAssetPath("xarm6", "urdf"),
         "end_effector_link": "link_tcp" if add_gripper else "link6",
         "adapter_type": adapter_type,
         "address": address,
@@ -136,7 +138,7 @@ def xarm6(
         "base_link": "link_base",
         "home_joints": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "base_pose": [x_offset, y_offset, z_offset, 0, 0, 0, 1],
-        "package_paths": {"xarm_description": LfsPath("xarm_description")},
+        "package_paths": robot_asset_package_paths("xarm6"),
         "xacro_args": xacro_args,
         "auto_convert_meshes": True,
         "collision_exclusion_pairs": XARM_GRIPPER_COLLISION_EXCLUSIONS if add_gripper else [],

@@ -19,10 +19,12 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from dimos.robot.asset_manager import RobotAssetPath, robot_asset_package_paths
 from dimos.robot.config import GripperConfig, RobotConfig
 from dimos.utils.data import LfsPath
 
-# Pre-built MJCF for Pinocchio FK (xacro not supported by Pinocchio)
+# Static no-gripper URDF for Pinocchio FK. The upstream source only publishes the
+# full gripper model, so this generated FK variant intentionally stays on LFS.
 A750_FK_MODEL = LfsPath("a750_description/urdf/a750_rev1_no_gripper.urdf")
 
 # A-750 gripper collision exclusions (parallel jaw gripper)
@@ -71,7 +73,7 @@ def a750(
     """
     defaults: dict[str, Any] = {
         "name": name,
-        "model_path": LfsPath("a750_description") / "urdf/a750_rev1.urdf",
+        "model_path": RobotAssetPath("a750", "urdf"),
         "end_effector_link": "gripper_base",
         "adapter_type": adapter_type,
         "address": device_path,
@@ -79,10 +81,7 @@ def a750(
         "base_link": "base_link",
         "home_joints": [0.0, 0.0, -math.radians(90), 0.0, 0.0, 0.0],
         "base_pose": [0, 0, 0, 0, 0, 0, 1],  # base_pose is where the robot sits in the world
-        "package_paths": {
-            "a750_description": LfsPath("a750_description"),
-            "a750_gazebo": LfsPath("a750_description"),
-        },
+        "package_paths": robot_asset_package_paths("a750"),
         "xacro_args": {},
         "auto_convert_meshes": True,
         "collision_exclusion_pairs": A750_GRIPPER_COLLISION_EXCLUSIONS,

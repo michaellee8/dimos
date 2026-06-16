@@ -18,11 +18,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from dimos.robot.asset_manager import RobotAssetPath, robot_asset_package_paths
 from dimos.robot.config import GripperConfig, RobotConfig
 from dimos.utils.data import LfsPath
 
-# Pre-built MJCF for Pinocchio FK (xacro not supported by Pinocchio)
-PIPER_FK_MODEL = LfsPath("piper_description/mujoco_model/piper_no_gripper_description.xml")
+# Static no-gripper URDF for Pinocchio FK (xacro not supported by Pinocchio)
+PIPER_FK_MODEL = RobotAssetPath("piper", "urdf_ik")
 
 # Simulation model path (MJCF)
 PIPER_SIM_PATH = LfsPath("piper/scene.xml")
@@ -59,7 +60,7 @@ def piper(
     """
     defaults: dict[str, Any] = {
         "name": name,
-        "model_path": LfsPath("piper_description") / "urdf/piper_description.xacro",
+        "model_path": RobotAssetPath("piper", "urdf"),
         "end_effector_link": "gripper_base",
         "adapter_type": adapter_type,
         "address": address,
@@ -67,10 +68,7 @@ def piper(
         "base_link": "base_link",
         "home_joints": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "base_pose": [0, y_offset, 0, 0, 0, 0, 1],
-        "package_paths": {
-            "piper_description": LfsPath("piper_description"),
-            "piper_gazebo": LfsPath("piper_description"),
-        },
+        "package_paths": robot_asset_package_paths("piper"),
         "xacro_args": {},
         "auto_convert_meshes": True,
         "collision_exclusion_pairs": PIPER_GRIPPER_COLLISION_EXCLUSIONS,

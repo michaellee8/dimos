@@ -503,19 +503,21 @@ If you want motion planning (collision-free trajectories via Drake), you need a 
 
 ### 4a. Add your URDF
 
-Place your URDF/xacro files under LFS data so they can be resolved via `LfsPath`. `LfsPath` is a `Path` subclass that lazily downloads LFS data on first access — this avoids downloading at import time when the blueprint module is loaded.
+Prefer an upstream Robot Description Source and add a typed declaration in `dimos/robot/robot_asset_declarations.py`. `RobotAssetPath` is a lazy `Path`-like adapter: importing the catalog does not clone or update the repo, but the first concrete path access resolves the source into `~/.cache/dimos/robot_assets`.
+
+Use `LfsPath` only when the asset is intentionally vendored, locally modified, or has no suitable upstream source.
 
 ```python skip
-from dimos.utils.data import LfsPath
+from dimos.robot.asset_manager import RobotAssetPath, robot_asset_package_paths
 from dimos.manipulation.manipulation_module import manipulation_module
 from dimos.manipulation.planning.spec import RobotModelConfig
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 
-# LfsPath defers download until the path is actually accessed
-_YOURARM_URDF_PATH = LfsPath("yourarm_description/urdf/yourarm.urdf")
-_YOURARM_PACKAGE_PATH = LfsPath("yourarm_description")
+# Add a RobotAssetDeclaration for "yourarm" in robot_asset_declarations.py.
+# Common artifact roles are "urdf", "mjcf", "srdf", and "mesh_dir".
+_YOURARM_URDF_PATH = RobotAssetPath("yourarm", "urdf")
 
 
 def _make_base_pose(x=0.0, y=0.0, z=0.0) -> PoseStamped:
@@ -554,7 +556,7 @@ def _make_yourarm_config(
         joint_names=joint_names,
         end_effector_link="link6",      # Last link in your URDF's kinematic chain
         base_link="base_link",          # Root link of your URDF
-        package_paths={"yourarm_description": _YOURARM_PACKAGE_PATH},
+        package_paths=robot_asset_package_paths("yourarm"),
         xacro_args={},                  # Xacro arguments if using .xacro files
         collision_exclusion_pairs=[],   # Pairs of links that can touch (e.g., gripper fingers)
         auto_convert_meshes=True,       # Convert DAE/STL meshes for Drake
