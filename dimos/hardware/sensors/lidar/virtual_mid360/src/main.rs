@@ -288,6 +288,11 @@ impl VirtualMid360 {
 fn reuse_bind(addr: SocketAddrV4) -> std::io::Result<UdpSocket> {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
+    // SO_REUSEPORT too: the consumer SDK opens its own :56000 sockets (one on
+    // INADDR_ANY), and on macOS a wildcard bind can't be added over an existing
+    // specific bind with SO_REUSEADDR alone — so without this the two race and
+    // whichever loses fails to bind. REUSEPORT makes the binds order-independent.
+    socket.set_reuse_port(true)?;
     let bind_addr: std::net::SocketAddr = addr.into();
     socket.bind(&bind_addr.into())?;
     Ok(socket.into())
