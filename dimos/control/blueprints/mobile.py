@@ -33,7 +33,6 @@ from dimos.control.components import (
 )
 from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.core.transport import LCMTransport
 from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.JointState import JointState
@@ -86,12 +85,7 @@ coordinator_mock_twist_base = ControlCoordinator.blueprint(
             priority=10,
         ),
     ],
-).transports(
-    {
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-    }
-)
+).remappings([(ControlCoordinator, "twist_command", "cmd_vel")])
 
 # FlowBase holonomic twist base (3-DOF: vx, vy, wz) over Portal RPC
 coordinator_flowbase = ControlCoordinator.blueprint(
@@ -104,12 +98,7 @@ coordinator_flowbase = ControlCoordinator.blueprint(
             priority=10,
         ),
     ],
-).transports(
-    {
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-    }
-)
+).remappings([(ControlCoordinator, "twist_command", "cmd_vel")])
 
 # FlowBase + WASD pygame keyboard teleop in a single blueprint
 coordinator_flowbase_keyboard_teleop = autoconnect(
@@ -125,12 +114,7 @@ coordinator_flowbase_keyboard_teleop = autoconnect(
         ],
     ),
     KeyboardTeleop.blueprint(),
-).transports(
-    {
-        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-    }
-)
+).remappings([(ControlCoordinator, "twist_command", "cmd_vel")])
 
 # FlowBase + Livox MID-360 + FastLio2 SLAM + nav stack with click-to-drive in Rerun. The velocity
 # sink is ControlCoordinator + FlowBaseAdapter
@@ -195,15 +179,10 @@ coordinator_flowbase_nav = (
             # SimplePlanner / FarPlanner owns way_point — disconnect MovementManager's
             # redundant pass-through copy (matches unitree-g1-nav-onboard).
             (MovementManager, "way_point", "_mgr_way_point_unused"),
-        ]
-    )
-    .transports(
-        {
             # MovementManager.cmd_vel publishes to LCM /cmd_vel by default; the
-            # coordinator's twist_command listens on the same topic.
-            ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        }
+            # coordinator's twist_command listens on the same name.
+            (ControlCoordinator, "twist_command", "cmd_vel"),
+        ]
     )
     .global_config(n_workers=8)
 )
@@ -223,12 +202,7 @@ coordinator_mobile_manip_mock = ControlCoordinator.blueprint(
             priority=10,
         ),
     ],
-).transports(
-    {
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-    }
-)
+).remappings([(ControlCoordinator, "twist_command", "cmd_vel")])
 
 
 __all__ = [
