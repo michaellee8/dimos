@@ -28,10 +28,8 @@ Usage::
 
 from __future__ import annotations
 
-import ipaddress
 import os
 from pathlib import Path
-import socket
 from typing import TYPE_CHECKING, Annotated
 
 from pydantic import Field
@@ -41,6 +39,7 @@ from reactivex.disposable import Disposable
 from dimos.core.core import rpc
 from dimos.core.native_module import NativeModule, NativeModuleConfig
 from dimos.core.stream import Out
+from dimos.hardware.sensors.lidar.livox.net import resolve_host_ip
 from dimos.hardware.sensors.lidar.livox.ports import (
     SDK_CMD_DATA_PORT,
     SDK_HOST_CMD_DATA_PORT,
@@ -60,11 +59,8 @@ from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.nav_stack.frames import FRAME_ODOM
 from dimos.spec import perception
-from dimos.utils.generic import get_local_ips
-from dimos.utils.logging_config import setup_logger
 
 _CONFIG_DIR = Path(__file__).parent / "config"
-_logger = setup_logger()
 
 
 class PointLioConfig(NativeModuleConfig):
@@ -170,63 +166,9 @@ class PointLio(NativeModule, perception.Lidar, perception.Odometry):
                 "PointLio: lidar_ip not set — it's network-specific. Set it in the config "
                 "or via the DIMOS_POINTLIO_LIDAR_IP env var."
             )
-        local_ips = [ip for ip, _iface in get_local_ips()]
-
         # host_ip optional: derive the local NIC on lidar_ip's /24 when unset or
-        # not one of our IPs.
-        configured = self.config.host_ip
-        if configured and configured in local_ips:
-            host_ip = configured
-        else:
-            try:
-                lidar_net = ipaddress.IPv4Network(f"{lidar_ip}/24", strict=False)
-                same_subnet = [ip for ip in local_ips if ipaddress.IPv4Address(ip) in lidar_net]
-            except (ValueError, TypeError):
-                same_subnet = []
-            if not same_subnet:
-                subnet_prefix = ".".join(lidar_ip.split(".")[:3])
-                msg = (
-                    f"PointLio: cannot resolve host_ip — no local IP on the lidar's subnet "
-                    f"(lidar {lidar_ip}).\n"
-                    f"  Local IPs found: {', '.join(local_ips) or '(none)'}\n"
-                    f"  → Bring up the lidar NIC, or set host_ip explicitly.\n"
-                    f"  → Check: ip addr | grep {subnet_prefix}\n"
-                    f"  → Or assign: sudo ip addr add {subnet_prefix}.5/24 dev <iface>\n"
-                )
-                _logger.error(msg)
-                raise RuntimeError(msg)
-            host_ip = same_subnet[0]
-            self.config.host_ip = host_ip
-            if configured:
-                _logger.warning(
-                    f"PointLio: host_ip={configured!r} not local; using {host_ip!r} "
-                    f"(on lidar {lidar_ip}'s subnet).",
-                )
-
-        _logger.info(
-            "PointLio network check", host_ip=host_ip, lidar_ip=lidar_ip, local_ips=local_ips
-        )
-
-        # Check if we can bind a UDP socket on host_ip (port 0 = ephemeral).
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.bind((host_ip, 0))
-        except OSError as err:
-            _logger.error(
-                f"PointLio: Cannot bind UDP socket on host_ip={host_ip!r}: {err}\n"
-                f"  Another process may be using the Livox SDK ports.\n"
-                f"  → Check: ss -ulnp | grep {host_ip}"
-            )
-            raise RuntimeError(
-                f"PointLio: Cannot bind UDP on {host_ip}: {err}. "
-                f"Check if another Livox/PointLio process is running."
-            ) from err
-
-        _logger.info(
-            "PointLio network check passed",
-            host_ip=host_ip,
-            lidar_ip=lidar_ip,
-        )
+        # not one of our IPs (shared with the Mid360 driver).
+        self.config.host_ip = resolve_host_ip(lidar_ip, self.config.host_ip, label="PointLio")
 
 
 # Verify protocol port compliance (mypy will flag missing ports)

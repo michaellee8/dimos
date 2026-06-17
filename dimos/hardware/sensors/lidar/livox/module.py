@@ -35,6 +35,7 @@ from pydantic import Field
 from dimos.core.core import rpc
 from dimos.core.native_module import NativeModule, NativeModuleConfig
 from dimos.core.stream import Out
+from dimos.hardware.sensors.lidar.livox.net import resolve_host_ip
 from dimos.hardware.sensors.lidar.livox.ports import (
     SDK_CMD_DATA_PORT,
     SDK_HOST_CMD_DATA_PORT,
@@ -96,6 +97,11 @@ class Mid360(NativeModule, perception.Lidar, perception.IMU):
 
     @rpc
     def start(self) -> None:
+        # Auto-derive host_ip from a local NIC on the lidar's subnet (shared with
+        # Point-LIO) when the configured value isn't one of our IPs.
+        self.config.host_ip = resolve_host_ip(
+            self.config.lidar_ip, self.config.host_ip, label="Mid360"
+        )
         super().start()
 
     @rpc
