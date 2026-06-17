@@ -20,7 +20,7 @@ Usage::
 
     from dimos.core.coordination.module_coordinator import ModuleCoordinator
     ModuleCoordinator.build(autoconnect(
-        Mid360.blueprint(host_ip="192.168.1.5"),
+        Mid360.blueprint(),  # host_ip auto-detected; set lidar_ip if not the factory default
         SomeConsumer.blueprint(),
     )).loop()
 """
@@ -59,7 +59,9 @@ class Mid360Config(NativeModuleConfig):
     cwd: str | None = "cpp"
     executable: str = "result/bin/mid360_native"
     build_command: str | None = "nix build .#mid360_native"
-    host_ip: str = "192.168.1.5"
+    # host_ip is machine-specific — left unset it's auto-derived in start() from a
+    # local NIC on lidar_ip's subnet. DIMOS_MID360_HOST_IP overrides.
+    host_ip: str | None = Field(default_factory=lambda: os.environ.get("DIMOS_MID360_HOST_IP"))
     # DIMOS_MID360_LIDAR_IP overrides; falls back to the Livox factory-default IP.
     lidar_ip: str = Field(
         default_factory=lambda: os.environ.get("DIMOS_MID360_LIDAR_IP", "192.168.1.155")
