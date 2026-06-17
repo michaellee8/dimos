@@ -1,8 +1,8 @@
 // Fake Livox Mid-360 — replays a recorded pcap over a virtual NIC and synthesizes
 // the Livox SDK2 control handshake so an unmodified, live-mode pointlio ingests it
-// through the real Livox SDK as if from a live sensor. Runs in the "lidar" netns
-// (peer "drv" runs pointlio); on a setup failure the error prints the exact
-// netns/veth commands to run.
+// through the real Livox SDK as if from a live sensor. Namespace-agnostic: it just
+// binds lidar_ip and sends UDP, so it works wherever the host_ip/lidar_ip are
+// reachable — IPs aliased on an interface (host ns, incl. macOS lo0) or a netns.
 
 use dimos_module::{run, LcmTransport, Module};
 use serde::Deserialize;
@@ -39,11 +39,17 @@ struct Config {
     #[serde(default)]
     #[validate(range(min = 0.0, max = 3600.0))]
     delay: f64,
-    /// IP the fake lidar sends from (on this netns's veth). Required.
+    /// IP the fake lidar sends from. Required.
     lidar_ip: String,
     /// Host IP the data is delivered to (where the SDK listens). Required.
     host_ip: String,
-    /// Network namespace the fake lidar runs in. Required.
+    /// Network namespace the fake lidar runs in. Optional — empty/omitted means
+    /// the host namespace (the IPs are aliased onto an interface instead, which
+    /// is the default and the only option on macOS). Accepted for wire-config
+    /// compatibility but not acted on: the process is *placed* in the netns by
+    /// the launcher (`ip netns exec`), so the binary itself stays agnostic.
+    #[serde(default)]
+    #[allow(dead_code)]
     lidar_netns: String,
     /// Multicast group for point/IMU. 224.1.1.5 is the Livox default the SDK
     /// joins; override only to match a differently-configured consumer.
@@ -182,32 +188,34 @@ fn ensure_interface(cfg: &Config) -> Result<Ipv4Addr, String> {
     // (or we're in the wrong namespace).
     let probe = UdpSocket::bind(SocketAddrV4::new(lidar_ip, CMD_PORT));
     if probe.is_err() {
-        let netns = &cfg.lidar_netns;
         let lidar_addr = &cfg.lidar_ip;
         let host_addr = &cfg.host_ip;
         let mcast_group = &cfg.mcast_data;
+        // The VirtualMid360 module sets the NIC up automatically (setup_network,
+        // via sudo); this fires only when that was skipped/failed. Show the
+        // by-hand recipe for the current platform.
+        let how = if cfg!(target_os = "macos") {
+            format!(
+                "macOS — alias the IPs onto loopback and route the Livox multicast there:\n  \
+                 sudo ifconfig lo0 alias {host_addr} netmask 255.255.255.0\n  \
+                 sudo ifconfig lo0 alias {lidar_addr} netmask 255.255.255.0\n  \
+                 sudo route -n add -host {mcast_group} -interface lo0\n  \
+                 sudo route -n add -host 255.255.255.255 -interface lo0"
+            )
+        } else {
+            format!(
+                "Linux — alias the IPs onto a dummy interface (no netns needed):\n  \
+                 sudo ip link add dimos-mid360 type dummy\n  \
+                 sudo ip addr add {host_addr}/24 dev dimos-mid360\n  \
+                 sudo ip addr add {lidar_addr}/24 dev dimos-mid360\n  \
+                 sudo ip link set dimos-mid360 up\n  \
+                 sudo ip link set dimos-mid360 multicast on\n  \
+                 sudo ip route add {mcast_group}/32 dev dimos-mid360\n  \
+                 sudo ip route add 255.255.255.255/32 dev dimos-mid360"
+            )
+        };
         return Err(format!(
-            "cannot bind {lidar_addr}:{CMD_PORT} — the virtual network interface isn't set up \
-             (or this process isn't in the '{netns}' netns).\n\
-             Run this once (creates the lidar/drv veth pair), then re-run the module:\n\
-             \n  sudo ip netns add drv\n  sudo ip netns add {netns}\n  \
-             sudo ip link add veth-drv type veth peer name veth-lidar\n  \
-             sudo ip link set veth-drv netns drv\n  \
-             sudo ip link set veth-lidar netns {netns}\n  \
-             sudo ip netns exec drv   ip addr add {host_addr}/24 dev veth-drv\n  \
-             sudo ip netns exec {netns} ip addr add {lidar_addr}/24 dev veth-lidar\n  \
-             sudo ip netns exec drv   ip link set veth-drv up\n  \
-             sudo ip netns exec {netns} ip link set veth-lidar up\n  \
-             sudo ip netns exec drv   ip link set lo up\n  \
-             sudo ip netns exec {netns} ip link set lo up\n  \
-             sudo ip netns exec drv   ip link set veth-drv multicast on\n  \
-             sudo ip netns exec {netns} ip link set veth-lidar multicast on\n  \
-             sudo ip netns exec {netns} ip route add 255.255.255.255/32 dev veth-lidar\n  \
-             sudo ip netns exec {netns} ip route add {mcast_group}/32 dev veth-lidar  # point/IMU multicast\n  \
-             sudo ip netns exec drv   ip route add 224.0.0.0/4 dev lo  # LCM (dimos transport)\n  \
-             sudo ip netns exec {netns} ip route add 224.0.0.0/4 dev lo  # LCM (dimos transport)\n\
-             \nThen launch this module inside the lidar netns:\n  \
-             sudo ip netns exec {netns} <run the blueprint / binary>"
+            "cannot bind {lidar_addr}:{CMD_PORT} — the virtual NIC isn't set up.\n{how}"
         ));
     }
     Ok(lidar_ip)

@@ -19,8 +19,8 @@ DIMOS_POINTLIO_* for PointLio); set the lidar/host IPs so the two ends agree.
 """
 
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.hardware.sensors.lidar.livox.virtual_mid360.module import VirtualMid360
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
+from dimos.hardware.sensors.lidar.virtual_mid360.module import VirtualMid360
 from dimos.visualization.vis_module import vis_module
 
 demo_virtual_mid360_pointlio = autoconnect(
