@@ -130,6 +130,14 @@ class _VideoPublisher:
         self._room = room
         self._loop = loop
 
+    def reset(self) -> None:
+        """Drop per-session state so a later bind() (reconnect) re-publishes the
+        track on the new room. Called from the provider's _disconnect()."""
+        self._room = None
+        self._loop = None
+        self._source = None
+        self._publish_task = None
+
     def set_latest(self, img: Image) -> None:
         loop = self._loop
         if loop is None or not loop.is_running():
@@ -154,9 +162,17 @@ class _VideoPublisher:
         from livekit import rtc
 
         assert self._room is not None and self._source is not None
-        track = rtc.LocalVideoTrack.create_video_track("camera", self._source)
-        opts = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA)
-        await self._room.local_participant.publish_track(track, opts)
+        try:
+            track = rtc.LocalVideoTrack.create_video_track("camera", self._source)
+            opts = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA)
+            await self._room.local_participant.publish_track(track, opts)
+        except Exception:
+            # Clear _source so the next captured frame retries publish, instead
+            # of feeding frames forever into a never-published source.
+            logger.warning("LiveKit video track publish failed; will retry", exc_info=True)
+            self._source = None
+            self._publish_task = None
+            return
         logger.info("LiveKit video track published")
 
 
@@ -260,6 +276,7 @@ class LiveKitBrokerProvider(AsyncProviderBase):
             with contextlib.suppress(Exception):
                 await self._room.disconnect()
             self._room = None
+        self._video.reset()  # clear per-session video state so a restart re-publishes
         if self._http:
             await self._http.aclose()
             self._http = None
@@ -278,7 +295,7 @@ class LiveKitBrokerProvider(AsyncProviderBase):
                         json={},
                     )
             except Exception:
-                logger.debug("LiveKit heartbeat failed", exc_info=True)
+                logger.warning("LiveKit heartbeat failed", exc_info=True)
             await asyncio.sleep(interval)
 
     # ─── Dispatch (loop thread) ──────────────────────────────────────
