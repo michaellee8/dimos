@@ -53,7 +53,7 @@ class ArmModel:
     # its STLs in data/g1_urdf/meshes). Ignored for URDF.
     model_meshdir: Path | None = None
     # For URDF: {ros_package_name: absolute_dir} to expand package:// refs.
-    package_roots: dict[str, str] = field(default_factory=dict)
+    package_roots: dict[str, str | Path] = field(default_factory=dict)
     # TCP offset from ee_body's origin, in the ee_body local frame.
     grasp_offset: tuple[float, float, float] = (0.0, 0.0, 0.0)
     # Body-name pairs whose contact is a constant structural mesh overlap
@@ -99,7 +99,7 @@ def _g1(side: str) -> ArmModel:
         params=MapParams(),
         viewer_urdf=LfsPath("g1_urdf/g1.urdf"),
         # g1.urdf references meshes as package://unitree_g1/meshes/... .
-        package_roots={"unitree_g1": str(LfsPath("g1_urdf"))},
+        package_roots={"unitree_g1": LfsPath("g1_urdf")},
     )
 
 
@@ -119,7 +119,7 @@ _REGISTRY: dict[str, ArmModel] = {
         # center is one finger-length out along the flange normal (+z).
         grasp_offset=(0.0, 0.0, 0.10),
         viewer_urdf=LfsPath("xarm_description/urdf/xarm7/xarm7.urdf"),
-        package_roots={"xarm_description": str(LfsPath("xarm_description"))},
+        package_roots={"xarm_description": LfsPath("xarm_description")},
     ),
     "piper": ArmModel(
         key="piper",
@@ -131,13 +131,13 @@ _REGISTRY: dict[str, ArmModel] = {
         # link1's collision mesh is seated in the base; constant overlap.
         collision_exclude=(("link1", "world"),),
         viewer_urdf=LfsPath("piper_description/urdf/piper_no_gripper_description.urdf"),
-        package_roots={"piper_description": str(LfsPath("piper_description"))},
+        package_roots={"piper_description": LfsPath("piper_description")},
     ),
     "a750": ArmModel(
         key="a750",
         model_path=LfsPath("a750_description/urdf/a750_rev1_no_gripper.urdf"),
         is_urdf=True,
-        package_roots={"a750_description": str(LfsPath("a750_description"))},
+        package_roots={"a750_description": LfsPath("a750_description")},
         joint_names=tuple(f"joint{i}" for i in range(1, 7)),
         ee_body="link6",
         # a750 gripper fingers sit at link6-local [0.076, 0, 0] — its flange
@@ -149,7 +149,7 @@ _REGISTRY: dict[str, ArmModel] = {
         key="openarm",
         model_path=LfsPath("openarm_description/urdf/robot/openarm_v10_single.urdf"),
         is_urdf=True,
-        package_roots={"openarm_description": str(LfsPath("openarm_description"))},
+        package_roots={"openarm_description": LfsPath("openarm_description")},
         joint_names=tuple(f"openarm_left_joint{i}" for i in range(1, 8)),
         ee_body="openarm_left_link7",
         # No hand in the arm-only model; grasp center one hand-length out along
@@ -179,7 +179,7 @@ def compile_model(
     *,
     is_urdf: bool = False,
     model_meshdir: str | Path | None = None,
-    package_roots: dict[str, str] | None = None,
+    package_roots: dict[str, str | Path] | None = None,
 ) -> mujoco.MjModel:
     """Compile an MJCF or URDF arm model into a ``mujoco.MjModel``.
 

@@ -280,6 +280,7 @@ def test_registry_is_consistent() -> None:
             assert am.package_roots, f"{key} is URDF but declares no package roots"
 
 
+@pytest.mark.self_hosted  # compiles real robot models pulled from the self-hosted LFS
 @pytest.mark.parametrize("robot", ["g1-left", "g1-right", "xarm7", "piper", "a750", "openarm"])
 def test_registered_model_compiles(robot: str) -> None:
     """Each registered model compiles and exposes its declared joints + EE
