@@ -351,13 +351,22 @@ xarm_perception_sim = autoconnect(
         fps=5,
     ),
     # Match the real-hardware xarm_perception thresholds: promotion reachable in a
-    # short warm-up (3 vs 6 frames), tighter dedup so neighbours don't merge, and a
-    # 1m range cap to drop far office-background detections.
+    # short warm-up (3 vs 6 frames) and tighter dedup so neighbours don't merge.
+    #
+    # max_distance is measured from the WORLD origin (Object.from_2d_to_list culls on
+    # |center| after transforming the cloud into the world frame). On real hardware /
+    # the legacy sim the robot base sits at the world origin, so 1m-from-origin ==
+    # 1m-from-camera. In the office scene the base is repositioned to the desk
+    # (sim_presets spawns it ~1m in front of and below the world origin), so the suite
+    # objects land 1.10-1.34m from the origin and a 1.0 cap discards ALL of them while
+    # they're only ~0.5m from the camera. The nearest office-background entity is 3.47m
+    # from the origin, so a 2.0 cap admits the whole suite with margin and still drops
+    # the background.
     ObjectSceneRegistrationModule.blueprint(
         target_frame="world",
         distance_threshold=0.08,
         min_detections_for_permanent=3,
-        max_distance=1.0,
+        max_distance=2.0,
         use_aabb=True,
         max_obstacle_width=0.06,
     ),
