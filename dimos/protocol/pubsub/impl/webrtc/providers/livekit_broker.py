@@ -92,7 +92,9 @@ def _image_to_rgba(img: Image) -> tuple[int, int, bytes]:
     from dimos.msgs.sensor_msgs.Image import ImageFormat
 
     arr = img.data
-    if arr.dtype != np.uint8:
+    if arr.dtype == np.uint16:
+        arr = (arr >> 8).astype(np.uint8)  # scale 16-bit (e.g. GRAY16) to 8-bit, not truncate
+    elif arr.dtype != np.uint8:
         arr = arr.astype(np.uint8)
     h, w = arr.shape[:2]
     fmt = img.format
@@ -301,13 +303,14 @@ class LiveKitBrokerProvider(AsyncProviderBase):
         drop while no room/operator is connected — normal pubsub behaviour."""
         if isinstance(data, (bytearray, memoryview)):
             data = bytes(data)
+        reliable = topic not in self.LOSSY_TOPICS
         with self._lock:
             if not self._started or self._loop is None or self._room is None:
                 return
-            room, loop = self._room, self._loop
-        reliable = topic not in self.LOSSY_TOPICS
-        coro = room.local_participant.publish_data(data, reliable=reliable, topic=topic)
-        asyncio.run_coroutine_threadsafe(coro, loop)
+            coro = self._room.local_participant.publish_data(
+                data, reliable=reliable, topic=topic
+            )
+            asyncio.run_coroutine_threadsafe(coro, self._loop)
 
     def set_video_frame(self, img: Image) -> None:
         """Robot → operator video: publish the latest camera frame (thread-safe)."""
