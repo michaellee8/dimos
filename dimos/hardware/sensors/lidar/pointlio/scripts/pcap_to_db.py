@@ -12,42 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Run Point-LIO over a .pcap (via the rust virtual_mid360 replay) → .db.
+"""
+Usage:
+    # snippet that normally diverges
+    PCAP_PATH="$(python -c "from dimos.utils.data import get_data; print(get_data('ruwik2_part3/ruwik2_part3.pcap'))")"
 
-Point-LIO has no in-process replay anymore; the only replay path is the
-``virtual_mid360`` rust module, which replays a recorded Mid-360 pcap *over the
-wire* so an unmodified live Point-LIO connects to it as real hardware. This tool
-orchestrates that end to end and records Point-LIO's outputs into a memory2
-SQLite database:
+    # gen .db from pcap with your config
+    python -m dimos.hardware.sensors.lidar.pointlio.tools.pcap_to_db \
+        --config your_pointlio_conf.yaml \
+        --pcap "$PCAP_PATH"
 
-* ``pointlio_odometry`` — the IESKF pose at the native odom rate.
-* ``pointlio_lidar``    — the sensor-frame point cloud at the native rate.
+    # add to existing .db
+    DB="mem2.db"
+    python -m dimos.hardware.sensors.lidar.pointlio.tools.pcap_to_db --db "$DB"  --pcap "$PCAP_PATH"
 
-By default both ends run in the host namespace with ``host_ip``/``lidar_ip``
-aliased on a dummy interface (``--alias-iface``); pass ``--lidar-ns``/``--drv-ns``
-to isolate them in separate netns + veth instead (needed to run two replays at
-once). Either way it configures interfaces/routes, so **it needs CAP_NET_ADMIN**
-and shells out to ``sudo`` for the setup. Live Point-LIO + the recorder run
-together (one coordinator, so their LCM streams wire up normally). Replay is real
-time (Point-LIO is not deterministic), so two runs over the same pcap differ.
-
-The ``--db`` is optional: with no existing db a fresh one is built from scratch
-(defaults to ``<pcap>.db`` next to the pcap). With an existing db the two streams
-are appended and time-aligned onto its clock, so Point-LIO output can be compared
-against whatever it already holds (e.g. a fastlio replay). If either stream
-already exists the run aborts unless ``--force`` drops them first.
-
-Run it as your normal user from the dimos6 venv — it shells out to ``sudo``
-for the privileged netns/veth bits itself::
-
-    source .venv/bin/activate
-    PCAP=$(python -c "from dimos.utils.data import get_data; \
-        print(get_data('mid360_shake_stairs/mid360_shake_stairs.pcap'))")
-    python -m dimos.hardware.sensors.lidar.pointlio.tools.pcap_to_db --pcap "$PCAP"
-    # -> writes mid360_shake_stairs.db next to the sample.
-
-Two simultaneous runs (e.g. alongside a fastlio replay) must use distinct
-namespaces/IPs — see --drv-ns / --lidar-ns / --host-ip / --lidar-ip.
+    # generate map
+    dimos map summary "$DB"
+    dimos map pose-fill "$DB" \
+        --target pointlio_lidar \
+        --pose-source pointlio_odometry \
+        --out "${DB%.db}_posed.db"
+    dimos map global "${DB%.db}_posed.db" --lidar pointlio_lidar
 """
 
 from __future__ import annotations
@@ -82,7 +67,7 @@ _STAGNANT_SEC = 5.0
 # to cover Point-LIO's IMU-init latency.
 _STARTUP_TIMEOUT_SEC = 60.0
 # virtual_mid360 crate dir (its `nix build .#default` produces result/bin/virtual_mid360).
-# .../sensors/lidar/pointlio/tools/pcap_to_db.py -> parents[2] == .../sensors/lidar
+# .../sensors/lidar/pointlio/scripts/pcap_to_db.py -> parents[2] == .../sensors/lidar
 _VM_DIR = Path(__file__).resolve().parents[2] / "livox" / "virtual_mid360"
 
 
@@ -90,6 +75,9 @@ class _RecConfig(ModuleConfig):
     """Configures the recorder with the target db and timing conversion."""
 
     db_path: str = ""
+    # db stream/table names the Point-LIO outputs are recorded under.
+    odom_stream_name: str = "pointlio_odometry"
+    lidar_stream_name: str = "pointlio_lidar"
     # Earliest existing ts in the db, or -1.0 if the db has no timestamped rows.
     ref_start_ts: float = -1.0
     # Explicit offset override; NaN means auto-derive from ref_start_ts.
@@ -116,8 +104,8 @@ class _Rec(Module):
         from dimos.memory2.store.sqlite import SqliteStore
 
         self._store = SqliteStore(path=self.config.db_path)
-        self._os = self._store.stream("pointlio_odometry", Odometry)
-        self._ls = self._store.stream("pointlio_lidar", PointCloud2)
+        self._os = self._store.stream(self.config.odom_stream_name, Odometry)
+        self._ls = self._store.stream(self.config.lidar_stream_name, PointCloud2)
         yield
         self._store.stop()
 
@@ -310,13 +298,20 @@ def _run_outer(args: argparse.Namespace) -> int:
         print(f"[pcap_to_db] missing pcap: {pcap_path}", file=sys.stderr)
         return 2
     db_path = Path(args.db).expanduser().resolve() if args.db else pcap_path.with_suffix(".db")
+    # Resolve --config against the *invoking* cwd (pwd-relative) up front; the
+    # PointLio config field otherwise resolves a relative path against its own
+    # config/ dir, never the pwd. Absolute path passes through unchanged.
+    config_path = str(Path(args.config).expanduser().resolve()) if args.config else ""
+    if config_path and not Path(config_path).exists():
+        print(f"[pcap_to_db] missing --config: {config_path}", file=sys.stderr)
+        return 2
     db_existed = db_path.exists()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     # Fail fast on stream conflicts before touching the network. Only open an
     # *existing* db here — a new db is created by the (root) inner so it owns it
     # outright; SQLite refuses WAL writes when the file owner != the process uid.
-    pointlio_streams = ("pointlio_odometry", "pointlio_lidar")
+    pointlio_streams = (args.odom_stream_name, args.lidar_stream_name)
     if db_existed:
         from dimos.memory2.store.sqlite import SqliteStore
 
@@ -388,10 +383,16 @@ def _run_outer(args: argparse.Namespace) -> int:
                 *inner_prefix,
                 sys.executable,
                 "-m",
-                "dimos.hardware.sensors.lidar.pointlio.tools.pcap_to_db",
+                "dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db",
                 "--inner",
                 "--db",
                 str(db_path),
+                "--config",
+                config_path,
+                "--odom-stream-name",
+                args.odom_stream_name,
+                "--lidar-stream-name",
+                args.lidar_stream_name,
                 "--odom-freq",
                 str(args.odom_freq),
                 "--ref-start-ts",
@@ -462,8 +463,8 @@ def _run_outer(args: argparse.Namespace) -> int:
         else:
             _teardown_aliases(args.alias_iface)
 
-    o_cnt, o_min, o_max = _table_stats(db_path, "pointlio_odometry")
-    l_cnt = _table_stats(db_path, "pointlio_lidar")[0]
+    o_cnt, o_min, o_max = _table_stats(db_path, args.odom_stream_name)
+    l_cnt = _table_stats(db_path, args.lidar_stream_name)[0]
     if o_cnt == 0:
         print("[pcap_to_db] no odometry recorded — check the run above", file=sys.stderr)
         return 1
@@ -486,13 +487,20 @@ def _run_inner(args: argparse.Namespace) -> int:
     db_path = Path(args.db)
     time_offset = float("nan") if args.time_offset == "nan" else float(args.time_offset)
 
+    # `config` (not `config_path`, which PointLioConfig derives itself); already
+    # an absolute path by the time it reaches the inner, so it bypasses the
+    # config-dir-relative resolution. Omit when empty to keep the default.yaml.
+    pointlio_kwargs: dict[str, object] = dict(
+        host_ip=args.host_ip,
+        lidar_ip=args.lidar_ip,
+        odom_freq=args.odom_freq,
+        debug=False,
+    )
+    if args.config:
+        pointlio_kwargs["config"] = args.config
+
     blueprint = autoconnect(
-        PointLio.blueprint(
-            host_ip=args.host_ip,
-            lidar_ip=args.lidar_ip,
-            odom_freq=args.odom_freq,
-            debug=False,
-        ).remappings(
+        PointLio.blueprint(**pointlio_kwargs).remappings(
             [
                 (PointLio, "odometry", "pointlio_odometry"),
                 (PointLio, "lidar", "pointlio_lidar"),
@@ -500,6 +508,8 @@ def _run_inner(args: argparse.Namespace) -> int:
         ),
         _Rec.blueprint(
             db_path=str(db_path),
+            odom_stream_name=args.odom_stream_name,
+            lidar_stream_name=args.lidar_stream_name,
             ref_start_ts=args.ref_start_ts,
             time_offset=time_offset,
         ),
@@ -514,7 +524,7 @@ def _run_inner(args: argparse.Namespace) -> int:
     try:
         while True:
             time.sleep(_POLL_SEC)
-            cnt, min_ts, max_ts = _table_stats(db_path, "pointlio_odometry")
+            cnt, min_ts, max_ts = _table_stats(db_path, args.odom_stream_name)
             if cnt == 0:
                 # Bound the no-output wait so a binary that never starts fails
                 # cleanly instead of hanging (stagnation timeout only arms once
@@ -579,6 +589,21 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--force", action="store_true", help="overwrite existing pointlio streams")
     parser.add_argument(
         "--warmup-sec", type=float, default=4.0, help="wait before streaming starts"
+    )
+    parser.add_argument(
+        "--config",
+        default="",
+        help="Point-LIO YAML config (pwd-relative or absolute; default: module's default.yaml)",
+    )
+    parser.add_argument(
+        "--odom-stream-name",
+        default="pointlio_odometry",
+        help="db stream/table name for the recorded odometry",
+    )
+    parser.add_argument(
+        "--lidar-stream-name",
+        default="pointlio_lidar",
+        help="db stream/table name for the recorded point cloud",
     )
     # Addressing knobs (override to run two replays at once).
     parser.add_argument("--host-ip", default="192.168.1.5")
