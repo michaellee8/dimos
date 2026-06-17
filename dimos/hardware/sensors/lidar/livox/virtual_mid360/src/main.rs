@@ -221,7 +221,6 @@ impl VirtualMid360 {
             Err(msg) => {
                 // Exit non-zero so the coordinator surfaces the fix command.
                 tracing::error!("{msg}");
-                eprintln!("\n[virtual_mid360] {msg}\n");
                 std::process::exit(2);
             }
         };
@@ -229,7 +228,7 @@ impl VirtualMid360 {
         let mcast_data: Ipv4Addr = match cfg.mcast_data.parse() {
             Ok(ip) => ip,
             Err(_) => {
-                eprintln!(
+                tracing::error!(
                     "[virtual_mid360] invalid mcast_data '{}' — expected an IPv4 multicast \
                      address matching the consumer's Livox multicast_ip (default 224.1.1.5).",
                     cfg.mcast_data
@@ -241,7 +240,7 @@ impl VirtualMid360 {
         let packets = match parse_pcap(&cfg.pcap) {
             Ok(parsed) if !parsed.is_empty() => Arc::new(parsed),
             Ok(_) => {
-                eprintln!(
+                tracing::error!(
                     "[virtual_mid360] pcap '{}' has no Livox UDP data packets. \
                      Check the path / that it's a Mid-360 capture, then re-run.",
                     cfg.pcap
@@ -249,7 +248,7 @@ impl VirtualMid360 {
                 std::process::exit(2);
             }
             Err(err) => {
-                eprintln!(
+                tracing::error!(
                     "[virtual_mid360] failed to read pcap '{}': {err}. Fix the path, then re-run.",
                     cfg.pcap
                 );
