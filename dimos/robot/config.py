@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 
 from dimos.control.components import HardwareComponent, HardwareType
 from dimos.control.coordinator import TaskConfig
+from dimos.manipulation.planning.planning_groups import discover_planning_group_definitions
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -54,7 +55,7 @@ class RobotConfig(BaseModel):
     # Required fields
     name: str
     model_path: Path | None = None
-    end_effector_link: str | None = None
+    end_effector_link: str | None = None  # Deprecated for planning; use planning group tip links.
 
     # Physical dimensions (meters)
     height_clearance: float | None = None  # max height
@@ -75,11 +76,14 @@ class RobotConfig(BaseModel):
 
     # Optional overrides (derived from model if not set)
     joint_names: list[str] | None = None
-    base_link: str | None = None
+    base_link: str | None = (
+        None  # Deprecated planning override; derived from model root when absent.
+    )
     home_joints: list[float] | None = None
 
     # Multi-robot / coordinator
     joint_prefix: str | None = None  # defaults to "{name}_"
+    # Deprecated for planning placement. Prefer encoding placement in URDF/xacro/MJCF.
     base_pose: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
 
     # Planning
@@ -94,6 +98,7 @@ class RobotConfig(BaseModel):
     package_paths: dict[str, Path] = Field(default_factory=dict)
     xacro_args: dict[str, str] = Field(default_factory=dict)
     auto_convert_meshes: bool = True
+    srdf_path: Path | None = None
 
     # TF publishing
     tf_extra_links: list[str] = Field(default_factory=list)
@@ -193,11 +198,6 @@ class RobotConfig(BaseModel):
 
     def to_robot_model_config(self) -> RobotModelConfig:
         """Generate RobotModelConfig for ManipulationModule."""
-        if self.end_effector_link is None:
-            raise ValueError(
-                f"RobotConfig '{self.name}' has no end_effector_link — "
-                "cannot generate RobotModelConfig for manipulation."
-            )
         if self.model_path is None:
             raise ValueError(
                 f"RobotConfig '{self.name}' has no model_path — "
@@ -218,14 +218,27 @@ class RobotConfig(BaseModel):
             self.joint_names if self.joint_names is not None else self.resolved_joint_names
         )
         base_link = self.base_link if self.base_link is not None else self.resolved_base_link
+        planning_groups = discover_planning_group_definitions(
+            robot_name=self.name,
+            model_path=self.model_path,
+            model=self.model_description,
+            controllable_joint_names=joint_names,
+            srdf_path=self.srdf_path,
+        )
+        legacy_end_effector_link = self.end_effector_link or next(
+            (group.tip_link for group in planning_groups if group.tip_link is not None),
+            None,
+        )
 
         return RobotModelConfig(
             name=self.name,
             model_path=self.model_path,
+            srdf_path=self.srdf_path,
             base_pose=base_pose,
             joint_names=joint_names,
-            end_effector_link=self.end_effector_link,
+            end_effector_link=legacy_end_effector_link,
             base_link=base_link,
+            planning_groups=planning_groups,
             package_paths=self.package_paths,
             xacro_args=self.xacro_args,
             collision_exclusion_pairs=exclusions,

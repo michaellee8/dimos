@@ -24,12 +24,18 @@ For full nonlinear optimization IK with Drake, use DrakeOptimizationIK.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from dimos.manipulation.planning.spec.enums import IKStatus
-from dimos.manipulation.planning.spec.models import IKResult, WorldRobotID
+from dimos.manipulation.planning.spec.models import (
+    IKResult,
+    PlanningGroupDescriptor,
+    PlanningGroupID,
+    WorldRobotID,
+)
 from dimos.manipulation.planning.spec.protocols import WorldSpec
 from dimos.manipulation.planning.utils.kinematics_utils import (
     check_singularity,
@@ -184,6 +190,85 @@ class JacobianIK:
             IKStatus.NO_SOLUTION,
             f"IK failed after {max_attempts} attempts",
         )
+
+    def solve_pose_targets(
+        self,
+        world: WorldSpec,
+        pose_targets: Mapping[PlanningGroupID | PlanningGroupDescriptor, PoseStamped],
+        auxiliary_groups: Sequence[PlanningGroupID | PlanningGroupDescriptor] = (),
+        seed: JointState | None = None,
+        position_tolerance: float = 0.001,
+        orientation_tolerance: float = 0.01,
+        check_collision: bool = True,
+        max_attempts: int = 10,
+    ) -> IKResult:
+        """Solve pose targets keyed by planning group with request-scoped auxiliaries.
+
+        This backend currently supports one directly pose-targeted robot at a time. Auxiliary
+        groups are included in the selected result shape when they belong to the same resolved
+        planning problem; existing robot-scoped IK provides their seed/current values as free
+        degrees of freedom.
+        """
+        if not pose_targets:
+            return _create_failure_result(
+                IKStatus.NO_SOLUTION, "At least one pose target is required"
+            )
+
+        pose_group_ids = tuple(_selector_id(group) for group in pose_targets.keys())
+        auxiliary_group_ids = tuple(_selector_id(group) for group in auxiliary_groups)
+        selected_group_ids = pose_group_ids + auxiliary_group_ids
+        try:
+            resolved_groups = world.resolve_planning_groups(selected_group_ids)
+        except (KeyError, ValueError) as exc:
+            return _create_failure_result(IKStatus.NO_SOLUTION, str(exc))
+
+        if len(pose_group_ids) != 1:
+            return _create_failure_result(
+                IKStatus.NO_SOLUTION,
+                "JacobianIK supports exactly one pose target per request",
+            )
+
+        target_group = next(group for group in resolved_groups if group.id == pose_group_ids[0])
+        if not target_group.has_pose_target:
+            return _create_failure_result(
+                IKStatus.NO_SOLUTION,
+                f"Planning group '{target_group.id}' has no pose target frame",
+            )
+
+        robot_ids = {group.robot_id for group in resolved_groups}
+        if len(robot_ids) != 1:
+            return _create_failure_result(
+                IKStatus.NO_SOLUTION,
+                "JacobianIK does not support cross-robot pose IK",
+            )
+
+        full_seed = seed
+        if full_seed is None:
+            with world.scratch_context() as ctx:
+                full_seed = world.get_joint_state(ctx, target_group.robot_id)
+
+        target_pose = pose_targets[next(iter(pose_targets.keys()))]
+        result = self.solve(
+            world=world,
+            robot_id=target_group.robot_id,
+            target_pose=target_pose,
+            seed=full_seed,
+            position_tolerance=position_tolerance,
+            orientation_tolerance=orientation_tolerance,
+            check_collision=check_collision,
+            max_attempts=max_attempts,
+        )
+        if not result.is_success() or result.joint_state is None:
+            return result
+
+        selected_joint_names: list[str] = []
+        for group in resolved_groups:
+            selected_joint_names.extend(group.joint_names)
+        try:
+            result.joint_state = _filter_joint_state(result.joint_state, selected_joint_names)
+        except ValueError as exc:
+            return _create_failure_result(IKStatus.NO_SOLUTION, str(exc))
+        return result
 
     def solve_iterative(
         self,
@@ -418,6 +503,23 @@ def _create_success_result(
         orientation_error=orientation_error,
         iterations=iterations,
         message="IK solution found",
+    )
+
+
+def _selector_id(selector: PlanningGroupID | PlanningGroupDescriptor) -> PlanningGroupID:
+    if isinstance(selector, PlanningGroupDescriptor):
+        return selector.id
+    return selector
+
+
+def _filter_joint_state(joint_state: JointState, joint_names: list[str]) -> JointState:
+    positions_by_name = dict(zip(joint_state.name, joint_state.position, strict=False))
+    missing = [joint_name for joint_name in joint_names if joint_name not in positions_by_name]
+    if missing:
+        raise ValueError(f"IK result is missing selected joints: {missing}")
+    return JointState(
+        name=joint_names,
+        position=[positions_by_name[joint_name] for joint_name in joint_names],
     )
 
 

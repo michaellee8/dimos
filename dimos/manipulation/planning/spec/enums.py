@@ -47,3 +47,4 @@ class PlanningStatus(Enum):
     INVALID_GOAL = auto()
     COLLISION_AT_START = auto()
     COLLISION_AT_GOAL = auto()
+    UNSUPPORTED = auto()

@@ -509,6 +509,7 @@ Place your URDF/xacro files under LFS data so they can be resolved via `LfsPath`
 from dimos.utils.data import LfsPath
 from dimos.manipulation.manipulation_module import manipulation_module
 from dimos.manipulation.planning.spec import RobotModelConfig
+from dimos.manipulation.planning.spec.models import PlanningGroupDefinition
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -550,10 +551,18 @@ def _make_yourarm_config(
     return RobotModelConfig(
         name=name,
         model_path=_YOURARM_URDF_PATH,
-        base_pose=_make_base_pose(y=y_offset),
         joint_names=joint_names,
-        end_effector_link="link6",      # Last link in your URDF's kinematic chain
-        base_link="base_link",          # Root link of your URDF
+        planning_groups=[
+            PlanningGroupDefinition(
+                name="manipulator",
+                joint_names=tuple(joint_names),
+                base_link="base_link",
+                tip_link="link6",
+                source="fallback",
+            )
+        ],
+        base_pose=_make_base_pose(y=y_offset),  # Deprecated; prefer model placement
+        base_link="base_link",                 # Deprecated robot-scoped compatibility
         package_paths={"yourarm_description": _YOURARM_PACKAGE_PATH},
         xacro_args={},                  # Xacro arguments if using .xacro files
         collision_exclusion_pairs=[],   # Pairs of links that can touch (e.g., gripper fingers)
@@ -587,13 +596,17 @@ yourarm_planner = manipulation_module(
 | Field | Description |
 |-------|-------------|
 | `model_path` | Path to `.urdf` or `.xacro` file |
-| `joint_names` | Ordered list of controlled joints (must match URDF) |
-| `end_effector_link` | Link to use as the end-effector for IK |
-| `base_link` | Root link of the robot model |
+| `joint_names` | Ordered controllable/coordinator joint set (must match URDF); not itself a planning group |
+| `planning_groups` / `srdf_path` | Explicit planning groups or SRDF source; fallback can generate `{robot_name}/manipulator` for an unambiguous single chain |
 | `package_paths` | Maps `package://` URIs to filesystem paths (for xacro) |
 | `joint_name_mapping` | Maps coordinator names (e.g., `"arm_joint1"`) to URDF names (e.g., `"joint1"`) |
 | `coordinator_task_name` | Must match the `TaskConfig.name` in your coordinator blueprint |
 | `collision_exclusion_pairs` | List of `(link_a, link_b)` tuples for links that may legitimately touch (e.g., gripper fingers) |
+
+`base_link`, `base_pose`, and `end_effector_link` are deprecated planning-level
+fields. New planning code should use SRDF/planning-group chain base/tip links
+and encode robot placement in the model. See
+[Planning Groups](/docs/capabilities/manipulation/planning_groups.md).
 
 ## Step 5: Register Blueprints
 

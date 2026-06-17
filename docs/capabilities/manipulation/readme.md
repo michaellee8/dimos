@@ -114,6 +114,14 @@ visualization backend.
 
 [guide is here](/docs/capabilities/manipulation/adding_a_custom_arm.md)
 
+## Planning Groups
+
+Manipulation planning uses explicit planning group IDs such as
+`arm/manipulator` and resolved joint names such as `arm/joint1`. See
+[Planning Groups](/docs/capabilities/manipulation/planning_groups.md) for SRDF
+support, fallback generation, auxiliary groups, generated plans, and execution
+projection.
+
 ## Key Files
 
 | File | Description |

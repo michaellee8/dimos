@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, Literal, TypeAlias
 
 from dimos.manipulation.planning.spec.enums import (
     IKStatus,
@@ -39,12 +39,103 @@ RobotName: TypeAlias = str
 WorldRobotID: TypeAlias = str
 """Internal Drake world robot ID"""
 
+PlanningGroupID: TypeAlias = str
+"""Public planning group ID of the form {robot_name}/{group_name}."""
+
+LocalModelJointName: TypeAlias = str
+"""Joint name as it appears in URDF/SRDF before world binding."""
+
+ResolvedJointName: TypeAlias = str
+"""Public joint name of the form {robot_name}/{local_joint_name}."""
+
 JointPath: TypeAlias = "list[JointState]"
 """List of joint states forming a path (each waypoint has names + positions)"""
 
 
 Jacobian: TypeAlias = "NDArray[np.float64]"
 """6 x n Jacobian matrix (rows: [vx, vy, vz, wx, wy, wz])"""
+
+PlanningGroupSource: TypeAlias = Literal["srdf", "fallback"]
+
+
+@dataclass(frozen=True)
+class PlanningGroupDefinition:
+    """Model-level declaration of a planning group.
+
+    Joint names are local model names. The definition is not bound to a world
+    robot ID and is safe to store on RobotModelConfig.
+    """
+
+    name: str
+    joint_names: tuple[LocalModelJointName, ...]
+    base_link: str
+    tip_link: str | None = None
+    source: PlanningGroupSource = "srdf"
+
+    @property
+    def has_pose_target(self) -> bool:
+        """Whether this group has a valid pose target frame."""
+        return self.tip_link is not None
+
+
+@dataclass(frozen=True)
+class PlanningGroupDescriptor:
+    """Read-only public snapshot for an available planning group."""
+
+    id: PlanningGroupID
+    robot_name: RobotName
+    group_name: str
+    joint_names: tuple[ResolvedJointName, ...]
+    local_joint_names: tuple[LocalModelJointName, ...]
+    base_link: str
+    tip_link: str | None = None
+    source: PlanningGroupSource = "srdf"
+
+    @property
+    def has_pose_target(self) -> bool:
+        """Whether this group can be directly pose-targeted."""
+        return self.tip_link is not None
+
+
+@dataclass(frozen=True)
+class ResolvedPlanningGroup:
+    """Runtime/world-bound planning group data."""
+
+    id: PlanningGroupID
+    robot_id: WorldRobotID
+    robot_name: RobotName
+    group_name: str
+    joint_names: tuple[ResolvedJointName, ...]
+    local_joint_names: tuple[LocalModelJointName, ...]
+    base_link: str
+    tip_link: str | None = None
+    source: PlanningGroupSource = "srdf"
+
+    @property
+    def has_pose_target(self) -> bool:
+        """Whether this group can be directly pose-targeted."""
+        return self.tip_link is not None
+
+
+@dataclass
+class GeneratedPlan:
+    """Canonical generated planning artifact.
+
+    The path uses resolved joint names and contains exactly the selected joints.
+    Downstream preview/execution projections are computed lazily from this data.
+    """
+
+    group_ids: tuple[PlanningGroupID, ...]
+    path: list[JointState] = field(default_factory=list)
+    status: PlanningStatus = PlanningStatus.NO_SOLUTION
+    planning_time: float = 0.0
+    path_length: float = 0.0
+    iterations: int = 0
+    message: str = ""
+
+    def is_success(self) -> bool:
+        """Check if planning was successful."""
+        return self.status == PlanningStatus.SUCCESS
 
 
 @dataclass

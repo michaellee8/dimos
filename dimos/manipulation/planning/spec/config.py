@@ -21,6 +21,7 @@ from pathlib import Path
 from pydantic import Field
 
 from dimos.core.module import ModuleConfig
+from dimos.manipulation.planning.spec.models import PlanningGroupDefinition
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
 
@@ -30,10 +31,16 @@ class RobotModelConfig(ModuleConfig):
     Attributes:
         name: Human-readable robot name
         model_path: Path to robot model file (.urdf, .xacro, or .xml/MJCF)
-        base_pose: Pose of robot base in world frame (position + orientation)
-        joint_names: Ordered list of controlled joint names (in URDF namespace)
-        end_effector_link: Name of the end-effector link for FK/IK
-        base_link: Name of the base link (default: "base_link")
+        srdf_path: Optional path to SRDF file containing planning group definitions
+        base_pose: Deprecated planning placement transform retained for
+            compatibility. Prefer encoding placement in the robot model.
+        joint_names: Ordered list of controllable/coordinator joints in the
+            local model namespace. This is not a planning group.
+        end_effector_link: Deprecated robot-scoped end-effector link retained
+            for compatibility. Pose targets should use planning group target
+            frames instead.
+        base_link: Deprecated robot-scoped base link retained for Drake weld
+            compatibility. Planning groups own chain base links.
         package_paths: Dict mapping package names to filesystem Paths
         joint_limits_lower: Lower joint limits (radians)
         joint_limits_upper: Upper joint limits (radians)
@@ -54,10 +61,12 @@ class RobotModelConfig(ModuleConfig):
 
     name: str
     model_path: Path
-    base_pose: PoseStamped
+    srdf_path: Path | None = None
+    base_pose: PoseStamped = Field(default_factory=PoseStamped)
     joint_names: list[str]
-    end_effector_link: str
+    end_effector_link: str | None = None
     base_link: str = "base_link"
+    planning_groups: list[PlanningGroupDefinition] = Field(default_factory=list)
     package_paths: dict[str, Path] = Field(default_factory=dict)
     joint_limits_lower: list[float] | None = None
     joint_limits_upper: list[float] | None = None

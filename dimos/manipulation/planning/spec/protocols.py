@@ -33,7 +33,10 @@ if TYPE_CHECKING:
         IKResult,
         JointPath,
         Obstacle,
+        PlanningGroupDescriptor,
+        PlanningGroupID,
         PlanningResult,
+        ResolvedPlanningGroup,
         WorldRobotID,
     )
     from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
@@ -69,6 +72,16 @@ class WorldSpec(Protocol):
 
     def get_robot_config(self, robot_id: WorldRobotID) -> RobotModelConfig:
         """Get robot configuration."""
+        ...
+
+    def list_planning_groups(self) -> tuple[PlanningGroupDescriptor, ...]:
+        """List available planning groups as immutable descriptor snapshots."""
+        ...
+
+    def resolve_planning_groups(
+        self, group_ids: list[PlanningGroupID] | tuple[PlanningGroupID, ...]
+    ) -> tuple[ResolvedPlanningGroup, ...]:
+        """Resolve planning group IDs against current world robot data."""
         ...
 
     def get_joint_limits(
@@ -155,8 +168,19 @@ class WorldSpec(Protocol):
         ...
 
     # Forward Kinematics (require context)
+    def get_group_pose(self, ctx: Any, group_id: PlanningGroupID) -> PoseStamped:
+        """Get pose for a planning group's target frame."""
+        ...
+
+    def get_group_jacobian(self, ctx: Any, group_id: PlanningGroupID) -> NDArray[np.float64]:
+        """Get planning group target-frame Jacobian over the group's selected joints."""
+        ...
+
     def get_ee_pose(self, ctx: Any, robot_id: WorldRobotID) -> PoseStamped:
-        """Get end-effector pose."""
+        """Get robot-scoped end-effector pose.
+
+        Deprecated: use get_group_pose() with an explicit planning group ID.
+        """
         ...
 
     def get_link_pose(
@@ -166,7 +190,10 @@ class WorldSpec(Protocol):
         ...
 
     def get_jacobian(self, ctx: Any, robot_id: WorldRobotID) -> NDArray[np.float64]:
-        """Get end-effector Jacobian (6 x n_joints)."""
+        """Get robot-scoped end-effector Jacobian (6 x n_joints).
+
+        Deprecated: use get_group_jacobian() with an explicit planning group ID.
+        """
         ...
 
 
@@ -224,6 +251,21 @@ class KinematicsSpec(Protocol):
         """Solve IK with optional collision checking."""
         ...
 
+    def solve_pose_targets(
+        self,
+        world: WorldSpec,
+        pose_targets: dict[PlanningGroupID | PlanningGroupDescriptor, PoseStamped],
+        auxiliary_groups: list[PlanningGroupID | PlanningGroupDescriptor]
+        | tuple[PlanningGroupID | PlanningGroupDescriptor, ...] = (),
+        seed: JointState | None = None,
+        position_tolerance: float = 0.001,
+        orientation_tolerance: float = 0.01,
+        check_collision: bool = True,
+        max_attempts: int = 10,
+    ) -> IKResult:
+        """Solve pose targets over planning groups plus request-scoped auxiliaries."""
+        ...
+
 
 @runtime_checkable
 class PlannerSpec(Protocol):
@@ -247,6 +289,17 @@ class PlannerSpec(Protocol):
         timeout: float = 10.0,
     ) -> PlanningResult:
         """Plan a collision-free joint-space path."""
+        ...
+
+    def plan_selected_joint_path(
+        self,
+        world: WorldSpec,
+        group_ids: list[PlanningGroupID] | tuple[PlanningGroupID, ...],
+        start: JointState,
+        goal: JointState,
+        timeout: float = 10.0,
+    ) -> PlanningResult:
+        """Plan over an explicit planning-group selection."""
         ...
 
     def get_name(self) -> str:

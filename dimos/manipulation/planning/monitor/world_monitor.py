@@ -40,6 +40,7 @@ if TYPE_CHECKING:
         CollisionObjectMessage,
         JointPath,
         Obstacle,
+        PlanningGroupID,
         WorldRobotID,
     )
     from dimos.manipulation.planning.spec.protocols import WorldSpec
@@ -357,7 +358,10 @@ class WorldMonitor:
     def get_ee_pose(
         self, robot_id: WorldRobotID, joint_state: JointState | None = None
     ) -> PoseStamped:
-        """Get end-effector pose. Uses current state if joint_state is None."""
+        """Get end-effector pose. Uses current state if joint_state is None.
+
+        Deprecated: use get_group_pose() with an explicit planning group ID.
+        """
         with self._world.scratch_context() as ctx:
             # If no state provided, fetch current from state monitor
             if joint_state is None:
@@ -367,6 +371,19 @@ class WorldMonitor:
                 self._world.set_joint_state(ctx, robot_id, joint_state)
 
             return self._world.get_ee_pose(ctx, robot_id)
+
+    def get_group_pose(
+        self, group_id: PlanningGroupID, joint_state: JointState | None = None
+    ) -> PoseStamped:
+        """Get planning group target-frame pose using current state by default."""
+        group = self._world.resolve_planning_groups((group_id,))[0]
+        with self._world.scratch_context() as ctx:
+            if joint_state is None:
+                joint_state = self.get_current_joint_state(group.robot_id)
+            if joint_state is not None:
+                self._world.set_joint_state(ctx, group.robot_id, joint_state)
+
+            return self._world.get_group_pose(ctx, group_id)
 
     def get_link_pose(
         self, robot_id: WorldRobotID, link_name: str, joint_state: JointState | None = None
@@ -401,10 +418,22 @@ class WorldMonitor:
             )
 
     def get_jacobian(self, robot_id: WorldRobotID, joint_state: JointState) -> NDArray[np.float64]:
-        """Get 6xN Jacobian matrix."""
+        """Get robot-scoped 6xN Jacobian matrix.
+
+        Deprecated: use get_group_jacobian() with an explicit planning group ID.
+        """
         with self._world.scratch_context() as ctx:
             self._world.set_joint_state(ctx, robot_id, joint_state)
             return self._world.get_jacobian(ctx, robot_id)
+
+    def get_group_jacobian(
+        self, group_id: PlanningGroupID, joint_state: JointState
+    ) -> NDArray[np.float64]:
+        """Get planning group target-frame 6xN Jacobian matrix."""
+        group = self._world.resolve_planning_groups((group_id,))[0]
+        with self._world.scratch_context() as ctx:
+            self._world.set_joint_state(ctx, group.robot_id, joint_state)
+            return self._world.get_group_jacobian(ctx, group_id)
 
     # Lifecycle
 

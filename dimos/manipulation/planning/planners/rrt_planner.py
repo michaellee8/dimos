@@ -27,7 +27,13 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from dimos.manipulation.planning.spec.enums import PlanningStatus
-from dimos.manipulation.planning.spec.models import JointPath, PlanningResult, WorldRobotID
+from dimos.manipulation.planning.spec.models import (
+    JointPath,
+    PlanningGroupID,
+    PlanningResult,
+    ResolvedPlanningGroup,
+    WorldRobotID,
+)
 from dimos.manipulation.planning.spec.protocols import WorldSpec
 from dimos.manipulation.planning.utils.path_utils import compute_path_length
 from dimos.msgs.sensor_msgs.JointState import JointState
@@ -98,6 +104,13 @@ class RRTConnectPlanner:
         if error is not None:
             return error
 
+        if world.check_edge_collision_free(robot_id, start, goal, self._collision_step_size):
+            return _create_success_result(
+                [start, goal],
+                time.time() - start_time,
+                0,
+            )
+
         lower, upper = world.get_joint_limits(robot_id)
         start_tree = [TreeNode(config=q_start.copy())]
         goal_tree = [TreeNode(config=q_goal.copy())]
@@ -146,6 +159,126 @@ class RRTConnectPlanner:
     def get_name(self) -> str:
         """Get planner name."""
         return "RRTConnect"
+
+    def plan_selected_joint_path(
+        self,
+        world: WorldSpec,
+        group_ids: list[PlanningGroupID] | tuple[PlanningGroupID, ...],
+        start: JointState,
+        goal: JointState,
+        timeout: float = 10.0,
+    ) -> PlanningResult:
+        """Plan a collision-free path for an explicit planning-group selection."""
+        try:
+            resolved_groups = world.resolve_planning_groups(tuple(group_ids))
+        except (KeyError, ValueError) as exc:
+            return _create_failure_result(PlanningStatus.INVALID_GOAL, str(exc))
+
+        selected_joint_names = [
+            joint_name for group in resolved_groups for joint_name in group.joint_names
+        ]
+        exact_error = _validate_exact_joint_keys(start, selected_joint_names, "start")
+        if exact_error is not None:
+            return exact_error
+        exact_error = _validate_exact_joint_keys(goal, selected_joint_names, "goal")
+        if exact_error is not None:
+            return exact_error
+
+        robot_ids = {group.robot_id for group in resolved_groups}
+        if len(robot_ids) != 1:
+            return self._plan_multi_robot_selected_joint_path(
+                world=world,
+                resolved_groups=resolved_groups,
+                start=start,
+                goal=goal,
+                timeout=timeout,
+            )
+
+        robot_id = next(iter(robot_ids))
+        robot_config = world.get_robot_config(robot_id)
+        full_resolved_joint_names = [
+            f"{robot_config.name}/{joint_name}" for joint_name in robot_config.joint_names
+        ]
+        if selected_joint_names != full_resolved_joint_names:
+            return _create_failure_result(
+                PlanningStatus.UNSUPPORTED,
+                "RRTConnectPlanner currently requires the selected groups to cover "
+                "the robot controllable joint set exactly",
+            )
+
+        return self.plan_joint_path(
+            world=world,
+            robot_id=robot_id,
+            start=_order_joint_state(start, selected_joint_names),
+            goal=_order_joint_state(goal, selected_joint_names),
+            timeout=timeout,
+        )
+
+    def _plan_multi_robot_selected_joint_path(
+        self,
+        world: WorldSpec,
+        resolved_groups: tuple[ResolvedPlanningGroup, ...],
+        start: JointState,
+        goal: JointState,
+        timeout: float,
+    ) -> PlanningResult:
+        """Plan each selected robot independently and synchronize waypoints.
+
+        This supports coordinated joint targets across multiple robots when the
+        selected groups cover each affected robot's full controllable joint set.
+        Cross-robot collision coupling is not optimized by this backend; each
+        per-robot plan is still checked by the world backend for that robot.
+        """
+        start_time = time.time()
+        groups_by_robot: dict[WorldRobotID, list[ResolvedPlanningGroup]] = {}
+        robot_order: list[WorldRobotID] = []
+        for group in resolved_groups:
+            if group.robot_id not in groups_by_robot:
+                groups_by_robot[group.robot_id] = []
+                robot_order.append(group.robot_id)
+            groups_by_robot[group.robot_id].append(group)
+
+        paths_by_robot: dict[WorldRobotID, JointPath] = {}
+        total_iterations = 0
+        for robot_id in robot_order:
+            robot_config = world.get_robot_config(robot_id)
+            robot_joint_names = [
+                joint_name
+                for group in groups_by_robot[robot_id]
+                for joint_name in group.joint_names
+            ]
+            full_resolved_joint_names = [
+                f"{robot_config.name}/{joint_name}" for joint_name in robot_config.joint_names
+            ]
+            if robot_joint_names != full_resolved_joint_names:
+                return _create_failure_result(
+                    PlanningStatus.UNSUPPORTED,
+                    "RRTConnectPlanner currently requires selected groups to cover "
+                    "each affected robot's controllable joint set exactly",
+                )
+
+            remaining_timeout = max(timeout - (time.time() - start_time), 0.001)
+            result = self.plan_joint_path(
+                world=world,
+                robot_id=robot_id,
+                start=_order_joint_state(start, robot_joint_names),
+                goal=_order_joint_state(goal, robot_joint_names),
+                timeout=remaining_timeout,
+            )
+            total_iterations += result.iterations
+            if not result.is_success():
+                return result
+            paths_by_robot[robot_id] = result.path
+
+        combined_path = _synchronize_robot_paths(robot_order, paths_by_robot)
+        return PlanningResult(
+            status=PlanningStatus.SUCCESS,
+            path=combined_path,
+            planning_time=time.time() - start_time,
+            path_length=compute_path_length(combined_path),
+            iterations=total_iterations,
+            message="Multi-robot plan composed from independently planned robot paths",
+        )
 
     def _validate_inputs(
         self,
@@ -343,4 +476,61 @@ def _create_failure_result(
         planning_time=planning_time,
         iterations=iterations,
         message=message,
+    )
+
+
+def _synchronize_robot_paths(
+    robot_order: list[WorldRobotID], paths_by_robot: dict[WorldRobotID, JointPath]
+) -> JointPath:
+    max_waypoints = max(len(path) for path in paths_by_robot.values())
+    if max_waypoints == 0:
+        return []
+
+    combined: JointPath = []
+    for waypoint_index in range(max_waypoints):
+        names: list[str] = []
+        positions: list[float] = []
+        for robot_id in robot_order:
+            path = paths_by_robot[robot_id]
+            if max_waypoints == 1 or len(path) == 1:
+                source_index = 0
+            else:
+                source_index = round(waypoint_index * (len(path) - 1) / (max_waypoints - 1))
+            waypoint = path[source_index]
+            names.extend(waypoint.name)
+            positions.extend(waypoint.position)
+        combined.append(JointState(name=names, position=positions))
+    return combined
+
+
+def _validate_exact_joint_keys(
+    joint_state: JointState, selected_joint_names: list[str], state_name: str
+) -> PlanningResult | None:
+    actual_names = list(joint_state.name)
+    expected_names = selected_joint_names
+    if set(actual_names) != set(expected_names):
+        missing = [name for name in expected_names if name not in actual_names]
+        extra = [name for name in actual_names if name not in expected_names]
+        details: list[str] = []
+        if missing:
+            details.append(f"missing={missing}")
+        if extra:
+            details.append(f"extra={extra}")
+        return _create_failure_result(
+            PlanningStatus.INVALID_START if state_name == "start" else PlanningStatus.INVALID_GOAL,
+            f"{state_name} joint names must exactly match selected joints ({', '.join(details)})",
+        )
+    if len(joint_state.position) != len(joint_state.name):
+        return _create_failure_result(
+            PlanningStatus.INVALID_START if state_name == "start" else PlanningStatus.INVALID_GOAL,
+            f"{state_name} joint name and position lengths must match",
+        )
+    return None
+
+
+def _order_joint_state(joint_state: JointState, joint_names: list[str]) -> JointState:
+    position_by_name = dict(zip(joint_state.name, joint_state.position, strict=False))
+    return JointState(
+        name=joint_names,
+        position=[position_by_name[name] for name in joint_names],
     )
