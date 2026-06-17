@@ -73,6 +73,9 @@ class GlobalConfig(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Coerce on assignment so string overrides from the CLI (-o g.field=val)
+        # and env become real typed values instead of raw strings.
+        validate_assignment=True,
     )
 
     def update(self, **kwargs: object) -> None:

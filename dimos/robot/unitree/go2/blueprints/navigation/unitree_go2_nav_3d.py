@@ -103,7 +103,7 @@ unitree_go2_nav_3d = autoconnect(
         map_freq=-1.0,
     ).remappings([(FastLio2, "global_map", "global_map_fastlio")]),
     RayTracingVoxelMap.blueprint(
-        voxel_size=voxel_size, emit_every=2, global_emit_every=600, max_health=5
+        voxel_size=voxel_size, emit_every=2, global_emit_every=150, max_health=5
     ),
     # global_map is remapped off so the planner runs purely on the
     # incremental local_map + region_bounds pair.
@@ -111,6 +111,12 @@ unitree_go2_nav_3d = autoconnect(
         world_frame="odom",
         voxel_size=voxel_size,
         robot_height=go2_lidar_height,
+        # Hard wall clearance: paths stay at least this far off walls. Raised
+        # from the 0.2 default so the robot keeps more distance.
+        robot_radius_m=0.35,
+        # Soft push toward the open centerline, decaying with wall distance.
+        # Never blocks a corridor, so safe to raise well above the 4.0 default.
+        wall_penalty_weight=8.0,
         # The surface_map / nodes / node_edges viz artifacts are suppressed in
         # the viewer below, so don't pay to build and publish them.
         viz_publish_hz=0.0,
@@ -118,6 +124,6 @@ unitree_go2_nav_3d = autoconnect(
     GoalRelay.blueprint(),
     BasicPathFollower.blueprint(lookahead_m=0.5, heading_gain=0.8, max_angular=0.6),
     MovementManager.blueprint(),
-).global_config(n_workers=10, robot_model="unitree_go2")
+).global_config(n_workers=10, robot_model="unitree_go2", obstacle_avoidance=True)
 
 __all__ = ["unitree_go2_nav_3d"]
