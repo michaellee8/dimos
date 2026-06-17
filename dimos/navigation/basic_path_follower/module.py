@@ -45,8 +45,6 @@ class BasicPathFollowerConfig(ModuleConfig):
     lookahead_m: float = 0.6
     heading_gain: float = 1.5
     max_angular: float = 1.0
-    # Rotate in place instead of advancing when heading error exceeds this.
-    rotate_threshold: float = 0.6
 
 
 class BasicPathFollower(Module):
@@ -183,9 +181,11 @@ class BasicPathFollower(Module):
             -self.config.max_angular,
             min(self.config.max_angular, self.config.heading_gain * yaw_error),
         )
-        linear = 0.0
-        if abs(yaw_error) <= self.config.rotate_threshold:
-            linear = self.config.speed * max(0.0, math.cos(yaw_error))
+        # Taper forward speed with heading error instead of a hard stop: the
+        # robot decelerates into a turn and pivots in place only near 90 degrees
+        # (cos -> 0). Slower speed at sharp corners means a tighter turn radius,
+        # so it tracks the safe path instead of stopping and lurching.
+        linear = self.config.speed * max(0.0, math.cos(yaw_error))
 
         self.nav_cmd_vel.publish(Twist(Vector3(linear, 0, 0), Vector3(0, 0, angular)))
 
