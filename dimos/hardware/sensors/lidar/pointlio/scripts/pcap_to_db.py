@@ -27,13 +27,9 @@ Usage:
     DB="mem2.db"
     python -m dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db --db "$DB"  --pcap "$PCAP_PATH"
 
-    # generate map
-    dimos map summary "$DB"
-    dimos map pose-fill "$DB" \
-        --target pointlio_lidar \
-        --pose-source pointlio_odometry \
-        --out "${DB%.db}_posed.db"
-    dimos map global "${DB%.db}_posed.db" --lidar pointlio_lidar
+    # A quick-look <db>.rrd (aggregated world lidar + pose path) is written next
+    # to the db automatically. View it with:
+    rerun "${DB%.db}.rrd"
 
 One coordinator runs three autoconnected modules: a ``VirtualMid360`` replays the
 pcap over the Livox wire (aliasing the host/lidar IPs onto a dummy interface on
@@ -50,7 +46,7 @@ from pathlib import Path
 import sqlite3
 import sys
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from dimos.core.coordination.blueprints import Blueprint
@@ -63,6 +59,8 @@ _STAGNANT_SEC = 5.0
 # artifact, bad pcap, SLAM-init crash); bounds the poll loop. Generous to cover
 # Point-LIO's IMU-init latency.
 _STARTUP_TIMEOUT_SEC = 60.0
+# Max |Δts| to match a lidar frame to an odometry pose when aggregating the .rrd.
+_POSE_MATCH_TOL = 0.1
 
 
 def _odom_stats(db_path: Path, table: str) -> tuple[int, float, float]:
@@ -78,6 +76,98 @@ def _odom_stats(db_path: Path, table: str) -> tuple[int, float, float]:
         return row[0] or 0, row[1] or 0.0, row[2] or 0.0
     finally:
         con.close()
+
+
+def _quat_to_rot(qx: float, qy: float, qz: float, qw: float) -> Any:
+    import numpy as np
+
+    return np.array(
+        [
+            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+        ]
+    )
+
+
+def _write_rrd(db_path: Path, odom_stream: str, lidar_stream: str, voxel: float) -> Path | None:
+    """Aggregate the recorded lidar (registered into world via the nearest odometry
+    pose) plus the pose path into a ``.rrd`` next to the db, for a quick look.
+
+    Point-LIO publishes its cloud in the sensor/body frame, so each frame is
+    transformed to world by its pose here, then voxel-deduped. Best-effort: any
+    failure is non-fatal to the recording. Returns the .rrd path, or None."""
+    import numpy as np
+    import rerun as rr
+
+    from dimos.memory2.store.sqlite import SqliteStore
+    from dimos.msgs.nav_msgs.Odometry import Odometry
+    from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+    from dimos.visualization.rerun.init import rerun_init
+
+    store = SqliteStore(path=str(db_path), must_exist=True)
+    try:
+        odom = list(store.stream(odom_stream, Odometry).order_by("ts"))
+        if not odom:
+            return None
+        ots = np.array([o.ts for o in odom])
+        opos = np.array(
+            [
+                [
+                    o.data.pose.pose.position.x,
+                    o.data.pose.pose.position.y,
+                    o.data.pose.pose.position.z,
+                ]
+                for o in odom
+            ]
+        )
+        oquat = np.array(
+            [
+                [
+                    o.data.pose.pose.orientation.x,
+                    o.data.pose.pose.orientation.y,
+                    o.data.pose.pose.orientation.z,
+                    o.data.pose.pose.orientation.w,
+                ]
+                for o in odom
+            ]
+        )
+        chunks = []
+        for lid in store.stream(lidar_stream, PointCloud2).order_by("ts"):
+            j = int(np.argmin(np.abs(ots - lid.ts)))
+            if abs(ots[j] - lid.ts) > _POSE_MATCH_TOL:
+                continue
+            pts = np.asarray(lid.data.as_numpy()[0])[:, :3].astype(np.float64)
+            if pts.shape[0] == 0:
+                continue
+            world = pts @ _quat_to_rot(*oquat[j]).T + opos[j]
+            # Per-frame voxel-dedup to bound memory before the global merge.
+            _, idx = np.unique(np.floor(world / voxel).astype(np.int64), axis=0, return_index=True)
+            chunks.append(world[idx])
+        if not chunks:
+            return None
+        allpts = np.concatenate(chunks)
+        _, idx = np.unique(np.floor(allpts / voxel).astype(np.int64), axis=0, return_index=True)
+        agg = allpts[idx].astype(np.float32)
+
+        # Height gradient: hot pink (low) -> dark purple (high).
+        z = agg[:, 2]
+        zn = (z - z.min()) / (np.ptp(z) + 1e-9)
+        low = np.array([255, 20, 147], dtype=np.float64)
+        high = np.array([60, 0, 80], dtype=np.float64)
+        colors = (low * (1 - zn)[:, None] + high * zn[:, None]).astype(np.uint8)
+
+        rrd = db_path.with_suffix(".rrd")
+        rerun_init("pcap_to_db")
+        rr.save(str(rrd))
+        rr.log("world/map", rr.Points3D(positions=agg, colors=colors, radii=[voxel / 8]))
+        rr.log(
+            "world/path",
+            rr.LineStrips3D(strips=[opos.astype(np.float32)], colors=[[231, 76, 60]], radii=[0.05]),
+        )
+        return rrd
+    finally:
+        store.stop()
 
 
 def _build_blueprint(args: argparse.Namespace, db_path: Path, config_path: str) -> Blueprint:
@@ -213,6 +303,13 @@ def _run(args: argparse.Namespace) -> int:
         f"[pcap_to_db] done odom={o_cnt} ts=[{o_min:.3f}, {o_max:.3f}] span={o_max - o_min:.1f}s",
         flush=True,
     )
+    if not args.no_rrd:
+        try:
+            rrd = _write_rrd(db_path, args.odom_stream_name, args.lidar_stream_name, args.voxel)
+            if rrd is not None:
+                print(f"[pcap_to_db] wrote {rrd.name} (aggregated lidar + pose path)", flush=True)
+        except Exception as exc:  # viz is a non-fatal bonus
+            print(f"[pcap_to_db] .rrd generation skipped ({exc})", file=sys.stderr, flush=True)
     return 0
 
 
@@ -244,6 +341,14 @@ def main(argv: list[str]) -> int:
         help="seconds added to every output ts (auto if omitted)",
     )
     parser.add_argument("--force", action="store_true", help="overwrite existing pointlio streams")
+    parser.add_argument(
+        "--no-rrd",
+        action="store_true",
+        help="skip writing the <db>.rrd quick-look (aggregated world lidar + pose path)",
+    )
+    parser.add_argument(
+        "--voxel", type=float, default=0.2, help="voxel size (m) for the .rrd aggregated map"
+    )
     parser.add_argument(
         "--warmup-sec",
         type=float,
