@@ -6,7 +6,7 @@
 use ahash::AHashSet;
 use rayon::prelude::*;
 use serde::Deserialize;
-use validator::Validate;
+use validator::{Validate, ValidationError};
 
 use crate::adjacency::{build_surface_cells, build_surface_lookup, rebuild_edges_around, CellId};
 use crate::edges::{build_node_edges, build_node_edges_region, PlannerGraph};
@@ -18,6 +18,7 @@ use crate::surfaces::{
 use crate::voxel::{voxelize, VoxelKey};
 
 #[derive(Debug, Clone, Deserialize, Validate)]
+#[validate(schema(function = "validate_wall_buffer"))]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub world_frame: String,
@@ -31,18 +32,23 @@ pub struct Config {
     pub surface_erosion_passes: u32,
     #[validate(range(exclusive_min = 0.0))]
     pub node_spacing_m: f32,
+    /// Hard clearance. Cells closer than this to a wall or edge are impassable.
     #[validate(range(min = 0.0))]
-    pub node_wall_buffer_m: f32,
+    pub wall_clearance_m: f32,
+    /// Width of the soft standoff zone beyond the clearance. Paths prefer to stay
+    /// clearance + buffer from walls.
     #[validate(range(min = 0.0))]
-    pub node_step_threshold_m: f32,
-    /// Hard clearance floor: cells closer than this to a wall are impassable.
-    #[serde(default = "default_robot_radius_m")]
+    pub wall_buffer_m: f32,
+    /// Peak soft wall penalty at the clearance edge: the cost multiplier there is
+    /// 1 + this, decaying to 1 at the outer edge of the buffer zone.
     #[validate(range(min = 0.0))]
-    pub robot_radius_m: f32,
-    /// Strength of the soft wall penalty at the radius, decaying with distance.
-    #[serde(default = "default_wall_penalty_weight")]
+    pub wall_buffer_weight: f32,
+    /// Max traversable vertical step. Taller steps are impassable.
     #[validate(range(min = 0.0))]
-    pub wall_penalty_weight: f32,
+    pub step_threshold_m: f32,
+    /// Soft cost added per meter of vertical climb.
+    #[validate(range(min = 0.0))]
+    pub step_penalty_weight: f32,
     /// Ground-plane distance from goal at which the planner stops replanning.
     #[validate(range(exclusive_min = 0.0))]
     pub goal_tolerance: f32,
@@ -52,12 +58,14 @@ pub struct Config {
     pub viz_publish_hz: f32,
 }
 
-fn default_robot_radius_m() -> f32 {
-    0.2
-}
-
-fn default_wall_penalty_weight() -> f32 {
-    4.0
+/// The soft wall penalty needs a non-zero zone to act in.
+fn validate_wall_buffer(config: &Config) -> Result<(), ValidationError> {
+    if config.wall_buffer_weight > 0.0 && config.wall_buffer_m == 0.0 {
+        return Err(ValidationError::new(
+            "wall_buffer_weight requires wall_buffer_m > 0",
+        ));
+    }
+    Ok(())
 }
 
 /// Cylindrical region the planner re-derives from a local map slice.
@@ -165,7 +173,7 @@ impl Planner {
         removed: Vec<VoxelKey>,
         config: &Config,
     ) {
-        let step = (config.node_step_threshold_m / config.voxel_size).floor() as i32;
+        let step = (config.step_threshold_m / config.voxel_size).floor() as i32;
         for &c in &removed {
             self.graph.cells.remove(c);
         }
@@ -191,9 +199,10 @@ impl Planner {
             &window,
             config.voxel_size,
             config.node_spacing_m,
-            config.node_wall_buffer_m,
-            config.robot_radius_m,
-            config.wall_penalty_weight,
+            config.wall_clearance_m,
+            config.wall_buffer_m,
+            config.wall_buffer_weight,
+            config.step_penalty_weight,
             &mut self.graph.wall_state,
             &mut self.graph.nodes,
         );
@@ -305,7 +314,7 @@ impl Planner {
     /// Rebuild all cells from surface_lookup, then nodes and edges.
     fn rebuild_graph(&mut self, config: &Config) {
         let voxel_size = config.voxel_size;
-        let step = (config.node_step_threshold_m / voxel_size).floor() as i32;
+        let step = (config.step_threshold_m / voxel_size).floor() as i32;
 
         build_surface_cells(
             &mut self.graph.cells,
@@ -323,7 +332,8 @@ impl Planner {
         const SLACK_CELLS: i32 = 2;
         let voxel_size = config.voxel_size;
         let pad = (config.surface_dilation_passes + config.surface_erosion_passes) as i32;
-        let buffer_cells = (config.node_wall_buffer_m / voxel_size).ceil() as i32;
+        let buffer_cells =
+            ((config.wall_clearance_m + config.wall_buffer_m) / voxel_size).ceil() as i32;
         let spacing_cells = (config.node_spacing_m / voxel_size).ceil() as i32;
         let margin = pad + buffer_cells + spacing_cells + SLACK_CELLS;
 
@@ -369,9 +379,10 @@ impl Planner {
             &mut self.graph.cells,
             config.voxel_size,
             config.node_spacing_m,
-            config.node_wall_buffer_m,
-            config.robot_radius_m,
-            config.wall_penalty_weight,
+            config.wall_clearance_m,
+            config.wall_buffer_m,
+            config.wall_buffer_weight,
+            config.step_penalty_weight,
             &mut self.graph.wall_state,
             &mut self.graph.nodes,
         );
@@ -478,10 +489,11 @@ mod region_tests {
             surface_dilation_passes: 3,
             surface_erosion_passes: 3,
             node_spacing_m: 1.0,
-            node_wall_buffer_m: 0.3,
-            node_step_threshold_m: 0.25,
-            robot_radius_m: 0.0,
-            wall_penalty_weight: 1.0,
+            wall_clearance_m: 0.0,
+            wall_buffer_m: 0.3,
+            wall_buffer_weight: 1.0,
+            step_threshold_m: 0.25,
+            step_penalty_weight: 0.0,
             goal_tolerance: 0.3,
             viz_publish_hz: 2.0,
         }
@@ -816,14 +828,14 @@ mod region_tests {
         let goal = (1.0, 3.5, 0.05);
         let max_x = |w: &[(f32, f32, f32)]| w.iter().map(|p| p.0).fold(f32::MIN, f32::max);
 
-        // No floor: the shortest route slips straight through the narrow gap.
-        cfg.robot_radius_m = 0.0;
+        // No clearance: the shortest route slips straight through the narrow gap.
+        cfg.wall_clearance_m = 0.0;
         let mut open = Planner::default();
         open.update_global_map(&pts, &cfg);
         let wp_open = open.plan(start, goal, &cfg).expect("open plan exists");
 
-        // Floor wider than the narrow gap: it is impassable, so detour wide.
-        cfg.robot_radius_m = 0.2;
+        // Clearance wider than the narrow gap: it is impassable, so detour wide.
+        cfg.wall_clearance_m = 0.2;
         let mut safe = Planner::default();
         safe.update_global_map(&pts, &cfg);
         let wp_safe = safe.plan(start, goal, &cfg).expect("safe plan exists");
@@ -839,6 +851,167 @@ mod region_tests {
             "safe route should be substantially longer: {} vs {}",
             path_len(&wp_safe),
             path_len(&wp_open)
+        );
+    }
+
+    /// Every cell the smoothed path crosses, between waypoints included, must
+    /// clear the hard wall distance.
+    #[test]
+    fn final_path_clears_wall_distance() {
+        let mut cfg = test_config();
+        cfg.wall_clearance_m = 0.2;
+        cfg.wall_buffer_m = 0.5;
+        let all = big_world();
+        let mut p = Planner::default();
+        p.update_global_map(&all, &cfg);
+
+        let wp = p
+            .plan((0.7, 4.0, 0.05), (7.3, 4.0, 0.05), &cfg)
+            .expect("plan exists");
+        let clearance: std::collections::HashMap<VoxelKey, f32> =
+            p.surface_clearance().into_iter().collect();
+        let vs = cfg.voxel_size;
+        let key = |x: f32, y: f32, z: f32| {
+            (
+                (x / vs).floor() as i32,
+                (y / vs).floor() as i32,
+                (z / vs).round() as i32 - 1,
+            )
+        };
+
+        // Interior waypoints are exact cell centers; sample between them too.
+        let interior = &wp[1..wp.len() - 1];
+        assert!(interior.len() >= 2, "expected a multi-cell path");
+        for pair in interior.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            for k in 0..=24 {
+                let t = k as f32 / 24.0;
+                let x = a.0 + t * (b.0 - a.0);
+                let y = a.1 + t * (b.1 - a.1);
+                let z = a.2 + t * (b.2 - a.2);
+                if let Some(&c) = clearance.get(&key(x, y, z)) {
+                    assert!(
+                        c >= cfg.wall_clearance_m - 1e-4,
+                        "path point ({x:.2},{y:.2}) sits {c:.3} from a wall, under the {} clearance",
+                        cfg.wall_clearance_m
+                    );
+                }
+            }
+        }
+    }
+
+    /// Solid 0.3 m block, taller than the step threshold; the path must route
+    /// around it and never climb on.
+    fn block_world() -> Vec<(f32, f32, f32)> {
+        let vs = 0.1_f32;
+        let half = vs * 0.5;
+        let mut pts = Vec::new();
+        for ix in 0..40 {
+            for iy in 0..12 {
+                pts.push((ix as f32 * vs + half, iy as f32 * vs + half, half));
+            }
+        }
+        // A solid block, 0.3 m tall, blocking the iy 0..6 lane around ix 18..22.
+        for ix in 18..22 {
+            for iy in 0..6 {
+                for iz in 0..4 {
+                    pts.push((
+                        ix as f32 * vs + half,
+                        iy as f32 * vs + half,
+                        iz as f32 * vs + half,
+                    ));
+                }
+            }
+        }
+        pts
+    }
+
+    #[test]
+    fn final_path_never_climbs_over_threshold_step() {
+        let mut cfg = test_config();
+        cfg.surface_dilation_passes = 0;
+        cfg.surface_erosion_passes = 0;
+        cfg.wall_clearance_m = 0.0;
+        cfg.wall_buffer_m = 0.0;
+        cfg.node_spacing_m = 0.5;
+        let pts = block_world();
+        let mut p = Planner::default();
+        p.update_global_map(&pts, &cfg);
+
+        let wp = p
+            .plan((1.0, 0.5, 0.05), (3.9, 0.5, 0.05), &cfg)
+            .expect("plan exists");
+
+        // The block top is at z = 0.4; the floor surface point is z = 0.1. No
+        // interior waypoint may land on the block.
+        for w in &wp[1..wp.len() - 1] {
+            assert!(
+                w.2 < 0.25,
+                "path climbed onto the 0.3 m block at {w:?}, exceeding the step threshold"
+            );
+        }
+        // It had to detour out of the blocked lane (iy < 0.6).
+        let max_y = wp.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+        assert!(
+            max_y > 0.6,
+            "path did not detour around the block: max_y={max_y}"
+        );
+    }
+
+    /// Flat floor with a crossable 0.2 m ridge blocking ix 15 except a flat gap
+    /// at iy 10..12. Crossing is short but climbs two steps; the detour is flat.
+    /// Route choice is read from the xy lane, since smoothing flattens the ridge
+    /// waypoints away.
+    fn ridge_world() -> Vec<(f32, f32, f32)> {
+        let vs = 0.1_f32;
+        let half = vs * 0.5;
+        let mut pts = Vec::new();
+        for ix in 0..40 {
+            for iy in 0..12 {
+                pts.push((ix as f32 * vs + half, iy as f32 * vs + half, half));
+            }
+        }
+        // A 0.2 m ridge cap at ix 15, iy 0..10: a 2-cell step up and back down.
+        for iy in 0..10 {
+            pts.push((15.0 * vs + half, iy as f32 * vs + half, 2.0 * vs + half));
+        }
+        pts
+    }
+
+    #[test]
+    fn step_penalty_diverts_path_around_ridge() {
+        let mut cfg = test_config();
+        cfg.surface_dilation_passes = 0;
+        cfg.surface_erosion_passes = 0;
+        cfg.wall_clearance_m = 0.0;
+        cfg.wall_buffer_m = 0.0;
+        cfg.node_spacing_m = 0.5;
+        let pts = ridge_world();
+        let start = (1.0, 0.5, 0.05);
+        let goal = (2.9, 0.5, 0.05);
+        let max_y = |w: &[(f32, f32, f32)]| w.iter().map(|p| p.1).fold(f32::MIN, f32::max);
+
+        // No step penalty: the short route crosses the ridge low.
+        cfg.step_penalty_weight = 0.0;
+        let mut cheap = Planner::default();
+        cheap.update_global_map(&pts, &cfg);
+        let wp_cheap = cheap.plan(start, goal, &cfg).expect("plan exists");
+
+        // Heavy step penalty: the flat detour to the iy 10 gap wins.
+        cfg.step_penalty_weight = 30.0;
+        let mut avoid = Planner::default();
+        avoid.update_global_map(&pts, &cfg);
+        let wp_avoid = avoid.plan(start, goal, &cfg).expect("plan exists");
+
+        assert!(
+            max_y(&wp_cheap) < 0.6,
+            "with no step penalty the path should cross the ridge low: max_y={}",
+            max_y(&wp_cheap)
+        );
+        assert!(
+            max_y(&wp_avoid) > 0.9,
+            "with a heavy step penalty the path should detour to the flat gap: max_y={}",
+            max_y(&wp_avoid)
         );
     }
 }

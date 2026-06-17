@@ -26,10 +26,11 @@ class MLSPlanner:
         surface_dilation_passes: int = 3,
         surface_erosion_passes: int = 3,
         node_spacing_m: float = 1.0,
-        node_wall_buffer_m: float = 0.3,
-        node_step_threshold_m: float = 0.25,
-        robot_radius_m: float = 0.2,
-        wall_penalty_weight: float = 4.0,
+        wall_clearance_m: float = 0.3,
+        wall_buffer_m: float = 0.75,
+        wall_buffer_weight: float = 100.0,
+        step_threshold_m: float = 0.25,
+        step_penalty_weight: float = 4.0,
     ) -> None: ...
     def update_global_map(self, points: NDArray[np.float32]) -> None:
         """Voxelize the map and rebuild surfaces, nodes, and edges. Shape (N, 3) float32."""

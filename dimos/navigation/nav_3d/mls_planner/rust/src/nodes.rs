@@ -27,9 +27,10 @@ pub fn place_nodes(
     cells: &mut SurfaceCells,
     voxel_size: f32,
     node_spacing_m: f32,
-    node_wall_buffer_m: f32,
-    robot_radius_m: f32,
-    wall_penalty_weight: f32,
+    wall_clearance_m: f32,
+    wall_buffer_m: f32,
+    wall_buffer_weight: f32,
+    step_penalty_weight: f32,
     state: &mut DijkstraState,
     out_nodes: &mut Vec<NodeData>,
 ) {
@@ -42,7 +43,8 @@ pub fn place_nodes(
     collect_wall_adjacent_cells(cells, &mut wall_seeds);
     dijkstra(cells, &wall_seeds, state, Weight::Base);
 
-    let node_floor = node_wall_buffer_m.max(robot_radius_m);
+    // Floor is the hard clearance; NMS already prefers the clearest cells.
+    let node_floor = wall_clearance_m;
     let candidates: Vec<CellId> = cells
         .ids()
         .filter(|&id| state.dist[id as usize] >= node_floor)
@@ -60,9 +62,10 @@ pub fn place_nodes(
     apply_wall_safe_penalty(
         cells,
         &state.dist,
-        node_wall_buffer_m,
-        robot_radius_m,
-        wall_penalty_weight,
+        wall_clearance_m,
+        wall_buffer_m,
+        wall_buffer_weight,
+        step_penalty_weight,
     );
 }
 
@@ -102,9 +105,10 @@ pub fn place_nodes_region(
     window: &AHashSet<CellId>,
     voxel_size: f32,
     node_spacing_m: f32,
-    node_wall_buffer_m: f32,
-    robot_radius_m: f32,
-    wall_penalty_weight: f32,
+    wall_clearance_m: f32,
+    wall_buffer_m: f32,
+    wall_buffer_weight: f32,
+    step_penalty_weight: f32,
     wall_state: &mut DijkstraState,
     nodes: &mut Vec<NodeData>,
 ) {
@@ -115,7 +119,7 @@ pub fn place_nodes_region(
     nodes.retain(|n| cells.is_live(n.cell_id) && !window.contains(&n.cell_id));
     let kept: Vec<CellId> = nodes.iter().map(|n| n.cell_id).collect();
 
-    let node_floor = node_wall_buffer_m.max(robot_radius_m);
+    let node_floor = wall_clearance_m;
     let candidates: Vec<CellId> = window
         .iter()
         .copied()
@@ -134,9 +138,10 @@ pub fn place_nodes_region(
     apply_wall_safe_penalty_region(
         cells,
         &wall_state.dist,
-        node_wall_buffer_m,
-        robot_radius_m,
-        wall_penalty_weight,
+        wall_clearance_m,
+        wall_buffer_m,
+        wall_buffer_weight,
+        step_penalty_weight,
         window,
     );
 }
@@ -179,9 +184,10 @@ fn is_wall_adjacent(cells: &SurfaceCells, id: CellId) -> bool {
 fn apply_wall_safe_penalty_region(
     cells: &mut SurfaceCells,
     dist: &[f32],
+    clearance_m: f32,
     buffer_m: f32,
-    robot_radius_m: f32,
-    weight: f32,
+    buffer_weight: f32,
+    step_weight: f32,
     window: &AHashSet<CellId>,
 ) {
     let mut affected: AHashSet<CellId> = AHashSet::with_capacity(window.len() * 2);
@@ -196,9 +202,10 @@ fn apply_wall_safe_penalty_region(
             cells.edges_mut(id),
             id,
             dist,
+            clearance_m,
             buffer_m,
-            robot_radius_m,
-            weight,
+            buffer_weight,
+            step_weight,
         );
     }
 }
@@ -276,19 +283,27 @@ fn nms_grid(
     survivors
 }
 
-/// Scale every edge cost by the average of its endpoint penalties, which
-/// pushes shortest paths away from walls and forbids sub-radius cells.
-/// Unreached cells have dist == +INFINITY which collapses to penalty 1.0.
+/// Scale each edge by its endpoints' average wall penalty and add the step
+/// penalty. Unreached cells (dist +INFINITY) collapse the wall penalty to 1.0.
 fn apply_wall_safe_penalty(
     cells: &mut SurfaceCells,
     dist: &[f32],
+    clearance_m: f32,
     buffer_m: f32,
-    robot_radius_m: f32,
-    weight: f32,
+    buffer_weight: f32,
+    step_weight: f32,
 ) {
     let mut edge_lists: Vec<(CellId, &mut Vec<Edge>)> = cells.iter_edges_mut().collect();
     edge_lists.par_iter_mut().for_each(|(src, edges)| {
-        scale_edges(edges, *src, dist, buffer_m, robot_radius_m, weight);
+        scale_edges(
+            edges,
+            *src,
+            dist,
+            clearance_m,
+            buffer_m,
+            buffer_weight,
+            step_weight,
+        );
     });
 }
 
@@ -299,26 +314,38 @@ fn scale_edges(
     edges: &mut [Edge],
     src: CellId,
     dist: &[f32],
+    clearance_m: f32,
     buffer_m: f32,
-    robot_radius_m: f32,
-    weight: f32,
+    buffer_weight: f32,
+    step_weight: f32,
 ) {
-    let pu = penalty_of(dist[src as usize], buffer_m, robot_radius_m, weight);
+    let pu = penalty_of(dist[src as usize], clearance_m, buffer_m, buffer_weight);
     for edge in edges.iter_mut() {
-        let pv = penalty_of(dist[edge.dest as usize], buffer_m, robot_radius_m, weight);
-        edge.cost = edge.base_cost * (pu + pv) / 2.0;
+        let pv = penalty_of(
+            dist[edge.dest as usize],
+            clearance_m,
+            buffer_m,
+            buffer_weight,
+        );
+        edge.cost = edge.base_cost * (pu + pv) / 2.0 + step_weight * edge.rise;
     }
 }
 
-/// Cost multiplier at wall distance d. Infinite inside the robot radius,
-/// then decays from 1 + weight toward 1 with length scale buffer_m.
+/// Lateral wall multiplier at wall distance d. Infinite inside the clearance,
+/// then 1 + weight at the clearance edge decaying convexly to 1 at
+/// clearance_m + buffer_m, and 1 beyond.
 #[inline]
-pub(crate) fn penalty_of(d: f32, buffer_m: f32, robot_radius_m: f32, weight: f32) -> f32 {
-    if d < robot_radius_m {
+pub(crate) fn penalty_of(d: f32, clearance_m: f32, buffer_m: f32, weight: f32) -> f32 {
+    if d < clearance_m {
         return f32::INFINITY;
     }
-    let scale = buffer_m.max(1e-3);
-    1.0 + weight * (-(d - robot_radius_m) / scale).exp()
+    let outer = clearance_m + buffer_m;
+    if d >= outer {
+        return 1.0;
+    }
+    let band = buffer_m.max(1e-3);
+    let t = (outer - d) / band; // 0 at the outer edge, 1 at the clearance edge
+    1.0 + weight * t * t
 }
 
 #[cfg(test)]
@@ -351,7 +378,9 @@ mod tests {
         let mut sc = build_cells(&open_patch(0, 0, 10), 2);
         let mut state = DijkstraState::default();
         let mut nodes = Vec::new();
-        place_nodes(&mut sc, VOXEL, 1.0, 0.3, 0.0, 1.0, &mut state, &mut nodes);
+        place_nodes(
+            &mut sc, VOXEL, 1.0, 0.0, 0.3, 1.0, 0.0, &mut state, &mut nodes,
+        );
         assert!(!nodes.is_empty());
         for n in &nodes {
             let (ix, iy, _) = sc.coord(n.cell_id);
@@ -370,7 +399,9 @@ mod tests {
         let mut sc = build_cells(&cells_in, 2);
         let mut state = DijkstraState::default();
         let mut nodes = Vec::new();
-        place_nodes(&mut sc, VOXEL, 1.0, 0.3, 0.0, 1.0, &mut state, &mut nodes);
+        place_nodes(
+            &mut sc, VOXEL, 1.0, 0.0, 0.3, 1.0, 0.0, &mut state, &mut nodes,
+        );
         assert!(!nodes.is_empty());
     }
 
@@ -381,7 +412,9 @@ mod tests {
         let mut sc = build_cells(&cells_in, 2);
         let mut state = DijkstraState::default();
         let mut nodes = Vec::new();
-        place_nodes(&mut sc, VOXEL, 1.0, 0.3, 0.0, 1.0, &mut state, &mut nodes);
+        place_nodes(
+            &mut sc, VOXEL, 1.0, 0.0, 0.3, 1.0, 0.0, &mut state, &mut nodes,
+        );
         assert!(nodes.len() >= 2);
         for i in 0..nodes.len() {
             for j in (i + 1)..nodes.len() {
@@ -397,30 +430,62 @@ mod tests {
     }
 
     #[test]
-    fn wall_penalty_weight_scales_edge_costs() {
-        // On a 1-wide strip every cell is wall-adjacent, so the penalty
-        // multiplier is exactly 1 + weight and edge cost is base times it.
+    fn penalty_ramps_across_buffer_zone() {
+        // clearance 0.1, soft zone 0.4 wide, so the outer edge is at 0.5.
+        let (clearance, buffer, w) = (0.1, 0.4, 4.0);
+        assert!(penalty_of(0.05, clearance, buffer, w).is_infinite());
+        assert!((penalty_of(0.1, clearance, buffer, w) - 5.0).abs() < 1e-6);
+        assert!((penalty_of(0.5, clearance, buffer, w) - 1.0).abs() < 1e-6);
+        assert!((penalty_of(1.0, clearance, buffer, w) - 1.0).abs() < 1e-6);
+        assert!((penalty_of(0.3, clearance, buffer, w) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn wall_penalty_doubles_cost_at_the_wall() {
+        // On a 1-wide strip every cell is wall-adjacent (d = 0), so with zero
+        // clearance the ramp peaks at 2 and edge cost is twice the geometric.
         let cells_in: Vec<VoxelKey> = (0..10).map(|ix| (ix, 0, 0)).collect();
-        let cost_with = |weight: f32| {
+        let mut sc = build_cells(&cells_in, 2);
+        let mut state = DijkstraState::default();
+        let mut nodes = Vec::new();
+        place_nodes(
+            &mut sc, VOXEL, 1.0, 0.0, 0.3, 1.0, 0.0, &mut state, &mut nodes,
+        );
+        let id = sc.id((5, 0, 0)).unwrap();
+        assert!((sc.neighbors(id)[0].cost - 2.0 * VOXEL).abs() < 1e-5);
+    }
+
+    #[test]
+    fn step_penalty_adds_to_vertical_edges() {
+        // A 2-cell rise (0.2 m) between adjacent cells. With weight 10 the edge
+        // gains 10 * 0.2 = 2.0 on top of its geometric and wall cost.
+        let cells_in: Vec<VoxelKey> = vec![(0, 0, 0), (1, 0, 2), (2, 0, 2)];
+        let cost_with = |step_weight: f32| {
             let mut sc = build_cells(&cells_in, 2);
             let mut state = DijkstraState::default();
             let mut nodes = Vec::new();
             place_nodes(
-                &mut sc, VOXEL, 1.0, 0.3, 0.0, weight, &mut state, &mut nodes,
+                &mut sc,
+                VOXEL,
+                1.0,
+                0.0,
+                0.3,
+                1.0,
+                step_weight,
+                &mut state,
+                &mut nodes,
             );
-            let id = sc.id((5, 0, 0)).unwrap();
-            sc.neighbors(id)[0].cost
+            let id = sc.id((0, 0, 0)).unwrap();
+            sc.neighbors(id)
+                .iter()
+                .find(|e| sc.coord(e.dest) == (1, 0, 2))
+                .unwrap()
+                .cost
         };
-        let unweighted = cost_with(0.0);
         assert!(
-            (unweighted - VOXEL).abs() < 1e-5,
-            "zero weight must leave the geometric cost, got {unweighted}"
+            (cost_with(10.0) - cost_with(0.0) - 10.0 * 0.2).abs() < 1e-4,
+            "step penalty must add weight * rise"
         );
-        assert!(
-            (cost_with(4.0) - 5.0 * VOXEL).abs() < 1e-5,
-            "weight 4 at the wall must scale cost by 5"
-        );
-        assert!(cost_with(4.0) > cost_with(1.0));
     }
 
     #[test]
@@ -429,7 +494,9 @@ mod tests {
         let mut sc = build_cells(&cells_in, 2);
         let mut state = DijkstraState::default();
         let mut nodes = Vec::new();
-        place_nodes(&mut sc, VOXEL, 1.0, 0.3, 0.0, 1.0, &mut state, &mut nodes);
+        place_nodes(
+            &mut sc, VOXEL, 1.0, 0.0, 0.3, 1.0, 0.0, &mut state, &mut nodes,
+        );
         let id0 = sc.id((0, 0, 0)).unwrap();
         let outbound = sc.neighbors(id0);
         assert!(!outbound.is_empty());

@@ -29,10 +29,11 @@ impl MLSPlanner {
         surface_dilation_passes = 3,
         surface_erosion_passes = 3,
         node_spacing_m = 1.0,
-        node_wall_buffer_m = 0.3,
-        node_step_threshold_m = 0.25,
-        robot_radius_m = 0.2,
-        wall_penalty_weight = 4.0,
+        wall_clearance_m = 0.3,
+        wall_buffer_m = 0.75,
+        wall_buffer_weight = 100.0,
+        step_threshold_m = 0.25,
+        step_penalty_weight = 4.0,
     ))]
     fn new(
         voxel_size: f32,
@@ -40,10 +41,11 @@ impl MLSPlanner {
         surface_dilation_passes: u32,
         surface_erosion_passes: u32,
         node_spacing_m: f32,
-        node_wall_buffer_m: f32,
-        node_step_threshold_m: f32,
-        robot_radius_m: f32,
-        wall_penalty_weight: f32,
+        wall_clearance_m: f32,
+        wall_buffer_m: f32,
+        wall_buffer_weight: f32,
+        step_threshold_m: f32,
+        step_penalty_weight: f32,
     ) -> PyResult<Self> {
         let config = Config {
             world_frame: String::new(),
@@ -52,10 +54,11 @@ impl MLSPlanner {
             surface_dilation_passes,
             surface_erosion_passes,
             node_spacing_m,
-            node_wall_buffer_m,
-            node_step_threshold_m,
-            robot_radius_m,
-            wall_penalty_weight,
+            wall_clearance_m,
+            wall_buffer_m,
+            wall_buffer_weight,
+            step_threshold_m,
+            step_penalty_weight,
             // Only the binary's replan loop reads goal_tolerance. This
             // in-process binding plans on demand and never consults it.
             goal_tolerance: 1.0,

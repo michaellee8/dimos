@@ -21,12 +21,20 @@ pub const NO_CELL: CellId = u32::MAX;
 const TOMBSTONE: VoxelKey = (i32::MIN, i32::MIN, i32::MIN);
 const NEIGHBORS_4: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
 
+/// Vertical extent of a `dz`-cell change in meters, the step-penalty input.
+#[inline]
+pub fn rise(dz: i32, voxel_size: f32) -> f32 {
+    dz.unsigned_abs() as f32 * voxel_size
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Edge {
     pub dest: CellId,
     /// Geometric cost, set at build time and never mutated.
     pub base_cost: f32,
-    /// base_cost scaled by the wall-safe penalty, recomputed each update.
+    /// Vertical change of the edge in meters, for the step penalty.
+    pub rise: f32,
+    /// base_cost scaled by the wall penalty plus the step penalty.
     pub cost: f32,
 }
 
@@ -127,6 +135,7 @@ impl SurfaceCells {
         self.edges[src as usize].push(Edge {
             dest,
             base_cost: cost,
+            rise: 0.0,
             cost,
         });
     }
@@ -224,6 +233,7 @@ pub fn build_surface_cells(
                     local.push(Edge {
                         dest,
                         base_cost: cost,
+                        rise: rise(dz, voxel_size),
                         cost,
                     });
                 }
@@ -281,6 +291,7 @@ pub fn rebuild_edges_around(
                 edges.push(Edge {
                     dest,
                     base_cost: cost,
+                    rise: rise(dz, voxel_size),
                     cost,
                 });
             }
