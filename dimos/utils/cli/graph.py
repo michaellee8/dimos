@@ -285,7 +285,7 @@ def serve_graph(
 
     server = HTTPServer(("127.0.0.1", port), Handler)
     actual_port = server.server_address[1]
-    url = f"http://localhost:{actual_port}"
+    url = f"http://127.0.0.1:{actual_port}"
     print(f"Serving at {url}  (will exit after first request)")
     webbrowser.open(url)
     server.handle_request()
