@@ -65,8 +65,9 @@ class SyncConfig(BaseConfig):
     rate_hz: float
     tolerance_ms: float
     strategy: Literal["nearest", "interp"] = "nearest"
-    # Action = state this many frames ahead (default 1 = next state, for BC).
-    # Trailing frames with no successor are dropped. Set 0 for action==state.
+    # Action = state this many frames ahead (default 1 = next-state BC). Set 0
+    # for action==state. Use 0 for ACT — actions stay flat (one per frame) and
+    # ACT builds its own chunk at train time via delta_timestamps.
     action_shift: int = 1
 
 
@@ -200,7 +201,9 @@ def extract_episodes(store: SqliteStore, cfg: EpisodeExtractor) -> list[Episode]
         if last_event == "start":
             # Auto-commit any prior pending episode (success=True per state-machine spec).
             _commit(ts, success=True, label=pending_label)
-            pending_start_ts = getattr(ev, "current_episode_start_ts", None) or ts
+            # None check, not `or ts`: a start at absolute ts 0.0 is valid.
+            ep_start = getattr(ev, "current_episode_start_ts", None)
+            pending_start_ts = ts if ep_start is None else ep_start
             pending_label = label
         elif last_event == "save":
             _commit(ts, success=True, label=pending_label or label)

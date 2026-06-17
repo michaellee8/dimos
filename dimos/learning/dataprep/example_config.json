@@ -23,7 +23,8 @@
   "sync": {
     "anchor": "image",
     "rate_hz": 14.0,
-    "tolerance_ms": 80.0
+    "tolerance_ms": 80.0,
+    "action_shift": 1
   },
   "output": {
     "format": "lerobot",

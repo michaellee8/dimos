@@ -302,3 +302,45 @@ def test_summarize_lengths_varied():
 
 def test_summarize_lengths_empty():
     assert summarize_lengths([]) == {"min": 0, "max": 0, "mean": 0.0, "uniform": True}
+
+
+# ── dimos_meta sidecar ───────────────────────────────────────────────────────
+
+
+def test_dimos_meta_records_sync_and_action_shift(tmp_path):
+    import json
+
+    from dimos.learning.dataprep.build import _write_dimos_meta
+    from dimos.learning.dataprep.core import DataPrepConfig, OutputConfig, StreamField
+
+    cfg = DataPrepConfig(
+        source="s.db",
+        observation={"state": StreamField(stream="js", field="position")},
+        action={"action": StreamField(stream="js", field="position")},
+        sync=SyncConfig(anchor="state", rate_hz=14.0, tolerance_ms=80.0, action_shift=0),
+        output=OutputConfig(format="lerobot", path=tmp_path, metadata={"fps": 14}),
+    )
+    _write_dimos_meta(tmp_path, cfg, episodes=[])
+
+    meta = json.loads((tmp_path / "dimos_meta.json").read_text())
+    assert meta["sync"]["action_shift"] == 0
+    assert meta["source"] == "s.db"
+
+
+def test_dimos_meta_beside_file_for_hdf5(tmp_path):
+    """hdf5 writer returns a FILE path; the sidecar must land beside it, not
+    inside it (which would treat the .hdf5 file as a directory and crash)."""
+    import json
+
+    from dimos.learning.dataprep.build import _write_dimos_meta
+    from dimos.learning.dataprep.core import DataPrepConfig, OutputConfig
+
+    ds_file = tmp_path / "session.hdf5"
+    ds_file.write_bytes(b"\x89HDF\r\n")  # stand-in for a real .hdf5
+    cfg = DataPrepConfig(source="s.db", output=OutputConfig(format="hdf5", path=ds_file))
+
+    _write_dimos_meta(ds_file, cfg, episodes=[])
+
+    sidecar = tmp_path / "session.dimos_meta.json"
+    assert sidecar.exists()  # beside the file, not session.hdf5/dimos_meta.json
+    assert json.loads(sidecar.read_text())["format"] == "hdf5"

@@ -92,6 +92,7 @@ class EpisodeMonitorModule(Module):
         self._saved: int = 0
         self._discarded: int = 0
         self._current_start_ts: float | None = None
+        self._last_event: Literal["start", "save", "discard", "init"] = "init"
         self._prev_bits: dict[str, bool] = {}  # rising-edge detection for buttons
         self._lock = threading.Lock()
 
@@ -126,7 +127,7 @@ class EpisodeMonitorModule(Module):
                 episodes_saved=self._saved,
                 episodes_discarded=self._discarded,
                 current_episode_start_ts=self._current_start_ts,
-                last_event="init",
+                last_event=self._last_event,
                 task_label=self.config.default_task_label,
             )
 
@@ -176,6 +177,7 @@ class EpisodeMonitorModule(Module):
 
     def _publish(self, last_event: Literal["start", "save", "discard", "init"]) -> EpisodeStatus:
         with self._lock:
+            self._last_event = last_event
             status = EpisodeStatus(
                 state=self._state,
                 episodes_saved=self._saved,

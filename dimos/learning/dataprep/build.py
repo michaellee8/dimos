@@ -61,7 +61,13 @@ def _write_dimos_meta(dataset_path: Path, config: DataPrepConfig, episodes: list
         "format": config.output.format,
         "metadata": config.output.metadata,
     }
-    with open(dataset_path / "dimos_meta.json", "w") as f:
+    # Writers return a directory (lerobot) or a file (hdf5). Put the sidecar
+    # *inside* a directory, or *beside* a file (`<name>.dimos_meta.json`).
+    if dataset_path.is_dir():
+        meta_path = dataset_path / "dimos_meta.json"
+    else:
+        meta_path = dataset_path.with_name(f"{dataset_path.stem}.dimos_meta.json")
+    with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2, default=str)
 
 
@@ -109,7 +115,6 @@ def run_dataprep(config: DataPrepConfig) -> Path:
             sorted(action_keys),
             config.sync.model_dump(),
         )
-
         writer = get_writer(config.output.format)
         logger.info("[dataprep] writing %s dataset to %s", config.output.format, config.output.path)
 
