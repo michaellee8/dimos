@@ -12,27 +12,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Demos: a SLAM consumer fed by a VirtualMid360 replaying a pcap (live SDK path).
-
-Each module reads its own config from env vars (DIMOS_MID360_* for the sensor,
-DIMOS_FASTLIO_* / DIMOS_POINTLIO_* for the consumer); set the lidar/host IPs so
-the two ends agree.
-"""
 
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
-from dimos.hardware.sensors.lidar.virtual_mid360.module import VirtualMid360
+from dimos.mapping.voxels import VoxelGridMapper
 from dimos.visualization.vis_module import vis_module
 
-demo_virtual_mid360_fastlio = autoconnect(
-    VirtualMid360.blueprint(),
-    FastLio2.blueprint(),
-    vis_module("rerun"),
-).global_config(n_workers=3, robot_model="virtual_mid360_fastlio")
+voxel_size = 0.05
 
-demo_virtual_mid360_pointlio = autoconnect(
-    VirtualMid360.blueprint(),
+
+mid360_pointlio = autoconnect(
     PointLio.blueprint(),
     vis_module("rerun"),
-).global_config(n_workers=3, robot_model="virtual_mid360_pointlio")
+).global_config(n_workers=2, robot_model="mid360_pointlio")
+
+mid360_pointlio_voxels = autoconnect(
+    PointLio.blueprint(),
+    VoxelGridMapper.blueprint(voxel_size=voxel_size, carve_columns=False),
+    vis_module(
+        "rerun",
+        rerun_config={
+            "visual_override": {
+                "world/lidar": None,
+            },
+        },
+    ),
+).global_config(n_workers=3, robot_model="mid360_pointlio_voxels")
