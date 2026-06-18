@@ -92,18 +92,18 @@ lcm-spy
 
 ## Configuration
 
-FAST-LIO2 config files live in `config/`. The YAML config controls filter
-parameters, EKF tuning, and point cloud processing settings.
+There are no checked-in config files. FAST-LIO2 tuning (filter sizes, EKF
+covariance, extrinsics, point-cloud processing) lives on `FastLio2Config` in
+`../module.py`; on `start()` the module renders those fields to a throwaway YAML
+and passes it as `--config_path`.
 
 ## File overview
 
 | File                      | Description                                                  |
 |---------------------------|--------------------------------------------------------------|
 | `main.cpp`                | Livox SDK2 + FAST-LIO2 integration, EKF SLAM, LCM publishing |
-| `cloud_filter.hpp`        | Point cloud filtering (range, voxel downsampling)            |
 | `voxel_map.hpp`           | Global voxel map accumulation                                |
 | `dimos_native_module.hpp` | Reusable header for parsing NativeModule CLI args            |
-| `config/`                 | FAST-LIO2 YAML configuration files                           |
 | `flake.nix`               | Nix flake for hermetic builds                                |
 | `CMakeLists.txt`          | Build config, fetches dimos-lcm headers automatically        |
 | `../module.py`            | Python NativeModule wrapper (`FastLio2`)                     |

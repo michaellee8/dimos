@@ -34,8 +34,6 @@ from dimos.control.components import (
 from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
-from dimos.msgs.geometry_msgs.Twist import Twist
-from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_stack.main import create_nav_stack, nav_stack_rerun_config
 from dimos.robot.catalog.ufactory import xarm7 as _catalog_xarm7
@@ -124,7 +122,15 @@ coordinator_flowbase_nav = (
         FastLio2.blueprint(
             host_ip=os.getenv("LIDAR_HOST_IP", "192.168.1.5"),
             lidar_ip=os.getenv("LIDAR_IP", "192.168.1.189"),
-            config="default.yaml",
+            # nav tuning (was config/default.yaml): tighter covariance, live
+            # extrinsic calibration, shorter range, default 0.5 m IESKF voxel.
+            acc_cov=0.01,
+            gyr_cov=0.01,
+            det_range=60.0,
+            extrinsic_est_en=True,
+            filter_size_surf=0.5,
+            filter_size_map=0.5,
+            pcd_save_en=False,
         ),
         create_nav_stack(
             planner="simple",

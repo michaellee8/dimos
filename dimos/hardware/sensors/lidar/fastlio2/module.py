@@ -16,18 +16,23 @@
 
 Binds Livox SDK2 into FAST-LIO-NON-ROS for real-time LiDAR SLAM; outputs
 registered (world-frame) point clouds and odometry with covariance.
+
+FAST-LIO tuning lives directly on ``FastLio2Config`` (no YAML files). On
+``start()`` the fields are rendered to a throwaway YAML that the C++ binary
+reads via ``--config_path``.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
+import tempfile
 import time
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
-from pydantic.experimental.pipeline import validate_as
 from reactivex.disposable import Disposable
+import yaml
 
 from dimos.core.core import rpc
 from dimos.core.native_module import NativeModule, NativeModuleConfig
@@ -53,7 +58,43 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.nav_stack.frames import FRAME_BODY, FRAME_ODOM
 from dimos.spec import perception
 
-_CONFIG_DIR = Path(__file__).parent / "config"
+# FAST-LIO encodes these as ints/codes; expose human-readable names and translate.
+LidarType = Literal["livox", "velodyne", "ouster"]
+_LIDAR_TYPE_CODE = {"livox": 1, "velodyne": 2, "ouster": 3}
+
+TimestampUnit = Literal["second", "millisecond", "microsecond", "nanosecond"]
+_TIMESTAMP_UNIT_CODE = {"second": 0, "millisecond": 1, "microsecond": 2, "nanosecond": 3}
+
+# Field name -> FAST-LIO YAML (section, key). Only these fields are rendered into
+# the generated config; everything else on FastLio2Config is module plumbing.
+_YAML_LAYOUT: dict[str, tuple[str, str]] = {
+    "lid_topic": ("common", "lid_topic"),
+    "imu_topic": ("common", "imu_topic"),
+    "time_sync_en": ("common", "time_sync_en"),
+    "time_offset_lidar_to_imu": ("common", "time_offset_lidar_to_imu"),
+    "lidar_type": ("preprocess", "lidar_type"),
+    "scan_line": ("preprocess", "scan_line"),
+    "scan_rate": ("preprocess", "scan_rate"),
+    "timestamp_unit": ("preprocess", "timestamp_unit"),
+    "blind": ("preprocess", "blind"),
+    "acc_cov": ("mapping", "acc_cov"),
+    "gyr_cov": ("mapping", "gyr_cov"),
+    "b_acc_cov": ("mapping", "b_acc_cov"),
+    "b_gyr_cov": ("mapping", "b_gyr_cov"),
+    "filter_size_surf": ("mapping", "filter_size_surf"),
+    "filter_size_map": ("mapping", "filter_size_map"),
+    "fov_degree": ("mapping", "fov_degree"),
+    "det_range": ("mapping", "det_range"),
+    "extrinsic_est_en": ("mapping", "extrinsic_est_en"),
+    "extrinsic_t": ("mapping", "extrinsic_T"),
+    "extrinsic_r": ("mapping", "extrinsic_R"),
+    "path_en": ("publish", "path_en"),
+    "scan_publish_en": ("publish", "scan_publish_en"),
+    "dense_publish_en": ("publish", "dense_publish_en"),
+    "scan_bodyframe_pub_en": ("publish", "scan_bodyframe_pub_en"),
+    "pcd_save_en": ("pcd_save", "pcd_save_en"),
+    "interval": ("pcd_save", "interval"),
+}
 
 
 class FastLio2Config(NativeModuleConfig):
@@ -80,13 +121,42 @@ class FastLio2Config(NativeModuleConfig):
     pointcloud_freq: float = 10.0
     odom_freq: float = 30.0
 
-    # FAST-LIO YAML config (relative to config/ dir, or absolute path)
-    # C++ binary reads YAML directly via yaml-cpp
-    config: Annotated[
-        Path, validate_as(...).transform(lambda p: p if p.is_absolute() else _CONFIG_DIR / p)
-    ] = Path("mid360.yaml")
-
     debug: bool = False
+
+    # --- FAST-LIO tuning (rendered to the generated YAML; see _YAML_LAYOUT) ---
+    # common
+    lid_topic: str = "/livox/lidar"
+    imu_topic: str = "/livox/imu"
+    time_sync_en: bool = False
+    time_offset_lidar_to_imu: float = 0.0
+    # preprocess
+    lidar_type: LidarType = "livox"
+    scan_line: int = 4
+    scan_rate: int = 10  # velodyne only
+    timestamp_unit: TimestampUnit = "microsecond"  # velodyne/ouster time field unit
+    blind: float = 0.5  # spherical min range (m)
+    # mapping
+    # acc_cov down-weights the IMU accel prediction; upstream 0.1 lets Go2 odom
+    # diverge to km/s, 1.0 holds bounded. See jhist dimos-fastlio-velocity-spike.md.
+    acc_cov: float = 1.0
+    gyr_cov: float = 0.1
+    b_acc_cov: float = 0.0001
+    b_gyr_cov: float = 0.0001
+    filter_size_surf: float = 0.1  # IESKF scan voxel; does not affect divergence
+    filter_size_map: float = 0.1
+    fov_degree: float = 360.0
+    det_range: float = 100.0
+    extrinsic_est_en: bool = False  # online IMU-LiDAR extrinsic estimation
+    extrinsic_t: list[float] = Field(default_factory=lambda: [-0.011, -0.02329, 0.04412])
+    extrinsic_r: list[float] = Field(default_factory=lambda: [1, 0, 0, 0, 1, 0, 0, 0, 1])
+    # publish
+    path_en: bool = False
+    scan_publish_en: bool = True
+    dense_publish_en: bool = True
+    scan_bodyframe_pub_en: bool = True
+    # pcd_save
+    pcd_save_en: bool = True
+    interval: int = -1
 
     # SDK port configuration (see livox/ports.py for defaults)
     cmd_data_port: int = SDK_CMD_DATA_PORT
@@ -100,18 +170,23 @@ class FastLio2Config(NativeModuleConfig):
     host_imu_data_port: int = SDK_HOST_IMU_DATA_PORT
     host_log_data_port: int = SDK_HOST_LOG_DATA_PORT
 
-    # Resolved in __post_init__, passed as --config_path to the binary
+    # Set in start() to the generated YAML; passed as --config_path to the binary.
     config_path: str | None = None
 
-    cli_exclude: frozenset[str] = frozenset({"config"})
+    # FAST-LIO tuning fields feed the generated YAML, not CLI args.
+    cli_exclude: frozenset[str] = frozenset(_YAML_LAYOUT)
 
-    def model_post_init(self, __context: object) -> None:
-        """Resolve config_path."""
-        super().model_post_init(__context)
-        cfg = self.config
-        if not cfg.is_absolute():
-            cfg = _CONFIG_DIR / cfg
-        self.config_path = str(cfg.resolve())
+    def render_config_yaml(self) -> str:
+        """Render the FAST-LIO tuning fields to YAML text the C++ binary reads."""
+        doc: dict[str, dict[str, object]] = {}
+        for field, (section, key) in _YAML_LAYOUT.items():
+            val: object = getattr(self, field)
+            if field == "lidar_type":
+                val = _LIDAR_TYPE_CODE[val]  # type: ignore[index]
+            elif field == "timestamp_unit":
+                val = _TIMESTAMP_UNIT_CODE[val]  # type: ignore[index]
+            doc.setdefault(section, {})[key] = val
+        return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
 
 
 class FastLio2(NativeModule, perception.Lidar, perception.Odometry):
@@ -120,13 +195,24 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry):
     lidar: Out[PointCloud2]
     odometry: Out[Odometry]
 
+    _config_file: str | None = None
+
     @rpc
     def start(self) -> None:
         self._validate_network()
+        self._write_config()
         super().start()
         self.register_disposable(
             Disposable(self.odometry.transport.subscribe(self._on_odom_for_tf, self.odometry))
         )
+
+    def _write_config(self) -> None:
+        """Render the config fields to a temp YAML and point the binary at it."""
+        fd, path = tempfile.mkstemp(prefix="fastlio2_", suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(self.config.render_config_yaml())
+        self._config_file = path
+        self.config.config_path = path
 
     def _on_odom_for_tf(self, msg: Odometry) -> None:
         self.tf.publish(
@@ -151,6 +237,9 @@ class FastLio2(NativeModule, perception.Lidar, perception.Odometry):
     @rpc
     def stop(self) -> None:
         super().stop()
+        if self._config_file is not None:
+            Path(self._config_file).unlink(missing_ok=True)
+            self._config_file = None
 
     def _validate_network(self) -> None:
         lidar_ip = self.config.lidar_ip
