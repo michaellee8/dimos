@@ -21,9 +21,9 @@ Usage:
     # gen .db from pcap (defaults to <pcap>.db next to the pcap)
     python -m dimos.hardware.sensors.lidar.fastlio2.tools.pcap_to_db --pcap "$PCAP_PATH"
 
-    # override any FastLio2Config field via a small YAML/JSON doc, e.g. {acc_cov: 0.1}
+    # override FastLio2Config tuning via direct flags (or a --config YAML doc)
     python -m dimos.hardware.sensors.lidar.fastlio2.tools.pcap_to_db \
-        --pcap "$PCAP_PATH" --config overrides.yaml
+        --pcap "$PCAP_PATH" --acc-cov 0.5 --filter-size-surf 0.3 --lidar-type livox
 
     # add to existing .db (a missing --db is fetched via get_data before falling
     # back to building from scratch)
@@ -65,6 +65,23 @@ _STARTUP_TIMEOUT_SEC = 60.0
 # Extra seconds past the pcap's own duration before auto-stopping, when no
 # explicit --max-sensor-sec is given.
 _DRAIN_MARGIN_SEC = 4.0
+# FastLio2Config fields exposed as direct CLI flags (merged into --config).
+_TUNING_FIELDS = (
+    "acc_cov",
+    "gyr_cov",
+    "b_acc_cov",
+    "b_gyr_cov",
+    "filter_size_surf",
+    "filter_size_map",
+    "det_range",
+    "blind",
+    "fov_degree",
+    "scan_line",
+    "lidar_type",
+    "extrinsic_est_en",
+    "scan_publish_en",
+    "dense_publish_en",
+)
 # Max |Δts| to match a lidar frame to an odometry pose when aggregating the .rrd.
 _POSE_MATCH_TOL = 0.1
 
@@ -349,6 +366,8 @@ def _run(args: argparse.Namespace) -> int:
     db_path = _resolve_db_path(args, pcap_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     overrides = _load_overrides(args.config)
+    # Direct --tuning flags override the --config doc.
+    overrides.update({f: getattr(args, f) for f in _TUNING_FIELDS if getattr(args, f) is not None})
 
     # Default the stop bound to the pcap's own duration: FAST-LIO keeps
     # dead-reckoning (publishing at full rate) after the pcap drains, so the
@@ -446,6 +465,37 @@ def main(argv: list[str]) -> int:
         "--config",
         default="",
         help="YAML/JSON doc of FastLio2Config field overrides (e.g. {acc_cov: 0.1})",
+    )
+    # FastLio2Config tuning as direct flags; these take precedence over --config.
+    tuning = parser.add_argument_group("FastLio2 tuning")
+    tuning.add_argument("--acc-cov", type=float, help="IMU accel covariance")
+    tuning.add_argument("--gyr-cov", type=float, help="IMU gyro covariance")
+    tuning.add_argument("--b-acc-cov", type=float, help="IMU accel bias covariance")
+    tuning.add_argument("--b-gyr-cov", type=float, help="IMU gyro bias covariance")
+    tuning.add_argument("--filter-size-surf", type=float, help="IESKF scan voxel leaf (m)")
+    tuning.add_argument("--filter-size-map", type=float, help="ikd-tree map voxel leaf (m)")
+    tuning.add_argument("--det-range", type=float, help="max detection range (m)")
+    tuning.add_argument("--blind", type=float, help="spherical min range (m)")
+    tuning.add_argument("--fov-degree", type=int, help="sensor FOV (deg)")
+    tuning.add_argument("--scan-line", type=int, help="lidar scan lines")
+    tuning.add_argument("--lidar-type", choices=("livox", "velodyne", "ouster"))
+    tuning.add_argument(
+        "--extrinsic-est-en",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="online IMU-LiDAR extrinsic estimation",
+    )
+    tuning.add_argument(
+        "--scan-publish-en",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="publish the lidar cloud",
+    )
+    tuning.add_argument(
+        "--dense-publish-en",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="publish the full (vs voxel-downsampled) cloud",
     )
     parser.add_argument(
         "--odom-stream-name",
