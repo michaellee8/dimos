@@ -35,7 +35,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import tempfile
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 from reactivex.disposable import Disposable
@@ -158,7 +158,7 @@ class PointLioConfig(NativeModuleConfig):
 
     debug: bool = False
 
-    # --- Point-LIO tuning (rendered to the generated YAML; see _YAML_LAYOUT) ---
+    # Point-LIO tuning, rendered to the generated YAML (see _YAML_LAYOUT).
     # common
     con_frame: bool = False
     con_frame_num: int = 1
@@ -235,16 +235,13 @@ class PointLioConfig(NativeModuleConfig):
 
     def render_config_yaml(self) -> str:
         """Render the Point-LIO tuning fields to YAML text the C++ binary reads."""
-        doc: dict[str, dict[str, object]] = {}
+        doc: dict[str, dict[str, Any]] = {}
         for field, (section, key) in _YAML_LAYOUT.items():
-            val: object = getattr(self, field)
-            if field == "lidar_type":
-                val = _LIDAR_TYPE_CODE[val]  # type: ignore[index]
-            elif field == "timestamp_unit":
-                val = _TIMESTAMP_UNIT_CODE[val]  # type: ignore[index]
-            elif field == "ivox_nearby_type":
-                val = _IVOX_NEARBY_CODE[val]  # type: ignore[index]
-            doc.setdefault(section, {})[key] = val
+            doc.setdefault(section, {})[key] = getattr(self, field)
+        # Enum-like strings -> Point-LIO int codes.
+        doc["preprocess"]["lidar_type"] = _LIDAR_TYPE_CODE[self.lidar_type]
+        doc["preprocess"]["timestamp_unit"] = _TIMESTAMP_UNIT_CODE[self.timestamp_unit]
+        doc["mapping"]["ivox_nearby_type"] = _IVOX_NEARBY_CODE[self.ivox_nearby_type]
         return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
 
 

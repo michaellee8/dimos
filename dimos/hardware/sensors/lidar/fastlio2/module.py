@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 import tempfile
 import time
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 from reactivex.disposable import Disposable
@@ -124,7 +124,7 @@ class FastLio2Config(NativeModuleConfig):
 
     debug: bool = False
 
-    # --- FAST-LIO tuning (rendered to the generated YAML; see _YAML_LAYOUT) ---
+    # FAST-LIO tuning, rendered to the generated YAML (see _YAML_LAYOUT).
     # common
     lid_topic: str = "/livox/lidar"
     imu_topic: str = "/livox/imu"
@@ -149,14 +149,16 @@ class FastLio2Config(NativeModuleConfig):
     det_range: float = 100.0
     extrinsic_est_en: bool = False  # online IMU-LiDAR extrinsic estimation
     extrinsic_t: list[float] = Field(default_factory=lambda: [-0.011, -0.02329, 0.04412])
-    extrinsic_r: list[float] = Field(default_factory=lambda: [1, 0, 0, 0, 1, 0, 0, 0, 1])
+    extrinsic_r: list[float] = Field(
+        default_factory=lambda: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    )
     # publish
     path_en: bool = False
     scan_publish_en: bool = True
     dense_publish_en: bool = True
     scan_bodyframe_pub_en: bool = True
     # pcd_save
-    pcd_save_en: bool = True
+    pcd_save_en: bool = False  # FAST-LIO writes .pcd files to disk when on
     interval: int = -1
 
     # SDK port configuration (see livox/ports.py for defaults)
@@ -179,14 +181,12 @@ class FastLio2Config(NativeModuleConfig):
 
     def render_config_yaml(self) -> str:
         """Render the FAST-LIO tuning fields to YAML text the C++ binary reads."""
-        doc: dict[str, dict[str, object]] = {}
+        doc: dict[str, dict[str, Any]] = {}
         for field, (section, key) in _YAML_LAYOUT.items():
-            val: object = getattr(self, field)
-            if field == "lidar_type":
-                val = _LIDAR_TYPE_CODE[val]  # type: ignore[index]
-            elif field == "timestamp_unit":
-                val = _TIMESTAMP_UNIT_CODE[val]  # type: ignore[index]
-            doc.setdefault(section, {})[key] = val
+            doc.setdefault(section, {})[key] = getattr(self, field)
+        # Enum-like strings -> FAST-LIO int codes.
+        doc["preprocess"]["lidar_type"] = _LIDAR_TYPE_CODE[self.lidar_type]
+        doc["preprocess"]["timestamp_unit"] = _TIMESTAMP_UNIT_CODE[self.timestamp_unit]
         return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
 
 

@@ -130,7 +130,6 @@ coordinator_flowbase_nav = (
             extrinsic_est_en=True,
             filter_size_surf=0.5,
             filter_size_map=0.5,
-            pcd_save_en=False,
         ),
         create_nav_stack(
             planner="simple",

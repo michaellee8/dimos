@@ -35,6 +35,7 @@ Recorder's tf-based ``world <- frame_id`` lookup::
 from __future__ import annotations
 
 from collections.abc import Callable
+import sqlite3
 from typing import Any
 
 from reactivex.disposable import Disposable
@@ -103,13 +104,12 @@ class TfRecorder(Recorder):
             return
         tf_stream = self.store.stream("tf", TFMessage)
 
-        def on_tf(msg: TFMessage, _topic: object) -> None:
+        def on_tf(msg: TFMessage, _topic: Any) -> None:
             try:
                 for transform in msg.transforms:
                     tf_stream.append(TFMessage(transform), ts=transform.ts, pose=None)
-            except Exception:
-                # A late LCM callback during teardown can hit an already-closed
-                # store; tf is a best-effort quick-look stream, so drop it.
+            except sqlite3.ProgrammingError:
+                # A late LCM callback raced teardown and hit the closed store.
                 pass
 
         self.register_disposable(Disposable(self.tf.pubsub.subscribe(topic, on_tf)))

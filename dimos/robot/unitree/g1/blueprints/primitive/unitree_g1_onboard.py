@@ -35,7 +35,6 @@ _unitree_g1_onboard = autoconnect(
         extrinsic_est_en=True,
         filter_size_surf=0.5,
         filter_size_map=0.5,
-        pcd_save_en=False,
     ),
     G1HighLevelDdsSdk.blueprint(),
     unitree_g1_vis,

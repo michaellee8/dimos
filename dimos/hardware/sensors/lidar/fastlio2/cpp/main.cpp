@@ -310,11 +310,6 @@ int main(int argc, char** argv) {
     double msr_freq = mod.arg_float("msr_freq", 50.0f);
     double main_freq = mod.arg_float("main_freq", 5000.0f);
 
-    // Post-IESKF velocity cap: if |v_world| exceeds this, restore the EKF to the
-    // last accepted scan (vel=0) and skip map_incremental, breaking the multi-km/s
-    // divergence runaway on aggressive motion / IMU gaps. Zero disables.
-    double max_velocity_norm_ms = mod.arg_float("max_velocity_norm_ms", 0.0f);
-
     // Livox hardware config
     std::string host_ip = mod.arg("host_ip", "192.168.1.5");
     std::string lidar_ip = mod.arg("lidar_ip", "192.168.1.155");

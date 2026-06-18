@@ -304,7 +304,7 @@ def _resolve_db_path(args: argparse.Namespace, pcap_path: Path) -> Path:
             if fetched.exists():
                 print(f"[pcap_to_db] fetched --db via get_data: {fetched}", flush=True)
                 return fetched.resolve()
-        except Exception as exc:  # not an LFS-known db -> build from scratch
+        except (FileNotFoundError, RuntimeError, OSError) as exc:  # not an LFS db -> build fresh
             print(
                 f"[pcap_to_db] --db not found locally or via get_data ({exc}); "
                 "building from scratch",

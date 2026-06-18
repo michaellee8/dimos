@@ -102,7 +102,6 @@ and passes it as `--config_path`.
 | File                      | Description                                                  |
 |---------------------------|--------------------------------------------------------------|
 | `main.cpp`                | Livox SDK2 + FAST-LIO2 integration, EKF SLAM, LCM publishing |
-| `voxel_map.hpp`           | Global voxel map accumulation                                |
 | `dimos_native_module.hpp` | Reusable header for parsing NativeModule CLI args            |
 | `flake.nix`               | Nix flake for hermetic builds                                |
 | `CMakeLists.txt`          | Build config, fetches dimos-lcm headers automatically        |

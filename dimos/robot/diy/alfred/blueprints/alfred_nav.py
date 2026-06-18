@@ -62,7 +62,6 @@ alfred_nav = (
             extrinsic_est_en=True,
             filter_size_surf=0.5,
             filter_size_map=0.5,
-            pcd_save_en=False,
         ),
         create_nav_stack(**nav_config),
         MovementManager.blueprint(),

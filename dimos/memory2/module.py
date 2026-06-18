@@ -252,8 +252,7 @@ class OnExisting(str, enum.Enum):
     OVERWRITE = "overwrite"
     ERROR = "error"
     BACKUP = "backup"
-    # Leave the db untouched (keep all existing streams); subclasses that append
-    # into a populated db handle their own per-stream replacement in
+    # Leave the db untouched; subclasses replace only their own streams in
     # ``_prepare_streams``.
     APPEND = "append"
 

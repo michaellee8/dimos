@@ -155,7 +155,6 @@ class FastLio2Recorder(TfRecorder):
 
     @pose_setter_for("lidar")
     def _lidar_pose(self, msg: PointCloud2) -> Pose | None:
-        # Stamp each (sensor-frame) cloud with the most-recent odometry pose
-        # directly — no tf / static-transform composition. None before the first
-        # odometry, in which case the frame is stored unposed and map-skipped.
+        # Most-recent odometry pose, stamped directly (no tf). None before the
+        # first odometry -> frame stored unposed, map-skipped.
         return self._last_odom_pose
