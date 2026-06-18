@@ -92,6 +92,11 @@ class TrajectoryTrackingTaskConfig:
     # If the pose in CoordinatorState goes stale for longer than this,
     # fall back to FF-only (no feedback on a frozen error).
     stale_pose_timeout: float = 0.3
+    # Throttle the COMMAND-UPDATE rate (Hz): recompute every 1/command_rate_hz s
+    # and hold the command in between, while the coordinator keeps ticking at
+    # full rate. None = a fresh command every tick. Lets us A/B the command rate
+    # against feedback freshness without touching tick_rate.
+    command_rate_hz: float | None = None
 
 
 class TrajectoryTrackingTask(BaseControlTask):
@@ -124,6 +129,10 @@ class TrajectoryTrackingTask(BaseControlTask):
         self._t0: float | None = None
         self._last_pose: tuple[float, float, float] | None = None
         self._last_pose_t: float | None = None
+        # Command-rate throttle (hold the command between recomputes).
+        self._command_period = 1.0 / config.command_rate_hz if config.command_rate_hz else 0.0
+        self._last_command: JointCommandOutput | None = None
+        self._last_command_t: float | None = None
 
     # ------------------------------------------------------------------
     # ControlTask protocol
@@ -146,6 +155,16 @@ class TrajectoryTrackingTask(BaseControlTask):
     def compute(self, state: CoordinatorState) -> JointCommandOutput | None:
         if not self.is_active() or self._trajectory is None:
             return None
+        # Command-rate throttle: hold the last command until a full period has
+        # elapsed, so the robot is commanded at command_rate_hz while the
+        # coordinator still ticks at full rate.
+        if (
+            self._command_period > 0.0
+            and self._last_command is not None
+            and self._last_command_t is not None
+            and state.t_now - self._last_command_t < self._command_period
+        ):
+            return self._last_command
         if self._t0 is None:
             self._t0 = state.t_now
         t_elapsed = state.t_now - self._t0
@@ -175,11 +194,14 @@ class TrajectoryTrackingTask(BaseControlTask):
         if self._compensator is not None:
             vx, vy, wz = self._compensator.compute(vx, vy, wz)
 
-        return JointCommandOutput(
+        command = JointCommandOutput(
             joint_names=self._joint_names_list,
             velocities=[vx, vy, wz],
             mode=ControlMode.VELOCITY,
         )
+        self._last_command = command
+        self._last_command_t = state.t_now
+        return command
 
     def on_preempted(self, by_task: str, joints: frozenset[str]) -> None:
         if joints & self._joint_names and self.is_active():
@@ -285,6 +307,7 @@ class TrajectoryTrackingTask(BaseControlTask):
         compensate_gain: bool | None = None,
         heading_mode: str | None = None,
         fixed_heading: float | None = None,
+        command_rate_hz: float | None = None,
         **ignored: Any,
     ) -> bool:
         """Override per-run knobs before start_path. Accepts (and logs)
@@ -309,6 +332,9 @@ class TrajectoryTrackingTask(BaseControlTask):
             self._config.heading_mode = heading_mode  # type: ignore[assignment]
         if fixed_heading is not None:
             self._config.fixed_heading = fixed_heading
+        if command_rate_hz is not None:
+            self._config.command_rate_hz = command_rate_hz
+            self._command_period = 1.0 / command_rate_hz if command_rate_hz > 0 else 0.0
         if ignored:
             logger.info(
                 f"TrajectoryTrackingTask '{self._name}': ignoring follower-specific "
@@ -346,6 +372,8 @@ class TrajectoryTrackingTask(BaseControlTask):
         if self._compensator is not None:
             self._compensator.reset()
         self._t0 = None
+        self._last_command = None
+        self._last_command_t = None
         self._state = "tracking"
         logger.info(
             f"TrajectoryTrackingTask '{self._name}' started: "
@@ -368,6 +396,8 @@ class TrajectoryTrackingTask(BaseControlTask):
         self._t0 = None
         self._last_pose = None
         self._last_pose_t = None
+        self._last_command = None
+        self._last_command_t = None
         return True
 
     def get_state(self) -> TrajectoryTrackingState:
@@ -391,6 +421,7 @@ class TrajectoryTrackingTaskParams(BaseConfig):
     goal_tolerance: float = 0.05
     orientation_tolerance: float = 0.1
     stale_pose_timeout: float = 0.3
+    command_rate_hz: float | None = None
 
 
 def create_task(cfg: Any, hardware: Any) -> TrajectoryTrackingTask:
@@ -411,6 +442,7 @@ def create_task(cfg: Any, hardware: Any) -> TrajectoryTrackingTask:
             goal_tolerance=params.goal_tolerance,
             orientation_tolerance=params.orientation_tolerance,
             stale_pose_timeout=params.stale_pose_timeout,
+            command_rate_hz=params.command_rate_hz,
         ),
     )
 

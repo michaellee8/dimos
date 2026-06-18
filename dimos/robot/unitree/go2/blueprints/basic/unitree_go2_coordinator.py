@@ -61,6 +61,12 @@ _GO2_ARTIFACT = str(
     / "go2_config_hw_concrete_2026-06-15_850e4b205.json"
 )
 
+# A/B the trajectory_tracker command-update rate vs feedback freshness.
+# None  = fresh command every 100 Hz tick (baseline).
+# ~6.0  ≈ go2 odom (18.6 Hz) / 3 — command at roughly the feedback rate.
+# Flip this constant and restart to switch arms.
+_TRAJTRACK_CMD_RATE_HZ: float | None = 6.0
+
 
 def _make_coordinator(mode: str = "default"):
     """Build a coordinator blueprint with the Go2 firmware in the given
@@ -125,7 +131,10 @@ def _make_coordinator(mode: str = "default"):
                         type="trajectory_tracking",
                         joint_names=_go2_joints,
                         priority=10,
-                        params={"artifact_path": _GO2_ARTIFACT},
+                        params={
+                            "artifact_path": _GO2_ARTIFACT,
+                            "command_rate_hz": _TRAJTRACK_CMD_RATE_HZ,
+                        },
                     ),
                 ],
             ),
