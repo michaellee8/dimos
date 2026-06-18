@@ -86,7 +86,7 @@ class FastLio2Config(NativeModuleConfig):
 
     debug: bool = False
 
-    # FAST-LIO tuning, rendered to the generated YAML (see _YAML_LAYOUT).
+    # FAST-LIO tuning, passed to the binary as plain CLI args (read in main.cpp).
     # common
     time_sync_en: bool = False
     time_offset_lidar_to_imu: float = 0.0
