@@ -222,63 +222,196 @@ class RRTConnectPlanner:
         goal: JointState,
         timeout: float,
     ) -> PlanningResult:
-        """Plan each selected robot independently and synchronize waypoints.
-
-        This supports coordinated joint targets across multiple robots when the
-        selected groups cover each affected robot's full controllable joint set.
-        Cross-robot collision coupling is not optimized by this backend; each
-        per-robot plan is still checked by the world backend for that robot.
-        """
+        """Plan over one coupled configuration vector for all selected robots."""
         start_time = time.time()
-        groups_by_robot: dict[WorldRobotID, list[ResolvedPlanningGroup]] = {}
-        robot_order: list[WorldRobotID] = []
-        for group in resolved_groups:
-            if group.robot_id not in groups_by_robot:
-                groups_by_robot[group.robot_id] = []
-                robot_order.append(group.robot_id)
-            groups_by_robot[group.robot_id].append(group)
 
-        paths_by_robot: dict[WorldRobotID, JointPath] = {}
-        total_iterations = 0
-        for robot_id in robot_order:
-            robot_config = world.get_robot_config(robot_id)
-            robot_joint_names = [
-                joint_name
-                for group in groups_by_robot[robot_id]
-                for joint_name in group.joint_names
-            ]
-            full_resolved_joint_names = [
-                f"{robot_config.name}/{joint_name}" for joint_name in robot_config.joint_names
-            ]
-            if robot_joint_names != full_resolved_joint_names:
+        if not world.is_finalized:
+            return _create_failure_result(
+                PlanningStatus.NO_SOLUTION,
+                "World must be finalized before planning",
+            )
+
+        selected_joint_names = [joint for group in resolved_groups for joint in group.joint_names]
+        q_start = np.array(
+            _order_joint_state(start, selected_joint_names).position, dtype=np.float64
+        )
+        q_goal = np.array(_order_joint_state(goal, selected_joint_names).position, dtype=np.float64)
+
+        try:
+            robot_order, robot_joint_names = _validate_full_robot_groups(world, resolved_groups)
+        except KeyError as exc:
+            return _create_failure_result(PlanningStatus.NO_SOLUTION, str(exc))
+        if not robot_order:
+            return _create_failure_result(
+                PlanningStatus.INVALID_GOAL, "No planning groups selected"
+            )
+
+        unsupported = _validate_selected_groups_cover_full_robots(
+            world, robot_order, robot_joint_names
+        )
+        if unsupported is not None:
+            return unsupported
+
+        lower, upper = _combined_joint_limits(world, robot_order)
+
+        if not _coupled_config_collision_free(
+            world, robot_order, robot_joint_names, selected_joint_names, q_start
+        ):
+            return _create_failure_result(
+                PlanningStatus.COLLISION_AT_START,
+                "Start configuration is in collision",
+            )
+        if not _coupled_config_collision_free(
+            world, robot_order, robot_joint_names, selected_joint_names, q_goal
+        ):
+            return _create_failure_result(
+                PlanningStatus.COLLISION_AT_GOAL,
+                "Goal configuration is in collision",
+            )
+
+        if np.any(q_start < lower) or np.any(q_start > upper):
+            return _create_failure_result(
+                PlanningStatus.INVALID_START,
+                "Start configuration is outside joint limits",
+            )
+        if np.any(q_goal < lower) or np.any(q_goal > upper):
+            return _create_failure_result(
+                PlanningStatus.INVALID_GOAL,
+                "Goal configuration is outside joint limits",
+            )
+
+        if _coupled_edge_collision_free(
+            world,
+            robot_order,
+            robot_joint_names,
+            selected_joint_names,
+            q_start,
+            q_goal,
+            self._collision_step_size,
+        ):
+            return _create_success_result(
+                [start, goal],
+                time.time() - start_time,
+                0,
+            )
+
+        start_tree = [TreeNode(config=q_start.copy())]
+        goal_tree = [TreeNode(config=q_goal.copy())]
+        trees_swapped = False
+
+        max_iterations = 5000
+        for iteration in range(max_iterations):
+            if time.time() - start_time > timeout:
                 return _create_failure_result(
-                    PlanningStatus.UNSUPPORTED,
-                    "RRTConnectPlanner currently requires selected groups to cover "
-                    "each affected robot's controllable joint set exactly",
+                    PlanningStatus.TIMEOUT,
+                    f"Timeout after {iteration} iterations",
+                    time.time() - start_time,
+                    iteration,
                 )
 
-            remaining_timeout = max(timeout - (time.time() - start_time), 0.001)
-            result = self.plan_joint_path(
-                world=world,
-                robot_id=robot_id,
-                start=_order_joint_state(start, robot_joint_names),
-                goal=_order_joint_state(goal, robot_joint_names),
-                timeout=remaining_timeout,
+            sample = np.random.uniform(lower, upper)
+            extended = self._extend_coupled_tree(
+                world,
+                robot_order,
+                robot_joint_names,
+                start_tree,
+                sample,
+                self._step_size,
+                selected_joint_names,
             )
-            total_iterations += result.iterations
-            if not result.is_success():
-                return result
-            paths_by_robot[robot_id] = result.path
 
-        combined_path = _synchronize_robot_paths(robot_order, paths_by_robot)
-        return PlanningResult(
-            status=PlanningStatus.SUCCESS,
-            path=combined_path,
-            planning_time=time.time() - start_time,
-            path_length=compute_path_length(combined_path),
-            iterations=total_iterations,
-            message="Multi-robot plan composed from independently planned robot paths",
+            if extended is not None:
+                connected = self._connect_coupled_tree(
+                    world,
+                    robot_order,
+                    robot_joint_names,
+                    goal_tree,
+                    extended.config,
+                    self._connect_step_size,
+                    selected_joint_names,
+                )
+                if connected is not None:
+                    path = self._extract_path(extended, connected, selected_joint_names)
+                    if trees_swapped:
+                        path = list(reversed(path))
+                    path = _simplify_coupled_path(
+                        world,
+                        robot_order,
+                        robot_joint_names,
+                        path,
+                        self._collision_step_size,
+                    )
+                    return _create_success_result(path, time.time() - start_time, iteration + 1)
+
+            start_tree, goal_tree = goal_tree, start_tree
+            trees_swapped = not trees_swapped
+
+        return _create_failure_result(
+            PlanningStatus.NO_SOLUTION,
+            f"No path found after {max_iterations} iterations",
+            time.time() - start_time,
+            max_iterations,
         )
+
+    def _extend_coupled_tree(
+        self,
+        world: WorldSpec,
+        robot_order: list[WorldRobotID],
+        robot_joint_names: dict[WorldRobotID, list[str]],
+        tree: list[TreeNode],
+        target: NDArray[np.float64],
+        step_size: float,
+        selected_joint_names: list[str],
+    ) -> TreeNode | None:
+        """Extend a tree in the coupled selected-joint configuration space."""
+        nearest = min(tree, key=lambda node: float(np.linalg.norm(node.config - target)))
+        diff = target - nearest.config
+        dist = float(np.linalg.norm(diff))
+        if dist <= step_size:
+            new_config = target.copy()
+        else:
+            new_config = nearest.config + step_size * (diff / dist)
+
+        if _coupled_edge_collision_free(
+            world,
+            robot_order,
+            robot_joint_names,
+            selected_joint_names,
+            nearest.config,
+            new_config,
+            self._collision_step_size,
+        ):
+            new_node = TreeNode(config=new_config, parent=nearest)
+            nearest.children.append(new_node)
+            tree.append(new_node)
+            return new_node
+        return None
+
+    def _connect_coupled_tree(
+        self,
+        world: WorldSpec,
+        robot_order: list[WorldRobotID],
+        robot_joint_names: dict[WorldRobotID, list[str]],
+        tree: list[TreeNode],
+        target: NDArray[np.float64],
+        step_size: float,
+        selected_joint_names: list[str],
+    ) -> TreeNode | None:
+        """Try to connect a coupled tree to a target configuration."""
+        while True:
+            result = self._extend_coupled_tree(
+                world,
+                robot_order,
+                robot_joint_names,
+                tree,
+                target,
+                step_size,
+                selected_joint_names,
+            )
+            if result is None:
+                return None
+            if float(np.linalg.norm(result.config - target)) < self._goal_tolerance:
+                return result
 
     def _validate_inputs(
         self,
@@ -479,28 +612,158 @@ def _create_failure_result(
     )
 
 
-def _synchronize_robot_paths(
-    robot_order: list[WorldRobotID], paths_by_robot: dict[WorldRobotID, JointPath]
-) -> JointPath:
-    max_waypoints = max(len(path) for path in paths_by_robot.values())
-    if max_waypoints == 0:
-        return []
+def _validate_full_robot_groups(
+    world: WorldSpec,
+    resolved_groups: tuple[ResolvedPlanningGroup, ...],
+) -> tuple[list[WorldRobotID], dict[WorldRobotID, list[str]]]:
+    robot_order: list[WorldRobotID] = []
+    robot_joint_names: dict[WorldRobotID, list[str]] = {}
+    known_robot_ids = set(world.get_robot_ids())
+    for group in resolved_groups:
+        if group.robot_id not in known_robot_ids:
+            raise KeyError(f"Robot '{group.robot_id}' not found")
+        if group.robot_id not in robot_joint_names:
+            robot_joint_names[group.robot_id] = []
+            robot_order.append(group.robot_id)
+        robot_joint_names[group.robot_id].extend(group.joint_names)
+    return robot_order, robot_joint_names
 
-    combined: JointPath = []
-    for waypoint_index in range(max_waypoints):
-        names: list[str] = []
-        positions: list[float] = []
+
+def _validate_selected_groups_cover_full_robots(
+    world: WorldSpec,
+    robot_order: list[WorldRobotID],
+    robot_joint_names: dict[WorldRobotID, list[str]],
+) -> PlanningResult | None:
+    for robot_id in robot_order:
+        robot_config = world.get_robot_config(robot_id)
+        full_resolved_joint_names = [
+            f"{robot_config.name}/{joint_name}" for joint_name in robot_config.joint_names
+        ]
+        if robot_joint_names[robot_id] != full_resolved_joint_names:
+            return _create_failure_result(
+                PlanningStatus.UNSUPPORTED,
+                "RRTConnectPlanner currently requires selected groups to cover "
+                "each affected robot's controllable joint set exactly",
+            )
+    return None
+
+
+def _combined_joint_limits(
+    world: WorldSpec,
+    robot_order: list[WorldRobotID],
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    lower_parts: list[NDArray[np.float64]] = []
+    upper_parts: list[NDArray[np.float64]] = []
+    for robot_id in robot_order:
+        lower, upper = world.get_joint_limits(robot_id)
+        lower_parts.append(lower)
+        upper_parts.append(upper)
+    return np.concatenate(lower_parts), np.concatenate(upper_parts)
+
+
+def _robot_joint_state_from_combined(
+    combined_joint_names: list[str],
+    combined_positions: NDArray[np.float64],
+    robot_joint_names: list[str],
+) -> JointState:
+    position_by_name = dict(zip(combined_joint_names, combined_positions.tolist(), strict=True))
+    return JointState(
+        name=robot_joint_names,
+        position=[position_by_name[name] for name in robot_joint_names],
+    )
+
+
+def _coupled_config_collision_free(
+    world: WorldSpec,
+    robot_order: list[WorldRobotID],
+    robot_joint_names: dict[WorldRobotID, list[str]],
+    selected_joint_names: list[str],
+    q: NDArray[np.float64],
+) -> bool:
+    with world.scratch_context() as ctx:
         for robot_id in robot_order:
-            path = paths_by_robot[robot_id]
-            if max_waypoints == 1 or len(path) == 1:
-                source_index = 0
-            else:
-                source_index = round(waypoint_index * (len(path) - 1) / (max_waypoints - 1))
-            waypoint = path[source_index]
-            names.extend(waypoint.name)
-            positions.extend(waypoint.position)
-        combined.append(JointState(name=names, position=positions))
-    return combined
+            world.set_joint_state(
+                ctx,
+                robot_id,
+                _robot_joint_state_from_combined(
+                    selected_joint_names,
+                    q,
+                    robot_joint_names[robot_id],
+                ),
+            )
+        return all(world.is_collision_free(ctx, robot_id) for robot_id in robot_order)
+
+
+def _coupled_edge_collision_free(
+    world: WorldSpec,
+    robot_order: list[WorldRobotID],
+    robot_joint_names: dict[WorldRobotID, list[str]],
+    selected_joint_names: list[str],
+    q_start: NDArray[np.float64],
+    q_end: NDArray[np.float64],
+    step_size: float,
+) -> bool:
+    dist = float(np.linalg.norm(q_end - q_start))
+    if dist < 1e-8:
+        return _coupled_config_collision_free(
+            world,
+            robot_order,
+            robot_joint_names,
+            selected_joint_names,
+            q_start,
+        )
+
+    n_steps = max(2, int(np.ceil(dist / step_size)) + 1)
+    with world.scratch_context() as ctx:
+        for i in range(n_steps):
+            t = i / (n_steps - 1)
+            q = q_start + t * (q_end - q_start)
+            for robot_id in robot_order:
+                world.set_joint_state(
+                    ctx,
+                    robot_id,
+                    _robot_joint_state_from_combined(
+                        selected_joint_names,
+                        q,
+                        robot_joint_names[robot_id],
+                    ),
+                )
+            if not all(world.is_collision_free(ctx, robot_id) for robot_id in robot_order):
+                return False
+    return True
+
+
+def _simplify_coupled_path(
+    world: WorldSpec,
+    robot_order: list[WorldRobotID],
+    robot_joint_names: dict[WorldRobotID, list[str]],
+    path: JointPath,
+    collision_step_size: float,
+    max_iterations: int = 100,
+) -> JointPath:
+    if len(path) <= 2:
+        return path
+
+    simplified = list(path)
+    selected_joint_names = list(path[0].name)
+    for _ in range(max_iterations):
+        if len(simplified) <= 2:
+            break
+        i = np.random.randint(0, len(simplified) - 2)
+        j = np.random.randint(i + 2, len(simplified))
+        q_start = np.array(simplified[i].position, dtype=np.float64)
+        q_end = np.array(simplified[j].position, dtype=np.float64)
+        if _coupled_edge_collision_free(
+            world,
+            robot_order,
+            robot_joint_names,
+            selected_joint_names,
+            q_start,
+            q_end,
+            collision_step_size,
+        ):
+            simplified = simplified[: i + 1] + simplified[j:]
+    return simplified
 
 
 def _validate_exact_joint_keys(

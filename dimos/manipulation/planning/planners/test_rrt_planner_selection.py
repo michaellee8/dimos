@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from contextlib import nullcontext
 from pathlib import Path
 from typing import cast
 
@@ -73,9 +75,12 @@ class _SelectionWorld:
         self,
         groups: dict[str, ResolvedPlanningGroup],
         robot_configs: dict[str, RobotModelConfig],
+        coupled_collision_predicate: Callable[[dict[str, JointState]], bool] | None = None,
     ) -> None:
         self._groups = groups
         self._robot_configs = robot_configs
+        self._coupled_collision_predicate = coupled_collision_predicate
+        self.coupled_collision_checks = 0
 
     def resolve_planning_groups(
         self, group_ids: tuple[str, ...]
@@ -103,6 +108,20 @@ class _SelectionWorld:
         step_size: float,
     ) -> bool:
         return True
+
+    def scratch_context(self) -> nullcontext[dict[str, JointState]]:
+        return nullcontext({})
+
+    def set_joint_state(
+        self, ctx: dict[str, JointState], robot_id: str, joint_state: JointState
+    ) -> None:
+        ctx[robot_id] = joint_state
+
+    def is_collision_free(self, ctx: dict[str, JointState], robot_id: str) -> bool:
+        self.coupled_collision_checks += 1
+        if self._coupled_collision_predicate is None:
+            return True
+        return self._coupled_collision_predicate(ctx)
 
 
 def test_plan_selected_joint_path_rejects_missing_and_extra_start_names() -> None:
@@ -165,6 +184,38 @@ def test_plan_selected_joint_path_plans_cross_robot_full_group_selection() -> No
     assert len(result.path) == 2
     assert result.path[0].name == ["left/joint1", "right/joint1"]
     assert result.path[-1].position == [0.1, -0.1]
+    assert world.coupled_collision_checks > 0
+
+
+def test_plan_selected_joint_path_rejects_cross_robot_coupled_goal_collision() -> None:
+    def coupled_free(ctx: dict[str, JointState]) -> bool:
+        if {"left_robot", "right_robot"} - set(ctx):
+            return True
+        left = ctx["left_robot"].position[0]
+        right = ctx["right_robot"].position[0]
+        return not (left > 0.04 and right > 0.04)
+
+    world = _SelectionWorld(
+        groups={
+            "left/arm": _group("left/arm", "left_robot", "left", ("left/joint1",)),
+            "right/arm": _group("right/arm", "right_robot", "right", ("right/joint1",)),
+        },
+        robot_configs={
+            "left_robot": _robot_config("left", ["joint1"]),
+            "right_robot": _robot_config("right", ["joint1"]),
+        },
+        coupled_collision_predicate=coupled_free,
+    )
+
+    result = RRTConnectPlanner().plan_selected_joint_path(
+        cast("WorldSpec", world),
+        ["left/arm", "right/arm"],
+        start=_joint_state(["left/joint1", "right/joint1"], [0.0, 0.0]),
+        goal=_joint_state(["left/joint1", "right/joint1"], [0.1, 0.1]),
+    )
+
+    assert result.status == PlanningStatus.COLLISION_AT_GOAL
+    assert world.coupled_collision_checks > 0
 
 
 def test_plan_selected_joint_path_rejects_single_robot_subset_selection() -> None:
