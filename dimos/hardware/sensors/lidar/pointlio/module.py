@@ -24,17 +24,22 @@ Usage::
         PointLio.blueprint(host_ip="192.168.1.5", lidar_ip="192.168.1.155"),
         SomeConsumer.blueprint(),
     )).loop()
+
+Point-LIO tuning lives directly on ``PointLioConfig`` (no YAML files). On
+``start()`` the fields are rendered to a throwaway YAML that the C++ binary reads
+via ``--config_path``.
 """
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+import tempfile
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
-from pydantic.experimental.pipeline import validate_as
 from reactivex.disposable import Disposable
+import yaml
 
 from dimos.core.core import rpc
 from dimos.core.native_module import NativeModule, NativeModuleConfig
@@ -60,7 +65,72 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.nav_stack.frames import FRAME_ODOM
 from dimos.spec import perception
 
-_CONFIG_DIR = Path(__file__).parent / "config"
+# Point-LIO encodes these as ints/codes; expose human-readable names and translate.
+# LID_TYPE enum (Point-LIO src/preprocess.h). 1 = AVIA selects the Livox branch
+# the Mid-360 emits.
+LidarType = Literal["avia", "velodyne", "ouster", "hesai", "unilidar"]
+_LIDAR_TYPE_CODE = {"avia": 1, "velodyne": 2, "ouster": 3, "hesai": 4, "unilidar": 5}
+
+TimestampUnit = Literal["second", "millisecond", "microsecond", "nanosecond"]
+_TIMESTAMP_UNIT_CODE = {"second": 0, "millisecond": 1, "microsecond": 2, "nanosecond": 3}
+
+# iVox local-map neighbour stencil.
+IvoxNearbyType = Literal["center", "nearby6", "nearby18", "nearby26"]
+_IVOX_NEARBY_CODE = {"center": 0, "nearby6": 6, "nearby18": 18, "nearby26": 26}
+
+# Field name -> Point-LIO YAML (section, key). Only these fields are rendered into
+# the generated config; everything else on PointLioConfig is module plumbing.
+_YAML_LAYOUT: dict[str, tuple[str, str]] = {
+    "con_frame": ("common", "con_frame"),
+    "con_frame_num": ("common", "con_frame_num"),
+    "cut_frame": ("common", "cut_frame"),
+    "cut_frame_time_interval": ("common", "cut_frame_time_interval"),
+    "time_lag_imu_to_lidar": ("common", "time_lag_imu_to_lidar"),
+    "lidar_type": ("preprocess", "lidar_type"),
+    "scan_line": ("preprocess", "scan_line"),
+    "scan_rate": ("preprocess", "scan_rate"),
+    "timestamp_unit": ("preprocess", "timestamp_unit"),
+    "blind": ("preprocess", "blind"),
+    "point_filter_num": ("preprocess", "point_filter_num"),
+    "use_imu_as_input": ("mapping", "use_imu_as_input"),
+    "prop_at_freq_of_imu": ("mapping", "prop_at_freq_of_imu"),
+    "check_satu": ("mapping", "check_satu"),
+    "init_map_size": ("mapping", "init_map_size"),
+    "space_down_sample": ("mapping", "space_down_sample"),
+    "satu_acc": ("mapping", "satu_acc"),
+    "satu_gyro": ("mapping", "satu_gyro"),
+    "acc_norm": ("mapping", "acc_norm"),
+    "plane_thr": ("mapping", "plane_thr"),
+    "filter_size_surf": ("mapping", "filter_size_surf"),
+    "filter_size_map": ("mapping", "filter_size_map"),
+    "ivox_grid_resolution": ("mapping", "ivox_grid_resolution"),
+    "ivox_nearby_type": ("mapping", "ivox_nearby_type"),
+    "cube_side_length": ("mapping", "cube_side_length"),
+    "det_range": ("mapping", "det_range"),
+    "fov_degree": ("mapping", "fov_degree"),
+    "imu_en": ("mapping", "imu_en"),
+    "start_in_aggressive_motion": ("mapping", "start_in_aggressive_motion"),
+    "extrinsic_est_en": ("mapping", "extrinsic_est_en"),
+    "imu_time_inte": ("mapping", "imu_time_inte"),
+    "lidar_meas_cov": ("mapping", "lidar_meas_cov"),
+    "acc_cov_input": ("mapping", "acc_cov_input"),
+    "vel_cov": ("mapping", "vel_cov"),
+    "gyr_cov_input": ("mapping", "gyr_cov_input"),
+    "gyr_cov_output": ("mapping", "gyr_cov_output"),
+    "acc_cov_output": ("mapping", "acc_cov_output"),
+    "b_gyr_cov": ("mapping", "b_gyr_cov"),
+    "b_acc_cov": ("mapping", "b_acc_cov"),
+    "imu_meas_acc_cov": ("mapping", "imu_meas_acc_cov"),
+    "imu_meas_omg_cov": ("mapping", "imu_meas_omg_cov"),
+    "match_s": ("mapping", "match_s"),
+    "gravity_align": ("mapping", "gravity_align"),
+    "gravity": ("mapping", "gravity"),
+    "gravity_init": ("mapping", "gravity_init"),
+    "extrinsic_t": ("mapping", "extrinsic_T"),
+    "extrinsic_r": ("mapping", "extrinsic_R"),
+    "publish_odometry_without_downsample": ("odometry", "publish_odometry_without_downsample"),
+    "odom_only": ("odometry", "odom_only"),
+}
 
 
 class PointLioConfig(NativeModuleConfig):
@@ -86,13 +156,64 @@ class PointLioConfig(NativeModuleConfig):
     pointcloud_freq: float = 10.0
     odom_freq: float = 30.0
 
-    # Point-LIO YAML config (relative to config/ dir, or absolute path).
-    config: Annotated[
-        Path,
-        validate_as(...).transform(lambda path: path if path.is_absolute() else _CONFIG_DIR / path),
-    ] = Path("default.yaml")
-
     debug: bool = False
+
+    # --- Point-LIO tuning (rendered to the generated YAML; see _YAML_LAYOUT) ---
+    # common
+    con_frame: bool = False
+    con_frame_num: int = 1
+    cut_frame: bool = False
+    cut_frame_time_interval: float = 0.1
+    time_lag_imu_to_lidar: float = 0.0
+    # preprocess
+    lidar_type: LidarType = "avia"  # 1 = AVIA (Livox) branch the Mid-360 emits
+    scan_line: int = 4
+    scan_rate: int = 10
+    timestamp_unit: TimestampUnit = "nanosecond"
+    blind: float = 0.5  # spherical min range (m)
+    point_filter_num: int = 3  # pre-KF decimation: keep every Nth raw point (1 = all)
+    # mapping
+    use_imu_as_input: bool = False  # false = IMU-as-output model (robust path)
+    prop_at_freq_of_imu: bool = True
+    check_satu: bool = True
+    init_map_size: int = 10
+    space_down_sample: bool = True  # pre-KF voxel downsample (leaf = filter_size_surf)
+    satu_acc: float = 3.0  # g; accel >= this is treated as saturated, bounding velocity
+    satu_gyro: float = 35.0
+    acc_norm: float = 1.0  # IMU accel unit: g
+    plane_thr: float = 0.1
+    filter_size_surf: float = 0.2  # pre-KF scan downsample leaf (m), iff space_down_sample
+    filter_size_map: float = 0.5
+    ivox_grid_resolution: float = 2.0  # iVox local-map grid (m)
+    ivox_nearby_type: IvoxNearbyType = "nearby6"
+    cube_side_length: float = 1000.0
+    det_range: float = 100.0
+    fov_degree: float = 360.0
+    imu_en: bool = True
+    start_in_aggressive_motion: bool = False
+    extrinsic_est_en: bool = False
+    imu_time_inte: float = 0.005
+    lidar_meas_cov: float = 0.01
+    acc_cov_input: float = 0.1
+    vel_cov: float = 20.0
+    gyr_cov_input: float = 0.01
+    gyr_cov_output: float = 1000.0
+    acc_cov_output: float = 500.0
+    b_gyr_cov: float = 0.0001
+    b_acc_cov: float = 0.0001
+    imu_meas_acc_cov: float = 0.01
+    imu_meas_omg_cov: float = 0.01
+    match_s: float = 81.0
+    gravity_align: bool = True
+    gravity: list[float] = Field(default_factory=lambda: [0.0, 0.0, -9.81])
+    gravity_init: list[float] = Field(default_factory=lambda: [0.0, 0.0, -9.81])
+    extrinsic_t: list[float] = Field(default_factory=lambda: [-0.011, -0.02329, 0.04412])
+    extrinsic_r: list[float] = Field(
+        default_factory=lambda: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    )
+    # odometry
+    publish_odometry_without_downsample: bool = False
+    odom_only: bool = False
 
     # SDK port configuration (see livox/ports.py for defaults)
     cmd_data_port: int = SDK_CMD_DATA_PORT
@@ -106,17 +227,25 @@ class PointLioConfig(NativeModuleConfig):
     host_imu_data_port: int = SDK_HOST_IMU_DATA_PORT
     host_log_data_port: int = SDK_HOST_LOG_DATA_PORT
 
-    # Resolved in __post_init__, passed as --config_path to the binary
+    # Set in start() to the generated YAML; passed as --config_path to the binary.
     config_path: str | None = None
 
-    cli_exclude: frozenset[str] = frozenset({"config", "body_start_frame_id"})
+    # Point-LIO tuning fields feed the generated YAML, not CLI args.
+    cli_exclude: frozenset[str] = frozenset({"body_start_frame_id", *_YAML_LAYOUT})
 
-    def model_post_init(self, __context: object) -> None:
-        super().model_post_init(__context)
-        cfg = self.config
-        if not cfg.is_absolute():
-            cfg = _CONFIG_DIR / cfg
-        self.config_path = str(cfg.resolve())
+    def render_config_yaml(self) -> str:
+        """Render the Point-LIO tuning fields to YAML text the C++ binary reads."""
+        doc: dict[str, dict[str, object]] = {}
+        for field, (section, key) in _YAML_LAYOUT.items():
+            val: object = getattr(self, field)
+            if field == "lidar_type":
+                val = _LIDAR_TYPE_CODE[val]  # type: ignore[index]
+            elif field == "timestamp_unit":
+                val = _TIMESTAMP_UNIT_CODE[val]  # type: ignore[index]
+            elif field == "ivox_nearby_type":
+                val = _IVOX_NEARBY_CODE[val]  # type: ignore[index]
+            doc.setdefault(section, {})[key] = val
+        return yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
 
 
 class PointLio(NativeModule, perception.Lidar, perception.Odometry):
@@ -125,13 +254,24 @@ class PointLio(NativeModule, perception.Lidar, perception.Odometry):
     lidar: Out[PointCloud2]
     odometry: Out[Odometry]
 
+    _config_file: str | None = None
+
     @rpc
     def start(self) -> None:
         self._validate_network()
+        self._write_config()
         super().start()
         self.register_disposable(
             Disposable(self.odometry.transport.subscribe(self._on_odom_for_tf, self.odometry))
         )
+
+    def _write_config(self) -> None:
+        """Render the config fields to a temp YAML and point the binary at it."""
+        fd, path = tempfile.mkstemp(prefix="pointlio_", suffix=".yaml")
+        with os.fdopen(fd, "w") as f:
+            f.write(self.config.render_config_yaml())
+        self._config_file = path
+        self.config.config_path = path
 
     def _on_odom_for_tf(self, msg: Odometry) -> None:
         self.tf.publish(
@@ -158,6 +298,9 @@ class PointLio(NativeModule, perception.Lidar, perception.Odometry):
     @rpc
     def stop(self) -> None:
         super().stop()
+        if self._config_file is not None:
+            Path(self._config_file).unlink(missing_ok=True)
+            self._config_file = None
 
     def _validate_network(self) -> None:
         lidar_ip = self.config.lidar_ip

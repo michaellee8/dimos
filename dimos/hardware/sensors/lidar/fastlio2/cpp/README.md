@@ -74,7 +74,7 @@ autoconnect(
     --odometry '/odometry#nav_msgs.Odometry' \
     --host_ip 192.168.1.5 \
     --lidar_ip 192.168.1.155 \
-    --config_path ../config/mid360.yaml
+    --config_path /path/to/fastlio.yaml   # FAST-LIO tuning; module.py generates this from FastLio2Config
 ```
 
 Topic strings must include the `#type` suffix -- this is the actual LCM channel

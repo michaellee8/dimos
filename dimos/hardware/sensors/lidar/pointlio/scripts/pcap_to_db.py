@@ -18,10 +18,12 @@ Usage:
     # LFS archive, NOT the archive name)
     PCAP_PATH="$(python -c "from dimos.utils.data import get_data; print(get_data('mid360_shake_stairs/mid360_shake_stairs.pcap'))")"
 
-    # gen .db from pcap with your config (defaults to <pcap>.db next to the pcap)
+    # gen .db from pcap (defaults to <pcap>.db next to the pcap)
+    python -m dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db --pcap "$PCAP_PATH"
+
+    # override any PointLioConfig field via a small YAML/JSON doc, e.g. {acc_cov_input: 0.3}
     python -m dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db \
-        --config dimos/hardware/sensors/lidar/pointlio/config/default.yaml \
-        --pcap "$PCAP_PATH"
+        --pcap "$PCAP_PATH" --config overrides.yaml
 
     # add to existing .db
     DB="mem2.db"
@@ -199,7 +201,9 @@ def _write_rrd(db_path: Path, odom_stream: str, lidar_stream: str, voxel: float)
         store.stop()
 
 
-def _build_blueprint(args: argparse.Namespace, db_path: Path, config_path: str) -> Blueprint:
+def _build_blueprint(
+    args: argparse.Namespace, db_path: Path, overrides: dict[str, Any]
+) -> Blueprint:
     """autoconnect(VirtualMid360 + PointLio + PointlioRecorder).
 
     PointLio's ``odometry``/``lidar`` outputs auto-wire to the recorder's
@@ -211,14 +215,10 @@ def _build_blueprint(args: argparse.Namespace, db_path: Path, config_path: str) 
     from dimos.hardware.sensors.lidar.pointlio.recorder import PointlioRecorder
     from dimos.hardware.sensors.lidar.virtual_mid360.module import VirtualMid360
 
-    # `config` (not `config_path`, which PointLioConfig derives itself); already
-    # an absolute path so it bypasses the config-dir-relative resolution. Omit
-    # when empty to keep the default.yaml.
-    pointlio_kwargs: dict[str, object] = dict(
+    pointlio_kwargs: dict[str, Any] = dict(
         host_ip=args.host_ip, lidar_ip=args.lidar_ip, odom_freq=args.odom_freq, debug=False
     )
-    if config_path:
-        pointlio_kwargs["config"] = config_path
+    pointlio_kwargs.update(overrides)
 
     return autoconnect(
         VirtualMid360.blueprint(
@@ -289,6 +289,21 @@ def _poll_until_drained(
             stagnant_since = None
 
 
+def _load_overrides(config: str) -> dict[str, Any]:
+    """Load a YAML/JSON doc of PointLioConfig field overrides, e.g. {acc_cov_input: 0.3}."""
+    if not config:
+        return {}
+    import yaml
+
+    path = Path(config).expanduser().resolve()
+    if not path.exists():
+        raise FileNotFoundError(f"--config not found: {path}")
+    data = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"--config must be a mapping of PointLioConfig fields, got {type(data)}")
+    return data
+
+
 def _run(args: argparse.Namespace) -> int:
     from dimos.core.coordination.module_coordinator import ModuleCoordinator
 
@@ -299,13 +314,7 @@ def _run(args: argparse.Namespace) -> int:
     args.pcap_path = pcap_path
     db_path = Path(args.db).expanduser().resolve() if args.db else pcap_path.with_suffix(".db")
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    # Resolve --config against the *invoking* cwd (pwd-relative) up front; the
-    # PointLio config field otherwise resolves a relative path against its own
-    # config/ dir, never the pwd. Absolute path passes through unchanged.
-    config_path = str(Path(args.config).expanduser().resolve()) if args.config else ""
-    if config_path and not Path(config_path).exists():
-        print(f"[pcap_to_db] missing --config: {config_path}", file=sys.stderr)
-        return 2
+    overrides = _load_overrides(args.config)
 
     # Default the stop bound to the pcap's own duration: Point-LIO keeps
     # dead-reckoning (publishing at full rate) after the pcap drains, so the
@@ -326,7 +335,7 @@ def _run(args: argparse.Namespace) -> int:
 
     coord = None
     try:
-        coord = ModuleCoordinator.build(_build_blueprint(args, db_path, config_path))
+        coord = ModuleCoordinator.build(_build_blueprint(args, db_path, overrides))
         drained = _poll_until_drained(
             db_path, args.odom_stream_name, args.lidar_stream_name, max_sensor_sec
         )
@@ -397,7 +406,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument(
         "--config",
         default="",
-        help="Point-LIO YAML config (pwd-relative or absolute; default: module's default.yaml)",
+        help="YAML/JSON doc of PointLioConfig field overrides (e.g. {acc_cov_input: 0.3})",
     )
     parser.add_argument(
         "--odom-stream-name",
