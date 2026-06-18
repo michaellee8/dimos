@@ -25,6 +25,10 @@ Quick start:
     # 3. Interactive RPC client (plan, preview, execute from Python):
     dimos run xarm7-planner-coordinator
     python -i -m dimos.manipulation.planning.examples.manipulation_client
+
+    # 4. Dual-arm xArm7 mock planner + coordinator demo:
+    dimos run dual-xarm7-planner-coordinator
+    python -i -m dimos.manipulation.planning.examples.manipulation_client
 """
 
 import math
@@ -113,6 +117,50 @@ xarm7_planner_coordinator = autoconnect(
         joint_state_frame_id="coordinator",
         hardware=[_xarm7_cfg.to_hardware_component()],
         tasks=[_xarm7_cfg.to_task_config()],
+    ),
+).transports(
+    {
+        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+    }
+)
+
+
+# Dual XArm7 mock planner + coordinator for bimanual planning demos.
+# Usage: dimos run dual-xarm7-planner-coordinator
+_left_xarm7_cfg = _catalog_xarm7(
+    name="left_arm",
+    adapter_type="mock",
+    add_gripper=False,
+    y_offset=0.5,
+)
+_right_xarm7_cfg = _catalog_xarm7(
+    name="right_arm",
+    adapter_type="mock",
+    add_gripper=False,
+    y_offset=-0.5,
+)
+
+dual_xarm7_planner_coordinator = autoconnect(
+    ManipulationModule.blueprint(
+        robots=[
+            _left_xarm7_cfg.to_robot_model_config(),
+            _right_xarm7_cfg.to_robot_model_config(),
+        ],
+        planning_timeout=10.0,
+        enable_viz=True,
+    ),
+    ControlCoordinator.blueprint(
+        tick_rate=100.0,
+        publish_joint_state=True,
+        joint_state_frame_id="coordinator",
+        hardware=[
+            _left_xarm7_cfg.to_hardware_component(),
+            _right_xarm7_cfg.to_hardware_component(),
+        ],
+        tasks=[
+            _left_xarm7_cfg.to_task_config(),
+            _right_xarm7_cfg.to_task_config(),
+        ],
     ),
 ).transports(
     {
@@ -339,6 +387,7 @@ xarm_perception_sim_agent = autoconnect(
 
 __all__ = [
     "dual_xarm6_planner",
+    "dual_xarm7_planner_coordinator",
     "xarm6_planner_only",
     "xarm7_planner_coordinator",
     "xarm7_planner_coordinator_agent",
