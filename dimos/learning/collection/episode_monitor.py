@@ -135,16 +135,22 @@ class EpisodeMonitorModule(Module):
     def _on_buttons(self, msg: Buttons) -> None:
         """Rising-edge detect against `config.button_map`; advance state machine."""
         ts = time.time()
-        for event_name, alias_or_attr in self.config.button_map.items():
-            attr = BUTTON_ALIASES.get(alias_or_attr, alias_or_attr)
-            try:
-                pressed = bool(getattr(msg, attr))
-            except AttributeError:
-                continue
-            prev = self._prev_bits.get(attr, False)
-            self._prev_bits[attr] = pressed
-            if pressed and not prev:  # rising edge
-                self._transition(event_name, ts)
+        # Edge-detect under the lock (it shares `_prev_bits` with reset_counters),
+        # then fire transitions outside it — `_transition` takes the same lock.
+        fired: list[Literal["start", "save", "discard", "toggle"]] = []
+        with self._lock:
+            for event_name, alias_or_attr in self.config.button_map.items():
+                attr = BUTTON_ALIASES.get(alias_or_attr, alias_or_attr)
+                try:
+                    pressed = bool(getattr(msg, attr))
+                except AttributeError:
+                    continue
+                prev = self._prev_bits.get(attr, False)
+                self._prev_bits[attr] = pressed
+                if pressed and not prev:  # rising edge
+                    fired.append(event_name)
+        for event_name in fired:
+            self._transition(event_name, ts)
 
     def _on_keyboard(self, msg: KeyPress) -> None:
         """Match `msg.key` against `config.keyboard_map`; advance state machine."""

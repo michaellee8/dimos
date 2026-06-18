@@ -40,8 +40,6 @@ from dimos.teleop.quest.blueprints import (
 )
 from dimos.teleop.quest.quest_types import Buttons
 
-_DEFAULT_BUTTON_MAP = {"toggle": "B", "discard": "Y"}
-
 _SESSION_DB = f"data/recordings/session_{datetime.now():%Y%m%d_%H%M%S}.db"
 
 
@@ -60,7 +58,7 @@ def _camera_if_real() -> tuple[Blueprint, ...]:
 learning_collect_quest_xarm7 = autoconnect(
     teleop_quest_xarm7,
     *_camera_if_real(),
-    EpisodeMonitorModule.blueprint(button_map=_DEFAULT_BUTTON_MAP),
+    EpisodeMonitorModule.blueprint(),  # default button_map: toggle=B, discard=Y
     CollectionRecorder.blueprint(db_path=_SESSION_DB),
 ).transports(
     {
@@ -75,7 +73,7 @@ learning_collect_quest_xarm7 = autoconnect(
 learning_collect_quest_piper = autoconnect(
     teleop_quest_piper,
     *_camera_if_real(),
-    EpisodeMonitorModule.blueprint(button_map=_DEFAULT_BUTTON_MAP),
+    EpisodeMonitorModule.blueprint(),  # default button_map: toggle=B, discard=Y
     CollectionRecorder.blueprint(db_path=_SESSION_DB),
 ).transports(
     {

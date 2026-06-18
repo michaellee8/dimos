@@ -193,6 +193,12 @@ visualization = [
     "dimos-viewer==0.32.0a1",
 ]
 
+learning = [
+    # dimos.learning.dataprep dataset writers (lazy-imported per format)
+    "pyarrow",  # LeRobot v2 parquet writer
+    "h5py",     # HDF5 writer
+]
+
 agents = [
     "langchain>=1.2.3,<2",
     "langchain-chroma>=1,<2",

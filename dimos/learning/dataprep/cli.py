@@ -84,6 +84,8 @@ def build(
     try:
         path = run_dataprep(cfg)
     except Exception as e:
+        # CLI boundary: any failure becomes a clean message + non-zero exit
+        # instead of a traceback. run_dataprep raises specific errors internally.
         typer.echo(f"dataprep build failed: {e}", err=True)
         raise typer.Exit(1)
     typer.echo(f"✓ wrote dataset to {path}")
@@ -99,6 +101,7 @@ def inspect(dataset: Path | None, output_format: str | None) -> None:
     try:
         info = inspect_dataset(dataset, output_format)
     except Exception as e:
+        # CLI boundary: surface failures as a message + non-zero exit, not a traceback.
         typer.echo(f"dataprep inspect failed: {e}", err=True)
         raise typer.Exit(1)
     typer.echo(json.dumps(info, indent=2, default=str))
