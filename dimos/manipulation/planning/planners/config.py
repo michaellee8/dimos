@@ -47,19 +47,14 @@ ManipulationPlannerConfig = Annotated[
     Field(discriminator="backend"),
 ]
 
-_PLANNER_CONFIG_ADAPTER: TypeAdapter[ManipulationPlannerConfig] = TypeAdapter(
+MANIPULATION_PLANNER_CONFIG_ADAPTER: TypeAdapter[ManipulationPlannerConfig] = TypeAdapter(
     ManipulationPlannerConfig
 )
 
 
-def planner_config_from_name(name: str) -> ManipulationPlannerConfig:
-    """Create a default planner config from a legacy planner name."""
-    return _PLANNER_CONFIG_ADAPTER.validate_python({"backend": name})
-
-
 __all__ = [
+    "MANIPULATION_PLANNER_CONFIG_ADAPTER",
     "ManipulationPlannerConfig",
     "RRTConnectPlannerConfig",
     "VampPlannerConfig",
-    "planner_config_from_name",
 ]

@@ -26,16 +26,16 @@ from dimos.manipulation.planning.kinematics.config import (
     kinematics_config_from_name,
 )
 from dimos.manipulation.planning.planners.config import (
+    MANIPULATION_PLANNER_CONFIG_ADAPTER,
     ManipulationPlannerConfig,
     RRTConnectPlannerConfig,
     VampPlannerConfig,
-    planner_config_from_name,
 )
 from dimos.manipulation.planning.world.config import (
+    MANIPULATION_WORLD_CONFIG_ADAPTER,
     DrakeWorldConfig,
     ManipulationWorldConfig,
     VampWorldConfig,
-    world_config_from_name,
 )
 
 if TYPE_CHECKING:
@@ -50,7 +50,7 @@ def create_world(
 ) -> WorldSpec:
     """Create a world instance from a backend name or typed world config."""
     if config is None:
-        config = world_config_from_name(backend)
+        config = MANIPULATION_WORLD_CONFIG_ADAPTER.validate_python({"backend": backend})
 
     if isinstance(config, DrakeWorldConfig):
         from dimos.manipulation.planning.world.drake_world import DrakeWorld
@@ -97,7 +97,7 @@ def create_planner(
 ) -> PlannerSpec:
     """Create motion planner from a backend name or typed planner config."""
     if config is None:
-        config = planner_config_from_name(name)
+        config = MANIPULATION_PLANNER_CONFIG_ADAPTER.validate_python({"backend": name})
 
     if isinstance(config, RRTConnectPlannerConfig):
         from dimos.manipulation.planning.planners.rrt_planner import RRTConnectPlanner
@@ -143,7 +143,11 @@ def create_planning_stack(
 ) -> tuple[WorldSpec, KinematicsSpec, PlannerSpec, str]:
     """Create complete planning stack. Returns (world, kinematics, planner, robot_id)."""
     world_config = world if world is not None else DrakeWorldConfig()
-    planner_config = planner if planner is not None else planner_config_from_name(planner_name)
+    planner_config = (
+        planner
+        if planner is not None
+        else MANIPULATION_PLANNER_CONFIG_ADAPTER.validate_python({"backend": planner_name})
+    )
     kinematics_config = (
         kinematics if kinematics is not None else kinematics_config_from_name(kinematics_name)
     )

@@ -62,20 +62,17 @@ ManipulationWorldConfig = Annotated[
     Field(discriminator="backend"),
 ]
 
-_WORLD_CONFIG_ADAPTER: TypeAdapter[ManipulationWorldConfig] = TypeAdapter(ManipulationWorldConfig)
-
-
-def world_config_from_name(name: str) -> ManipulationWorldConfig:
-    """Create a default world config from a backend name."""
-    return _WORLD_CONFIG_ADAPTER.validate_python({"backend": name})
+MANIPULATION_WORLD_CONFIG_ADAPTER: TypeAdapter[ManipulationWorldConfig] = TypeAdapter(
+    ManipulationWorldConfig
+)
 
 
 __all__ = [
+    "MANIPULATION_WORLD_CONFIG_ADAPTER",
     "CustomVampArtifactConfig",
     "DrakeWorldConfig",
     "ManipulationWorldConfig",
     "OfficialVampArtifactConfig",
     "VampArtifactConfig",
     "VampWorldConfig",
-    "world_config_from_name",
 ]

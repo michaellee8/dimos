@@ -51,9 +51,9 @@ from dimos.manipulation.planning.kinematics.config import (
 )
 from dimos.manipulation.planning.monitor.world_monitor import WorldMonitor
 from dimos.manipulation.planning.planners.config import (
+    MANIPULATION_PLANNER_CONFIG_ADAPTER,
     ManipulationPlannerConfig,
     RRTConnectPlannerConfig,
-    planner_config_from_name,
 )
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import IKStatus, ObstacleType
@@ -136,7 +136,9 @@ class ManipulationModuleConfig(ModuleConfig):
                 DeprecationWarning,
                 stacklevel=3,
             )
-            self.planner = planner_config_from_name(self.planner_name)
+            self.planner = MANIPULATION_PLANNER_CONFIG_ADAPTER.validate_python(
+                {"backend": self.planner_name}
+            )
         if self.kinematics_name is not None:
             warnings.warn(
                 "ManipulationModuleConfig.kinematics_name is deprecated; use "
