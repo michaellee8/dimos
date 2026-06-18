@@ -25,7 +25,6 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -46,6 +45,8 @@
 #include "fast_lio.hpp"
 #include "fast_lio_debug.hpp"
 
+#include <pcl/filters/voxel_grid.h>
+
 using livox_common::GRAVITY_MS2;
 using livox_common::DATA_TYPE_IMU;
 using livox_common::DATA_TYPE_CARTESIAN_HIGH;
@@ -60,11 +61,6 @@ static FastLio* g_fastlio = nullptr;
 static double get_publish_ts() {
     return std::chrono::duration<double>(
         std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
-// Steady clock for the main loop's frame/publish rate limiters.
-static std::optional<std::chrono::steady_clock::time_point> virtual_now() {
-    return std::chrono::steady_clock::now();
 }
 
 static std::string g_lidar_topic;
@@ -90,18 +86,29 @@ static uint64_t get_timestamp_ns(const LivoxLidarEthernetPacket* pkt) {
 using dimos::time_from_seconds;
 using dimos::make_header;
 
-// Publish lidar (sensor/body-frame point cloud)
+// Leaf size (m) for the non-dense (dense_publish_en=false) downsampled output.
+static constexpr float PUBLISH_VOXEL_LEAF = 0.1f;
+
+static PointCloudXYZI::Ptr voxel_downsample(const PointCloudXYZI::Ptr& cloud, float leaf) {
+    PointCloudXYZI::Ptr out(new PointCloudXYZI());
+    pcl::VoxelGrid<PointCloudXYZI::PointType> vg;
+    vg.setInputCloud(cloud);
+    vg.setLeafSize(leaf, leaf, leaf);
+    vg.filter(*out);
+    return out;
+}
+
+// Publish a lidar point cloud, stamped with `frame_id`.
 
 static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
-                          const std::string& topic = "") {
+                          const std::string& frame_id, const std::string& topic = "") {
     const std::string& chan = topic.empty() ? g_lidar_topic : topic;
     if (!g_lcm || !cloud || cloud->empty() || chan.empty()) return;
 
     int num_points = static_cast<int>(cloud->size());
 
     sensor_msgs::PointCloud2 pc;
-    // Cloud is in the sensor/body frame (the odometry child frame), not world.
-    pc.header = make_header(g_child_frame_id, timestamp);
+    pc.header = make_header(frame_id, timestamp);
     pc.height = 1;
     pc.width = num_points;
     pc.is_bigendian = 0;
@@ -319,6 +326,13 @@ int main(int argc, char** argv) {
     float pointcloud_freq = mod.arg_float("pointcloud_freq", 5.0f);
     float odom_freq = mod.arg_float("odom_freq", 50.0f);
 
+    // Cloud-publish behaviour. scan_publish_en gates the lidar output;
+    // scan_bodyframe_pub_en picks the sensor/body (true) or world (false) frame;
+    // dense_publish_en false voxel-downsamples the published cloud.
+    bool scan_publish_en = mod.arg_bool("scan_publish_en", true);
+    bool dense_publish_en = mod.arg_bool("dense_publish_en", true);
+    bool scan_bodyframe_pub_en = mod.arg_bool("scan_bodyframe_pub_en", true);
+
     // Verbose logging — propagates to the FAST-LIO C++ core via the
     // `fastlio_debug` global. Default false → only real errors print.
     bool debug = mod.arg_bool("debug", false);
@@ -373,30 +387,19 @@ int main(int argc, char** argv) {
     // wall-clock-paced main thread.
     auto frame_interval = std::chrono::microseconds(
         static_cast<int64_t>(1e6 / g_frequency));
-    std::optional<std::chrono::steady_clock::time_point> last_emit;
     const double process_period_ms = 1000.0 / main_freq;
 
     auto pc_interval = std::chrono::microseconds(
         static_cast<int64_t>(1e6 / pointcloud_freq));
     auto odom_interval = std::chrono::microseconds(
         static_cast<int64_t>(1e6 / odom_freq));
-    std::optional<std::chrono::steady_clock::time_point> last_pc_publish;
-    std::optional<std::chrono::steady_clock::time_point> last_odom_publish;
+
+    // Rate-limit bookmarks, seeded to now so they don't all fire on iteration 1.
+    auto last_emit = std::chrono::steady_clock::now();
+    auto last_pc_publish = last_emit;
+    auto last_odom_publish = last_emit;
 
     auto run_main_iter = [&](std::chrono::steady_clock::time_point now) {
-        // Lazy-seed the rate-limit bookmarks on the first iteration so they line
-        // up with the wall clock instead of firing immediately.
-        auto seed = now;
-        if (!last_emit.has_value()) {
-            last_emit = seed;
-        }
-        if (!last_pc_publish.has_value()) {
-            last_pc_publish = seed;
-        }
-        if (!last_odom_publish.has_value()) {
-            last_odom_publish = seed;
-        }
-
         // At frame rate, drain accumulated raw points into a CustomMsg and feed
         // FAST-LIO. Hold g_pc_mutex across the rate-limit check + swap so a
         // callback can't slip a packet in between the decision and the swap.
@@ -405,7 +408,7 @@ int main(int argc, char** argv) {
         {
             std::lock_guard<std::mutex> lock(g_pc_mutex);
             auto check_now = now;
-            if (check_now - *last_emit >= frame_interval) {
+            if (check_now - last_emit >= frame_interval) {
                 if (!g_accumulated_points.empty()) {
                     points.swap(g_accumulated_points);
                     frame_start = g_frame_start_ns;
@@ -437,18 +440,22 @@ int main(int argc, char** argv) {
         auto pose = fast_lio.get_pose();
         if (!pose.empty() && (pose[0] != 0.0 || pose[1] != 0.0 || pose[2] != 0.0)) {
             double ts = get_publish_ts();
-            auto body_cloud = fast_lio.get_body_cloud();
-            if (body_cloud && !body_cloud->empty()) {
-                // Sensor/body-frame cloud at pointcloud_freq, published as-is (no
-                // downsampling). Consumers register it via the odometry pose.
-                if (!g_lidar_topic.empty() && now - *last_pc_publish >= pc_interval) {
-                    publish_lidar(body_cloud, ts);
-                    last_pc_publish = now;
+            if (scan_publish_en && !g_lidar_topic.empty()
+                    && now - last_pc_publish >= pc_interval) {
+                // Body frame: register downstream via the odometry pose. World
+                // frame: already registered.
+                auto cloud = scan_bodyframe_pub_en ? fast_lio.get_body_cloud()
+                                                   : fast_lio.get_world_cloud();
+                if (cloud && !cloud->empty()) {
+                    if (!dense_publish_en) cloud = voxel_downsample(cloud, PUBLISH_VOXEL_LEAF);
+                    publish_lidar(cloud, ts,
+                                  scan_bodyframe_pub_en ? g_child_frame_id : g_frame_id);
                 }
+                last_pc_publish = now;
             }
 
             // Pose + covariance, rate-limited to odom_freq.
-            if (!g_odometry_topic.empty() && now - *last_odom_publish >= odom_interval) {
+            if (!g_odometry_topic.empty() && now - last_odom_publish >= odom_interval) {
                 publish_odometry(fast_lio.get_odometry(), ts);
                 last_odom_publish = now;
             }
@@ -472,12 +479,7 @@ int main(int argc, char** argv) {
 
     while (g_running.load()) {
         auto loop_start = std::chrono::high_resolution_clock::now();
-        auto now_opt = virtual_now();
-        if (!now_opt.has_value()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        run_main_iter(*now_opt);
+        run_main_iter(std::chrono::steady_clock::now());
 
         // Drain LCM messages.
         lcm.handleTimeout(0);

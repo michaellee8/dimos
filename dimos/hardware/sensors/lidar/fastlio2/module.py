@@ -66,11 +66,10 @@ _LIDAR_TYPE_CODE = {"livox": 1, "velodyne": 2, "ouster": 3}
 TimestampUnit = Literal["second", "millisecond", "microsecond", "nanosecond"]
 _TIMESTAMP_UNIT_CODE = {"second": 0, "millisecond": 1, "microsecond": 2, "nanosecond": 3}
 
-# Field name -> FAST-LIO YAML (section, key). Only these fields are rendered into
-# the generated config; everything else on FastLio2Config is module plumbing.
+# Field name -> FAST-LIO YAML (section, key) for the keys the C++ core reads.
+# The publish flags aren't here — the core ignores them; they're passed to the
+# dimos binary as CLI args (see main.cpp).
 _YAML_LAYOUT: dict[str, tuple[str, str]] = {
-    "lid_topic": ("common", "lid_topic"),
-    "imu_topic": ("common", "imu_topic"),
     "time_sync_en": ("common", "time_sync_en"),
     "time_offset_lidar_to_imu": ("common", "time_offset_lidar_to_imu"),
     "lidar_type": ("preprocess", "lidar_type"),
@@ -89,12 +88,6 @@ _YAML_LAYOUT: dict[str, tuple[str, str]] = {
     "extrinsic_est_en": ("mapping", "extrinsic_est_en"),
     "extrinsic_t": ("mapping", "extrinsic_T"),
     "extrinsic_r": ("mapping", "extrinsic_R"),
-    "path_en": ("publish", "path_en"),
-    "scan_publish_en": ("publish", "scan_publish_en"),
-    "dense_publish_en": ("publish", "dense_publish_en"),
-    "scan_bodyframe_pub_en": ("publish", "scan_bodyframe_pub_en"),
-    "pcd_save_en": ("pcd_save", "pcd_save_en"),
-    "interval": ("pcd_save", "interval"),
 }
 
 
@@ -126,8 +119,6 @@ class FastLio2Config(NativeModuleConfig):
 
     # FAST-LIO tuning, rendered to the generated YAML (see _YAML_LAYOUT).
     # common
-    lid_topic: str = "/livox/lidar"
-    imu_topic: str = "/livox/imu"
     time_sync_en: bool = False
     time_offset_lidar_to_imu: float = 0.0
     # preprocess
@@ -143,8 +134,8 @@ class FastLio2Config(NativeModuleConfig):
     gyr_cov: float = 0.1
     b_acc_cov: float = 0.0001
     b_gyr_cov: float = 0.0001
-    filter_size_surf: float = 0.1  # IESKF scan voxel; does not affect divergence
-    filter_size_map: float = 0.1
+    filter_size_surf: float = 0.1  # IESKF scan voxel leaf (m)
+    filter_size_map: float = 0.1  # ikd-tree map voxel leaf (m)
     fov_degree: int = 360  # FAST-LIO reads this as an int
     det_range: float = 100.0
     extrinsic_est_en: bool = False  # online IMU-LiDAR extrinsic estimation
@@ -152,14 +143,10 @@ class FastLio2Config(NativeModuleConfig):
     extrinsic_r: list[float] = Field(
         default_factory=lambda: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
     )
-    # publish
-    path_en: bool = False
-    scan_publish_en: bool = True
-    dense_publish_en: bool = True
-    scan_bodyframe_pub_en: bool = True
-    # pcd_save
-    pcd_save_en: bool = False  # FAST-LIO writes .pcd files to disk when on
-    interval: int = -1
+    # publish behaviour (passed to the binary as CLI args, not the YAML)
+    scan_publish_en: bool = True  # false closes the lidar output
+    dense_publish_en: bool = True  # false voxel-downsamples the published cloud
+    scan_bodyframe_pub_en: bool = True  # true: sensor/body frame; false: world frame
 
     # SDK port configuration (see livox/ports.py for defaults)
     cmd_data_port: int = SDK_CMD_DATA_PORT
