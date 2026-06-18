@@ -561,8 +561,8 @@ def _make_yourarm_config(
                 source="fallback",
             )
         ],
-        base_pose=_make_base_pose(y=y_offset),  # Deprecated; prefer model placement
-        base_link="base_link",                 # Deprecated robot-scoped compatibility
+        base_pose=_make_base_pose(y=y_offset),  # Compatibility; prefer model placement
+        base_link="base_link",                 # Compatibility robot-scoped base
         package_paths={"yourarm_description": _YOURARM_PACKAGE_PATH},
         xacro_args={},                  # Xacro arguments if using .xacro files
         collision_exclusion_pairs=[],   # Pairs of links that can touch (e.g., gripper fingers)
@@ -603,9 +603,9 @@ yourarm_planner = manipulation_module(
 | `coordinator_task_name` | Must match the `TaskConfig.name` in your coordinator blueprint |
 | `collision_exclusion_pairs` | List of `(link_a, link_b)` tuples for links that may legitimately touch (e.g., gripper fingers) |
 
-`base_link`, `base_pose`, and `end_effector_link` are deprecated planning-level
-fields. New planning code should use SRDF/planning-group chain base/tip links
-and encode robot placement in the model. See
+`base_link`, `base_pose`, and `end_effector_link` are compatibility fields used
+by current placement and robot-scoped helper paths. New planning code should use
+SRDF/planning-group chain base/tip links and encode robot placement in the model. See
 [Planning Groups](/docs/capabilities/manipulation/planning_groups.md).
 
 ## Step 5: Register Blueprints

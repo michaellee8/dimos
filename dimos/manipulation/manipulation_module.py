@@ -47,6 +47,12 @@ from dimos.manipulation.planning.kinematics.config import (
     kinematics_config_from_name,
 )
 from dimos.manipulation.planning.monitor.world_monitor import WorldMonitor
+from dimos.manipulation.planning.planning_group_utils import (
+    normalize_joint_target_for_group,
+    planning_group_id_from_selector,
+    primary_pose_planning_group_id_for_robot,
+    single_planning_group_id_for_robot,
+)
 from dimos.manipulation.planning.planning_identifiers import make_resolved_joint_name
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import IKStatus, ObstacleType
@@ -333,7 +339,7 @@ class ManipulationModule(Module):
                 transforms: list[Transform] = []
                 for robot_id, config, _ in self._robots.values():
                     # Publish world → primary planning-group target frame.
-                    # Fall back to deprecated robot-scoped EE only for legacy configs.
+                    # Fall back to robot-scoped EE only for compatibility configs.
                     target_frame = config.end_effector_link
                     pose_group_id = self._primary_pose_group_id_for_robot(config.name)
                     if pose_group_id is not None:
@@ -472,27 +478,20 @@ class ManipulationModule(Module):
     def _default_group_id_for_robot(self, robot_name: RobotName) -> PlanningGroupID | None:
         """Return wrapper-level default group for legacy single-group RPCs."""
         assert self._world_monitor is not None
-        group_ids = [
-            group.id
-            for group in self._world_monitor.world.list_planning_groups()
-            if group.robot_name == robot_name
-        ]
-        if len(group_ids) != 1:
-            logger.error(
-                "Robot '%s' has %d planning groups; select a planning group explicitly",
-                robot_name,
-                len(group_ids),
+        try:
+            return single_planning_group_id_for_robot(
+                self._world_monitor.world.list_planning_groups(), robot_name
             )
+        except ValueError as exc:
+            logger.error(str(exc))
             return None
-        return group_ids[0]
 
     def _primary_pose_group_id_for_robot(self, robot_name: RobotName) -> PlanningGroupID | None:
         """Return the first pose-targetable group for robot-scoped compatibility paths."""
         assert self._world_monitor is not None
-        for group in self._world_monitor.world.list_planning_groups():
-            if group.robot_name == robot_name and group.has_pose_target:
-                return group.id
-        return None
+        return primary_pose_planning_group_id_for_robot(
+            self._world_monitor.world.list_planning_groups(), robot_name
+        )
 
     def _selected_joint_state(self, group_ids: tuple[PlanningGroupID, ...]) -> JointState | None:
         """Collect current state for exactly the selected resolved joints."""
@@ -528,43 +527,17 @@ class ManipulationModule(Module):
 
         return JointState(name=names, position=positions)
 
-    def _normalize_group_selector(
-        self, selector: PlanningGroupID | PlanningGroupDescriptor
-    ) -> PlanningGroupID:
-        """Normalize a planning group selector to its stable public ID."""
-        if isinstance(selector, PlanningGroupDescriptor):
-            return selector.id
-        return selector
-
     def _normalize_joint_target(
         self, group_id: PlanningGroupID, target: JointState
     ) -> JointState | None:
         """Normalize a group joint target to resolved joint names in group order."""
         assert self._world_monitor is not None
         group = self._world_monitor.world.resolve_planning_groups((group_id,))[0]
-        if not target.name:
-            if len(target.position) != len(group.joint_names):
-                logger.error("Target for '%s' has wrong joint count", group_id)
-                return None
-            return JointState(name=list(group.joint_names), position=list(target.position))
-
-        positions_by_name = dict(zip(target.name, target.position, strict=False))
-        resolved_positions: list[float] = []
-        for resolved_name, local_name in zip(
-            group.joint_names, group.local_joint_names, strict=False
-        ):
-            if resolved_name in positions_by_name:
-                resolved_positions.append(positions_by_name[resolved_name])
-            elif local_name in positions_by_name:
-                resolved_positions.append(positions_by_name[local_name])
-            else:
-                logger.error("Target for '%s' is missing joint '%s'", group_id, resolved_name)
-                return None
-        extra = set(target.name) - set(group.joint_names) - set(group.local_joint_names)
-        if extra:
-            logger.error("Target for '%s' has extra joints: %s", group_id, sorted(extra))
+        try:
+            return normalize_joint_target_for_group(group, target)
+        except ValueError as exc:
+            logger.error(str(exc))
             return None
-        return JointState(name=list(group.joint_names), position=resolved_positions)
 
     def _project_plan_path_for_robot(self, plan: GeneratedPlan, robot_name: RobotName) -> JointPath:
         """Project combined plan path to one robot in configured local joint order.
@@ -848,14 +821,14 @@ class ManipulationModule(Module):
             self._state = ManipulationState.PLANNING
 
         stamped_targets = {
-            self._normalize_group_selector(group): PoseStamped(
+            planning_group_id_from_selector(group): PoseStamped(
                 frame_id="world",
                 position=pose.position,
                 orientation=pose.orientation,
             )
             for group, pose in pose_targets.items()
         }
-        auxiliary_ids = tuple(self._normalize_group_selector(group) for group in auxiliary_groups)
+        auxiliary_ids = tuple(planning_group_id_from_selector(group) for group in auxiliary_groups)
         group_ids = tuple(dict.fromkeys((*stamped_targets.keys(), *auxiliary_ids)))
 
         try:
@@ -914,7 +887,7 @@ class ManipulationModule(Module):
                 return False
             self._state = ManipulationState.PLANNING
 
-        group_ids = tuple(self._normalize_group_selector(group) for group in joint_targets)
+        group_ids = tuple(planning_group_id_from_selector(group) for group in joint_targets)
         try:
             start = self._selected_joint_state(group_ids)
         except Exception as exc:
@@ -925,7 +898,7 @@ class ManipulationModule(Module):
         goal_names: list[str] = []
         goal_positions: list[float] = []
         for group, target in joint_targets.items():
-            group_id = self._normalize_group_selector(group)
+            group_id = planning_group_id_from_selector(group)
             normalized = self._normalize_joint_target(group_id, target)
             if normalized is None:
                 return self._fail(f"Invalid joint target for '{group_id}'")
@@ -1150,7 +1123,6 @@ class ManipulationModule(Module):
             "planning_groups": planning_groups,
             "end_effector_link": config.end_effector_link,
             "base_link": config.base_link,
-            "deprecated_fields": ["end_effector_link", "base_link"],
             "max_velocity": config.max_velocity,
             "max_acceleration": config.max_acceleration,
             "has_joint_name_mapping": bool(config.joint_name_mapping),

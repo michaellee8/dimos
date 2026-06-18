@@ -55,7 +55,8 @@ class RobotConfig(BaseModel):
     # Required fields
     name: str
     model_path: Path | None = None
-    end_effector_link: str | None = None  # Deprecated for planning; use planning group tip links.
+    # Compatibility robot-scoped target frame; new planning uses group tip links.
+    end_effector_link: str | None = None
 
     # Physical dimensions (meters)
     height_clearance: float | None = None  # max height
@@ -77,13 +78,13 @@ class RobotConfig(BaseModel):
     # Optional overrides (derived from model if not set)
     joint_names: list[str] | None = None
     base_link: str | None = (
-        None  # Deprecated planning override; derived from model root when absent.
+        None  # Compatibility planning override; derived from model root when absent.
     )
     home_joints: list[float] | None = None
 
     # Multi-robot / coordinator
     joint_prefix: str | None = None  # defaults to "{name}_"
-    # Deprecated for planning placement. Prefer encoding placement in URDF/xacro/MJCF.
+    # Compatibility planning placement. Prefer encoding placement in URDF/xacro/MJCF.
     base_pose: list[float] = Field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
 
     # Planning

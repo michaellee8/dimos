@@ -32,15 +32,16 @@ class RobotModelConfig(ModuleConfig):
         name: Human-readable robot name
         model_path: Path to robot model file (.urdf, .xacro, or .xml/MJCF)
         srdf_path: Optional path to SRDF file containing planning group definitions
-        base_pose: Deprecated planning placement transform retained for
-            compatibility. Prefer encoding placement in the robot model.
+        base_pose: Compatibility placement transform used by current Drake
+            world loading/welding. Prefer encoding new placement in the robot
+            model when possible.
         joint_names: Ordered list of controllable/coordinator joints in the
             local model namespace. This is not a planning group.
-        end_effector_link: Deprecated robot-scoped end-effector link retained
-            for compatibility. Pose targets should use planning group target
-            frames instead.
-        base_link: Deprecated robot-scoped base link retained for Drake weld
-            compatibility. Planning groups own chain base links.
+        end_effector_link: Compatibility robot-scoped end-effector link used by
+            legacy helpers. New pose-targeted planning should use planning
+            group target frames instead.
+        base_link: Compatibility robot-scoped base link used by current Drake
+            weld/placement behavior. Planning groups own chain base links.
         package_paths: Dict mapping package names to filesystem Paths
         joint_limits_lower: Lower joint limits (radians)
         joint_limits_upper: Upper joint limits (radians)

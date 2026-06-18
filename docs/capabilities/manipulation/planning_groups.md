@@ -109,13 +109,14 @@ Multi-task dispatch is not atomic in this change: if one trajectory task accepts
 and a later task rejects, DimOS reports the rejection but does not roll back the
 accepted task.
 
-## Deprecated planning config fields
+## Compatibility planning config fields
 
 `RobotConfig.base_link`, `RobotConfig.base_pose`,
 `RobotModelConfig.base_link`, `RobotModelConfig.base_pose`, and
 `RobotModelConfig.end_effector_link` remain as compatibility fields for the
-current Drake weld and deprecated robot-scoped FK/Jacobian APIs. New planning
-logic should use model/SRDF structure and planning group base/tip links instead.
+current Drake weld/placement behavior and robot-scoped compatibility helpers.
+New planning logic should use model/SRDF structure and planning group base/tip
+links instead.
 
 Robot placement should be encoded in URDF/xacro/MJCF. `joint_names` remains
 supported and should describe the controllable/coordinator joint set.

@@ -21,6 +21,8 @@ from dimos.manipulation.planning.spec.models import (
     PlanningGroupDescriptor,
     PlanningGroupID,
     ResolvedJointName,
+    ResolvedPlanningGroup,
+    RobotName,
 )
 from dimos.msgs.sensor_msgs.JointState import JointState
 
@@ -32,6 +34,31 @@ def planning_group_id_from_selector(
     if isinstance(selector, PlanningGroupDescriptor):
         return selector.id
     return selector
+
+
+def single_planning_group_id_for_robot(
+    groups: Sequence[PlanningGroupDescriptor],
+    robot_name: RobotName,
+) -> PlanningGroupID:
+    """Return a robot's only planning group ID, or raise if ambiguous."""
+    group_ids = [group.id for group in groups if group.robot_name == robot_name]
+    if len(group_ids) != 1:
+        raise ValueError(
+            f"Robot '{robot_name}' has {len(group_ids)} planning groups; "
+            "select a planning group explicitly"
+        )
+    return group_ids[0]
+
+
+def primary_pose_planning_group_id_for_robot(
+    groups: Sequence[PlanningGroupDescriptor],
+    robot_name: RobotName,
+) -> PlanningGroupID | None:
+    """Return the first pose-targetable group ID for compatibility paths."""
+    for group in groups:
+        if group.robot_name == robot_name and group.has_pose_target:
+            return group.id
+    return None
 
 
 def matching_resolved_joint_name(
@@ -76,3 +103,35 @@ def filter_joint_state_to_selected_joints(
         raise ValueError(f"IK result is missing selected joints: {missing}")
 
     return JointState({"name": list(resolved_joint_names), "position": selected_positions})
+
+
+def normalize_joint_target_for_group(
+    group: ResolvedPlanningGroup,
+    target: JointState,
+) -> JointState:
+    """Normalize a group joint target to resolved joint names in group order."""
+    if not target.name:
+        if len(target.position) != len(group.joint_names):
+            raise ValueError(
+                f"Target for '{group.id}' has {len(target.position)} positions, "
+                f"expected {len(group.joint_names)}"
+            )
+        return JointState(name=list(group.joint_names), position=list(target.position))
+
+    positions_by_name = dict(zip(target.name, target.position, strict=False))
+    resolved_positions: list[float] = []
+    missing: list[str] = []
+    for resolved_name, local_name in zip(group.joint_names, group.local_joint_names, strict=False):
+        if resolved_name in positions_by_name:
+            resolved_positions.append(positions_by_name[resolved_name])
+        elif local_name in positions_by_name:
+            resolved_positions.append(positions_by_name[local_name])
+        else:
+            missing.append(resolved_name)
+    if missing:
+        raise ValueError(f"Target for '{group.id}' is missing joints: {missing}")
+
+    extra = set(target.name) - set(group.joint_names) - set(group.local_joint_names)
+    if extra:
+        raise ValueError(f"Target for '{group.id}' has extra joints: {sorted(extra)}")
+    return JointState(name=list(group.joint_names), position=resolved_positions)

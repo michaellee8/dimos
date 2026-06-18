@@ -117,8 +117,8 @@ class _RobotData:
     config: RobotModelConfig
     model_instance: Any  # ModelInstanceIndex
     joint_indices: list[int]  # Indices into plant's position vector
-    ee_frame: Any | None  # Deprecated robot-scoped end-effector frame
-    base_frame: Any  # Deprecated robot-scoped base frame
+    ee_frame: Any | None  # Compatibility robot-scoped end-effector frame
+    base_frame: Any  # Compatibility robot-scoped base frame
     preview_model_instance: Any = None  # ModelInstanceIndex for preview (yellow) robot
     preview_joint_indices: list[int] = field(default_factory=list)
 
@@ -227,8 +227,9 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         """Add a robot to the world. Returns robot_id.
 
         Same model_path + base_pose reuses the model instance (e.g. two arms in one URDF).
-        base_pose/base_link/end_effector_link are deprecated compatibility fields;
-        planning should use planning-group base/tip links.
+        base_pose/base_link/end_effector_link remain compatibility fields for
+        placement and robot-scoped helpers; group-aware planning should use
+        planning group base/tip links.
         """
         if self._finalized:
             raise RuntimeError("Cannot add robot after world is finalized")
@@ -265,7 +266,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
             return robot_id
 
     def _legacy_ee_frame(self, config: RobotModelConfig, model_instance: Any) -> Any | None:
-        """Resolve deprecated robot-scoped EE frame, if available."""
+        """Resolve compatibility robot-scoped EE frame, if available."""
         if config.end_effector_link is None:
             return None
         return self._plant.GetBodyByName(config.end_effector_link, model_instance).body_frame()
@@ -1085,10 +1086,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         return _pose_stamped_from_drake_transform(tip_pose)
 
     def get_ee_pose(self, ctx: Context, robot_id: WorldRobotID) -> PoseStamped:
-        """Get robot-scoped end-effector pose.
-
-        Deprecated: use get_group_pose() with an explicit planning group ID.
-        """
+        """Get pose for a robot's compatibility end-effector frame."""
         if not self._finalized:
             raise RuntimeError("World must be finalized first")
 
@@ -1131,9 +1129,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         return result  # type: ignore[no-any-return]
 
     def get_jacobian(self, ctx: Context, robot_id: WorldRobotID) -> NDArray[np.float64]:
-        """Get robot-scoped geometric Jacobian (6 x n_joints).
-
-        Deprecated: use get_group_jacobian() with an explicit planning group ID.
+        """Get robot-scoped geometric Jacobian for the compatibility EE frame.
 
         Rows: [vx, vy, vz, wx, wy, wz] (linear, then angular)
         """

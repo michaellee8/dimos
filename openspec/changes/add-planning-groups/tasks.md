@@ -58,8 +58,8 @@
 
 ## 6. Robot config migration and API cleanup
 
-- [x] 6.1 Remove or deprecate planning-level `RobotConfig.base_link` and `RobotConfig.base_pose` usage.
-- [x] 6.2 Remove or deprecate planning-level `RobotModelConfig.base_link`, `RobotModelConfig.base_pose`, and `RobotModelConfig.end_effector_link` usage.
+- [x] 6.1 Reframe planning-level `RobotConfig.base_link` and `RobotConfig.base_pose` usage as active compatibility behavior.
+- [x] 6.2 Reframe planning-level `RobotModelConfig.base_link`, `RobotModelConfig.base_pose`, and `RobotModelConfig.end_effector_link` usage as active compatibility behavior.
 - [x] 6.3 Keep and document `RobotConfig.joint_names` and `RobotModelConfig.joint_names` as controllable/coordinator joint sets, not planning groups.
 - [x] 6.4 Update existing robot catalog/config entries to use SRDF where needed or rely on fallback for unambiguous single-chain arms.
 - [x] 6.5 Update manipulation skills/wrappers to select planning groups explicitly or provide clear wrapper-level defaults.

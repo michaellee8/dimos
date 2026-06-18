@@ -80,12 +80,14 @@ def parse_srdf_planning_groups(
     model: ModelDescription,
     controllable_joint_names: list[str],
 ) -> list[PlanningGroupDefinition]:
-    """Parse supported SRDF planning group definitions.
+    """Extract supported SRDF planning group definitions.
 
     Supported forms are a single ``<chain base_link="..." tip_link="..."/>``
     child or an ordered list of ``<joint name="..."/>`` children. Other forms,
     including SRDF ``<end_effector>`` metadata, are ignored for planning group
-    extraction.
+    extraction. This is intentionally a minimal SRDF group extractor rather
+    than a full SRDF parser; adopting a ROS/MoveIt parser such as srdfdom would
+    add substantial dependency overhead for this narrow subset.
     """
     root = ET.parse(srdf_path).getroot()
     groups: list[PlanningGroupDefinition] = []

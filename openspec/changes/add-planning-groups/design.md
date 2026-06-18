@@ -536,7 +536,7 @@ Simulation and replay should mirror hardware behavior because group resolution a
 - **SRDF scope:** Parse `<group>` only; ignore `<end_effector>`.
 - **Unsupported SRDF:** Skip unsupported group forms with warnings.
 - **SRDF discovery:** Explicit path, then warning auto-discovery, then fallback, then error.
-- **Config fields:** Add `srdf_path`; remove planning-level `base_link`, `end_effector_link`, and `base_pose` in the new design.
+- **Config fields:** Add `srdf_path`; keep `base_link`, `end_effector_link`, and `base_pose` as explicit compatibility fields while new planning code uses planning-group base/tip links and model-owned placement.
 - **Robot placement:** Placement belongs in URDF/model, not separate planning config transforms.
 - **FK/Jacobian:** Replace robot-scoped end-effector APIs with group-scoped APIs.
 - **Cross-robot planning:** Interface allows it; backends may report unsupported.

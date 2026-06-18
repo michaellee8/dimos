@@ -75,13 +75,23 @@ class WorldSpec(Protocol):
         ...
 
     def list_planning_groups(self) -> tuple[PlanningGroupDescriptor, ...]:
-        """List available planning groups as immutable descriptor snapshots."""
+        """List planning groups for robots currently added to this world.
+
+        SRDF/fallback parsing creates model-level definitions before world
+        binding. This query returns world-level descriptor snapshots with stable
+        public IDs and resolved joint names.
+        """
         ...
 
     def resolve_planning_groups(
         self, group_ids: list[PlanningGroupID] | tuple[PlanningGroupID, ...]
     ) -> tuple[ResolvedPlanningGroup, ...]:
-        """Resolve planning group IDs against current world robot data."""
+        """Resolve group IDs against this world's runtime robot bindings.
+
+        Resolution is world-bound: it looks up the robots added to this world,
+        attaches WorldRobotID, validates selected groups, and returns data that
+        backend planners/IK can use with world contexts.
+        """
         ...
 
     def get_joint_limits(
@@ -177,10 +187,7 @@ class WorldSpec(Protocol):
         ...
 
     def get_ee_pose(self, ctx: Any, robot_id: WorldRobotID) -> PoseStamped:
-        """Get robot-scoped end-effector pose.
-
-        Deprecated: use get_group_pose() with an explicit planning group ID.
-        """
+        """Get pose for a robot's unique pose-targetable planning group."""
         ...
 
     def get_link_pose(
@@ -190,10 +197,7 @@ class WorldSpec(Protocol):
         ...
 
     def get_jacobian(self, ctx: Any, robot_id: WorldRobotID) -> NDArray[np.float64]:
-        """Get robot-scoped end-effector Jacobian (6 x n_joints).
-
-        Deprecated: use get_group_jacobian() with an explicit planning group ID.
-        """
+        """Get Jacobian for a robot's unique pose-targetable planning group."""
         ...
 
 

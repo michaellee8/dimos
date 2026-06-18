@@ -63,7 +63,9 @@ class PlanningGroupDefinition:
     """Model-level declaration of a planning group.
 
     Joint names are local model names. The definition is not bound to a world
-    robot ID and is safe to store on RobotModelConfig.
+    robot ID and is safe to store on RobotModelConfig. Definitions are parsed
+    from SRDF or conservative fallback generation before any robot instance is
+    added to a planning world.
     """
 
     name: str
@@ -80,7 +82,12 @@ class PlanningGroupDefinition:
 
 @dataclass(frozen=True)
 class PlanningGroupDescriptor:
-    """Read-only public snapshot for an available planning group."""
+    """Read-only public snapshot for an available planning group.
+
+    Descriptors are returned by query APIs. They expose stable public IDs and
+    resolved joint names for callers, but intentionally do not expose backend
+    runtime IDs or mutable world state.
+    """
 
     id: PlanningGroupID
     robot_name: RobotName
@@ -99,7 +106,12 @@ class PlanningGroupDescriptor:
 
 @dataclass(frozen=True)
 class ResolvedPlanningGroup:
-    """Runtime/world-bound planning group data."""
+    """Runtime/world-bound planning group data.
+
+    Resolved groups are created from descriptors/IDs for a specific planning
+    world. They include the internal WorldRobotID and are the form consumed by
+    planners, IK backends, and group-scoped FK/Jacobian calls.
+    """
 
     id: PlanningGroupID
     robot_id: WorldRobotID
