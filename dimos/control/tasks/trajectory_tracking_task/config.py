@@ -52,7 +52,7 @@ _EPS = 1e-9
 
 
 @dataclass(frozen=True)
-class AxisTriple:
+class PerAxis:
     """One value per twist-base axis (x, y, yaw)."""
 
     x: float
@@ -79,8 +79,8 @@ def _safe_div(a: float, b: float) -> float:
 class ProfileLimits:
     """Limits the trajectory generator needs (per-axis vel/acc + lateral)."""
 
-    plan_max_vel: AxisTriple
-    plan_max_acc: AxisTriple
+    plan_max_vel: PerAxis
+    plan_max_acc: PerAxis
     a_lat_max: float
 
 
@@ -88,14 +88,14 @@ class ProfileLimits:
 class TrackingConfig:
     """Everything the trajectory tracker needs, derived from a plant fit."""
 
-    k_hat: AxisTriple  # plant steady-state gain (for u_cmd = u_phys / K_hat)
-    deadtime: AxisTriple  # per-axis L (s) — FF reference is previewed by this
-    kp_default: AxisTriple  # per-axis P gain at zeta=1.0
-    kp_aggressive: AxisTriple  # per-axis P gain at zeta=0.7
-    plan_max_vel: AxisTriple
-    plan_max_acc: AxisTriple
+    k_hat: PerAxis  # plant steady-state gain (for u_cmd = u_phys / K_hat)
+    deadtime: PerAxis  # per-axis L (s) — FF reference is previewed by this
+    kp_default: PerAxis  # per-axis P gain at zeta=1.0
+    kp_aggressive: PerAxis  # per-axis P gain at zeta=0.7
+    plan_max_vel: PerAxis
+    plan_max_acc: PerAxis
     a_lat_max: float  # lateral/centripetal accel budget for cornering
-    ff_output_limit: AxisTriple  # command-space clamp on the gain-inverted output
+    ff_output_limit: PerAxis  # command-space clamp on the gain-inverted output
     # Optional speed-scheduled gain inversion (nonlinear plants). When set,
     # the controller inverts K(|v|) per axis instead of the constant k_hat.
     schedule: GainSchedule | None = None
@@ -107,7 +107,7 @@ class TrackingConfig:
     def profile_limits(self) -> ProfileLimits:
         return ProfileLimits(self.plan_max_vel, self.plan_max_acc, self.a_lat_max)
 
-    def kp(self, gain_profile: str) -> AxisTriple:
+    def kp(self, gain_profile: str) -> PerAxis:
         return self.kp_aggressive if gain_profile == "aggressive" else self.kp_default
 
     def feedforward_config(self) -> FeedforwardGainConfig:
@@ -135,26 +135,26 @@ class TrackingConfig:
     ) -> TrackingConfig:
         """Build from a fit + a firmware command limiter (FlowBase style):
         physical limits = K x command limits, then the 85% planning margin."""
-        k_hat = AxisTriple(plant.vx.K, plant.vy.K, plant.wz.K)
-        plan_vel = AxisTriple(
+        k_hat = PerAxis(plant.vx.K, plant.vy.K, plant.wz.K)
+        plan_vel = PerAxis(
             PLANNING_MARGIN * k_hat.x * cmd_max_vel[0],
             PLANNING_MARGIN * k_hat.y * cmd_max_vel[1],
             PLANNING_MARGIN * k_hat.yaw * cmd_max_vel[2],
         )
-        plan_acc = AxisTriple(
+        plan_acc = PerAxis(
             PLANNING_MARGIN * k_hat.x * cmd_max_acc[0],
             PLANNING_MARGIN * k_hat.y * cmd_max_acc[1],
             PLANNING_MARGIN * k_hat.yaw * cmd_max_acc[2],
         )
         return TrackingConfig(
             k_hat=k_hat,
-            deadtime=AxisTriple(plant.vx.L, plant.vy.L, plant.wz.L),
-            kp_default=AxisTriple(
+            deadtime=PerAxis(plant.vx.L, plant.vy.L, plant.wz.L),
+            kp_default=PerAxis(
                 kp_for_zeta(plant.vx.tau, ZETA_DEFAULT),
                 kp_for_zeta(plant.vy.tau, ZETA_DEFAULT),
                 kp_for_zeta(plant.wz.tau, ZETA_DEFAULT),
             ),
-            kp_aggressive=AxisTriple(
+            kp_aggressive=PerAxis(
                 kp_for_zeta(plant.vx.tau, ZETA_AGGRESSIVE),
                 kp_for_zeta(plant.vy.tau, ZETA_AGGRESSIVE),
                 kp_for_zeta(plant.wz.tau, ZETA_AGGRESSIVE),
@@ -162,7 +162,7 @@ class TrackingConfig:
             plan_max_vel=plan_vel,
             plan_max_acc=plan_acc,
             a_lat_max=LAT_ACCEL_FRACTION * min(plan_acc.x, plan_acc.y),
-            ff_output_limit=AxisTriple(*cmd_max_vel),
+            ff_output_limit=PerAxis(*cmd_max_vel),
             provenance=provenance,
         )
 
@@ -175,7 +175,7 @@ class TrackingConfig:
         speed-scheduled gain inversion for nonlinear plants."""
         plant = tuning.plant
         vp = tuning.velocity_profile
-        k_hat = AxisTriple(plant.vx.K, plant.vy.K, plant.wz.K)
+        k_hat = PerAxis(plant.vx.K, plant.vy.K, plant.wz.K)
         # The envelope has one linear cap (applies to vx and vy) and one
         # angular cap. Derive a yaw accel from the first-order rise
         # (omega_max / tau_wz), mirroring how DERIVE sets the linear accel.
@@ -183,23 +183,23 @@ class TrackingConfig:
         prov = tuning.provenance
         return TrackingConfig(
             k_hat=k_hat,
-            deadtime=AxisTriple(plant.vx.L, plant.vy.L, plant.wz.L),
-            kp_default=AxisTriple(
+            deadtime=PerAxis(plant.vx.L, plant.vy.L, plant.wz.L),
+            kp_default=PerAxis(
                 kp_for_zeta(plant.vx.tau, ZETA_DEFAULT),
                 kp_for_zeta(plant.vy.tau, ZETA_DEFAULT),
                 kp_for_zeta(plant.wz.tau, ZETA_DEFAULT),
             ),
-            kp_aggressive=AxisTriple(
+            kp_aggressive=PerAxis(
                 kp_for_zeta(plant.vx.tau, ZETA_AGGRESSIVE),
                 kp_for_zeta(plant.vy.tau, ZETA_AGGRESSIVE),
                 kp_for_zeta(plant.wz.tau, ZETA_AGGRESSIVE),
             ),
-            plan_max_vel=AxisTriple(vp.max_linear_speed, vp.max_linear_speed, vp.max_angular_speed),
-            plan_max_acc=AxisTriple(vp.max_linear_accel, vp.max_linear_accel, yaw_acc),
+            plan_max_vel=PerAxis(vp.max_linear_speed, vp.max_linear_speed, vp.max_angular_speed),
+            plan_max_acc=PerAxis(vp.max_linear_accel, vp.max_linear_accel, yaw_acc),
             a_lat_max=vp.max_centripetal_accel,
             # FF output is a command; the command that reaches the envelope
             # speed is envelope / K.
-            ff_output_limit=AxisTriple(
+            ff_output_limit=PerAxis(
                 _safe_div(vp.max_linear_speed, k_hat.x),
                 _safe_div(vp.max_linear_speed, k_hat.y),
                 _safe_div(vp.max_angular_speed, k_hat.yaw),
@@ -225,7 +225,7 @@ __all__ = [
     "PLANNING_MARGIN",
     "ZETA_AGGRESSIVE",
     "ZETA_DEFAULT",
-    "AxisTriple",
+    "PerAxis",
     "ProfileLimits",
     "TrackingConfig",
     "kp_for_zeta",

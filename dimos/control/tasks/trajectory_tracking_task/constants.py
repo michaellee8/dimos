@@ -31,7 +31,7 @@ from dimos.control.tasks.trajectory_tracking_task.config import (
     PLANNING_MARGIN,
     ZETA_AGGRESSIVE,
     ZETA_DEFAULT,
-    AxisTriple,
+    PerAxis,
     TrackingConfig,
     kp_for_zeta,
 )
@@ -65,12 +65,12 @@ A_LAT_MAX = FLOWBASE_TRACKING.a_lat_max
 
 # Physical limits = K x firmware command limits (the planning margins above
 # are 85% of these). Kept as named values for traceability.
-PHYSICAL_MAX_VEL = AxisTriple(
+PHYSICAL_MAX_VEL = PerAxis(
     x=K_HAT.x * FLOWBASE_CMD_MAX_VEL[0],
     y=K_HAT.y * FLOWBASE_CMD_MAX_VEL[1],
     yaw=K_HAT.yaw * FLOWBASE_CMD_MAX_VEL[2],
 )
-PHYSICAL_MAX_ACC = AxisTriple(
+PHYSICAL_MAX_ACC = PerAxis(
     x=K_HAT.x * FLOWBASE_CMD_MAX_ACC[0],
     y=K_HAT.y * FLOWBASE_CMD_MAX_ACC[1],
     yaw=K_HAT.yaw * FLOWBASE_CMD_MAX_ACC[2],
@@ -101,7 +101,7 @@ __all__ = [
     "PLAN_MAX_VEL",
     "ZETA_AGGRESSIVE",
     "ZETA_DEFAULT",
-    "AxisTriple",
+    "PerAxis",
     "TrackingConfig",
     "flowbase_feedforward_config",
     "kp_for_zeta",
