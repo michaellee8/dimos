@@ -61,7 +61,7 @@ def _monitor(**config: object) -> tuple[EpisodeMonitorModule, _CaptureOut]:
 
 def _press(monitor: EpisodeMonitorModule, alias: str, ts: float) -> None:
     """Rising edge: release-then-press the given Quest button alias."""
-    from dimos.learning.collection.episode_monitor import BUTTON_ALIASES
+    from dimos.teleop.quest.quest_types import BUTTON_ALIASES
 
     attr = BUTTON_ALIASES[alias]
     released = Buttons()

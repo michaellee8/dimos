@@ -195,4 +195,21 @@ class Buttons(UInt32):
         return buttons
 
 
-__all__ = ["Buttons", "QuestControllerState", "ThumbstickState"]
+# Quest controller face-button labels → Buttons attribute names. Callers can
+# also pass a raw attribute name (e.g. "right_grip") directly where an alias is
+# accepted.
+BUTTON_ALIASES: dict[str, str] = {
+    "A": "right_primary",
+    "B": "right_secondary",
+    "X": "left_primary",
+    "Y": "left_secondary",
+    "LT": "left_trigger",
+    "RT": "right_trigger",
+    "LG": "left_grip",
+    "RG": "right_grip",
+    "MENU_L": "left_menu",
+    "MENU_R": "right_menu",
+}
+
+
+__all__ = ["BUTTON_ALIASES", "Buttons", "QuestControllerState", "ThumbstickState"]

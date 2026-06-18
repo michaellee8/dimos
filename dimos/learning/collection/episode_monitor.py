@@ -33,25 +33,10 @@ from reactivex.disposable import Disposable
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
-from dimos.teleop.quest.quest_types import Buttons
+from dimos.teleop.quest.quest_types import BUTTON_ALIASES, Buttons
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
-
-# Friendly names → Quest Buttons attribute names. Override by supplying an
-# attribute name directly in `button_map`.
-BUTTON_ALIASES: dict[str, str] = {
-    "A": "right_primary",
-    "B": "right_secondary",
-    "X": "left_primary",
-    "Y": "left_secondary",
-    "LT": "left_trigger",
-    "RT": "right_trigger",
-    "LG": "left_grip",
-    "RG": "right_grip",
-    "MENU_L": "left_menu",
-    "MENU_R": "right_menu",
-}
 
 
 class EpisodeStatus(BaseModel):
