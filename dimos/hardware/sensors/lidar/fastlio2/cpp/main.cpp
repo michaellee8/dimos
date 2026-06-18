@@ -63,8 +63,8 @@ static double get_publish_ts() {
 
 static std::string g_lidar_topic;
 static std::string g_odometry_topic;
-static std::string g_frame_id;        // required via --frame_id
-static std::string g_child_frame_id;   // required via --child_frame_id
+static std::string g_frame_id;  // required via --frame_id
+static std::string g_child_frame_id;  // required via --child_frame_id
 static float g_frequency = 10.0f;
 
 // Frame accumulator (Livox SDK raw → CustomMsg)
@@ -207,7 +207,7 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
         auto* pts = reinterpret_cast<const LivoxLidarCartesianHighRawPoint*>(data->data);
         for (uint16_t i = 0; i < dot_num; ++i) {
             custom_messages::CustomPoint cp;
-            cp.x = static_cast<double>(pts[i].x) / 1000.0;   // mm → m
+            cp.x = static_cast<double>(pts[i].x) / 1000.0;  // mm → m
             cp.y = static_cast<double>(pts[i].y) / 1000.0;
             cp.z = static_cast<double>(pts[i].z) / 1000.0;
             cp.reflectivity = pts[i].reflectivity;
@@ -220,7 +220,7 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
         auto* pts = reinterpret_cast<const LivoxLidarCartesianLowRawPoint*>(data->data);
         for (uint16_t i = 0; i < dot_num; ++i) {
             custom_messages::CustomPoint cp;
-            cp.x = static_cast<double>(pts[i].x) / 100.0;   // cm → m
+            cp.x = static_cast<double>(pts[i].x) / 100.0;  // cm → m
             cp.y = static_cast<double>(pts[i].y) / 100.0;
             cp.z = static_cast<double>(pts[i].z) / 100.0;
             cp.reflectivity = pts[i].reflectivity;
@@ -360,16 +360,16 @@ int main(int argc, char** argv) {
     // SDK network ports (defaults from SdkPorts struct in livox_sdk_config.hpp)
     livox_common::SdkPorts ports;
     const livox_common::SdkPorts port_defaults;
-    ports.cmd_data        = mod.arg_int("cmd_data_port", port_defaults.cmd_data);
-    ports.push_msg        = mod.arg_int("push_msg_port", port_defaults.push_msg);
-    ports.point_data      = mod.arg_int("point_data_port", port_defaults.point_data);
-    ports.imu_data        = mod.arg_int("imu_data_port", port_defaults.imu_data);
-    ports.log_data        = mod.arg_int("log_data_port", port_defaults.log_data);
-    ports.host_cmd_data   = mod.arg_int("host_cmd_data_port", port_defaults.host_cmd_data);
-    ports.host_push_msg   = mod.arg_int("host_push_msg_port", port_defaults.host_push_msg);
+    ports.cmd_data = mod.arg_int("cmd_data_port", port_defaults.cmd_data);
+    ports.push_msg = mod.arg_int("push_msg_port", port_defaults.push_msg);
+    ports.point_data = mod.arg_int("point_data_port", port_defaults.point_data);
+    ports.imu_data = mod.arg_int("imu_data_port", port_defaults.imu_data);
+    ports.log_data = mod.arg_int("log_data_port", port_defaults.log_data);
+    ports.host_cmd_data = mod.arg_int("host_cmd_data_port", port_defaults.host_cmd_data);
+    ports.host_push_msg = mod.arg_int("host_push_msg_port", port_defaults.host_push_msg);
     ports.host_point_data = mod.arg_int("host_point_data_port", port_defaults.host_point_data);
-    ports.host_imu_data   = mod.arg_int("host_imu_data_port", port_defaults.host_imu_data);
-    ports.host_log_data   = mod.arg_int("host_log_data_port", port_defaults.host_log_data);
+    ports.host_imu_data = mod.arg_int("host_imu_data_port", port_defaults.host_imu_data);
+    ports.host_log_data = mod.arg_int("host_log_data_port", port_defaults.host_log_data);
 
     if (debug) {
         printf("[fastlio2] Starting FAST-LIO2 + Livox Mid-360 native module\n");
