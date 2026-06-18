@@ -56,11 +56,6 @@ static std::atomic<bool> g_running{true};
 static lcm::LCM* g_lcm = nullptr;
 static FastLio* g_fastlio = nullptr;
 
-static double get_publish_ts() {
-    return std::chrono::duration<double>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-}
-
 static std::string g_lidar_topic;
 static std::string g_odometry_topic;
 static std::string g_frame_id;  // required via --frame_id
@@ -91,7 +86,7 @@ static std::vector<double> parse_doubles(const std::string& csv) {
     size_t i = 0;
     while (i < csv.size()) {
         size_t j = csv.find(',', i);
-        if (j == std::string::npos) j = csv.size();
+        if (j == std::string::npos) { j = csv.size(); }
         try {
             out.push_back(std::stod(csv.substr(i, j - i)));
         } catch (...) {
@@ -104,10 +99,9 @@ static std::vector<double> parse_doubles(const std::string& csv) {
 
 // Publish a lidar point cloud, stamped with `frame_id`.
 
-static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
-                          const std::string& frame_id, const std::string& topic = "") {
+static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp, const std::string& frame_id, const std::string& topic = "") {
     const std::string& chan = topic.empty() ? g_lidar_topic : topic;
-    if (!g_lcm || !cloud || cloud->empty() || chan.empty()) return;
+    if (!g_lcm || !cloud || cloud->empty() || chan.empty()) { return; }
 
     int num_points = static_cast<int>(cloud->size());
 
@@ -156,7 +150,7 @@ static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp,
 // Publish odometry
 
 static void publish_odometry(const custom_messages::Odometry& odom, double timestamp) {
-    if (!g_lcm) return;
+    if (!g_lcm) { return; }
 
     nav_msgs::Odometry msg;
     msg.header = make_header(g_frame_id, timestamp);
@@ -190,9 +184,8 @@ static void publish_odometry(const custom_messages::Odometry& odom, double times
 
 // Livox SDK callbacks
 
-static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
-                           LivoxLidarEthernetPacket* data, void* /*client_data*/) {
-    if (!g_running.load() || data == nullptr) return;
+static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/, LivoxLidarEthernetPacket* data, void* /*client_data*/) {
+    if (!g_running.load() || data == nullptr) { return; }
 
     uint64_t ts_ns = get_timestamp_ns(data);
     uint16_t dot_num = data->dot_num;
@@ -233,9 +226,8 @@ static void on_point_cloud(const uint32_t /*handle*/, const uint8_t /*dev_type*/
     }
 }
 
-static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
-                        LivoxLidarEthernetPacket* data, void* /*client_data*/) {
-    if (!g_running.load() || data == nullptr || !g_fastlio) return;
+static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/, LivoxLidarEthernetPacket* data, void* /*client_data*/) {
+    if (!g_running.load() || data == nullptr || !g_fastlio) { return; }
 
     uint64_t pkt_ts_ns = get_timestamp_ns(data);
 
@@ -253,28 +245,24 @@ static void on_imu_data(const uint32_t /*handle*/, const uint8_t /*dev_type*/,
         imu_msg->orientation.y = 0.0;
         imu_msg->orientation.z = 0.0;
         imu_msg->orientation.w = 1.0;
-        for (int j = 0; j < 9; ++j)
-            imu_msg->orientation_covariance[j] = 0.0;
+        for (int j = 0; j < 9; ++j) { imu_msg->orientation_covariance[j] = 0.0; }
 
         imu_msg->angular_velocity.x = static_cast<double>(imu_pts[i].gyro_x);
         imu_msg->angular_velocity.y = static_cast<double>(imu_pts[i].gyro_y);
         imu_msg->angular_velocity.z = static_cast<double>(imu_pts[i].gyro_z);
-        for (int j = 0; j < 9; ++j)
-            imu_msg->angular_velocity_covariance[j] = 0.0;
+        for (int j = 0; j < 9; ++j) { imu_msg->angular_velocity_covariance[j] = 0.0; }
 
         imu_msg->linear_acceleration.x = static_cast<double>(imu_pts[i].acc_x) * GRAVITY_MS2;
         imu_msg->linear_acceleration.y = static_cast<double>(imu_pts[i].acc_y) * GRAVITY_MS2;
         imu_msg->linear_acceleration.z = static_cast<double>(imu_pts[i].acc_z) * GRAVITY_MS2;
-        for (int j = 0; j < 9; ++j)
-            imu_msg->linear_acceleration_covariance[j] = 0.0;
+        for (int j = 0; j < 9; ++j) { imu_msg->linear_acceleration_covariance[j] = 0.0; }
 
         g_fastlio->feed_imu(imu_msg);
     }
 }
 
-static void on_info_change(const uint32_t handle, const LivoxLidarInfo* info,
-                           void* /*client_data*/) {
-    if (info == nullptr) return;
+static void on_info_change(const uint32_t handle, const LivoxLidarInfo* info, void* /*client_data*/) {
+    if (info == nullptr) { return; }
 
     char sn[17] = {};
     std::memcpy(sn, info->sn, 16);
@@ -282,8 +270,7 @@ static void on_info_change(const uint32_t handle, const LivoxLidarInfo* info,
     std::memcpy(ip, info->lidar_ip, 16);
 
     if (fastlio_debug) {
-        printf("[fastlio2] Device connected: handle=%u type=%u sn=%s ip=%s\n",
-               handle, info->dev_type, sn, ip);
+        printf("[fastlio2] Device connected: handle=%u type=%u sn=%s ip=%s\n", handle, info->dev_type, sn, ip);
     }
 
     SetLivoxLidarWorkMode(handle, kLivoxLidarNormal, nullptr, nullptr);
@@ -300,15 +287,18 @@ static void signal_handler(int /*sig*/) {
 
 // One iteration of the main loop: drain accumulated points into a CustomMsg,
 // run a FAST-LIO step, and publish results (rate-limited by the bookmarks).
-static void run_main_iter(std::chrono::steady_clock::time_point now,
-                          FastLio& fast_lio,
-                          std::chrono::steady_clock::time_point& last_emit,
-                          std::chrono::steady_clock::time_point& last_pc_publish,
-                          std::chrono::steady_clock::time_point& last_odom_publish,
-                          std::chrono::microseconds frame_interval,
-                          std::chrono::microseconds pc_interval,
-                          std::chrono::microseconds odom_interval,
-                          bool scan_publish_en, bool dense_publish_en) {
+static void run_main_iter(
+    std::chrono::steady_clock::time_point now,
+    FastLio& fast_lio,
+    std::chrono::steady_clock::time_point& last_emit,
+    std::chrono::steady_clock::time_point& last_pc_publish,
+    std::chrono::steady_clock::time_point& last_odom_publish,
+    std::chrono::microseconds frame_interval,
+    std::chrono::microseconds pc_interval,
+    std::chrono::microseconds odom_interval,
+    bool scan_publish_en,
+    bool dense_publish_en
+) {
     // At frame rate, drain accumulated raw points into a CustomMsg and feed
     // FAST-LIO. Hold g_pc_mutex across the rate-limit check + swap so a
     // callback can't slip a packet in between the decision and the swap.
@@ -329,12 +319,11 @@ static void run_main_iter(std::chrono::steady_clock::time_point now,
         // Build CustomMsg
         auto lidar_msg = boost::make_shared<custom_messages::CustomMsg>();
         lidar_msg->header.seq = 0;
-        lidar_msg->header.stamp = custom_messages::Time().fromSec(
-            static_cast<double>(frame_start) / 1e9);
+        lidar_msg->header.stamp = custom_messages::Time().fromSec(static_cast<double>(frame_start) / 1e9);
         lidar_msg->header.frame_id = "livox_frame";
         lidar_msg->timebase = frame_start;
         lidar_msg->lidar_id = 0;
-        for (int i = 0; i < 3; i++) lidar_msg->rsvd[i] = 0;
+        for (int i = 0; i < 3; i++) { lidar_msg->rsvd[i] = 0; }
         lidar_msg->point_num = static_cast<uli>(points.size());
         lidar_msg->points = std::move(points);
         fast_lio.feed_lidar(lidar_msg);
@@ -347,13 +336,11 @@ static void run_main_iter(std::chrono::steady_clock::time_point now,
     // Check for new SLAM results and publish (rate-limited).
     auto pose = fast_lio.get_pose();
     if (!pose.empty() && (pose[0] != 0.0 || pose[1] != 0.0 || pose[2] != 0.0)) {
-        double ts = get_publish_ts();
-        if (scan_publish_en && !g_lidar_topic.empty()
-                && now - last_pc_publish >= pc_interval) {
+        double ts = std::chrono::duration<double>(std::chrono::system_clock::now().time_since_epoch()).count();
+        if (scan_publish_en && !g_lidar_topic.empty() && now - last_pc_publish >= pc_interval) {
             // Sensor-frame cloud; register downstream via the odom pose.
             // dense_publish_en false -> FAST-LIO's IESKF-downsampled scan.
-            auto cloud = dense_publish_en ? fast_lio.get_body_cloud()
-                                          : fast_lio.get_body_cloud_down();
+            auto cloud = dense_publish_en ? fast_lio.get_body_cloud() : fast_lio.get_body_cloud_down();
             if (cloud && !cloud->empty()) {
                 publish_lidar(cloud, ts, g_sensor_frame_id);
             }
@@ -390,8 +377,7 @@ int main(int argc, char** argv) {
     params.filter_size_map = mod.arg_float("filter_size_map", params.filter_size_map);
     params.det_range = mod.arg_float("det_range", params.det_range);
     params.blind = mod.arg_float("blind", params.blind);
-    params.time_offset_lidar_to_imu =
-        mod.arg_float("time_offset_lidar_to_imu", params.time_offset_lidar_to_imu);
+    params.time_offset_lidar_to_imu = mod.arg_float("time_offset_lidar_to_imu", params.time_offset_lidar_to_imu);
     params.fov_degree = mod.arg_int("fov_degree", params.fov_degree);
     params.scan_line = mod.arg_int("scan_line", params.scan_line);
     params.scan_rate = mod.arg_int("scan_rate", params.scan_rate);
@@ -400,10 +386,9 @@ int main(int argc, char** argv) {
     std::string lidar_type = mod.arg("lidar_type", "livox");
     params.lidar_type = lidar_type == "velodyne" ? 2 : lidar_type == "ouster" ? 3 : 1;
     std::string ts_unit = mod.arg("timestamp_unit", "microsecond");
-    params.timestamp_unit =
-        ts_unit == "second" ? 0 : ts_unit == "millisecond" ? 1 : ts_unit == "nanosecond" ? 3 : 2;
-    if (auto et = parse_doubles(mod.arg("extrinsic_t", "")); !et.empty()) params.extrinsic_T = et;
-    if (auto er = parse_doubles(mod.arg("extrinsic_r", "")); !er.empty()) params.extrinsic_R = er;
+    params.timestamp_unit = ts_unit == "second" ? 0 : ts_unit == "millisecond" ? 1 : ts_unit == "nanosecond" ? 3 : 2;
+    if (auto et = parse_doubles(mod.arg("extrinsic_t", "")); !et.empty()) { params.extrinsic_T = et; }
+    if (auto er = parse_doubles(mod.arg("extrinsic_r", "")); !er.empty()) { params.extrinsic_R = er; }
 
     // FAST-LIO internal processing rates
     double msr_freq = mod.arg_float("msr_freq", 50.0f);
@@ -445,16 +430,11 @@ int main(int argc, char** argv) {
 
     if (debug) {
         printf("[fastlio2] Starting FAST-LIO2 + Livox Mid-360 native module\n");
-        printf("[fastlio2] lidar topic: %s\n",
-               g_lidar_topic.empty() ? "(disabled)" : g_lidar_topic.c_str());
-        printf("[fastlio2] odometry topic: %s\n",
-               g_odometry_topic.empty() ? "(disabled)" : g_odometry_topic.c_str());
-        printf("[fastlio2] acc_cov: %.3f  filter_size_surf: %.3f\n",
-               params.acc_cov, params.filter_size_surf);
-        printf("[fastlio2] host_ip: %s  lidar_ip: %s  frequency: %.1f Hz\n",
-               host_ip.c_str(), lidar_ip.c_str(), g_frequency);
-        printf("[fastlio2] pointcloud_freq: %.1f Hz  odom_freq: %.1f Hz\n",
-               pointcloud_freq, odom_freq);
+        printf("[fastlio2] lidar topic: %s\n", g_lidar_topic.empty() ? "(disabled)" : g_lidar_topic.c_str());
+        printf("[fastlio2] odometry topic: %s\n", g_odometry_topic.empty() ? "(disabled)" : g_odometry_topic.c_str());
+        printf("[fastlio2] acc_cov: %.3f  filter_size_surf: %.3f\n", params.acc_cov, params.filter_size_surf);
+        printf("[fastlio2] host_ip: %s  lidar_ip: %s  frequency: %.1f Hz\n", host_ip.c_str(), lidar_ip.c_str(), g_frequency);
+        printf("[fastlio2] pointcloud_freq: %.1f Hz  odom_freq: %.1f Hz\n", pointcloud_freq, odom_freq);
     }
 
     // Signal handlers
@@ -470,20 +450,17 @@ int main(int argc, char** argv) {
     g_lcm = &lcm;
 
     // Init FAST-LIO with config
-    if (debug) printf("[fastlio2] Initializing FAST-LIO...\n");
+    if (debug) { printf("[fastlio2] Initializing FAST-LIO...\n"); }
     FastLio fast_lio(params, msr_freq, main_freq);
     g_fastlio = &fast_lio;
-    if (debug) printf("[fastlio2] FAST-LIO initialized.\n");
+    if (debug) { printf("[fastlio2] FAST-LIO initialized.\n"); }
 
     // Main-loop rate-limit state (consumed by the loop below).
-    auto frame_interval = std::chrono::microseconds(
-        static_cast<int64_t>(1e6 / g_frequency));
+    auto frame_interval = std::chrono::microseconds(static_cast<int64_t>(1e6 / g_frequency));
     const double process_period_ms = 1000.0 / main_freq;
 
-    auto pc_interval = std::chrono::microseconds(
-        static_cast<int64_t>(1e6 / pointcloud_freq));
-    auto odom_interval = std::chrono::microseconds(
-        static_cast<int64_t>(1e6 / odom_freq));
+    auto pc_interval = std::chrono::microseconds(static_cast<int64_t>(1e6 / pointcloud_freq));
+    auto odom_interval = std::chrono::microseconds(static_cast<int64_t>(1e6 / odom_freq));
 
     // Rate-limit bookmarks, seeded to now so they don't all fire on iteration 1.
     auto last_emit = std::chrono::steady_clock::now();
@@ -503,14 +480,23 @@ int main(int argc, char** argv) {
         LivoxLidarSdkUninit();
         return 1;
     }
-    if (debug) printf("[fastlio2] SDK started, waiting for device...\n");
+    if (debug) { printf("[fastlio2] SDK started, waiting for device...\n"); }
 
     while (g_running.load()) {
         auto loop_start = std::chrono::high_resolution_clock::now();
         auto now = std::chrono::steady_clock::now();
-        run_main_iter(now, fast_lio, last_emit, last_pc_publish, last_odom_publish,
-                      frame_interval, pc_interval, odom_interval,
-                      scan_publish_en, dense_publish_en);
+        run_main_iter(
+            now,
+            fast_lio,
+            last_emit,
+            last_pc_publish,
+            last_odom_publish,
+            frame_interval,
+            pc_interval,
+            odom_interval,
+            scan_publish_en,
+            dense_publish_en
+        );
 
         // Drain LCM messages.
         lcm.handleTimeout(0);
@@ -519,19 +505,18 @@ int main(int argc, char** argv) {
         auto loop_end = std::chrono::high_resolution_clock::now();
         auto elapsed_ms = std::chrono::duration<double, std::milli>(loop_end - loop_start).count();
         if (elapsed_ms < process_period_ms) {
-            std::this_thread::sleep_for(std::chrono::microseconds(
-                static_cast<int64_t>((process_period_ms - elapsed_ms) * 1000)));
+            std::this_thread::sleep_for(std::chrono::microseconds(static_cast<int64_t>((process_period_ms - elapsed_ms) * 1000)));
         }
     }
 
     // Cleanup. Uninit the SDK (stops + joins its callback threads) BEFORE
     // clearing the globals the callbacks read, so a late on_point/on_imu can't
     // race the assignment and dereference a null g_fastlio / g_lcm.
-    if (debug) printf("[fastlio2] Shutting down...\n");
+    if (debug) { printf("[fastlio2] Shutting down...\n"); }
     LivoxLidarSdkUninit();
     g_fastlio = nullptr;
     g_lcm = nullptr;
 
-    if (debug) printf("[fastlio2] Done.\n");
+    if (debug) { printf("[fastlio2] Done.\n"); }
     return 0;
 }

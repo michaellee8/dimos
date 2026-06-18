@@ -63,7 +63,7 @@ static std::vector<double> parse_doubles(const std::string& csv) {
     size_t i = 0;
     while (i < csv.size()) {
         size_t j = csv.find(',', i);
-        if (j == std::string::npos) j = csv.size();
+        if (j == std::string::npos) { j = csv.size(); }
         try {
             out.push_back(std::stod(csv.substr(i, j - i)));
         } catch (...) {

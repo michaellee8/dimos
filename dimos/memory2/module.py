@@ -351,11 +351,10 @@ class Recorder(MemoryModule):
             return
 
         for name, port in self.inputs.items():
-            stream: Stream[Any] = self.store.stream(self._stream_name(name), port.type)
+            stream_name = self.config.stream_remapping.get(name, name)
+            stream: Stream[Any] = self.store.stream(stream_name, port.type)
             self._port_to_stream(name, port, stream)
-            logger.info(
-                "Recording %s -> %s (%s)", name, self._stream_name(name), port.type.__name__
-            )
+            logger.info("Recording %s -> %s (%s)", name, stream_name, port.type.__name__)
 
         if self.config.record_tf:
             self._record_tf()
@@ -385,18 +384,13 @@ class Recorder(MemoryModule):
 
         self.register_disposable(Disposable(input_topic.subscribe(on_msg)))
 
-    def _stream_name(self, port_name: str) -> str:
-        """db stream/table name to record *port_name* under. Renamed via
-        ``config.stream_remapping``; override for fancier mapping."""
-        return self.config.stream_remapping.get(port_name, port_name)
-
     def _prepare_streams(self) -> None:
         """On APPEND, drop the streams this recorder is about to (re)write — the
         remapped In-port streams plus ``tf`` — so a re-run replaces them instead
         of duplicating, while leaving any other streams in the db untouched."""
         if self.config.on_existing is not OnExisting.APPEND:
             return
-        targets = {self._stream_name(name) for name in self.inputs}
+        targets = {self.config.stream_remapping.get(name, name) for name in self.inputs}
         if self.config.record_tf:
             targets.add("tf")
         for stream in targets.intersection(self.store.list_streams()):
