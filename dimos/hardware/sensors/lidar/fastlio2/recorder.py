@@ -14,24 +14,27 @@
 
 """Record FAST-LIO odometry + lidar into a memory2 SQLite db.
 
-Subscribes to a FastLio2's ``odometry`` / ``lidar`` outputs (auto-connected by
-matching stream name + type — no remappings needed) and appends them to a
-memory2 store. Timestamps are converted onto the db's existing clock so a run
-can be appended to an existing db and compared on one timeline. Owns the db
-lifecycle: refuses to clobber existing streams unless ``force``, and derives the
-alignment reference from whatever the db already holds.
+A memory2 ``Recorder`` whose ``odometry`` / ``lidar`` In ports auto-connect to a
+FastLio2's same-named outputs. Beyond the base recorder it: records under
+configurable stream names, re-bases timestamps onto the db's existing clock so a
+run can be appended and compared on one timeline, replaces only its own streams
+when appending (``force``), and sets poses from the odometry stream rather than
+tf — each lidar frame is stamped with the latest odometry pose, so
+``fastlio_lidar`` carries the trajectory and ``dimos map global`` can register it
+directly.
 """
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 import math
 from pathlib import Path
 import sqlite3
 import time
+from typing import Any
 
-from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In
+from dimos.memory2.module import OnExisting, Recorder, RecorderConfig
+from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 
@@ -39,6 +42,9 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 _SENSOR_CLOCK_MAX = 1e8
 # Strictly-increasing tie-breaker so two samples never collide on ts.
 _EPS = 1e-9
+# Max sensor-ts gap to attach the latest odometry pose to a lidar frame. Matches
+# pose_fill's nearest-match window; odometry is ~30 Hz so this nearly always hits.
+_POSE_MATCH_TOL = 0.1
 
 
 def _existing_min_ts(db_path: Path) -> float:
@@ -69,10 +75,9 @@ def _existing_min_ts(db_path: Path) -> float:
         con.close()
 
 
-class FastLio2RecorderConfig(ModuleConfig):
-    """Configures the recorder with the target db and timing conversion."""
+class FastLio2RecorderConfig(RecorderConfig):
+    """Target db + timing conversion for the FAST-LIO recorder."""
 
-    db_path: str = ""
     # db stream/table names the FastLio2 outputs are recorded under.
     odom_stream_name: str = "fastlio_odometry"
     lidar_stream_name: str = "fastlio_lidar"
@@ -80,44 +85,45 @@ class FastLio2RecorderConfig(ModuleConfig):
     time_offset: float = float("nan")
     # Drop pre-existing odom/lidar streams instead of refusing to overwrite.
     force: bool = False
+    # Append into a populated db (keep other streams); replace only our two.
+    on_existing: OnExisting = OnExisting.APPEND
 
 
-class FastLio2Recorder(Module):
+class FastLio2Recorder(Recorder):
     config: FastLio2RecorderConfig
 
-    lidar: In[PointCloud2]
     odometry: In[Odometry]
+    lidar: In[PointCloud2]
+
     _offset: float | None = None
     _ref_start_ts: float = -1.0
     _last_odom_ts: float = 0.0
     _last_lidar_ts: float = 0.0
-    _last_pose: object = None
-    _odom_count: int = 0
-    _lidar_count: int = 0
+    # Latest odometry pose + its raw sensor ts, stamped onto each lidar frame.
+    _last_odom_pose: Pose | None = None
+    _last_odom_raw_ts: float = 0.0
 
-    async def main(self) -> AsyncIterator[None]:
-        # Deferred: the store is opened in the worker process that runs main(),
-        # not at module-scan/import time on the host.
-        from dimos.memory2.store.sqlite import SqliteStore
+    def _stream_name(self, port_name: str) -> str:
+        if port_name == "odometry":
+            return self.config.odom_stream_name
+        if port_name == "lidar":
+            return self.config.lidar_stream_name
+        return port_name
 
+    def _prepare_streams(self) -> None:
         cfg = self.config
-        self._store = SqliteStore(path=cfg.db_path)
         names = (cfg.odom_stream_name, cfg.lidar_stream_name)
-        existing = sorted(set(self._store.list_streams()) & set(names))
+        existing = sorted(set(self.store.list_streams()) & set(names))
         if existing and not cfg.force:
             raise RuntimeError(
                 f"FastLio2Recorder: {Path(cfg.db_path).name} already has {existing}; "
                 "set force=True to overwrite"
             )
         for name in existing:
-            self._store.delete_stream(name)
+            self.store.delete_stream(name)
         # Reference is the db's earliest ts *after* dropping our own old streams,
         # so only the data we're aligning against counts.
         self._ref_start_ts = _existing_min_ts(Path(cfg.db_path))
-        self._os = self._store.stream(cfg.odom_stream_name, Odometry)
-        self._ls = self._store.stream(cfg.lidar_stream_name, PointCloud2)
-        yield
-        self._store.stop()
 
     def _resolve_offset(self, first_ts: float) -> float:
         override = self.config.time_offset
@@ -130,28 +136,38 @@ class FastLio2Recorder(Module):
         # db on wall-clock time -> start-align FastLio2 onto the db's earliest ts.
         return ref - first_ts
 
-    def _aligned_ts(self, raw_ts: float, last_ts: float) -> float:
-        """Convert a sensor ts onto the db clock, kept strictly above last_ts."""
-        if self._offset is None:
-            self._offset = self._resolve_offset(raw_ts)
-        return max(raw_ts + self._offset, last_ts + _EPS)
-
-    async def handle_odometry(self, msg: Odometry) -> None:
+    def _resolve_ts(self, name: str, msg: Any) -> float:
         # `is not None`, not `or`: a real sensor ts of 0.0 must not fall back to
         # wall time (would misclassify the stream's clock in _resolve_offset).
-        raw_ts_raw = getattr(msg, "ts", None)
-        raw_ts = raw_ts_raw if raw_ts_raw is not None else time.time()
-        ts = self._aligned_ts(raw_ts, self._last_odom_ts)
-        self._last_odom_ts = ts
-        pose = getattr(msg, "pose", None)
-        self._last_pose = getattr(pose, "pose", None) if pose is not None else None
-        self._os.append(msg, ts=ts, pose=self._last_pose)
-        self._odom_count += 1
+        raw = getattr(msg, "ts", None)
+        raw = raw if raw is not None else time.time()
+        if self._offset is None:
+            self._offset = self._resolve_offset(raw)
+        last = self._last_odom_ts if name == "odometry" else self._last_lidar_ts
+        ts = max(raw + self._offset, last + _EPS)
+        if name == "odometry":
+            self._last_odom_ts = ts
+        else:
+            self._last_lidar_ts = ts
+        return ts
 
-    async def handle_lidar(self, msg: PointCloud2) -> None:
-        raw_ts_raw = getattr(msg, "ts", None)
-        raw_ts = raw_ts_raw if raw_ts_raw is not None else time.time()
-        ts = self._aligned_ts(raw_ts, self._last_lidar_ts)
-        self._last_lidar_ts = ts
-        self._ls.append(msg, ts=ts, pose=self._last_pose)
-        self._lidar_count += 1
+    def _resolve_pose(self, name: str, msg: Any, ts: float) -> Pose | None:
+        if name == "odometry":
+            pose = getattr(msg, "pose", None)
+            inner = getattr(pose, "pose", None) if pose is not None else None
+            self._last_odom_pose = inner
+            raw = getattr(msg, "ts", None)
+            self._last_odom_raw_ts = raw if raw is not None else 0.0
+            return inner
+        # lidar: stamp the latest odometry pose when it's recent enough. Both
+        # FastLio2 outputs share a publish ts, so the nearest odometry is at most
+        # ~one odom period stale. Frames with no match (e.g. before the first
+        # odometry) get None and are map-skipped.
+        raw = getattr(msg, "ts", None)
+        raw = raw if raw is not None else 0.0
+        if (
+            self._last_odom_pose is not None
+            and abs(raw - self._last_odom_raw_ts) <= _POSE_MATCH_TOL
+        ):
+            return self._last_odom_pose
+        return None

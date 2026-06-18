@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from reactivex.abc import DisposableBase
 
     from dimos.core.stream import In, Out
+    from dimos.msgs.geometry_msgs.Pose import Pose
 
 logger = setup_logger()
 
@@ -251,6 +252,10 @@ class OnExisting(str, enum.Enum):
     OVERWRITE = "overwrite"
     ERROR = "error"
     BACKUP = "backup"
+    # Leave the db untouched (keep all existing streams); subclasses that append
+    # into a populated db handle their own per-stream replacement in
+    # ``_prepare_streams``.
+    APPEND = "append"
 
 
 class RecorderConfig(MemoryModuleConfig):
@@ -291,7 +296,9 @@ class Recorder(MemoryModule):
         # this module in a deployed blueprint.
         db_path = Path(self.config.db_path)
         if db_path.exists():
-            if self.config.on_existing is OnExisting.OVERWRITE:
+            if self.config.on_existing is OnExisting.APPEND:
+                pass  # keep the db; _prepare_streams handles any per-stream replacement
+            elif self.config.on_existing is OnExisting.OVERWRITE:
                 db_path.unlink()
                 logger.info("Deleted existing recording %s", db_path)
             elif self.config.on_existing is OnExisting.BACKUP:
@@ -303,14 +310,18 @@ class Recorder(MemoryModule):
             else:
                 raise FileExistsError(f"Recording already exists: {db_path}")
 
+        self._prepare_streams()
+
         if not self.inputs:
             logger.warning("Recorder has no In ports — nothing to record, subclass the Recorder")
             return
 
         for name, port in self.inputs.items():
-            stream: Stream[Any] = self.store.stream(name, port.type)
+            stream: Stream[Any] = self.store.stream(self._stream_name(name), port.type)
             self._port_to_stream(name, port, stream)
-            logger.info("Recording %s (%s)", name, port.type.__name__)
+            logger.info(
+                "Recording %s -> %s (%s)", name, self._stream_name(name), port.type.__name__
+            )
 
     def _port_to_stream(self, name: str, input_topic: In[Any], stream: Stream[Any]) -> None:
         """Append each message from *input_topic* to *stream*, attaching world pose via tf.
@@ -323,23 +334,37 @@ class Recorder(MemoryModule):
         Registers the subscription as a disposable on this module.
         """
 
-        default_frame_id = self.config.default_frame_id
-        tf_tolerance = self.config.tf_tolerance
-
         def on_msg(msg: Any) -> None:
-            ts = getattr(msg, "ts", None) or time.time()
-            frame_id = getattr(msg, "frame_id", None) or default_frame_id
-            transform = self.tf.get("world", frame_id, time_point=ts, time_tolerance=tf_tolerance)
-            pose = transform.to_pose() if transform is not None else None
-
+            ts = self._resolve_ts(name, msg)
+            pose = self._resolve_pose(name, msg, ts)
             if not pose:
                 logger.warning(
-                    "[%s] No tf available for frame '%s' at time %s (msg ts: %s), storing without pose",
+                    "[%s] No pose for time %s (msg ts: %s), storing without pose",
                     name,
-                    frame_id,
                     ts,
                     getattr(msg, "ts", None),
                 )
             stream.append(msg, ts=ts, pose=pose)
 
         self.register_disposable(Disposable(input_topic.subscribe(on_msg)))
+
+    def _stream_name(self, port_name: str) -> str:
+        """db stream/table name to record *port_name* under. Override to rename."""
+        return port_name
+
+    def _prepare_streams(self) -> None:
+        """Hook run after the on_existing check, before ports are wired. Override
+        to replace specific streams when appending into a populated db."""
+
+    def _resolve_ts(self, name: str, msg: Any) -> float:
+        """Timestamp to record *msg* at. Override to re-base onto another clock."""
+        return getattr(msg, "ts", None) or time.time()
+
+    def _resolve_pose(self, name: str, msg: Any, ts: float) -> Pose | None:
+        """Pose to anchor *msg* with. Default: world<-frame_id via tf. Override to
+        source poses elsewhere (e.g. from an odometry stream)."""
+        frame_id = getattr(msg, "frame_id", None) or self.config.default_frame_id
+        transform = self.tf.get(
+            "world", frame_id, time_point=ts, time_tolerance=self.config.tf_tolerance
+        )
+        return transform.to_pose() if transform is not None else None
