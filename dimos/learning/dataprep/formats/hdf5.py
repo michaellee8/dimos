@@ -68,7 +68,7 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
 
     # Per-episode buffers — flushed at episode boundary.
     cur_id: str | None = None
-    cur_idx = -1
+    cur_idx = 0
     cur_start_ts: float | None = None
     buf_ts: list[float] = []
     buf_obs: dict[str, list[np.ndarray]] = {}
@@ -79,9 +79,9 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
     with h5py.File(out, "w") as h5:
         episodes_g = h5.create_group("episodes")
 
-        def _flush() -> None:
-            if cur_idx < 0 or not buf_ts:
-                return
+        def _flush() -> bool:
+            if not buf_ts:
+                return False
             ep = episodes_g.create_group(f"episode_{cur_idx:06d}")
             ep.attrs["length"] = len(buf_ts)
             ep.attrs["start_ts"] = float(cur_start_ts or 0.0)
@@ -100,12 +100,13 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
             buf_ts.clear()
             buf_obs.clear()
             buf_act.clear()
+            return True
 
         for sample in samples:
             if sample.episode_id != cur_id:
-                _flush()
+                if _flush():
+                    cur_idx += 1
                 cur_id = sample.episode_id
-                cur_idx += 1
                 cur_start_ts = float(sample.ts)
                 if default_task_label not in tasks_index:
                     tasks_index[default_task_label] = len(tasks_index)

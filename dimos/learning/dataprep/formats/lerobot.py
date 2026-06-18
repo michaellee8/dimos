@@ -110,7 +110,7 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
     default_task_label = output.metadata.get("default_task_label", "task")
 
     current_episode_id: str | None = None
-    current_episode_index = -1
+    current_episode_index = 0
     current_frames: list[dict[str, Any]] = []
     current_video_writers: dict[str, Any] = {}
     global_index = 0
@@ -133,10 +133,10 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
             raise RuntimeError(f"Failed to open VideoWriter for {path}")
         return writer
 
-    def _flush_episode() -> None:
+    def _flush_episode() -> bool:
         nonlocal current_frames, current_video_writers, current_episode_index
         if not current_frames:
-            return
+            return False
         for vw in current_video_writers.values():
             vw.release()
         current_video_writers = {}
@@ -173,13 +173,14 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
             }
         )
         current_frames = []
+        return True
 
     try:
         for sample in samples:
             if sample.episode_id != current_episode_id:
-                _flush_episode()
+                if _flush_episode():
+                    current_episode_index += 1
                 current_episode_id = sample.episode_id
-                current_episode_index += 1
                 label = default_task_label
                 if label not in tasks_index:
                     tasks_index[label] = len(tasks_index)

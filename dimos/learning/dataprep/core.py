@@ -301,35 +301,34 @@ def iter_episode_samples(
             return None
         return msg_list[best]
 
-    # Buffer the episode in order; the action shift below pairs obs[i] with
-    # action[i + shift].
-    frames: list[Sample] = []
-    for t in targets:
-        obs_dict: dict[str, np.ndarray] = {}
-        act_dict: dict[str, np.ndarray] = {}
-        skip = False
-        for key, ref in streams.items():
-            msg = _nearest(key, t)
-            if msg is None:
-                skip = True
-                break
-            arr = resolve_field(msg, ref)
-            if arr.ndim < 3:
-                arr = arr.astype(np.float32, copy=False)
-            if key in action_keys:
-                act_dict[key] = arr
-            elif key in obs_keys:
-                obs_dict[key] = arr
-        if skip:
-            continue
-        frames.append(Sample(ts=t, episode_id=episode.id, observation=obs_dict, action=act_dict))
+    def _build_frames() -> Iterator[Sample]:
+        for t in targets:
+            obs_dict: dict[str, np.ndarray] = {}
+            act_dict: dict[str, np.ndarray] = {}
+            skip = False
+            for key, ref in streams.items():
+                msg = _nearest(key, t)
+                if msg is None:
+                    skip = True
+                    break
+                arr = resolve_field(msg, ref)
+                if arr.ndim < 3:
+                    arr = arr.astype(np.float32, copy=False)
+                if key in action_keys:
+                    act_dict[key] = arr
+                elif key in obs_keys:
+                    obs_dict[key] = arr
+            if skip:
+                continue
+            yield Sample(ts=t, episode_id=episode.id, observation=obs_dict, action=act_dict)
 
     shift = max(0, sync.action_shift)
     if shift == 0 or not action_keys:
-        yield from frames
+        yield from _build_frames()
         return
 
     # frame i keeps its obs but takes frame i+shift's action; tail dropped.
+    frames = list(_build_frames())
     for i in range(len(frames) - shift):
         cur = frames[i]
         nxt = frames[i + shift]

@@ -40,7 +40,10 @@ from dimos.teleop.quest.blueprints import (
 )
 from dimos.teleop.quest.quest_types import Buttons
 
-_SESSION_DB = f"data/recordings/session_{datetime.now():%Y%m%d_%H%M%S}.db"
+
+def _session_db(robot: str) -> str:
+    """Timestamped session DB path, namespaced by robot."""
+    return f"data/recordings/session_{robot}_{datetime.now():%Y%m%d_%H%M%S}.db"
 
 
 def _camera_if_real() -> tuple[Blueprint, ...]:
@@ -59,7 +62,7 @@ learning_collect_quest_xarm7 = autoconnect(
     teleop_quest_xarm7,
     *_camera_if_real(),
     EpisodeMonitorModule.blueprint(),  # default button_map: toggle=B, discard=Y
-    CollectionRecorder.blueprint(db_path=_SESSION_DB),
+    CollectionRecorder.blueprint(db_path=_session_db("xarm7")),
 ).transports(
     {
         ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
@@ -74,7 +77,7 @@ learning_collect_quest_piper = autoconnect(
     teleop_quest_piper,
     *_camera_if_real(),
     EpisodeMonitorModule.blueprint(),  # default button_map: toggle=B, discard=Y
-    CollectionRecorder.blueprint(db_path=_SESSION_DB),
+    CollectionRecorder.blueprint(db_path=_session_db("piper")),
 ).transports(
     {
         ("buttons", Buttons): LCMTransport("/teleop/buttons", Buttons),
