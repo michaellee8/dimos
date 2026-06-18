@@ -194,6 +194,11 @@ def main(
     ray_subsample: int = typer.Option(1, "--ray-subsample", help="Keep every Nth ray"),
     emit_every: int = typer.Option(1, "--emit-every", help="Replan every N lidar frames"),
     robot_height: float = typer.Option(1.0, "--robot-height", help="Robot height (m)"),
+    surface_closing_radius: float = typer.Option(
+        0.3,
+        "--surface-closing-radius",
+        help="Hole-fill radius (m); morphological closing fills holes up to twice this wide",
+    ),
     node_spacing: float = typer.Option(1.0, "--node-spacing", help="Graph node spacing (m)"),
     wall_clearance: float = typer.Option(
         0.3,
@@ -205,6 +210,11 @@ def main(
     ),
     wall_buffer_weight: float = typer.Option(
         100.0, "--wall-buffer-weight", help="Peak soft wall penalty at the clearance edge"
+    ),
+    step_height: float = typer.Option(
+        0.25,
+        "--step-height",
+        help="Max traversable vertical step (m); taller steps are impassable",
     ),
     step_penalty_weight: float = typer.Option(
         4.0, "--step-penalty-weight", help="Soft cost per meter of vertical climb"
@@ -273,10 +283,12 @@ def main(
             planner = MLSPlanner(
                 voxel_size=voxel_size,
                 robot_height=robot_height,
+                surface_closing_radius=surface_closing_radius,
                 node_spacing_m=node_spacing,
                 wall_clearance_m=clr,
                 wall_buffer_m=buf,
                 wall_buffer_weight=wgt,
+                step_threshold_m=step_height,
                 step_penalty_weight=step_penalty_weight,
             )
             color = PATH_PALETTE[i % len(PATH_PALETTE)]
