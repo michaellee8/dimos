@@ -58,7 +58,7 @@ from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.navigation.nav_stack.frames import FRAME_ODOM
+from dimos.navigation.nav_stack.frames import FRAME_BODY, FRAME_ODOM, FRAME_SENSOR
 from dimos.spec import perception
 
 # Human-readable enums; the C++ binary (main.cpp) maps these strings to
@@ -81,11 +81,13 @@ class PointLioConfig(NativeModuleConfig):
     lidar_ip: str | None = Field(default_factory=lambda: os.environ.get("DIMOS_POINTLIO_LIDAR_IP"))
     frequency: float = 10.0
 
-    # Sensor frame for the cloud + odometry headers.
-    frame_id: str = "mid360_link"
-    # Published TF: body_start_frame_id -> body_frame_id.
-    body_start_frame_id: str = FRAME_ODOM
-    body_frame_id: str = "base_link"
+    # Odometry is published as frame_id (fixed) -> child_frame_id (moving body),
+    # and also broadcast on TF. The point cloud is stamped with sensor_frame_id
+    # (the lidar's own frame — get_body_cloud is the undistorted scan, not yet
+    # transformed into the body frame).
+    frame_id: str = FRAME_ODOM
+    child_frame_id: str = FRAME_BODY
+    sensor_frame_id: str = FRAME_SENSOR
 
     # Point-LIO internal processing rates (Hz)
     msr_freq: float = 50.0
@@ -165,10 +167,6 @@ class PointLioConfig(NativeModuleConfig):
     host_imu_data_port: int = SDK_HOST_IMU_DATA_PORT
     host_log_data_port: int = SDK_HOST_LOG_DATA_PORT
 
-    # body_start_frame_id anchors the published TF in Python only; it's not a
-    # binary arg. Everything else (tuning included) renders to a CLI arg.
-    cli_exclude: frozenset[str] = frozenset({"body_start_frame_id"})
-
 
 class PointLio(NativeModule, perception.Lidar, perception.Odometry):
     config: PointLioConfig
@@ -187,8 +185,8 @@ class PointLio(NativeModule, perception.Lidar, perception.Odometry):
     def _on_odom_for_tf(self, msg: Odometry) -> None:
         self.tf.publish(
             Transform(
-                frame_id=self.config.body_start_frame_id,
-                child_frame_id=self.config.body_frame_id,
+                frame_id=self.frame_id,
+                child_frame_id=self.config.child_frame_id,
                 translation=Vector3(
                     msg.pose.position.x,
                     msg.pose.position.y,

@@ -52,7 +52,7 @@ from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.navigation.nav_stack.frames import FRAME_BODY, FRAME_ODOM
+from dimos.navigation.nav_stack.frames import FRAME_BODY, FRAME_ODOM, FRAME_SENSOR
 from dimos.spec import perception
 
 # Human-readable enums; the C++ binary maps these strings to FAST-LIO's int codes.
@@ -71,10 +71,13 @@ class FastLio2Config(NativeModuleConfig):
     lidar_ip: str | None = Field(default_factory=lambda: os.environ.get("DIMOS_FASTLIO_LIDAR_IP"))
     frequency: float = 10.0
 
-    # "odom" frame: FastLio2 gives smooth continuous odometry; PGO publishes the
-    # map→odom correction via TF.
+    # Odometry is published as frame_id (fixed) -> child_frame_id (moving body),
+    # and also broadcast on TF. The point cloud is stamped with sensor_frame_id
+    # (the lidar's own frame — get_body_cloud is the undistorted scan, not yet
+    # transformed into the body frame).
     frame_id: str = FRAME_ODOM
     child_frame_id: str = FRAME_BODY
+    sensor_frame_id: str = FRAME_SENSOR
 
     # FAST-LIO internal processing rates
     msr_freq: float = 50.0

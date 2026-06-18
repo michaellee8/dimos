@@ -5,7 +5,7 @@
 //
 // Binds Livox SDK2 directly into the Point-LIO core: SDK callbacks feed
 // CustomMsg/Imu to the IESKF estimator, which performs LiDAR-inertial SLAM.
-// Sensor-frame (mid360_link) point clouds and odometry are published on LCM.
+// Sensor-frame point clouds and odometry are published on LCM.
 //
 // Usage:
 //   ./pointlio_native \
@@ -78,6 +78,7 @@ static std::string g_lidar_topic;
 static std::string g_odometry_topic;
 static std::string g_frame_id;          // required via --frame_id
 static std::string g_child_frame_id;     // required via --child_frame_id
+static std::string g_sensor_frame_id;    // required via --sensor_frame_id
 static float g_frequency = 10.0f;
 
 // Frame accumulator (Livox SDK raw → CustomMsg)
@@ -102,7 +103,7 @@ static uint64_t get_timestamp_ns(const LivoxLidarEthernetPacket* pkt) {
 using dimos::time_from_seconds;
 using dimos::make_header;
 
-// Publish the lidar point cloud in the sensor body frame (g_frame_id).
+// Publish the lidar point cloud in the sensor frame (g_sensor_frame_id).
 // `cloud` is Point-LIO's undistorted scan in the sensor's own frame
 // (get_body_cloud), so points are published as-is with no world registration.
 static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp, const std::string& topic = "") {
@@ -112,7 +113,7 @@ static void publish_lidar(PointCloudXYZI::Ptr cloud, double timestamp, const std
     int num_points = static_cast<int>(cloud->size());
 
     sensor_msgs::PointCloud2 pc;
-    pc.header = make_header(g_frame_id, timestamp);
+    pc.header = make_header(g_sensor_frame_id, timestamp);
     pc.height = 1;
     pc.width = num_points;
     pc.is_bigendian = 0;
@@ -410,7 +411,8 @@ int main(int argc, char** argv) {
     std::string lidar_ip = mod.arg("lidar_ip", "192.168.1.155");
     g_frequency = mod.arg_float("frequency", 10.0f);
     g_frame_id = mod.arg_required("frame_id");
-    g_child_frame_id = mod.arg_required("body_frame_id");
+    g_child_frame_id = mod.arg_required("child_frame_id");
+    g_sensor_frame_id = mod.arg_required("sensor_frame_id");
     float pointcloud_freq = mod.arg_float("pointcloud_freq", 5.0f);
     float odom_freq = mod.arg_float("odom_freq", 50.0f);
 

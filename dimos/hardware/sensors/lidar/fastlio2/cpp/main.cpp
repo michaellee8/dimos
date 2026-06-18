@@ -65,6 +65,7 @@ static std::string g_lidar_topic;
 static std::string g_odometry_topic;
 static std::string g_frame_id;  // required via --frame_id
 static std::string g_child_frame_id;  // required via --child_frame_id
+static std::string g_sensor_frame_id;  // required via --sensor_frame_id
 static float g_frequency = 10.0f;
 
 // Frame accumulator (Livox SDK raw → CustomMsg)
@@ -349,12 +350,12 @@ static void run_main_iter(std::chrono::steady_clock::time_point now,
         double ts = get_publish_ts();
         if (scan_publish_en && !g_lidar_topic.empty()
                 && now - last_pc_publish >= pc_interval) {
-            // Sensor/body-frame cloud; register downstream via the odom pose.
+            // Sensor-frame cloud; register downstream via the odom pose.
             // dense_publish_en false -> FAST-LIO's IESKF-downsampled scan.
             auto cloud = dense_publish_en ? fast_lio.get_body_cloud()
                                           : fast_lio.get_body_cloud_down();
             if (cloud && !cloud->empty()) {
-                publish_lidar(cloud, ts, g_child_frame_id);
+                publish_lidar(cloud, ts, g_sensor_frame_id);
             }
             last_pc_publish = now;
         }
@@ -414,6 +415,7 @@ int main(int argc, char** argv) {
     g_frequency = mod.arg_float("frequency", 10.0f);
     g_frame_id = mod.arg_required("frame_id");
     g_child_frame_id = mod.arg_required("child_frame_id");
+    g_sensor_frame_id = mod.arg_required("sensor_frame_id");
     float pointcloud_freq = mod.arg_float("pointcloud_freq", 5.0f);
     float odom_freq = mod.arg_float("odom_freq", 50.0f);
 
