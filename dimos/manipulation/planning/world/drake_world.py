@@ -93,7 +93,7 @@ except ImportError:
 logger = setup_logger()
 
 
-def _pose_stamped_from_drake_transform(transform: Any) -> PoseStamped:
+def _pose_stamped_from_drake_transform(transform: RigidTransform) -> PoseStamped:
     """Convert a Drake RigidTransform-like object to a world-frame pose."""
     position = transform.translation()
     quaternion = transform.rotation().ToQuaternion()
