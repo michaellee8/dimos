@@ -84,7 +84,9 @@ m20_onboard = autoconnect(
     vis_module(
         viewer_backend=global_config.viewer,
         rerun_config={
-            "max_hz": {"dimos/grid_map_3d": 1},
+            # Keys are Rerun entity paths, not Zenoh topics: the bridge maps
+            # dimos/grid_map_3d#... -> world/grid_map_3d (strip #type, dimos/ -> world/).
+            "max_hz": {"world/grid_map_3d": 1},
         },
     ),
 ).global_config(n_workers=2)
