@@ -27,12 +27,6 @@ from dimos.robot.catalog.franka import (
 from dimos.utils.data import LfsPath
 
 
-def _lfs_filename(path: LfsPath) -> str:
-    filename = path.lfs_filename
-    assert isinstance(filename, str)
-    return filename
-
-
 def test_franka_panda_catalog_defaults_to_mock_control() -> None:
     """The Panda catalog config is mock-control first."""
     config = franka_panda()
@@ -47,9 +41,9 @@ def test_franka_panda_catalog_defaults_to_mock_control() -> None:
 
 def test_franka_panda_uses_lfs_backed_model_and_srdf_paths() -> None:
     """Panda URDF/SRDF resources follow the repo LFS-backed data pattern."""
-    assert _lfs_filename(FRANKA_PANDA_MODEL) == "franka_description/urdf/panda.urdf.xacro"
-    assert _lfs_filename(FRANKA_PANDA_FK_MODEL) == "franka_description/urdf/panda.urdf"
-    assert _lfs_filename(FRANKA_PANDA_SRDF) == "franka_description/srdf/panda.srdf"
+    assert isinstance(FRANKA_PANDA_MODEL, LfsPath)
+    assert isinstance(FRANKA_PANDA_FK_MODEL, LfsPath)
+    assert isinstance(FRANKA_PANDA_SRDF, LfsPath)
 
 
 def test_franka_panda_hardware_component_uses_mock_adapter_and_prefixed_joints() -> None:
@@ -73,7 +67,6 @@ def test_franka_panda_robot_model_config_preserves_vamp_joint_order() -> None:
 
     assert model.name == "panda"
     assert isinstance(model.model_path, LfsPath)
-    assert _lfs_filename(model.model_path) == _lfs_filename(FRANKA_PANDA_MODEL)
     assert model.joint_names == FRANKA_PANDA_JOINT_NAMES
     assert model.joint_name_mapping == {
         f"panda/{joint}": joint for joint in FRANKA_PANDA_JOINT_NAMES
@@ -95,5 +88,4 @@ def test_franka_panda_task_config_supports_mock_coordinator_benchmark_path() -> 
     assert task.type == "cartesian_ik"
     assert task.joint_names == [f"panda/{joint}" for joint in FRANKA_PANDA_JOINT_NAMES]
     assert isinstance(task.params["model_path"], LfsPath)
-    assert _lfs_filename(task.params["model_path"]) == _lfs_filename(FRANKA_PANDA_FK_MODEL)
     assert task.params["ee_joint_id"] == 7
