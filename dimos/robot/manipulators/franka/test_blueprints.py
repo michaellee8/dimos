@@ -44,9 +44,10 @@ def test_panda_coordinator_accepts_vamp_cli_override_shape() -> None:
     )
 
     assert config.manipulationmodule is not None
-    assert config.manipulationmodule.world.backend == "vamp"
-    assert config.manipulationmodule.world.artifact.robot == "panda"
-    assert config.manipulationmodule.planner.backend == "vamp"
-    assert config.manipulationmodule.planner.algorithm == "rrtc"
-    assert config.manipulationmodule.planner.simplify is True
-    assert config.manipulationmodule.planner.validate_path is True
+    module_config = config.manipulationmodule
+    assert module_config.world.backend == "vamp"
+    assert module_config.world.artifact.robot == "panda"
+    assert module_config.planner.backend == "vamp"
+    assert module_config.planner.algorithm == "rrtc"
+    assert module_config.planner.simplify is True
+    assert module_config.planner.validate_path is True

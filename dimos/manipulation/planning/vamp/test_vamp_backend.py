@@ -16,12 +16,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 import sys
 from types import ModuleType, SimpleNamespace
-from typing import cast
 
 import numpy as np
+from numpy.typing import NDArray
 from pydantic import ValidationError
 import pytest
 
@@ -71,7 +72,7 @@ class FakePath:
     def __init__(self, waypoints: list[list[float]]) -> None:
         self._waypoints = np.array(waypoints, dtype=np.float64)
 
-    def numpy(self) -> np.ndarray:
+    def numpy(self) -> NDArray[np.float64]:
         return self._waypoints
 
 
@@ -151,7 +152,14 @@ class FakeVampModule(ModuleType):
 
     def configure_robot_and_planner_with_kwargs(
         self, robot_name: str, planner_name: str, max_iterations: int
-    ) -> tuple[FakeRobotModule, object, SimpleNamespace, SimpleNamespace]:
+    ) -> tuple[
+        FakeRobotModule,
+        Callable[
+            [list[float], list[float], FakeEnvironment, SimpleNamespace, str], FakePlanningResult
+        ],
+        SimpleNamespace,
+        SimpleNamespace,
+    ]:
         self.configure_calls.append((robot_name, planner_name, max_iterations))
 
         def planner_func(
@@ -224,8 +232,8 @@ def test_non_vamp_planner_creation_does_not_import_vamp(mocker) -> None:
 
 def test_vamp_config_rejects_invalid_algorithm() -> None:
     """VAMP planner config validates the finite algorithm set."""
-    with pytest.raises(ValidationError):
-        VampPlannerConfig(algorithm="invalid")  # type: ignore[arg-type]
+    with pytest.raises(ValidationError, match="algorithm"):
+        VampPlannerConfig.model_validate({"backend": "vamp", "algorithm": "invalid"})
 
 
 def test_official_vamp_artifact_loading_uses_installed_robot_module(fake_vamp_modules) -> None:
@@ -249,7 +257,8 @@ def test_custom_vamp_artifact_loading_uses_explicit_module_path(
     loaded_vamp, loaded_robot = load_vamp_robot_module(CustomVampArtifactConfig(path=artifact_path))
 
     assert loaded_vamp is vamp_module
-    assert cast("ModuleType", loaded_robot).ROBOT_NAME == "custom_panda"
+    assert isinstance(loaded_robot, ModuleType)
+    assert loaded_robot.ROBOT_NAME == "custom_panda"
 
 
 def test_create_world_and_planner_from_vamp_configs(fake_vamp_modules) -> None:

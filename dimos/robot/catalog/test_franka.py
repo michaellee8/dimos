@@ -26,8 +26,10 @@ from dimos.robot.catalog.franka import (
 )
 
 
-def _lfs_filename(path: object) -> object:
-    return object.__getattribute__(path, "_lfs_filename")
+def _lfs_filename(path: object) -> str:
+    filename = object.__getattribute__(path, "_lfs_filename")
+    assert isinstance(filename, str)
+    return filename
 
 
 def test_franka_panda_catalog_defaults_to_mock_control() -> None:
