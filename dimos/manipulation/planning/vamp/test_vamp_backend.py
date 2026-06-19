@@ -316,6 +316,27 @@ def test_custom_vamp_artifact_loading_uses_explicit_module_path(
     assert loaded_robot.ROBOT_NAME == "custom_panda"
 
 
+def test_custom_vamp_artifact_directory_import_restores_sys_path(
+    fake_vamp_modules, tmp_path
+) -> None:
+    """Directory artifact imports do not permanently change module resolution order."""
+    assert fake_vamp_modules is not None
+    artifact_dir = tmp_path / "custom_robot"
+    artifact_dir.mkdir()
+    (artifact_dir / "__init__.py").write_text("ROBOT_NAME = 'custom_robot'\n", encoding="utf-8")
+    parent = str(tmp_path)
+    assert parent not in sys.path
+
+    try:
+        loaded_robot = load_vamp_robot_module(CustomVampArtifactConfig(path=artifact_dir))
+
+        assert isinstance(loaded_robot, ModuleType)
+        assert loaded_robot.ROBOT_NAME == "custom_robot"
+        assert parent not in sys.path
+    finally:
+        sys.modules.pop("custom_robot", None)
+
+
 def test_create_world_and_planner_from_vamp_configs(fake_vamp_modules) -> None:
     """Factory functions create VAMP world and planner adapters from typed configs."""
     world = create_world(config=VampWorldConfig())
@@ -366,13 +387,20 @@ def test_vamp_planner_dispatches_algorithm_simplifies_and_validates(fake_vamp_mo
     world = finalized_vamp_world()
     robot_id = world.get_robot_ids()[0]
     planner = VampPlanner(VampPlannerConfig(algorithm="prm", simplify=True, validate_path=True))
-    start = JointState(name=["joint1", "joint2", "joint3"], position=[0.0, 0.0, 0.0])
-    goal = JointState(name=["joint1", "joint2", "joint3"], position=[1.0, 0.5, 0.25])
+    start = JointState(
+        name=["joint1", "joint2", "joint3", "gripper"],
+        position=[0.0, 0.0, 0.0, 0.9],
+    )
+    goal = JointState(
+        name=["joint1", "joint2", "joint3", "gripper"],
+        position=[1.0, 0.5, 0.25, 0.1],
+    )
 
     result = planner.plan_joint_path(world, robot_id, start, goal, timeout=0.25)
 
     assert result.status == PlanningStatus.SUCCESS
     assert [point.position for point in result.path] == [[0.0, 0.0, 0.0], [1.0, 0.5, 0.25]]
+    assert [point.name for point in result.path] == [["joint1", "joint2", "joint3"]] * 2
     assert vamp_module.configure_calls == [("panda", "prm", 250)]
     assert vamp_module.planner_calls == [
         ([0.0, 0.0, 0.0], [1.0, 0.5, 0.25], FakeSampler("fake_sampler"))

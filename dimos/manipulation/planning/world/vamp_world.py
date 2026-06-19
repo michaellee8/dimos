@@ -267,6 +267,8 @@ class VampWorld(WorldSpec):
             return _failure(PlanningStatus.COLLISION_AT_START, "Start configuration is invalid")
         if not self.check_config_collision_free(robot_id, goal):
             return _failure(PlanningStatus.COLLISION_AT_GOAL, "Goal configuration is invalid")
+        start_state = self._joint_state_for_robot_order(robot_id, start)
+        goal_state = self._joint_state_for_robot_order(robot_id, goal)
 
         robot_module, planner_func, plan_settings, simplify_settings = (
             vamp.configure_robot_and_planner_with_kwargs(
@@ -277,8 +279,8 @@ class VampWorld(WorldSpec):
         )
         sampler = robot_module.halton()
         result = planner_func(
-            list(start.position),
-            list(goal.position),
+            list(start_state.position),
+            list(goal_state.position),
             self._environment,
             plan_settings,
             sampler,
@@ -300,7 +302,7 @@ class VampWorld(WorldSpec):
                 path_source = simplified.path
 
         path_array = np.asarray(path_source.numpy(), dtype=np.float64)
-        joint_names = start.name or self.get_robot_config(robot_id).joint_names
+        joint_names = start_state.name or self.get_robot_config(robot_id).joint_names
         path = [
             JointState(name=joint_names, position=row.astype(float).tolist()) for row in path_array
         ]

@@ -83,9 +83,14 @@ def _load_custom_robot_module(path: Path) -> vamp.RobotModule:
 
     if artifact_path.is_dir():
         parent = str(artifact_path.parent)
-        if parent not in sys.path:
+        should_remove_parent = parent not in sys.path
+        if should_remove_parent:
             sys.path.insert(0, parent)
-        return cast("vamp.RobotModule", importlib.import_module(artifact_path.name))
+        try:
+            return cast("vamp.RobotModule", importlib.import_module(artifact_path.name))
+        finally:
+            if should_remove_parent:
+                sys.path.remove(parent)
 
     module_name = artifact_path.stem
     spec = importlib.util.spec_from_file_location(module_name, artifact_path)

@@ -31,14 +31,12 @@ from dimos.manipulation.planning.planners.config import (
     RRTConnectPlannerConfig,
     VampPlannerConfig,
 )
-from dimos.manipulation.planning.planners.vamp_planner import VampPlanner
 from dimos.manipulation.planning.world.config import (
     MANIPULATION_WORLD_CONFIG_ADAPTER,
     DrakeWorldConfig,
     ManipulationWorldConfig,
     VampWorldConfig,
 )
-from dimos.manipulation.planning.world.vamp_world import VampWorld
 
 if TYPE_CHECKING:
     from dimos.manipulation.planning.spec.protocols import KinematicsSpec, PlannerSpec, WorldSpec
@@ -59,6 +57,8 @@ def create_world(
 
         return DrakeWorld(enable_viz=enable_viz, **kwargs)
     if isinstance(config, VampWorldConfig):
+        from dimos.manipulation.planning.world.vamp_world import VampWorld
+
         return VampWorld(config=config, **kwargs)
     raise TypeError(f"Unsupported world config: {type(config).__name__}")
 
@@ -110,6 +110,8 @@ def create_planner(
             **kwargs,
         )
     if isinstance(config, VampPlannerConfig):
+        from dimos.manipulation.planning.planners.vamp_planner import VampPlanner
+
         return VampPlanner(config=config, **kwargs)
     raise TypeError(f"Unsupported planner config: {type(config).__name__}")
 
