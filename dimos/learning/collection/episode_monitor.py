@@ -68,6 +68,8 @@ class EpisodeMonitorModule(Module):
     config: EpisodeMonitorModuleConfig
 
     buttons: In[Buttons]
+    # TODO: no KeyPress producer exists yet — add a pygame keyboard module that
+    # publishes KeyPress so this port is actually fed (today only buttons drive it).
     keyboard: In[KeyPress]
     status: Out[EpisodeStatus]
 
