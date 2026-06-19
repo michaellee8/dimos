@@ -27,16 +27,22 @@ const ACTIONS = [
     { name: 'Pose', label: 'Pose' },
 ];
 
-// Local placeholder UI state (replaced by real telemetry when wired).
+// Local UI state. Posture/estop are still placeholder; body-height + battery
+// are now wired to the real state_reliable / state_reliable_back channels.
 const ui = {
     posture: 'StandUp',
     estopped: false,
     bodyHeight: 0,
-    // demo telemetry until state_reliable_back is parsed here
-    soc: 82,
+    nonce: 0,                 // monotonic command id for ack matching
+    pending: new Map(),       // nonce -> {el, timer}
 };
 
 let tickTimer = null;
+
+// Is the operator → robot command channel up? (state_reliable)
+function cmdReady() {
+    return state.stateChannel && state.stateChannel.readyState === 'open' && !ui.estopped;
+}
 
 export function renderGo2(c) {
     const btn = (cmd) =>
@@ -183,11 +189,44 @@ function wireGo2() {
     });
 
     const bh = document.getElementById('body-height');
+    // 'input' = continuous while dragging → update the label only (cheap, local).
     bh.addEventListener('input', () => {
         ui.bodyHeight = +bh.value;
         document.getElementById('bh-val').textContent = ui.bodyHeight.toFixed(2);
     });
-    // TODO on 'change': send {type:'sport_cmd', name:'BodyHeight', value:ui.bodyHeight}
+    // 'change' = on release → send ONE command. Robot clamps + acks; no flood.
+    bh.addEventListener('change', () => {
+        sendBodyHeight(+bh.value, bh);
+    });
+
+    // Resolve command acks coming back on state_reliable_back (via webrtc.js).
+    state.onCmdAck = onCmdAck;
+}
+
+// ── command send + ack (state_reliable ↔ state_reliable_back) ────────
+function sendBodyHeight(value, el) {
+    if (!cmdReady()) return;
+    const nonce = ++ui.nonce;
+    el.classList.add('cmd-sending');                 // optional visual hook
+    state.stateChannel.send(JSON.stringify({ type: 'body_height', value, nonce }));
+    // Watchdog: clear pending if no ack in 3s (e.g. session split swallowed it).
+    const timer = setTimeout(() => resolveAck(nonce, false), 3000);
+    ui.pending.set(nonce, { el, timer });
+}
+
+function onCmdAck(msg) {
+    resolveAck(msg.nonce, !!msg.ok);
+}
+
+function resolveAck(nonce, ok) {
+    const p = ui.pending.get(nonce);
+    if (!p) return;
+    clearTimeout(p.timer);
+    ui.pending.delete(nonce);
+    p.el.classList.remove('cmd-sending');
+    // brief confirm/reject flash on the slider container
+    p.el.classList.add(ok ? 'cmd-ok' : 'cmd-err');
+    setTimeout(() => p.el.classList.remove('cmd-ok', 'cmd-err'), 600);
 }
 
 // Placeholder command: locally flips status so the UI is demonstrable. The real
@@ -234,10 +273,18 @@ function refreshControls() {
 }
 
 function renderBattery() {
-    const p = Math.max(0, Math.min(100, ui.soc));
     const pct = document.getElementById('batt-pct');
     const bar = document.getElementById('batt-bar');
     if (!pct || !bar) return;
+    // Real SOC from robot_telemetry (state_reliable_back); null until first push.
+    const soc = state.liveStats?.soc;
+    if (soc == null) {
+        pct.textContent = '—%';
+        bar.style.width = '0%';
+        pct.style.color = '#6b7280';
+        return;
+    }
+    const p = Math.max(0, Math.min(100, soc));
     pct.textContent = `${p}%`;
     bar.style.width = `${p}%`;
     bar.style.background = p > 40 ? '#b0e1f0' : p > 15 ? '#eab308' : '#d97777';
@@ -267,4 +314,8 @@ export function stopTick() {
         clearInterval(tickTimer);
         tickTimer = null;
     }
+    // Drop the ack hook + pending watchdogs so they don't leak to the next view.
+    if (state.onCmdAck === onCmdAck) state.onCmdAck = null;
+    ui.pending.forEach((p) => clearTimeout(p.timer));
+    ui.pending.clear();
 }

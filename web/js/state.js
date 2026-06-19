@@ -41,7 +41,9 @@ export const state = {
         offsetMs: 0,
         cmdHz: 0,           // command-send rate (twists for kb, poses for VR)
         cmd: null,          // robot-measured: {latency_ms, jitter_ms, loss_pct, rate_hz}
+        soc: null,          // robot battery state-of-charge (%), from robot_telemetry
     },
+    onCmdAck: null,         // optional view hook: (msg) => void for {type:cmd_ack,nonce,ok}
     cmdSendCount: 0,        // rolling counter; sampled into cmdHz once/sec
     hudTimer: null,
 

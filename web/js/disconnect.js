@@ -4,6 +4,7 @@ import { api } from './api.js';
 import { unmountHud } from './hud.js';
 import { navigate } from './router.js';
 import { state } from './state.js';
+import { stopTick } from './views/go2.js';
 import { stopKeyboardLoop } from './views/keyboard.js';
 import { stopClockSync, stopVideoStats } from './webrtc.js';
 
@@ -19,6 +20,7 @@ export async function disconnect() {
     }
 
     stopKeyboardLoop();
+    stopTick();  // go2 cockpit: clear telemetry tick + cmd-ack hook
     stopClockSync();
     stopVideoStats();
     unmountHud();

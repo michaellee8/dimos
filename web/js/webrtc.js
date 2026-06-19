@@ -272,7 +272,15 @@ export function handleStateMessage(data) {
     if (msg.type === 'pong') applyPong(msg);
     // Robot-measured command-plane health (latency/jitter/loss) — what
     // actually arrived, which the operator can't see from its send side.
-    else if (msg.type === 'robot_telemetry') state.liveStats.cmd = msg.cmd;
+    else if (msg.type === 'robot_telemetry') {
+        state.liveStats.cmd = msg.cmd;
+        // Battery SOC rides robot_telemetry (state_reliable_back). null until
+        // the robot's first lowstate; views read state.liveStats.soc.
+        if (msg.soc != null) state.liveStats.soc = msg.soc;
+    }
+    // Command ack for a nonce'd command (body_height, sport_cmd, ...). The
+    // active view registers state.onCmdAck to resolve its pending button/slider.
+    else if (msg.type === 'cmd_ack') state.onCmdAck?.(msg);
 }
 
 // NTP-style min-RTT: accept only samples below the running best, ignore
