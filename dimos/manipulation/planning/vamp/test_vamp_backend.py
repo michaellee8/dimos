@@ -235,7 +235,8 @@ def fake_vamp_modules(mocker) -> tuple[FakeVampModule, FakeRobotModule]:
     robot_module = FakeRobotModule()
     vamp_module = FakeVampModule(robot_module)
     mocker.patch.dict(sys.modules, {"vamp": vamp_module, "vamp.panda": robot_module})
-    mocker.patch("dimos.manipulation.planning.vamp.loader._vamp_module", vamp_module)
+    mocker.patch("dimos.manipulation.planning.vamp.loader.vamp", vamp_module)
+    mocker.patch("dimos.manipulation.planning.vamp.loader._VAMP_IMPORT_ERROR", None)
     mocker.patch(
         "dimos.manipulation.planning.vamp.loader._VAMP_OFFICIAL_ROBOT_MODULES",
         {"panda": robot_module},
@@ -268,7 +269,11 @@ def finalized_vamp_world() -> VampWorld:
 
 def test_vamp_dependency_error_has_install_guidance(mocker) -> None:
     """Selecting VAMP without the optional package raises an actionable error."""
-    mocker.patch("dimos.manipulation.planning.vamp.loader._vamp_module", None)
+    mocker.patch("dimos.manipulation.planning.vamp.loader.vamp", None)
+    mocker.patch(
+        "dimos.manipulation.planning.vamp.loader._VAMP_IMPORT_ERROR",
+        ImportError("No module named 'vamp'"),
+    )
 
     with pytest.raises(VampDependencyError, match="vamp-planner"):
         load_vamp_robot_module(OfficialVampArtifactConfig(robot="panda"))
@@ -276,7 +281,7 @@ def test_vamp_dependency_error_has_install_guidance(mocker) -> None:
 
 def test_rrt_planner_creation_works_when_vamp_unavailable(mocker) -> None:
     """Default planner creation still works when the optional VAMP package is unavailable."""
-    mocker.patch("dimos.manipulation.planning.vamp.loader._vamp_module", None)
+    mocker.patch("dimos.manipulation.planning.vamp.loader.vamp", None)
 
     planner = create_planner(config=RRTConnectPlannerConfig())
 
@@ -291,11 +296,10 @@ def test_vamp_config_rejects_invalid_algorithm() -> None:
 
 def test_official_vamp_artifact_loading_uses_installed_robot_module(fake_vamp_modules) -> None:
     """Official artifact mode loads robot modules exposed by the VAMP package."""
-    vamp_module, robot_module = fake_vamp_modules
+    _, robot_module = fake_vamp_modules
 
-    loaded_vamp, loaded_robot = load_vamp_robot_module(OfficialVampArtifactConfig(robot="panda"))
+    loaded_robot = load_vamp_robot_module(OfficialVampArtifactConfig(robot="panda"))
 
-    assert loaded_vamp is vamp_module
     assert loaded_robot is robot_module
 
 
@@ -303,13 +307,12 @@ def test_custom_vamp_artifact_loading_uses_explicit_module_path(
     fake_vamp_modules, tmp_path
 ) -> None:
     """Custom artifact mode imports a user-prepared local Python robot module."""
-    vamp_module, _ = fake_vamp_modules
+    assert fake_vamp_modules is not None
     artifact_path = tmp_path / "custom_panda.py"
     artifact_path.write_text("ROBOT_NAME = 'custom_panda'\n", encoding="utf-8")
 
-    loaded_vamp, loaded_robot = load_vamp_robot_module(CustomVampArtifactConfig(path=artifact_path))
+    loaded_robot = load_vamp_robot_module(CustomVampArtifactConfig(path=artifact_path))
 
-    assert loaded_vamp is vamp_module
     assert isinstance(loaded_robot, ModuleType)
     assert loaded_robot.ROBOT_NAME == "custom_panda"
 

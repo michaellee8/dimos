@@ -33,8 +33,7 @@ from dimos.manipulation.planning.spec.models import Obstacle, PlanningResult, Wo
 from dimos.manipulation.planning.spec.protocols import WorldSpec
 from dimos.manipulation.planning.utils.path_utils import compute_path_length
 from dimos.manipulation.planning.vamp.errors import UnsupportedWorldCapabilityError
-from dimos.manipulation.planning.vamp.loader import load_vamp_robot_module
-from dimos.manipulation.planning.vamp.utils import path_to_joint_states
+from dimos.manipulation.planning.vamp.loader import load_vamp_robot_module, require_vamp
 from dimos.manipulation.planning.world.config import VampWorldConfig
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.JointState import JointState
@@ -65,8 +64,9 @@ class VampWorld(WorldSpec):
 
     def __init__(self, config: VampWorldConfig) -> None:
         self.config = config
-        self._vamp_module, self._robot_module = load_vamp_robot_module(config.artifact)
-        self._environment = self._vamp_module.Environment()
+        vamp = require_vamp()
+        self._robot_module = load_vamp_robot_module(config.artifact)
+        self._environment = vamp.Environment()  # type: ignore[attr-defined]
         self._robot_id: WorldRobotID | None = None
         self._robot_config: RobotModelConfig | None = None
         self._live_joint_state: JointState | None = None
@@ -212,7 +212,7 @@ class VampWorld(WorldSpec):
             list(end_state.position),
             self._environment,
             True,
-        )
+        )  # type: ignore[attr-defined]
         return bool(result)
 
     def get_ee_pose(self, ctx: _VampContext, robot_id: WorldRobotID) -> PoseStamped:
@@ -220,7 +220,8 @@ class VampWorld(WorldSpec):
         self._assert_robot_id(robot_id)
         joint_state = ctx.joint_state
         transform = np.asarray(
-            self._robot_module.eefk(list(joint_state.position)), dtype=np.float64
+            self._robot_module.eefk(list(joint_state.position)),  # type: ignore[attr-defined]
+            dtype=np.float64,
         )
         pose = matrix_to_pose(transform)
         return PoseStamped(position=pose.position, orientation=pose.orientation, frame_id="world")
@@ -233,7 +234,10 @@ class VampWorld(WorldSpec):
         if link_name != config.end_effector_link:
             raise UnsupportedWorldCapabilityError("vamp", f"link pose for '{link_name}'")
         joint_state = ctx.joint_state
-        return np.asarray(self._robot_module.eefk(list(joint_state.position)), dtype=np.float64)
+        return np.asarray(
+            self._robot_module.eefk(list(joint_state.position)),  # type: ignore[attr-defined]
+            dtype=np.float64,
+        )
 
     def get_jacobian(self, ctx: _VampContext, robot_id: WorldRobotID) -> NDArray[np.float64]:
         """VAMP's Python API does not expose a Jacobian."""
@@ -260,13 +264,13 @@ class VampWorld(WorldSpec):
             return _failure(PlanningStatus.COLLISION_AT_GOAL, "Goal configuration is invalid")
 
         robot_module, planner_func, plan_settings, simplify_settings = (
-            self._vamp_module.configure_robot_and_planner_with_kwargs(
+            require_vamp().configure_robot_and_planner_with_kwargs(  # type: ignore[attr-defined]
                 self._robot_name(),
                 planner_config.algorithm,
                 max_iterations=_timeout_to_iteration_budget(timeout),
             )
         )
-        sampler = robot_module.halton()
+        sampler = robot_module.halton()  # type: ignore[attr-defined]
         result = planner_func(
             list(start.position),
             list(goal.position),
@@ -286,13 +290,15 @@ class VampWorld(WorldSpec):
         if planner_config.simplify:
             simplified = robot_module.simplify(
                 path_source, self._environment, simplify_settings, sampler
-            )
+            )  # type: ignore[attr-defined]
             if simplified.solved:
                 path_source = simplified.path
 
-        path = path_to_joint_states(
-            path_source, start.name or self.get_robot_config(robot_id).joint_names
-        )
+        path_array = np.asarray(path_source.numpy(), dtype=np.float64)
+        joint_names = start.name or self.get_robot_config(robot_id).joint_names
+        path = [
+            JointState(name=joint_names, position=row.astype(float).tolist()) for row in path_array
+        ]
         if planner_config.validate_path and not self._validate_path(robot_id, path):
             return _failure(
                 PlanningStatus.NO_SOLUTION,
@@ -346,10 +352,11 @@ class VampWorld(WorldSpec):
                 self._environment,
                 check_bounds,
             )
-        )
+        )  # type: ignore[attr-defined]
 
     def _rebuild_environment(self) -> None:
-        self._environment = self._vamp_module.Environment()
+        vamp = require_vamp()
+        self._environment = vamp.Environment()  # type: ignore[attr-defined]
         for obstacle in self._obstacles.values():
             self._add_obstacle_to_environment(obstacle)
 
@@ -367,14 +374,15 @@ class VampWorld(WorldSpec):
             .as_euler("xyz")
             .tolist()
         )
+        vamp = require_vamp()
         if obstacle.obstacle_type == ObstacleType.SPHERE:
-            self._environment.add_sphere(self._vamp_module.Sphere(center, obstacle.dimensions[0]))
+            self._environment.add_sphere(vamp.Sphere(center, obstacle.dimensions[0]))  # type: ignore[attr-defined]
         elif obstacle.obstacle_type == ObstacleType.BOX:
             half_extents = [dimension / 2.0 for dimension in obstacle.dimensions]
-            self._environment.add_cuboid(self._vamp_module.Cuboid(center, euler_xyz, half_extents))
+            self._environment.add_cuboid(vamp.Cuboid(center, euler_xyz, half_extents))  # type: ignore[attr-defined]
         elif obstacle.obstacle_type == ObstacleType.CYLINDER:
             self._environment.add_capsule(
-                self._vamp_module.Cylinder(
+                vamp.Cylinder(  # type: ignore[attr-defined]
                     center,
                     euler_xyz,
                     obstacle.dimensions[0],
