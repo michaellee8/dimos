@@ -12,13 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Smoke tests for the LeRobot v2 writer/reader.
+"""Smoke tests for the LeRobot v3.0 writer/reader.
 
-The state-only test always runs (parquet + meta + stats, exercises the
-try/finally cleanup with no writers open). The image test additionally checks
-the MP4 path + canonical `observation.images.*` naming, and skips if no mp4v
-codec is available in the environment. Skips entirely if pyarrow isn't
-installed (`learning` optional-dependency group).
+Asserts the v3.0 layout: a single concatenated data parquet, parquet meta
+(tasks + episodes, no jsonl), and one MP4 per camera under
+`videos/<key>/chunk-000/`. The image test skips if no mp4v codec is available;
+the whole module skips if pyarrow/pandas aren't installed (`learning` extra).
 """
 
 from __future__ import annotations
@@ -31,6 +30,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("pyarrow")
+pytest.importorskip("pandas")
 cv2 = pytest.importorskip("cv2")
 
 from dimos.learning.dataprep.core import OutputConfig, Sample
@@ -47,6 +47,17 @@ def _state_samples(n: int = 4) -> Iterator[Sample]:
         )
 
 
+def _two_episode_samples() -> Iterator[Sample]:
+    for ep in range(2):
+        for i in range(3):
+            yield Sample(
+                ts=float(ep * 3 + i),
+                episode_id=f"ep_{ep:06d}",
+                observation={"state": np.arange(6, dtype=np.float32) + ep},
+                action={"action": np.full(6, float(i), dtype=np.float32)},
+            )
+
+
 def _image_samples(n: int = 4) -> Iterator[Sample]:
     for i in range(n):
         yield Sample(
@@ -60,32 +71,66 @@ def _image_samples(n: int = 4) -> Iterator[Sample]:
         )
 
 
-def test_lerobot_state_only_layout_and_naming(tmp_path: Path) -> None:
+def test_lerobot_v3_state_only_layout_and_naming(tmp_path: Path) -> None:
     out = OutputConfig(
         format="lerobot", path=tmp_path / "ds", metadata={"fps": 10.0, "robot": "xarm7"}
     )
     root = write(_state_samples(), out)
 
+    # v3.0: concatenated single data file + parquet meta (no jsonl, no per-episode parquet)
     assert (root / "meta" / "info.json").exists()
-    assert (root / "meta" / "episodes.jsonl").exists()
-    assert (root / "meta" / "tasks.jsonl").exists()
+    assert (root / "meta" / "tasks.parquet").exists()
     assert (root / "meta" / "stats.json").exists()
-    assert (root / "data" / "chunk-000" / "episode_000000.parquet").exists()
+    assert (root / "meta" / "episodes" / "chunk-000" / "file-000.parquet").exists()
+    assert (root / "data" / "chunk-000" / "file-000.parquet").exists()
+    assert not (root / "meta" / "episodes.jsonl").exists()
+    assert not (root / "meta" / "tasks.jsonl").exists()
 
     info = json.loads((root / "meta" / "info.json").read_text())
+    assert info["codebase_version"] == "v3.0"
     assert info["total_episodes"] == 1
     assert info["total_frames"] == 4
     assert info["fps"] == 10.0
+    assert info["data_path"] == "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
     # single low-dim state + single action → canonical names
     assert "observation.state" in info["features"]
     assert "action" in info["features"]
 
 
-def test_lerobot_inspect_state_only(tmp_path: Path) -> None:
+def test_lerobot_v3_episode_metadata_columns(tmp_path: Path) -> None:
+    import pyarrow.parquet as pq
+
+    out = OutputConfig(format="lerobot", path=tmp_path / "ds", metadata={"fps": 10.0})
+    # two episodes so dataset_from/to_index advance
+    root = write(_two_episode_samples(), out)
+    ep = pq.read_table(root / "meta" / "episodes" / "chunk-000" / "file-000.parquet")
+    cols = set(ep.column_names)
+    for required in (
+        "episode_index",
+        "tasks",
+        "length",
+        "dataset_from_index",
+        "dataset_to_index",
+        "data/chunk_index",
+        "data/file_index",
+        "meta/episodes/chunk_index",
+        "meta/episodes/file_index",
+    ):
+        assert required in cols, f"missing episode column {required}"
+    # per-episode stats are embedded (flattened)
+    assert any(c.startswith("stats/observation.state/") for c in cols)
+    rows = ep.to_pylist()
+    assert [r["episode_index"] for r in rows] == [0, 1]
+    assert rows[0]["dataset_from_index"] == 0 and rows[0]["dataset_to_index"] == 3
+    assert rows[1]["dataset_from_index"] == 3 and rows[1]["dataset_to_index"] == 6
+
+
+def test_lerobot_v3_inspect_state_only(tmp_path: Path) -> None:
     out = OutputConfig(format="lerobot", path=tmp_path / "ds", metadata={"fps": 10.0})
     root = write(_state_samples(), out)
     info = inspect(root)
     assert info["format"] == "lerobot"
+    assert info["version"] == "v3.0"
     assert info["episodes"] == 1
     assert info["frames"] == 4
     assert "observation.state" in info["observation"]
@@ -93,7 +138,7 @@ def test_lerobot_inspect_state_only(tmp_path: Path) -> None:
     assert info["has_stats"] is True
 
 
-def test_lerobot_with_images_writes_mp4_and_video_feature(tmp_path: Path) -> None:
+def test_lerobot_v3_with_images_writes_concatenated_mp4(tmp_path: Path) -> None:
     out = OutputConfig(format="lerobot", path=tmp_path / "ds", metadata={"fps": 10.0})
     try:
         root = write(_image_samples(), out)
@@ -102,10 +147,14 @@ def test_lerobot_with_images_writes_mp4_and_video_feature(tmp_path: Path) -> Non
             pytest.skip(f"no mp4v encoder available in this environment: {e}")
         raise
 
-    mp4 = root / "videos" / "chunk-000" / "observation.images.cam" / "episode_000000.mp4"
+    # v3.0 video path: videos/<key>/chunk-000/file-000.mp4 (key before chunk, one per camera)
+    mp4 = root / "videos" / "observation.images.cam" / "chunk-000" / "file-000.mp4"
     assert mp4.exists() and mp4.stat().st_size > 0
 
     info = json.loads((root / "meta" / "info.json").read_text())
+    assert (
+        info["video_path"] == "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+    )
     assert info["features"]["observation.images.cam"]["dtype"] == "video"
     # image column is excluded from parquet; state/action remain
     assert "observation.state" in info["features"]
