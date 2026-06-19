@@ -1,0 +1,353 @@
+// Copyright 2026 Dimensional Inc.
+// SPDX-License-Identifier: Apache-2.0
+//
+// DeepRobotics M20 "drdds" -> dimos Zenoh bridge (NativeModule binary).
+//
+// Runs *on the M20*. Subscribes to the robot's onboard Fast-DDS fork ("drdds")
+// topics under the ROS `rt/` namespace, converts each sample to the matching
+// dimos_lcm type, LCM-encodes it, and publishes the bytes over Zenoh on the
+// dimos key for that topic (`dimos/<name>/<pkg.Type>`). dimos's Zenoh transport
+// on the consumer side (`dimos.protocol.pubsub.impl.zenohpubsub.Zenoh`) decodes
+// the same bytes back into typed messages.
+//
+// Same per-sample conversions as the sibling LCM bridge (../../dds/cpp/main.cpp);
+// only the carrier differs: reliable Zenoh unicast (auto-discovered, retransmits
+// at each hop) instead of LCM udpm multicast, which silently drops the dense
+// cloud bursts (measured ~87% loss on the M20's NOS->GEN path).
+//
+// The Python NativeModule wrapper passes each output port's dimos channel as
+// `--<port> <topic>#<msg_type>` and the drdds source topic as `--<port>_topic`.
+// We map the LCM channel to the Zenoh key by swapping '#' -> '/' (exactly what
+// dimos's `_topic_to_key_expr` does).
+//
+// Usage (on NOS, as root for SHM access to the robot's root-owned writers):
+//   ./m20_drdds_zenoh_bridge \
+//       --aligned   'dimos/aligned_points#sensor_msgs.PointCloud2' --aligned_topic /ALIGNED_POINTS \
+//       --grid      'dimos/grid_map_3d#sensor_msgs.PointCloud2'    --grid_topic    /grid_map_3d \
+//       --odometry  'dimos/odom#nav_msgs.Odometry'                 --odom_topic    /ODOM \
+//       --iface eth1 --domain 0
+
+#include "drdds/core/drdds_core.h"
+
+#include "dridl/sensor_msgs/msg/PointCloud2.h"
+#include "dridl/sensor_msgs/msg/PointCloud2PubSubTypes.h"
+#include "dridl/sensor_msgs/msg/Imu.h"
+#include "dridl/sensor_msgs/msg/ImuPubSubTypes.h"
+#include "dridl/nav_msgs/msg/Odometry.h"
+#include "dridl/nav_msgs/msg/OdometryPubSubTypes.h"
+
+#include <zenoh.h>
+
+#include "dimos_native_module.hpp"
+#include "geometry_msgs/Quaternion.hpp"
+#include "geometry_msgs/Vector3.hpp"
+#include "nav_msgs/Odometry.hpp"
+#include "sensor_msgs/Imu.hpp"
+#include "sensor_msgs/PointCloud2.hpp"
+#include "sensor_msgs/PointField.hpp"
+
+#include <atomic>
+#include <chrono>
+#include <csignal>
+#include <cstdio>
+#include <cstring>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+static std::atomic<bool> g_running{true};
+static void on_signal(int) { g_running.store(false); }
+
+static std::string g_frame_override;
+
+// One wired output: its precomputed Zenoh key + running counters (read by the
+// status line). Heap-allocated so drdds reader threads hold a stable pointer.
+struct Port {
+    std::string key;    // zenoh key expr, e.g. "dimos/aligned_points/sensor_msgs.PointCloud2"
+    std::string label;  // short name for logs
+    std::atomic<long> n{0};
+    std::atomic<long> bytes{0};
+};
+
+// ----------------------------------------------------------------- zenoh out --
+static z_owned_session_t g_session;
+static std::mutex g_pub_mx;
+static std::map<std::string, z_owned_publisher_t> g_pubs;  // key -> cached publisher
+
+// dimos Zenoh keys use '/' where LCM channels use '#'; key exprs can't start with '/'.
+static std::string chan_to_key(const std::string& chan) {
+    std::string k = chan;
+    for (char& c : k) {
+        if (c == '#') { c = '/'; }
+    }
+    size_t i = 0;
+    while (i < k.size() && k[i] == '/') { ++i; }
+    return k.substr(i);
+}
+
+// Get or declare the cached reliable publisher for a key. BLOCK congestion
+// control means a momentarily-slow link blocks the sender rather than dropping
+// (publisher reliability already defaults to RELIABLE).
+static const z_loaned_publisher_t* get_pub(const std::string& key) {
+    std::lock_guard<std::mutex> lk(g_pub_mx);
+    auto it = g_pubs.find(key);
+    if (it == g_pubs.end()) {
+        z_view_keyexpr_t ke;
+        if (z_view_keyexpr_from_str(&ke, key.c_str()) != Z_OK) {
+            fprintf(stderr, "[bridge] bad key expr '%s'\n", key.c_str());
+            return nullptr;
+        }
+        z_publisher_options_t opts;
+        z_publisher_options_default(&opts);
+        opts.congestion_control = Z_CONGESTION_CONTROL_BLOCK;
+        z_owned_publisher_t pub;
+        if (z_declare_publisher(z_loan(g_session), &pub, z_loan(ke), &opts) != Z_OK) {
+            fprintf(stderr, "[bridge] declare_publisher failed for '%s'\n", key.c_str());
+            return nullptr;
+        }
+        it = g_pubs.emplace(key, pub).first;
+    }
+    return z_loan(it->second);
+}
+
+// LCM-encode a dimos_lcm message and publish the raw bytes on the port's key.
+template <class T>
+static void publish_zenoh(Port* p, const T& msg) {
+    const z_loaned_publisher_t* pub = get_pub(p->key);
+    if (pub == nullptr) { return; }
+    const int len = msg.getEncodedSize();
+    if (len < 0) { return; }
+    std::vector<uint8_t> buf(static_cast<size_t>(len));
+    if (msg.encode(buf.data(), 0, len) != len) {
+        fprintf(stderr, "[bridge] encode failed for '%s'\n", p->key.c_str());
+        return;
+    }
+    z_owned_bytes_t payload;
+    z_bytes_copy_from_buf(&payload, buf.data(), static_cast<size_t>(len));
+    z_publisher_put_options_t po;
+    z_publisher_put_options_default(&po);
+    z_publisher_put(pub, z_move(payload), &po);
+    p->n.fetch_add(1, std::memory_order_relaxed);
+    p->bytes.fetch_add(len, std::memory_order_relaxed);
+}
+
+// ----------------------------------------------------- drdds -> dimos_lcm conv --
+// (identical field-for-field copies to ../../dds/cpp/main.cpp; the drdds and
+// dimos_lcm ROS-message layouts match, so these are straight member copies.)
+
+static std_msgs::Header to_lcm_header(const std_msgs::msg::Header& h, const std::string& frame_override) {
+    static std::atomic<int32_t> seq{0};
+    std_msgs::Header out;
+    out.seq = seq.fetch_add(1, std::memory_order_relaxed);
+    out.stamp.sec = h.stamp().sec();
+    out.stamp.nsec = static_cast<int32_t>(h.stamp().nanosec());
+    out.frame_id = frame_override.empty() ? h.frame_id() : frame_override;
+    return out;
+}
+
+static void on_pointcloud(const sensor_msgs::msg::PointCloud2* m, Port* p) {
+    if (m == nullptr) { return; }
+    sensor_msgs::PointCloud2 pc;
+    pc.header = to_lcm_header(m->header(), g_frame_override);
+    pc.height = m->height();
+    pc.width = m->width();
+    pc.is_bigendian = m->is_bigendian();
+    pc.point_step = m->point_step();
+    pc.row_step = m->row_step();
+    pc.is_dense = m->is_dense();
+
+    const auto& fields = m->fields();
+    pc.fields_length = static_cast<int32_t>(fields.size());
+    pc.fields.resize(fields.size());
+    for (size_t i = 0; i < fields.size(); ++i) {
+        pc.fields[i].name = fields[i].name();
+        pc.fields[i].offset = fields[i].offset();
+        pc.fields[i].datatype = static_cast<int8_t>(fields[i].datatype());
+        pc.fields[i].count = fields[i].count();
+    }
+
+    const auto& data = m->data();
+    pc.data_length = static_cast<int32_t>(data.size());
+    pc.data.resize(data.size());
+    if (!data.empty()) {
+        std::memcpy(pc.data.data(), data.data(), data.size());
+    }
+    publish_zenoh(p, pc);
+}
+
+static void on_imu(const sensor_msgs::msg::Imu* m, Port* p) {
+    if (m == nullptr) { return; }
+    sensor_msgs::Imu out;
+    out.header = to_lcm_header(m->header(), g_frame_override);
+    out.orientation.x = m->orientation().x();
+    out.orientation.y = m->orientation().y();
+    out.orientation.z = m->orientation().z();
+    out.orientation.w = m->orientation().w();
+    out.angular_velocity.x = m->angular_velocity().x();
+    out.angular_velocity.y = m->angular_velocity().y();
+    out.angular_velocity.z = m->angular_velocity().z();
+    out.linear_acceleration.x = m->linear_acceleration().x();
+    out.linear_acceleration.y = m->linear_acceleration().y();
+    out.linear_acceleration.z = m->linear_acceleration().z();
+    for (int i = 0; i < 9; ++i) {
+        out.orientation_covariance[i] = m->orientation_covariance()[i];
+        out.angular_velocity_covariance[i] = m->angular_velocity_covariance()[i];
+        out.linear_acceleration_covariance[i] = m->linear_acceleration_covariance()[i];
+    }
+    publish_zenoh(p, out);
+}
+
+static void on_odometry(const nav_msgs::msg::Odometry* m, Port* p) {
+    if (m == nullptr) { return; }
+    nav_msgs::Odometry out;
+    out.header = to_lcm_header(m->header(), g_frame_override);
+    out.child_frame_id = m->child_frame_id();
+
+    const auto& pose = m->pose().pose();
+    out.pose.pose.position.x = pose.position().x();
+    out.pose.pose.position.y = pose.position().y();
+    out.pose.pose.position.z = pose.position().z();
+    out.pose.pose.orientation.x = pose.orientation().x();
+    out.pose.pose.orientation.y = pose.orientation().y();
+    out.pose.pose.orientation.z = pose.orientation().z();
+    out.pose.pose.orientation.w = pose.orientation().w();
+
+    const auto& tw = m->twist().twist();
+    out.twist.twist.linear.x = tw.linear().x();
+    out.twist.twist.linear.y = tw.linear().y();
+    out.twist.twist.linear.z = tw.linear().z();
+    out.twist.twist.angular.x = tw.angular().x();
+    out.twist.twist.angular.y = tw.angular().y();
+    out.twist.twist.angular.z = tw.angular().z();
+
+    const auto& pcov = m->pose().covariance();
+    const auto& tcov = m->twist().covariance();
+    for (int i = 0; i < 36; ++i) {
+        out.pose.covariance[i] = pcov[i];
+        out.twist.covariance[i] = tcov[i];
+    }
+    publish_zenoh(p, out);
+}
+
+// ------------------------------------------------------------------- wiring --
+// PointCloud2 output ports: CLI flag name, --<topic_arg> override, drdds default.
+struct PCPortDef {
+    const char* port;
+    const char* topic_arg;
+    const char* default_src;
+};
+static const PCPortDef PC_PORTS[] = {
+    {"lidar", "lidar_topic", "/LIDAR/POINTS"},          // raw lidar firehose (opt-in)
+    {"aligned", "aligned_topic", "/ALIGNED_POINTS"},    // NOS localization world cloud (SHM-only)
+    {"grid", "grid_topic", "/grid_map_3d"},             // 3D grid map
+    {"locbody", "locbody_topic", "/LOC_BODY_POINTS"},   // body-frame localization cloud
+};
+
+int main(int argc, char** argv) {
+    dimos::NativeModule mod(argc, argv);
+
+    const int domain = mod.arg_int("domain", 0);
+    const std::string network = mod.arg("network", "");
+    g_frame_override = mod.arg("frame_id", "");
+    const std::string iface = mod.arg("iface", "");
+    // SHM transport: required for the robot's SHM-only writers (e.g. ALIGNED_POINTS)
+    // and harmless for dual-transport topics. Run as root so the SHM segments match.
+    const bool shm = mod.arg_bool("shm", true);
+
+    std::signal(SIGINT, on_signal);
+    std::signal(SIGTERM, on_signal);
+
+    // Zenoh session: default config = peer mode + multicast scouting (auto-discovery),
+    // so dimos consumers find us with no hardcoded endpoints. Pin the multicast NIC
+    // when given (the M20 boxes are multi-homed; eth1 is the NOS .31 segment).
+    z_owned_config_t cfg;
+    z_config_default(&cfg);
+    if (!iface.empty()) {
+        const std::string v = "\"" + iface + "\"";
+        zc_config_insert_json5(z_config_loan_mut(&cfg), "scouting/multicast/interface", v.c_str());
+    }
+    if (z_open(&g_session, z_move(cfg), nullptr) != Z_OK) {
+        fprintf(stderr, "[bridge] zenoh session open failed\n");
+        return 1;
+    }
+
+    DrDDSManager::Init(domain, network);
+
+    std::vector<std::unique_ptr<Port>> ports;
+    std::vector<std::unique_ptr<DrDDSChannel<sensor_msgs::msg::PointCloud2PubSubType>>> pc_chans;
+    std::unique_ptr<DrDDSChannel<sensor_msgs::msg::ImuPubSubType>> imu_chan;
+    std::unique_ptr<DrDDSChannel<nav_msgs::msg::OdometryPubSubType>> odom_chan;
+
+    for (const auto& def : PC_PORTS) {
+        if (!mod.has(def.port)) { continue; }
+        const std::string src = mod.arg(def.topic_arg, def.default_src);
+        auto p = std::make_unique<Port>();
+        p->key = chan_to_key(mod.topic(def.port));
+        p->label = def.port;
+        Port* pp = p.get();
+        ports.push_back(std::move(p));
+        pc_chans.push_back(std::make_unique<DrDDSChannel<sensor_msgs::msg::PointCloud2PubSubType>>(
+            [pp](const sensor_msgs::msg::PointCloud2* m) { on_pointcloud(m, pp); },
+            src, domain, shm, "rt"));
+        fprintf(stderr, "[bridge] %s: rt%s -> %s\n", def.port, src.c_str(), pp->key.c_str());
+    }
+    if (mod.has("imu")) {
+        const std::string src = mod.arg("imu_topic", "/IMU");
+        auto p = std::make_unique<Port>();
+        p->key = chan_to_key(mod.topic("imu"));
+        p->label = "imu";
+        Port* pp = p.get();
+        ports.push_back(std::move(p));
+        imu_chan = std::make_unique<DrDDSChannel<sensor_msgs::msg::ImuPubSubType>>(
+            [pp](const sensor_msgs::msg::Imu* m) { on_imu(m, pp); }, src, domain, shm, "rt");
+        fprintf(stderr, "[bridge] imu: rt%s -> %s\n", src.c_str(), pp->key.c_str());
+    }
+    if (mod.has("odometry")) {
+        const std::string src = mod.arg("odom_topic", "/ODOM");
+        auto p = std::make_unique<Port>();
+        p->key = chan_to_key(mod.topic("odometry"));
+        p->label = "odometry";
+        Port* pp = p.get();
+        ports.push_back(std::move(p));
+        odom_chan = std::make_unique<DrDDSChannel<nav_msgs::msg::OdometryPubSubType>>(
+            [pp](const nav_msgs::msg::Odometry* m) { on_odometry(m, pp); }, src, domain, shm, "rt");
+        fprintf(stderr, "[bridge] odometry: rt%s -> %s\n", src.c_str(), pp->key.c_str());
+    }
+
+    if (ports.empty()) {
+        fprintf(stderr, "[bridge] no output ports wired; nothing to bridge\n");
+        return 1;
+    }
+
+    fprintf(stderr, "[bridge] shm=%d iface=%s bridging domain %d ...\n", shm,
+            iface.empty() ? "(auto)" : iface.c_str(), domain);
+    long t = 0;
+    while (g_running.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        ++t;
+        std::string line = "t=" + std::to_string(t) + "s";
+        for (const auto& p : ports) {
+            char b[96];
+            snprintf(b, sizeof(b), "  %s[n=%ld %.1fMB]", p->label.c_str(), p->n.load(),
+                     p->bytes.load() / 1e6);
+            line += b;
+        }
+        fprintf(stderr, "%s\n", line.c_str());
+    }
+
+    fprintf(stderr, "[bridge] shutting down\n");
+    pc_chans.clear();
+    imu_chan.reset();
+    odom_chan.reset();
+    DrDDSManager::Delete();
+    {
+        std::lock_guard<std::mutex> lk(g_pub_mx);
+        for (auto& kv : g_pubs) { z_drop(z_move(kv.second)); }
+        g_pubs.clear();
+    }
+    z_drop(z_move(g_session));
+    return 0;
+}
