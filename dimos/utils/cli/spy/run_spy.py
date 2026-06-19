@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.color import Color
@@ -84,8 +86,8 @@ class SpyApp(App):  # type: ignore[type-arg]
         key: str | None = None,
         connect: list[str] | None = None,
         iface: str | None = None,
-        *args,  # type: ignore[no-untyped-def]
-        **kwargs,
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         # Warn about missing system config before entering TUI raw mode (LCM only).
@@ -234,9 +236,7 @@ def main() -> None:
             iface=args.iface,
         )
     else:
-        SpyApp(
-            transport=args.transport, key=args.key, connect=args.connect, iface=args.iface
-        ).run()
+        SpyApp(transport=args.transport, key=args.key, connect=args.connect, iface=args.iface).run()
 
 
 if __name__ == "__main__":

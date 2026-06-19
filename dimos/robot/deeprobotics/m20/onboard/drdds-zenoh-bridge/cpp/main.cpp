@@ -51,6 +51,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -71,10 +72,12 @@ struct Port {
     std::string label;  // short name for logs
     std::atomic<long> n{0};
     std::atomic<long> bytes{0};
+    std::function<int()> matched;  // GetMatchedCount() of the underlying drdds reader
 };
 
 // ----------------------------------------------------------------- zenoh out --
 static z_owned_session_t g_session;
+static std::atomic<bool> g_zenoh_on{false};  // false = --no_zenoh diagnostic (skip publish)
 static std::mutex g_pub_mx;
 static std::map<std::string, z_owned_publisher_t> g_pubs;  // key -> cached publisher
 
@@ -117,6 +120,11 @@ static const z_loaned_publisher_t* get_pub(const std::string& key) {
 // LCM-encode a dimos_lcm message and publish the raw bytes on the port's key.
 template <class T>
 static void publish_zenoh(Port* p, const T& msg) {
+    if (!g_zenoh_on.load()) {  // --no_zenoh: count only (isolate zenoh from FastDDS SHM)
+        p->n.fetch_add(1, std::memory_order_relaxed);
+        p->bytes.fetch_add(msg.getEncodedSize(), std::memory_order_relaxed);
+        return;
+    }
     const z_loaned_publisher_t* pub = get_pub(p->key);
     if (pub == nullptr) { return; }
     const int len = msg.getEncodedSize();
@@ -285,14 +293,20 @@ int main(int argc, char** argv) {
     // so dimos consumers find us with no hardcoded endpoints. Pin the multicast NIC
     // when given (the M20 boxes are multi-homed; eth1 is the NOS .31 segment).
     z_owned_config_t cfg;
-    z_config_default(&cfg);
-    if (!iface.empty()) {
-        const std::string v = "\"" + iface + "\"";
-        zc_config_insert_json5(z_config_loan_mut(&cfg), "scouting/multicast/interface", v.c_str());
-    }
-    if (z_open(&g_session, z_move(cfg), nullptr) != Z_OK) {
-        fprintf(stderr, "[bridge] zenoh session open failed\n");
-        return 1;
+    const bool no_zenoh = mod.arg_bool("no_zenoh", false);  // diagnostic: skip zenoh entirely
+    if (!no_zenoh) {
+        z_config_default(&cfg);
+        if (!iface.empty()) {
+            const std::string v = "\"" + iface + "\"";
+            zc_config_insert_json5(z_config_loan_mut(&cfg), "scouting/multicast/interface", v.c_str());
+        }
+        if (z_open(&g_session, z_move(cfg), nullptr) != Z_OK) {
+            fprintf(stderr, "[bridge] zenoh session open failed\n");
+            return 1;
+        }
+        g_zenoh_on.store(true);
+    } else {
+        fprintf(stderr, "[bridge] --no_zenoh: zenoh disabled (count-only, SHM isolation test)\n");
     }
 
     DrDDSManager::Init(domain, network);
@@ -314,6 +328,8 @@ int main(int argc, char** argv) {
         pc_chans.push_back(std::make_unique<DrDDSChannel<sensor_msgs::msg::PointCloud2PubSubType>>(
             [pp](const sensor_msgs::msg::PointCloud2* m) { on_pointcloud(m, pp); },
             src, domain, shm, "rt"));
+        auto* ch = pc_chans.back().get();
+        pp->matched = [ch] { return ch->GetMatchedCount(); };
         wired_src.insert(src);
         fprintf(stderr, "[bridge] %s: rt%s -> %s\n", def.port, src.c_str(), pp->key.c_str());
     }
@@ -375,7 +391,8 @@ int main(int argc, char** argv) {
         std::string line = "t=" + std::to_string(t) + "s";
         for (const auto& p : ports) {
             char b[96];
-            snprintf(b, sizeof(b), "  %s[n=%ld %.1fMB]", p->label.c_str(), p->n.load(),
+            const int m = p->matched ? p->matched() : -1;
+            snprintf(b, sizeof(b), "  %s[m=%d n=%ld %.1fMB]", p->label.c_str(), m, p->n.load(),
                      p->bytes.load() / 1e6);
             line += b;
         }
@@ -389,11 +406,13 @@ int main(int argc, char** argv) {
     imu_chan.reset();
     odom_chan.reset();
     DrDDSManager::Delete();
-    {
-        std::lock_guard<std::mutex> lk(g_pub_mx);
-        for (auto& kv : g_pubs) { z_drop(z_move(kv.second)); }
-        g_pubs.clear();
+    if (g_zenoh_on.load()) {
+        {
+            std::lock_guard<std::mutex> lk(g_pub_mx);
+            for (auto& kv : g_pubs) { z_drop(z_move(kv.second)); }
+            g_pubs.clear();
+        }
+        z_drop(z_move(g_session));
     }
-    z_drop(z_move(g_session));
     return 0;
 }
