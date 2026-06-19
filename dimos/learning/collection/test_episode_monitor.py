@@ -50,7 +50,6 @@ def _monitor(**config: object) -> tuple[EpisodeMonitorModule, _CaptureOut]:
     m._state = "idle"
     m._saved = 0
     m._discarded = 0
-    m._current_start_ts = None
     m._last_event = "init"
     m._prev_bits = {}
     m._lock = threading.Lock()

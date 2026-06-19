@@ -74,16 +74,12 @@ class _Status:
     """Mimics EpisodeStatus fields the extractor reads via getattr."""
 
     last_event: str
-    current_episode_start_ts: float | None = None
     task_label: str | None = None
 
 
-def _status(events: list[tuple[float, str, float | None, str | None]]) -> list[_Obs]:
-    """events = [(ts, last_event, start_ts, label), ...]"""
-    return [
-        _Obs(ts=ts, data=_Status(last_event=ev, current_episode_start_ts=start, task_label=lbl))
-        for ts, ev, start, lbl in events
-    ]
+def _status(events: list[tuple[float, str, str | None]]) -> list[_Obs]:
+    """events = [(ts, last_event, label), ...]"""
+    return [_Obs(ts=ts, data=_Status(last_event=ev, task_label=lbl)) for ts, ev, lbl in events]
 
 
 # ── resolve_field ────────────────────────────────────────────────────────────
@@ -124,9 +120,7 @@ def test_resolve_field_none_unwraps_data_attr():
 
 
 def test_extract_start_save():
-    store = _FakeStore(
-        {"status": _status([(1.0, "start", 1.0, "pick"), (5.0, "save", None, None)])}
-    )
+    store = _FakeStore({"status": _status([(1.0, "start", "pick"), (5.0, "save", None)])})
     eps = extract_episodes(store, EpisodeExtractor(status_stream="status"))
     assert len(eps) == 1
     assert eps[0].start_ts == 1.0 and eps[0].end_ts == 5.0
@@ -135,9 +129,7 @@ def test_extract_start_save():
 
 
 def test_extract_discard_marks_failure():
-    store = _FakeStore(
-        {"status": _status([(1.0, "start", 1.0, None), (3.0, "discard", None, None)])}
-    )
+    store = _FakeStore({"status": _status([(1.0, "start", None), (3.0, "discard", None)])})
     eps = extract_episodes(store, EpisodeExtractor(status_stream="status"))
     assert len(eps) == 1
     assert eps[0].success is False
@@ -149,9 +141,9 @@ def test_extract_auto_commit_on_restart():
         {
             "status": _status(
                 [
-                    (1.0, "start", 1.0, None),
-                    (4.0, "start", 4.0, None),
-                    (8.0, "save", None, None),
+                    (1.0, "start", None),
+                    (4.0, "start", None),
+                    (8.0, "save", None),
                 ]
             )
         }
@@ -163,25 +155,21 @@ def test_extract_auto_commit_on_restart():
 
 
 def test_extract_pending_at_eof_dropped():
-    store = _FakeStore({"status": _status([(1.0, "start", 1.0, None)])})
+    store = _FakeStore({"status": _status([(1.0, "start", None)])})
     eps = extract_episodes(store, EpisodeExtractor(status_stream="status"))
     assert eps == []
 
 
 def test_extract_init_and_unknown_are_noops():
     store = _FakeStore(
-        {
-            "status": _status(
-                [(0.5, "init", None, None), (1.0, "start", 1.0, None), (5.0, "save", None, None)]
-            )
-        }
+        {"status": _status([(0.5, "init", None), (1.0, "start", None), (5.0, "save", None)])}
     )
     eps = extract_episodes(store, EpisodeExtractor(status_stream="status"))
     assert len(eps) == 1
 
 
 def test_extract_save_without_start_emits_nothing():
-    store = _FakeStore({"status": _status([(2.0, "save", None, None)])})
+    store = _FakeStore({"status": _status([(2.0, "save", None)])})
     assert extract_episodes(store, EpisodeExtractor(status_stream="status")) == []
 
 

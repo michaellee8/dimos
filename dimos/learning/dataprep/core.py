@@ -202,9 +202,9 @@ def extract_episodes(store: SqliteStore, cfg: EpisodeExtractor) -> list[Episode]
         if last_event == "start":
             # Auto-commit any prior pending episode (success=True per state-machine spec).
             _commit(ts, success=True, label=pending_label)
-            # None check, not `or ts`: a start at absolute ts 0.0 is valid.
-            ep_start = getattr(ev, "current_episode_start_ts", None)
-            pending_start_ts = ts if ep_start is None else ep_start
+            # obs.ts is the press time — the recorder stamps EpisodeStatus from
+            # its own `.ts` field (set at the button press, not at record time).
+            pending_start_ts = ts
             pending_label = label
         elif last_event == "save":
             _commit(ts, success=True, label=pending_label or label)

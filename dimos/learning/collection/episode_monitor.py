@@ -40,10 +40,10 @@ logger = setup_logger()
 
 
 class EpisodeStatus(BaseModel):
+    ts: float
     state: Literal["idle", "recording"]
     episodes_saved: int
     episodes_discarded: int
-    current_episode_start_ts: float | None
     last_event: Literal["start", "save", "discard", "init"] = "init"
     task_label: str | None = None
 
@@ -76,7 +76,6 @@ class EpisodeMonitorModule(Module):
         self._state: Literal["idle", "recording"] = "idle"
         self._saved: int = 0
         self._discarded: int = 0
-        self._current_start_ts: float | None = None
         self._last_event: Literal["start", "save", "discard", "init"] = "init"
         self._prev_bits: dict[str, bool] = {}  # rising-edge detection for buttons
         self._lock = threading.Lock()
@@ -90,7 +89,7 @@ class EpisodeMonitorModule(Module):
         # Emit an initial idle status so subscribers (and recorders) have a
         # known starting point in the timeline.
         with self._lock:
-            status = self._snapshot("init")
+            status = self._snapshot("init", time.time())
         self._emit(status)
 
     @rpc
@@ -103,19 +102,18 @@ class EpisodeMonitorModule(Module):
             self._state = "idle"
             self._saved = 0
             self._discarded = 0
-            self._current_start_ts = None
             self._prev_bits = {}
-            status = self._snapshot("init")
+            status = self._snapshot("init", time.time())
         return self._emit(status)
 
     @rpc
     def get_status(self) -> EpisodeStatus:
         with self._lock:
             return EpisodeStatus(
+                ts=time.time(),
                 state=self._state,
                 episodes_saved=self._saved,
                 episodes_discarded=self._discarded,
-                current_episode_start_ts=self._current_start_ts,
                 last_event=self._last_event,
                 task_label=self.config.default_task_label,
             )
@@ -161,32 +159,31 @@ class EpisodeMonitorModule(Module):
                 event = "save" if self._state == "recording" else "start"
             if event == "start":
                 # Auto-commit any in-progress episode (matches DataPrep extractor).
-                if self._state == "recording" and self._current_start_ts is not None:
+                if self._state == "recording":
                     self._saved += 1
                 self._state = "recording"
-                self._current_start_ts = ts
             elif event == "save":
                 if self._state == "recording":
                     self._saved += 1
                 self._state = "idle"
-                self._current_start_ts = None
             elif event == "discard":
                 if self._state == "recording":
                     self._discarded += 1
                 self._state = "idle"
-                self._current_start_ts = None
             # Snapshot under the mutation's lock so the event matches the state.
-            status = self._snapshot(event)
+            status = self._snapshot(event, ts)
         self._emit(status)
 
-    def _snapshot(self, last_event: Literal["start", "save", "discard", "init"]) -> EpisodeStatus:
+    def _snapshot(
+        self, last_event: Literal["start", "save", "discard", "init"], ts: float
+    ) -> EpisodeStatus:
         """Build a status from current state. Caller must hold `self._lock`."""
         self._last_event = last_event
         return EpisodeStatus(
+            ts=ts,
             state=self._state,
             episodes_saved=self._saved,
             episodes_discarded=self._discarded,
-            current_episode_start_ts=self._current_start_ts,
             last_event=last_event,
             task_label=self.config.default_task_label,
         )
