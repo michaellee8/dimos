@@ -429,6 +429,8 @@ class TestPlanningInitialization:
         assert result.status == IKStatus.NO_SOLUTION
         assert "end-effector Jacobian" in result.message
         assert module._state == ManipulationState.IDLE
+        assert module._planned_paths == {}
+        module._kinematics.solve.assert_called_once()
 
 
 class TestJointNameTranslation:
