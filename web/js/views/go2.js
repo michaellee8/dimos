@@ -62,9 +62,13 @@ export function renderGo2(c) {
                 <div class="relative flex-1 bg-black flex items-center justify-center min-h-0">
                     <video id="robot-cam" autoplay muted playsinline
                         class="w-full h-full object-contain" style="display:none;"></video>
-                    <div id="video-placeholder" class="text-center text-gray-600">
-                        <div class="text-6xl mb-2">🐕</div>
-                        <div class="term-caps text-xs">robot camera</div>
+                    <!-- Centered status (Negotiating WebRTC…) + placeholder, both
+                         hidden once the video track is actually playing. -->
+                    <div id="video-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-center text-gray-500">
+                        <div class="text-6xl mb-3">🐕</div>
+                        <div id="teleop-status" class="text-lg text-gray-300 px-4 py-2 bg-bg-950/80 border border-[#2a2a2a] rounded-lg">
+                            Negotiating WebRTC…
+                        </div>
                     </div>
                     <div id="video-lost" class="hidden absolute inset-0 bg-black/70 flex flex-col items-center justify-center">
                         <div class="text-4xl mb-2">⚠</div>
@@ -152,6 +156,18 @@ export function renderGo2(c) {
 // ── interaction (placeholder — no robot calls yet) ──────────────────
 function wireGo2() {
     document.getElementById('disconnectBtn').onclick = disconnect;
+
+    // Video: webrtc.js sets srcObject + display:block on ontrack, but doesn't
+    // know about our placeholder. Hide the dog+status overlay once frames flow
+    // ('playing'); show it again if the stream drops.
+    const cam = document.getElementById('robot-cam');
+    const placeholder = document.getElementById('video-placeholder');
+    const showPlaceholder = (on) => placeholder && placeholder.classList.toggle('hidden', !on);
+    cam.addEventListener('playing', () => {
+        cam.style.display = 'block';
+        showPlaceholder(false);
+    });
+    cam.addEventListener('emptied', () => showPlaceholder(true)); // stream cleared on disconnect
 
     document.querySelectorAll('.cmd-btn[data-cmd]').forEach((b) =>
         b.addEventListener('click', () => sendCommand(b.dataset.cmd, b)));
