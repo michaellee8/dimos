@@ -56,6 +56,7 @@ from dimos.manipulation.planning.planning_group_utils import (
 from dimos.manipulation.planning.planning_identifiers import (
     assert_global_joint_names,
     assert_local_joint_names,
+    is_global_joint_name,
     make_global_joint_name,
     make_global_joint_names,
 )
@@ -504,13 +505,65 @@ class ManipulationModule(Module):
             self._world_monitor.world.list_planning_groups(), robot_name
         )
 
+    def _current_positions_by_name(
+        self, robot_name: RobotName, current: JointState
+    ) -> tuple[dict[str, float], bool] | None:
+        """Index a robot current state and report whether its keys are global.
+
+        World-monitor current state is a single-robot backend boundary. It may
+        be local (the normal backend form) or global during compatibility
+        migrations, but it must not mix namespaces.
+        """
+        if len(current.name) != len(current.position):
+            logger.error(
+                "Current state for '%s' has %d names but %d positions",
+                robot_name,
+                len(current.name),
+                len(current.position),
+            )
+            return None
+        if not current.name:
+            logger.error("Current state for '%s' has no joint names", robot_name)
+            return None
+
+        global_flags = [is_global_joint_name(name) for name in current.name]
+        if any(global_flags) and not all(global_flags):
+            logger.error(
+                "Current state for '%s' mixes global and local joint names: %s",
+                robot_name,
+                list(current.name),
+            )
+            return None
+
+        current_is_global = all(global_flags)
+        try:
+            if current_is_global:
+                assert_global_joint_names(current.name)
+                wrong_robot = [
+                    name for name in current.name if not name.startswith(f"{robot_name}/")
+                ]
+                if wrong_robot:
+                    logger.error(
+                        "Current state for '%s' contains joints from another robot: %s",
+                        robot_name,
+                        wrong_robot,
+                    )
+                    return None
+            else:
+                assert_local_joint_names(current.name)
+        except ValueError as exc:
+            logger.error("Invalid current state for '%s': %s", robot_name, exc)
+            return None
+
+        return dict(zip(current.name, current.position, strict=True)), current_is_global
+
     def _selected_joint_state(self, group_ids: tuple[PlanningGroupID, ...]) -> JointState | None:
         """Collect current state for exactly the selected global joints."""
         assert self._world_monitor is not None
         resolved_groups = self._world_monitor.world.resolve_planning_groups(group_ids)
         names: list[str] = []
         positions: list[float] = []
-        current_by_robot: dict[WorldRobotID, dict[str, float]] = {}
+        current_by_robot: dict[WorldRobotID, tuple[dict[str, float], bool]] = {}
 
         for group in resolved_groups:
             if group.robot_id not in current_by_robot:
@@ -518,25 +571,47 @@ class ManipulationModule(Module):
                 if current is None:
                     logger.error("No joint state for robot '%s'", group.robot_name)
                     return None
-                current_by_robot[group.robot_id] = dict(
-                    zip(current.name, current.position, strict=False)
-                )
+                indexed_current = self._current_positions_by_name(group.robot_name, current)
+                if indexed_current is None:
+                    return None
+                current_by_robot[group.robot_id] = indexed_current
 
-            robot_state = current_by_robot[group.robot_id]
+            robot_state, current_is_global = current_by_robot[group.robot_id]
             for resolved_name, local_name in zip(
                 group.joint_names, group.local_joint_names, strict=True
             ):
-                if resolved_name in robot_state:
-                    position = robot_state[resolved_name]
-                elif local_name in robot_state:
-                    position = robot_state[local_name]
-                else:
+                lookup_name = resolved_name if current_is_global else local_name
+                if lookup_name not in robot_state:
                     logger.error("Current state missing selected joint '%s'", resolved_name)
                     return None
+                position = robot_state[lookup_name]
                 names.append(resolved_name)
                 positions.append(position)
 
         return JointState(name=names, position=positions)
+
+    def _validate_generated_plan_path(
+        self, group_ids: tuple[PlanningGroupID, ...], path: JointPath
+    ) -> None:
+        """Validate canonical generated plans use selected global names in group order."""
+        assert self._world_monitor is not None
+        resolved_groups = self._world_monitor.world.resolve_planning_groups(group_ids)
+        expected_names = [
+            joint_name for group in resolved_groups for joint_name in group.joint_names
+        ]
+        assert_global_joint_names(expected_names)
+        for index, waypoint in enumerate(path):
+            if len(waypoint.name) != len(waypoint.position):
+                raise ValueError(
+                    f"Waypoint {index} has {len(waypoint.name)} names but "
+                    f"{len(waypoint.position)} positions"
+                )
+            assert_global_joint_names(waypoint.name)
+            if list(waypoint.name) != expected_names:
+                raise ValueError(
+                    f"Waypoint {index} joint names {list(waypoint.name)} do not match "
+                    f"selected planning joints {expected_names}"
+                )
 
     def _normalize_joint_target(
         self, group_id: PlanningGroupID, target: JointState
@@ -565,21 +640,41 @@ class ManipulationModule(Module):
         if self._world_monitor is not None:
             current = self._world_monitor.get_current_joint_state(robot_id)
             if current is not None:
-                current_by_name = dict(zip(current.name, current.position, strict=False))
+                indexed_current = self._current_positions_by_name(robot_name, current)
+                if indexed_current is None:
+                    return []
+                current_by_name, current_is_global = indexed_current
+            else:
+                current_is_global = False
+        else:
+            current_is_global = False
         projected: JointPath = []
         for waypoint in plan.path:
-            position_by_name = dict(zip(waypoint.name, waypoint.position, strict=False))
+            if len(waypoint.name) != len(waypoint.position):
+                logger.error(
+                    "Cannot project plan for '%s': waypoint has %d names but %d positions",
+                    robot_name,
+                    len(waypoint.name),
+                    len(waypoint.position),
+                )
+                return []
+            try:
+                assert_global_joint_names(waypoint.name)
+            except ValueError as exc:
+                logger.error("Cannot project plan for '%s': %s", robot_name, exc)
+                return []
+            position_by_name = dict(zip(waypoint.name, waypoint.position, strict=True))
             positions: list[float] = []
             for local_name, global_name in zip(
                 config.joint_names, global_joint_names, strict=False
             ):
                 if global_name in position_by_name:
                     positions.append(position_by_name[global_name])
-                elif global_name in current_by_name:
-                    positions.append(current_by_name[global_name])
-                elif local_name in current_by_name:
-                    positions.append(current_by_name[local_name])
                 else:
+                    current_lookup_name = global_name if current_is_global else local_name
+                    if current_lookup_name in current_by_name:
+                        positions.append(current_by_name[current_lookup_name])
+                        continue
                     logger.error(
                         "Cannot project plan for '%s': missing joint '%s'",
                         robot_name,
@@ -657,6 +752,10 @@ class ManipulationModule(Module):
         )
         if not result.is_success():
             return self._fail(f"Planning failed: {result.status.name}")
+        try:
+            self._validate_generated_plan_path(group_ids, result.path)
+        except ValueError as exc:
+            return self._fail(f"Planner returned invalid global plan: {exc}")
 
         logger.info("Path: %d waypoints", len(result.path))
         self._store_generated_plan(group_ids, result)
@@ -775,44 +874,30 @@ class ManipulationModule(Module):
             pose: Target end-effector pose
             robot_name: Robot to plan for (required if multiple robots configured)
         """
-        if self._kinematics is None or (r := self._begin_planning(robot_name)) is None:
+        if self._kinematics is None or self._world_monitor is None:
             return False
-        robot_name, robot_id = r
-        assert self._world_monitor  # guaranteed by _begin_planning
+        robot = self._get_robot(robot_name)
+        if robot is None:
+            return False
+
+        selected_robot_name, robot_id, _, _ = robot
+        group_id = self._default_group_id_for_robot(selected_robot_name)
+        if group_id is not None:
+            return self.plan_to_poses({group_id: pose})
+
+        if self._begin_planning(selected_robot_name) is None:
+            return False
 
         current = self._world_monitor.get_current_joint_state(robot_id)
         if current is None:
             return self._fail("No joint state")
-
-        target_pose = PoseStamped(
-            frame_id="world",
-            position=pose.position,
-            orientation=pose.orientation,
-        )
-
-        group_id = self._default_group_id_for_robot(robot_name)
-        if group_id is not None:
-            ik = self._kinematics.solve_pose_targets(
-                world=self._world_monitor.world,
-                pose_targets={group_id: target_pose},
-                seed=current,
-                check_collision=True,
-            )
-            if not ik.is_success() or ik.joint_state is None:
-                return self._fail(f"IK failed: {ik.status.name}")
-
-            start = self._selected_joint_state((group_id,))
-            if start is None:
-                return self._fail("No joint state")
-            logger.info(f"IK solved, error: {ik.position_error:.4f}m")
-            return self._plan_selected_path((group_id,), start, ik.joint_state)
 
         ik = self._solve_ik_for_pose(robot_id, pose, current, check_collision=True)
         if not ik.is_success() or ik.joint_state is None:
             return self._fail(f"IK failed: {ik.status.name}")
 
         logger.info(f"IK solved, error: {ik.position_error:.4f}m")
-        return self._plan_path_only(robot_name, robot_id, ik.joint_state)
+        return self._plan_path_only(selected_robot_name, robot_id, ik.joint_state)
 
     @rpc
     def plan_to_poses(

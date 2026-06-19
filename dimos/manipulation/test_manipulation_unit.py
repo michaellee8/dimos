@@ -756,6 +756,18 @@ class TestGeneratedPlanProjection:
         assert selected.name == ["left/j1", "left/j2"]
         assert selected.position == [1.0, 2.0]
 
+    def test_selected_joint_state_rejects_mixed_current_state_names(self):
+        config = _make_robot_config("left", ["j1", "j2"], "task")
+        module = _make_module_with_monitor(config)
+        module._world_monitor.world.resolve_planning_groups.return_value = [
+            _make_global_group("left", "arm", ["j1", "j2"])
+        ]
+        module._world_monitor.get_current_joint_state.return_value = JointState(
+            name=["left/j1", "j2"], position=[1.0, 2.0]
+        )
+
+        assert module._selected_joint_state(("left/arm",)) is None
+
     def test_execute_plan_dispatches_one_trajectory_per_affected_robot(self):
         left_config = _make_robot_config(
             "left",
@@ -815,6 +827,45 @@ class TestGeneratedPlanProjection:
 
         assert [state.name for state in projected] == [["j1", "j2", "j3"], ["j1", "j2", "j3"]]
         assert [state.position for state in projected] == [[10.0, 2.0, 30.0], [10.0, 3.0, 30.0]]
+
+    def test_project_plan_rejects_local_waypoint_names(self):
+        config = _make_robot_config("left", ["j1", "j2"], "task")
+        module = _make_module_with_monitor(config)
+        module._world_monitor.get_current_joint_state.return_value = JointState(
+            name=["j1", "j2"], position=[10.0, 20.0]
+        )
+        plan = GeneratedPlan(
+            group_ids=("left/arm",),
+            path=[JointState(name=["j1"], position=[1.0])],
+            status=PlanningStatus.SUCCESS,
+        )
+
+        assert module._project_plan_path_for_robot(plan, "left") == []
+
+    def test_project_plan_uses_global_names_for_robots_with_shared_local_names(self):
+        left_config = _make_robot_config("left", ["j1", "j2"], "left_task")
+        right_config = _make_robot_config("right", ["j1", "j2"], "right_task")
+        module = _make_module_with_monitor(left_config, right_config)
+        module._world_monitor.get_current_joint_state.side_effect = [
+            JointState(name=["j1", "j2"], position=[10.0, 20.0]),
+            JointState(name=["j1", "j2"], position=[30.0, 40.0]),
+        ]
+        plan = GeneratedPlan(
+            group_ids=("left/arm", "right/arm"),
+            path=[
+                JointState(name=["left/j1", "right/j1"], position=[1.0, 3.0]),
+                JointState(name=["left/j1", "right/j1"], position=[2.0, 4.0]),
+            ],
+            status=PlanningStatus.SUCCESS,
+        )
+
+        left_projected = module._project_plan_path_for_robot(plan, "left")
+        right_projected = module._project_plan_path_for_robot(plan, "right")
+
+        assert [state.name for state in left_projected] == [["j1", "j2"], ["j1", "j2"]]
+        assert [state.position for state in left_projected] == [[1.0, 20.0], [2.0, 20.0]]
+        assert [state.name for state in right_projected] == [["j1", "j2"], ["j1", "j2"]]
+        assert [state.position for state in right_projected] == [[3.0, 40.0], [4.0, 40.0]]
 
     def test_preview_path_with_last_plan_projects_lazily_to_world_monitor(self):
         config = _make_robot_config("left", ["j1", "j2"], "task")

@@ -16,7 +16,11 @@
 
 from collections.abc import Mapping, Sequence
 
-from dimos.manipulation.planning.planning_identifiers import assert_local_joint_names
+from dimos.manipulation.planning.planning_identifiers import (
+    assert_global_joint_names,
+    assert_local_joint_names,
+    is_global_joint_name,
+)
 from dimos.manipulation.planning.spec.models import (
     GlobalJointName,
     LocalModelJointName,
@@ -110,7 +114,12 @@ def normalize_joint_target_for_group(
     group: ResolvedPlanningGroup,
     target: JointState,
 ) -> JointState:
-    """Normalize a robot-scoped group target to global joint names in group order."""
+    """Normalize a group joint target to global joint names in group order.
+
+    Named targets may use either the public global planning names or the
+    robot-local model names used by legacy robot-scoped callers, but the two
+    namespaces must not be mixed in one target.
+    """
     if not target.name:
         if len(target.position) != len(group.joint_names):
             raise ValueError(
@@ -119,19 +128,38 @@ def normalize_joint_target_for_group(
             )
         return JointState(name=list(group.joint_names), position=list(target.position))
 
-    assert_local_joint_names(target.name)
-    positions_by_name = dict(zip(target.name, target.position, strict=False))
+    if len(target.name) != len(target.position):
+        raise ValueError(
+            f"Target for '{group.id}' has {len(target.name)} names but "
+            f"{len(target.position)} positions"
+        )
+
+    target_names = list(target.name)
+    global_flags = [is_global_joint_name(name) for name in target_names]
+    if any(global_flags) and not all(global_flags):
+        raise ValueError(
+            f"Target for '{group.id}' mixes global and local joint names: {target_names}"
+        )
+
+    if all(global_flags):
+        assert_global_joint_names(target_names)
+        expected_names = group.joint_names
+    else:
+        assert_local_joint_names(target_names)
+        expected_names = group.local_joint_names
+
+    positions_by_name = dict(zip(target_names, target.position, strict=True))
     global_positions: list[float] = []
     missing: list[str] = []
-    for local_name in group.local_joint_names:
-        if local_name in positions_by_name:
-            global_positions.append(positions_by_name[local_name])
+    for expected_name in expected_names:
+        if expected_name in positions_by_name:
+            global_positions.append(positions_by_name[expected_name])
         else:
-            missing.append(local_name)
+            missing.append(expected_name)
     if missing:
         raise ValueError(f"Target for '{group.id}' is missing joints: {missing}")
 
-    extra = set(target.name) - set(group.local_joint_names)
+    extra = set(target_names) - set(expected_names)
     if extra:
         raise ValueError(f"Target for '{group.id}' has extra joints: {sorted(extra)}")
     return JointState(name=list(group.joint_names), position=global_positions)
