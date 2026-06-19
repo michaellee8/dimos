@@ -235,12 +235,9 @@ def fake_vamp_modules(mocker) -> tuple[FakeVampModule, FakeRobotModule]:
     robot_module = FakeRobotModule()
     vamp_module = FakeVampModule(robot_module)
     mocker.patch.dict(sys.modules, {"vamp": vamp_module, "vamp.panda": robot_module})
-    mocker.patch("dimos.manipulation.planning.vamp.loader.vamp", vamp_module)
+    mocker.patch("dimos.manipulation.planning.vamp.loader.vamp", vamp_module, create=True)
+    mocker.patch("dimos.manipulation.planning.world.vamp_world.vamp", vamp_module, create=True)
     mocker.patch("dimos.manipulation.planning.vamp.loader._VAMP_IMPORT_ERROR", None)
-    mocker.patch(
-        "dimos.manipulation.planning.vamp.loader._VAMP_OFFICIAL_ROBOT_MODULES",
-        {"panda": robot_module},
-    )
     return vamp_module, robot_module
 
 
@@ -269,7 +266,6 @@ def finalized_vamp_world() -> VampWorld:
 
 def test_vamp_dependency_error_has_install_guidance(mocker) -> None:
     """Selecting VAMP without the optional package raises an actionable error."""
-    mocker.patch("dimos.manipulation.planning.vamp.loader.vamp", None)
     mocker.patch(
         "dimos.manipulation.planning.vamp.loader._VAMP_IMPORT_ERROR",
         ImportError("No module named 'vamp'"),
@@ -281,7 +277,10 @@ def test_vamp_dependency_error_has_install_guidance(mocker) -> None:
 
 def test_rrt_planner_creation_works_when_vamp_unavailable(mocker) -> None:
     """Default planner creation still works when the optional VAMP package is unavailable."""
-    mocker.patch("dimos.manipulation.planning.vamp.loader.vamp", None)
+    mocker.patch(
+        "dimos.manipulation.planning.vamp.loader._VAMP_IMPORT_ERROR",
+        ImportError("No module named 'vamp'"),
+    )
 
     planner = create_planner(config=RRTConnectPlannerConfig())
 

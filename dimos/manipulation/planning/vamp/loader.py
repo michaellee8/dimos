@@ -20,7 +20,6 @@ import importlib
 import importlib.util
 from pathlib import Path
 import sys
-from types import ModuleType
 from typing import cast
 
 from dimos.manipulation.planning.vamp.errors import VampDependencyError
@@ -30,41 +29,28 @@ from dimos.manipulation.planning.world.config import (
     VampArtifactConfig,
 )
 
-vamp: ModuleType | None
 _VAMP_IMPORT_ERROR: ImportError | None
-_VAMP_OFFICIAL_ROBOT_MODULES: dict[str, ModuleType]
 
 try:
-    import vamp as _vamp_package  # type: ignore[import-not-found]
-    import vamp.baxter as _vamp_baxter  # type: ignore[import-not-found]
-    import vamp.fetch as _vamp_fetch  # type: ignore[import-not-found]
-    import vamp.panda as _vamp_panda  # type: ignore[import-not-found]
-    import vamp.sphere as _vamp_sphere  # type: ignore[import-not-found]
-    import vamp.ur5 as _vamp_ur5  # type: ignore[import-not-found]
+    import vamp
+    import vamp.baxter
+    import vamp.fetch
+    import vamp.panda
+    import vamp.sphere
+    import vamp.ur5
 except ImportError as exc:
-    vamp = None
     _VAMP_IMPORT_ERROR = exc
-    _VAMP_OFFICIAL_ROBOT_MODULES = {}
 else:
-    vamp = cast("ModuleType", _vamp_package)
     _VAMP_IMPORT_ERROR = None
-    _VAMP_OFFICIAL_ROBOT_MODULES = {
-        "baxter": cast("ModuleType", _vamp_baxter),
-        "fetch": cast("ModuleType", _vamp_fetch),
-        "panda": cast("ModuleType", _vamp_panda),
-        "sphere": cast("ModuleType", _vamp_sphere),
-        "ur5": cast("ModuleType", _vamp_ur5),
-    }
 
 
-def require_vamp() -> ModuleType:
-    """Return the imported VAMP package or raise with install guidance."""
-    if vamp is None:
+def require_vamp() -> None:
+    """Raise with install guidance when the optional VAMP package is unavailable."""
+    if _VAMP_IMPORT_ERROR is not None:
         raise VampDependencyError() from _VAMP_IMPORT_ERROR
-    return vamp
 
 
-def load_vamp_robot_module(artifact: VampArtifactConfig) -> ModuleType:
+def load_vamp_robot_module(artifact: VampArtifactConfig) -> vamp.RobotModule:
     """Load the configured VAMP robot module."""
     require_vamp()
     if isinstance(artifact, OfficialVampArtifactConfig):
@@ -74,16 +60,23 @@ def load_vamp_robot_module(artifact: VampArtifactConfig) -> ModuleType:
     raise TypeError(f"Unsupported VAMP artifact config: {type(artifact).__name__}")
 
 
-def _load_official_robot_module(robot: str) -> ModuleType:
-    try:
-        return _VAMP_OFFICIAL_ROBOT_MODULES[robot]
-    except KeyError as exc:
-        raise ValueError(
-            f"Installed VAMP package does not expose robot artifact '{robot}'"
-        ) from exc
+def _load_official_robot_module(robot: str) -> vamp.RobotModule:
+    match robot:
+        case "baxter":
+            return cast("vamp.RobotModule", vamp.baxter)
+        case "fetch":
+            return cast("vamp.RobotModule", vamp.fetch)
+        case "panda":
+            return cast("vamp.RobotModule", vamp.panda)
+        case "sphere":
+            return cast("vamp.RobotModule", vamp.sphere)
+        case "ur5":
+            return cast("vamp.RobotModule", vamp.ur5)
+        case _:
+            raise ValueError(f"Installed VAMP package does not expose robot artifact '{robot}'")
 
 
-def _load_custom_robot_module(path: Path) -> ModuleType:
+def _load_custom_robot_module(path: Path) -> vamp.RobotModule:
     artifact_path = path.expanduser().resolve()
     if not artifact_path.exists():
         raise FileNotFoundError(f"VAMP custom artifact path does not exist: {artifact_path}")
@@ -92,7 +85,7 @@ def _load_custom_robot_module(path: Path) -> ModuleType:
         parent = str(artifact_path.parent)
         if parent not in sys.path:
             sys.path.insert(0, parent)
-        return importlib.import_module(artifact_path.name)
+        return cast("vamp.RobotModule", importlib.import_module(artifact_path.name))
 
     module_name = artifact_path.stem
     spec = importlib.util.spec_from_file_location(module_name, artifact_path)
@@ -101,4 +94,4 @@ def _load_custom_robot_module(path: Path) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
-    return module
+    return cast("vamp.RobotModule", module)

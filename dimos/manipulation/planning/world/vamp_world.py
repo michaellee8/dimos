@@ -26,6 +26,11 @@ from typing import TYPE_CHECKING, Protocol
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+try:
+    import vamp
+except ImportError:
+    pass
+
 from dimos.manipulation.planning.planners.config import VampPlannerConfig
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import ObstacleType, PlanningStatus
@@ -64,9 +69,9 @@ class VampWorld(WorldSpec):
 
     def __init__(self, config: VampWorldConfig) -> None:
         self.config = config
-        vamp = require_vamp()
+        require_vamp()
         self._robot_module = load_vamp_robot_module(config.artifact)
-        self._environment = vamp.Environment()  # type: ignore[attr-defined]
+        self._environment = vamp.Environment()
         self._robot_id: WorldRobotID | None = None
         self._robot_config: RobotModelConfig | None = None
         self._live_joint_state: JointState | None = None
@@ -212,7 +217,7 @@ class VampWorld(WorldSpec):
             list(end_state.position),
             self._environment,
             True,
-        )  # type: ignore[attr-defined]
+        )
         return bool(result)
 
     def get_ee_pose(self, ctx: _VampContext, robot_id: WorldRobotID) -> PoseStamped:
@@ -220,7 +225,7 @@ class VampWorld(WorldSpec):
         self._assert_robot_id(robot_id)
         joint_state = ctx.joint_state
         transform = np.asarray(
-            self._robot_module.eefk(list(joint_state.position)),  # type: ignore[attr-defined]
+            self._robot_module.eefk(list(joint_state.position)),
             dtype=np.float64,
         )
         pose = matrix_to_pose(transform)
@@ -235,7 +240,7 @@ class VampWorld(WorldSpec):
             raise UnsupportedWorldCapabilityError("vamp", f"link pose for '{link_name}'")
         joint_state = ctx.joint_state
         return np.asarray(
-            self._robot_module.eefk(list(joint_state.position)),  # type: ignore[attr-defined]
+            self._robot_module.eefk(list(joint_state.position)),
             dtype=np.float64,
         )
 
@@ -264,13 +269,13 @@ class VampWorld(WorldSpec):
             return _failure(PlanningStatus.COLLISION_AT_GOAL, "Goal configuration is invalid")
 
         robot_module, planner_func, plan_settings, simplify_settings = (
-            require_vamp().configure_robot_and_planner_with_kwargs(  # type: ignore[attr-defined]
+            vamp.configure_robot_and_planner_with_kwargs(
                 self._robot_name(),
                 planner_config.algorithm,
                 max_iterations=_timeout_to_iteration_budget(timeout),
             )
         )
-        sampler = robot_module.halton()  # type: ignore[attr-defined]
+        sampler = robot_module.halton()
         result = planner_func(
             list(start.position),
             list(goal.position),
@@ -290,7 +295,7 @@ class VampWorld(WorldSpec):
         if planner_config.simplify:
             simplified = robot_module.simplify(
                 path_source, self._environment, simplify_settings, sampler
-            )  # type: ignore[attr-defined]
+            )
             if simplified.solved:
                 path_source = simplified.path
 
@@ -352,11 +357,11 @@ class VampWorld(WorldSpec):
                 self._environment,
                 check_bounds,
             )
-        )  # type: ignore[attr-defined]
+        )
 
     def _rebuild_environment(self) -> None:
-        vamp = require_vamp()
-        self._environment = vamp.Environment()  # type: ignore[attr-defined]
+        require_vamp()
+        self._environment = vamp.Environment()
         for obstacle in self._obstacles.values():
             self._add_obstacle_to_environment(obstacle)
 
@@ -374,15 +379,15 @@ class VampWorld(WorldSpec):
             .as_euler("xyz")
             .tolist()
         )
-        vamp = require_vamp()
+        require_vamp()
         if obstacle.obstacle_type == ObstacleType.SPHERE:
-            self._environment.add_sphere(vamp.Sphere(center, obstacle.dimensions[0]))  # type: ignore[attr-defined]
+            self._environment.add_sphere(vamp.Sphere(center, obstacle.dimensions[0]))
         elif obstacle.obstacle_type == ObstacleType.BOX:
             half_extents = [dimension / 2.0 for dimension in obstacle.dimensions]
-            self._environment.add_cuboid(vamp.Cuboid(center, euler_xyz, half_extents))  # type: ignore[attr-defined]
+            self._environment.add_cuboid(vamp.Cuboid(center, euler_xyz, half_extents))
         elif obstacle.obstacle_type == ObstacleType.CYLINDER:
             self._environment.add_capsule(
-                vamp.Cylinder(  # type: ignore[attr-defined]
+                vamp.Cylinder(
                     center,
                     euler_xyz,
                     obstacle.dimensions[0],
