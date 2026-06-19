@@ -36,11 +36,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dimos.protocol.service.spec import BaseConfig
 
-Writer = Callable[[Iterator["Sample"], "OutputConfig"], Path]
-
 if TYPE_CHECKING:
     from dimos.memory2.store.sqlite import SqliteStore
     from dimos.memory2.stream import Stream
+
+# A dataset format is a `formats/<name>.py` module exposing `write` and
+# `inspect` with these signatures, registered in `get_writer`/`get_inspector`.
+Writer = Callable[[Iterator["Sample"], "OutputConfig"], Path]
+Inspector = Callable[[Path], dict[str, Any]]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -351,7 +354,7 @@ def get_writer(format_name: str) -> Writer:
     return write
 
 
-def get_inspector(format_name: str) -> Callable[[Path], dict[str, Any]]:
+def get_inspector(format_name: str) -> Inspector:
     """Lazy-import the format reader's `inspect` function."""
     if format_name == "lerobot":
         from dimos.learning.dataprep.formats.lerobot import inspect
