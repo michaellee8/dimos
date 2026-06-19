@@ -29,15 +29,14 @@ if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
 
+    from dimos.manipulation.planning.groups import PlanningGroup, PlanningGroupSelection
     from dimos.manipulation.planning.spec.config import RobotModelConfig
     from dimos.manipulation.planning.spec.models import (
         GeneratedPlan,
         IKResult,
         Obstacle,
-        PlanningGroupDescriptor,
         PlanningGroupID,
         PlanningResult,
-        ResolvedPlanningGroup,
         WorldRobotID,
     )
     from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
@@ -73,26 +72,6 @@ class WorldSpec(Protocol):
 
     def get_robot_config(self, robot_id: WorldRobotID) -> RobotModelConfig:
         """Get robot configuration."""
-        ...
-
-    def list_planning_groups(self) -> tuple[PlanningGroupDescriptor, ...]:
-        """List planning groups for robots currently added to this world.
-
-        SRDF/fallback parsing creates model-level definitions before world
-        binding. This query returns world-level descriptor snapshots with stable
-        public IDs and global joint names.
-        """
-        ...
-
-    def resolve_planning_groups(
-        self, group_ids: list[PlanningGroupID] | tuple[PlanningGroupID, ...]
-    ) -> tuple[ResolvedPlanningGroup, ...]:
-        """Resolve group IDs against this world's runtime robot bindings.
-
-        Resolution is world-bound: it looks up the robots added to this world,
-        attaches WorldRobotID, validates selected groups, and returns data that
-        backend planners/IK can use with world contexts.
-        """
         ...
 
     def get_joint_limits(
@@ -259,9 +238,8 @@ class KinematicsSpec(Protocol):
     def solve_pose_targets(
         self,
         world: WorldSpec,
-        pose_targets: dict[PlanningGroupID | PlanningGroupDescriptor, PoseStamped],
-        auxiliary_groups: list[PlanningGroupID | PlanningGroupDescriptor]
-        | tuple[PlanningGroupID | PlanningGroupDescriptor, ...] = (),
+        pose_targets: dict[PlanningGroup, PoseStamped],
+        auxiliary_groups: list[PlanningGroup] | tuple[PlanningGroup, ...] = (),
         seed: JointState | None = None,
         position_tolerance: float = 0.001,
         orientation_tolerance: float = 0.01,
@@ -299,7 +277,7 @@ class PlannerSpec(Protocol):
     def plan_selected_joint_path(
         self,
         world: WorldSpec,
-        group_ids: list[PlanningGroupID] | tuple[PlanningGroupID, ...],
+        selection: PlanningGroupSelection,
         start: JointState,
         goal: JointState,
         timeout: float = 10.0,

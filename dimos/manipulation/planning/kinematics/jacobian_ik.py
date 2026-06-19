@@ -30,15 +30,15 @@ import warnings
 
 import numpy as np
 
-from dimos.manipulation.planning.planning_group_utils import (
+from dimos.manipulation.planning.groups import (
+    PlanningGroup,
+    PlanningGroupSelection,
     filter_joint_state_to_selected_joints,
-    planning_group_id_from_selector,
 )
 from dimos.manipulation.planning.spec.enums import IKStatus
 from dimos.manipulation.planning.spec.models import (
     IKResult,
-    PlanningGroupDescriptor,
-    PlanningGroupID,
+    RobotName,
     WorldRobotID,
 )
 from dimos.manipulation.planning.spec.protocols import WorldSpec
@@ -208,8 +208,8 @@ class JacobianIK:
     def solve_pose_targets(
         self,
         world: WorldSpec,
-        pose_targets: Mapping[PlanningGroupID | PlanningGroupDescriptor, PoseStamped],
-        auxiliary_groups: Sequence[PlanningGroupID | PlanningGroupDescriptor] = (),
+        pose_targets: Mapping[PlanningGroup, PoseStamped],
+        auxiliary_groups: Sequence[PlanningGroup] = (),
         seed: JointState | None = None,
         position_tolerance: float = 0.001,
         orientation_tolerance: float = 0.01,
@@ -225,43 +225,43 @@ class JacobianIK:
                 IKStatus.NO_SOLUTION, "At least one pose target is required"
             )
 
-        pose_group_ids = tuple(
-            planning_group_id_from_selector(group) for group in pose_targets.keys()
-        )
-        if len(pose_group_ids) != 1 or auxiliary_groups:
+        pose_groups = tuple(pose_targets.keys())
+        if len(pose_groups) != 1 or auxiliary_groups:
             return _create_failure_result(
                 IKStatus.NO_SOLUTION,
                 "JacobianIK supports exactly one pose target and no auxiliary planning groups",
             )
 
         try:
-            resolved_groups = world.resolve_planning_groups(pose_group_ids)
+            selection = PlanningGroupSelection.from_groups(pose_groups + tuple(auxiliary_groups))
+            robot_ids_by_name = _robot_ids_by_name(world, selection.robot_names)
         except (KeyError, ValueError) as exc:
             return _create_failure_result(IKStatus.NO_SOLUTION, str(exc))
 
-        target_group = next(group for group in resolved_groups if group.id == pose_group_ids[0])
+        target_group = pose_groups[0]
         if not target_group.has_pose_target:
             return _create_failure_result(
                 IKStatus.NO_SOLUTION,
                 f"Planning group '{target_group.id}' has no pose target frame",
             )
 
-        robot_ids = {group.robot_id for group in resolved_groups}
+        robot_ids = {robot_ids_by_name[group.robot_name] for group in selection.groups}
         if len(robot_ids) != 1:
             return _create_failure_result(
                 IKStatus.NO_SOLUTION,
                 "JacobianIK does not support cross-robot pose IK",
             )
 
+        robot_id = robot_ids_by_name[target_group.robot_name]
         full_seed = seed
         if full_seed is None:
             with world.scratch_context() as ctx:
-                full_seed = world.get_joint_state(ctx, target_group.robot_id)
+                full_seed = world.get_joint_state(ctx, robot_id)
 
         target_pose = pose_targets[next(iter(pose_targets.keys()))]
         result = self.solve(
             world=world,
-            robot_id=target_group.robot_id,
+            robot_id=robot_id,
             target_pose=target_pose,
             seed=full_seed,
             position_tolerance=position_tolerance,
@@ -273,7 +273,7 @@ class JacobianIK:
             return result
 
         selected_joint_names: list[str] = []
-        for group in resolved_groups:
+        for group in selection.groups:
             selected_joint_names.extend(group.joint_names)
         try:
             result.joint_state = filter_joint_state_to_selected_joints(
@@ -531,3 +531,21 @@ def _create_failure_result(
         iterations=iterations,
         message=message,
     )
+
+
+def _robot_ids_by_name(
+    world: WorldSpec, robot_names: tuple[RobotName, ...]
+) -> dict[RobotName, WorldRobotID]:
+    robot_ids_by_name: dict[RobotName, WorldRobotID] = {}
+    for robot_name in robot_names:
+        matches = [
+            robot_id
+            for robot_id in world.get_robot_ids()
+            if world.get_robot_config(robot_id).name == robot_name
+        ]
+        if not matches:
+            raise KeyError(f"Robot '{robot_name}' not found")
+        if len(matches) > 1:
+            raise ValueError(f"Robot name '{robot_name}' is not unique in planning world")
+        robot_ids_by_name[robot_name] = matches[0]
+    return robot_ids_by_name

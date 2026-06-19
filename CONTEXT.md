@@ -17,7 +17,7 @@ A control-layer routing identity for a hardware component. For manipulator robot
 _Avoid_: Robot name when discussing planning semantics, world robot ID
 
 **Planning Group**:
-A named selectable serial kinematic chain of robot joints used as the unit of manipulation planning. A planning group is defined by its chain/joints, not by end-effector metadata.
+A named selectable serial kinematic chain of robot joints used as the unit of manipulation planning. After binding to a robot name, it is identified by a planning group ID and remains independent of backend world robot IDs.
 _Avoid_: Move group, movegroup
 
 **Planning Group Definition**:
@@ -27,10 +27,6 @@ _Avoid_: Runtime group, robot ID
 **End-Effector Association**:
 Separate metadata used for pose-targeted operations. For a planning group defined by a chain, the end-effector link is the chain tip. For a planning group defined only by joints, there is no end-effector link.
 _Avoid_: Planning group definition
-
-**Resolved Planning Group**:
-A planning group after model-level declarations have been bound to a concrete robot name and planning world.
-_Avoid_: Planning group config, robot ID
 
 **Planning Group Selection**:
 The set of one or more planning groups chosen for a planning request.
@@ -52,9 +48,9 @@ _Avoid_: Bare group name, robot ID
 The generated fallback planning group used by robot-scoped compatibility APIs when no planning group is specified explicitly. It is not inferred from arbitrary SRDF group uniqueness.
 _Avoid_: Unique planning group, primary planning group
 
-**Planning Group Descriptor**:
-A read-only snapshot returned by query APIs that describes an available planning group and may be used ergonomically as a planning group selector.
-_Avoid_: Live planning group handle, resolved planning group
+**Robot-Scoped Compatibility API**:
+A convenience API that accepts a robot name for common single-robot calls but immediately delegates to planning-group APIs through the robot's default planning group. It does not define a separate planning model, storage model, or groupless execution path.
+_Avoid_: Robot-scoped planner, groupless API
 
 **Joint State**:
 A joint-name-keyed robot state that can represent any set of joints and is not inherently coupled to a robot, planning group, planning group selection, or joint-name scope. At flat multi-robot or coordinator boundaries, joint names are required and are global joint names. Robot identity and local-vs-global meaning are provided by the API boundary or containing type, not by extra fields on the generic joint state.

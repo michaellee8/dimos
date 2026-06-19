@@ -21,12 +21,14 @@ from pathlib import Path
 from pydantic import Field
 
 from dimos.core.module import ModuleConfig
-from dimos.manipulation.planning.planning_groups import FALLBACK_PLANNING_GROUP_NAME
+from dimos.manipulation.planning.groups import (
+    FALLBACK_PLANNING_GROUP_NAME,
+    PlanningGroupDefinition,
+)
 from dimos.manipulation.planning.planning_identifiers import (
     assert_local_joint_names,
     assert_valid_robot_name,
 )
-from dimos.manipulation.planning.spec.models import PlanningGroupDefinition
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
 

@@ -17,11 +17,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
 from typing import cast
 
+from dimos.manipulation.planning.groups import PlanningGroup
 from dimos.manipulation.planning.kinematics.jacobian_ik import JacobianIK
+from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import IKStatus
-from dimos.manipulation.planning.spec.models import IKResult, ResolvedPlanningGroup
+from dimos.manipulation.planning.spec.models import IKResult
 from dimos.manipulation.planning.spec.protocols import WorldSpec
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.JointState import JointState
@@ -37,10 +40,9 @@ def _joint_state(names: list[str], positions: list[float]) -> JointState:
 
 def _group(
     group_id: str, joint_names: tuple[str, ...], tip_link: str | None = "tool0"
-) -> ResolvedPlanningGroup:
-    return ResolvedPlanningGroup(
+) -> PlanningGroup:
+    return PlanningGroup(
         id=group_id,
-        robot_id="robot_1",
         robot_name="arm",
         group_name=group_id.split("/", maxsplit=1)[1],
         joint_names=joint_names,
@@ -51,13 +53,23 @@ def _group(
 
 
 class _IKWorld:
-    def __init__(self, groups: Mapping[str, ResolvedPlanningGroup]) -> None:
+    def __init__(self, groups: Mapping[str, PlanningGroup]) -> None:
         self._groups = groups
+        self._robot_configs = {
+            "robot_1": RobotModelConfig(
+                name="arm",
+                model_path=Path("robot.urdf"),
+                base_pose=_pose(),
+                joint_names=["joint1", "joint2", "gripper"],
+                end_effector_link="tool0",
+            )
+        }
 
-    def resolve_planning_groups(
-        self, group_ids: tuple[str, ...]
-    ) -> tuple[ResolvedPlanningGroup, ...]:
-        return tuple(self._groups[group_id] for group_id in group_ids)
+    def get_robot_ids(self) -> list[str]:
+        return list(self._robot_configs)
+
+    def get_robot_config(self, robot_id: str) -> RobotModelConfig:
+        return self._robot_configs[robot_id]
 
 
 class _SuccessfulIK(JacobianIK):
@@ -90,7 +102,7 @@ def test_solve_pose_targets_filters_result_to_single_group_joints() -> None:
 
     result = _SuccessfulIK().solve_pose_targets(
         world=cast("WorldSpec", world),
-        pose_targets={"arm/arm": _pose()},
+        pose_targets={world._groups["arm/arm"]: _pose()},
         seed=_joint_state(["arm/joint1", "arm/joint2", "arm/gripper"], [0.0, 0.0, 0.0]),
     )
 
@@ -105,8 +117,8 @@ def test_solve_pose_targets_rejects_auxiliary_groups() -> None:
 
     result = _SuccessfulIK().solve_pose_targets(
         world=cast("WorldSpec", world),
-        pose_targets={"arm/arm": _pose()},
-        auxiliary_groups=["arm/gripper"],
+        pose_targets={world._groups["arm/arm"]: _pose()},
+        auxiliary_groups=[_group("arm/gripper", ("arm/gripper",))],
         seed=_joint_state(["arm/joint1", "arm/joint2"], [0.0, 0.0]),
     )
 
@@ -119,7 +131,7 @@ def test_solve_pose_targets_rejects_group_without_pose_target_frame() -> None:
 
     result = JacobianIK().solve_pose_targets(
         world=cast("WorldSpec", world),
-        pose_targets={"arm/gripper": _pose()},
+        pose_targets={world._groups["arm/gripper"]: _pose()},
     )
 
     assert result.status == IKStatus.NO_SOLUTION

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 from dimos.manipulation.planning.spec.enums import (
     IKStatus,
@@ -54,79 +54,6 @@ JointPath: TypeAlias = "list[JointState]"
 
 Jacobian: TypeAlias = "NDArray[np.float64]"
 """6 x n Jacobian matrix (rows: [vx, vy, vz, wx, wy, wz])"""
-
-PlanningGroupSource: TypeAlias = Literal["srdf", "fallback"]
-
-
-@dataclass(frozen=True)
-class PlanningGroupDefinition:
-    """Model-level declaration of a planning group.
-
-    Joint names are local model names. The definition is not bound to a world
-    robot ID and is safe to store on RobotModelConfig. Definitions are parsed
-    from SRDF or conservative fallback generation before any robot instance is
-    added to a planning world.
-    """
-
-    name: str
-    joint_names: tuple[LocalModelJointName, ...]
-    base_link: str
-    tip_link: str | None = None
-    source: PlanningGroupSource = "srdf"
-
-    @property
-    def has_pose_target(self) -> bool:
-        """Whether this group has a valid pose target frame."""
-        return self.tip_link is not None
-
-
-@dataclass(frozen=True)
-class PlanningGroupDescriptor:
-    """Read-only public snapshot for an available planning group.
-
-    Descriptors are returned by query APIs. They expose stable public IDs and
-    global joint names for callers, but intentionally do not expose backend
-    runtime IDs or mutable world state.
-    """
-
-    id: PlanningGroupID
-    robot_name: RobotName
-    group_name: str
-    joint_names: tuple[GlobalJointName, ...]
-    local_joint_names: tuple[LocalModelJointName, ...]
-    base_link: str
-    tip_link: str | None = None
-    source: PlanningGroupSource = "srdf"
-
-    @property
-    def has_pose_target(self) -> bool:
-        """Whether this group can be directly pose-targeted."""
-        return self.tip_link is not None
-
-
-@dataclass(frozen=True)
-class ResolvedPlanningGroup:
-    """Runtime/world-bound planning group data.
-
-    Resolved groups are created from descriptors/IDs for a specific planning
-    world. They include the internal WorldRobotID and are the form consumed by
-    planners, IK backends, and group-scoped FK/Jacobian calls.
-    """
-
-    id: PlanningGroupID
-    robot_id: WorldRobotID
-    robot_name: RobotName
-    group_name: str
-    joint_names: tuple[GlobalJointName, ...]
-    local_joint_names: tuple[LocalModelJointName, ...]
-    base_link: str
-    tip_link: str | None = None
-    source: PlanningGroupSource = "srdf"
-
-    @property
-    def has_pose_target(self) -> bool:
-        """Whether this group can be directly pose-targeted."""
-        return self.tip_link is not None
 
 
 @dataclass

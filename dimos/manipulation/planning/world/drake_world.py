@@ -25,21 +25,17 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from dimos.manipulation.planning.groups import PlanningGroupRegistry
 from dimos.manipulation.planning.planning_identifiers import (
     assert_local_joint_names,
     make_global_joint_name,
-    make_global_joint_names,
-    make_planning_group_id,
-    parse_planning_group_id,
 )
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import ObstacleType
 from dimos.manipulation.planning.spec.models import (
     GeneratedPlan,
     Obstacle,
-    PlanningGroupDescriptor,
     PlanningGroupID,
-    ResolvedPlanningGroup,
     WorldRobotID,
 )
 from dimos.manipulation.planning.spec.protocols import VisualizationSpec, WorldSpec
@@ -209,6 +205,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
 
         # Tracking data
         self._robots: dict[WorldRobotID, _RobotData] = {}
+        self._planning_groups = PlanningGroupRegistry()
         self._obstacles: dict[str, _ObstacleData] = {}
         self._robot_counter = 0
         self._obstacle_counter = 0
@@ -261,6 +258,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
                 base_frame=base_frame,
                 preview_model_instance=preview_model_instance,
             )
+            self._planning_groups.add_robot(config)
 
             logger.info(f"Added robot '{robot_id}' ({config.name})")
             return robot_id
@@ -349,75 +347,6 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
             raise KeyError(f"Robot '{robot_id}' not found")
         return self._robots[robot_id].config
 
-    def list_planning_groups(self) -> tuple[PlanningGroupDescriptor, ...]:
-        """List available planning groups as immutable descriptor snapshots."""
-        descriptors: list[PlanningGroupDescriptor] = []
-        for robot_data in self._robots.values():
-            config = robot_data.config
-            for group in config.planning_groups:
-                descriptors.append(
-                    PlanningGroupDescriptor(
-                        id=make_planning_group_id(config.name, group.name),
-                        robot_name=config.name,
-                        group_name=group.name,
-                        joint_names=tuple(make_global_joint_names(config.name, group.joint_names)),
-                        local_joint_names=group.joint_names,
-                        base_link=group.base_link,
-                        tip_link=group.tip_link,
-                        source=group.source,
-                    )
-                )
-        return tuple(descriptors)
-
-    def resolve_planning_groups(
-        self, group_ids: list[PlanningGroupID] | tuple[PlanningGroupID, ...]
-    ) -> tuple[ResolvedPlanningGroup, ...]:
-        """Resolve planning group IDs against current world robot data."""
-        resolved_groups: list[ResolvedPlanningGroup] = []
-        seen_joints: dict[str, PlanningGroupID] = {}
-
-        for group_id in group_ids:
-            robot_name, group_name = parse_planning_group_id(group_id)
-            robot_data = self._get_robot_data_by_name(robot_name)
-            group = next(
-                (
-                    candidate
-                    for candidate in robot_data.config.planning_groups
-                    if candidate.name == group_name
-                ),
-                None,
-            )
-            if group is None:
-                raise KeyError(f"Unknown planning group ID: {group_id}")
-
-            global_joint_names = tuple(
-                make_global_joint_name(robot_name, local_name) for local_name in group.joint_names
-            )
-            for joint_name in global_joint_names:
-                previous_group_id = seen_joints.get(joint_name)
-                if previous_group_id is not None:
-                    raise ValueError(
-                        "Selected planning groups overlap on global joint "
-                        f"{joint_name}: {previous_group_id} and {group_id}"
-                    )
-                seen_joints[joint_name] = group_id
-
-            resolved_groups.append(
-                ResolvedPlanningGroup(
-                    id=group_id,
-                    robot_id=robot_data.robot_id,
-                    robot_name=robot_name,
-                    group_name=group_name,
-                    joint_names=global_joint_names,
-                    local_joint_names=group.joint_names,
-                    base_link=group.base_link,
-                    tip_link=group.tip_link,
-                    source=group.source,
-                )
-            )
-
-        return tuple(resolved_groups)
-
     def _get_robot_data_by_name(self, robot_name: str) -> _RobotData:
         matches = [
             robot_data
@@ -429,10 +358,6 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         if len(matches) > 1:
             raise ValueError(f"Robot name '{robot_name}' is not unique in planning world")
         return matches[0]
-
-    def _resolve_single_planning_group(self, group_id: PlanningGroupID) -> ResolvedPlanningGroup:
-        resolved_groups = self.resolve_planning_groups((group_id,))
-        return resolved_groups[0]
 
     def get_joint_limits(
         self, robot_id: WorldRobotID
@@ -1062,11 +987,11 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         if not self._finalized:
             raise RuntimeError("World must be finalized first")
 
-        group = self._resolve_single_planning_group(group_id)
+        group = self._planning_groups.get(group_id)
         if group.tip_link is None:
             raise ValueError(f"Planning group '{group_id}' has no pose target frame")
 
-        robot_data = self._robots[group.robot_id]
+        robot_data = self._get_robot_data_by_name(group.robot_name)
         plant_ctx = self._diagram.GetSubsystemContext(self._plant, ctx)
 
         try:
@@ -1165,11 +1090,11 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         if not self._finalized:
             raise RuntimeError("World must be finalized first")
 
-        group = self._resolve_single_planning_group(group_id)
+        group = self._planning_groups.get(group_id)
         if group.tip_link is None:
             raise ValueError(f"Planning group '{group_id}' has no pose target frame")
 
-        robot_data = self._robots[group.robot_id]
+        robot_data = self._get_robot_data_by_name(group.robot_name)
         plant_ctx = self._diagram.GetSubsystemContext(self._plant, ctx)
 
         try:
@@ -1238,9 +1163,10 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
     ) -> list[WorldRobotID]:
         """Resolve planning groups to stable preview robot IDs."""
         robot_ids: list[WorldRobotID] = []
-        for group in self.resolve_planning_groups(tuple(group_ids)):
-            if group.robot_id not in robot_ids:
-                robot_ids.append(group.robot_id)
+        for group in self._planning_groups.select(tuple(group_ids)).groups:
+            robot_id = self._get_robot_data_by_name(group.robot_name).robot_id
+            if robot_id not in robot_ids:
+                robot_ids.append(robot_id)
         return robot_ids
 
     def _show_preview_robot(self, robot_id: WorldRobotID) -> None:

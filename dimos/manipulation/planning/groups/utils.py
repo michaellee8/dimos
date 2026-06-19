@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared helpers for planning-group selector and joint-state projection."""
+"""Shared helpers for planning-group selectors and joint-state projection."""
 
 from collections.abc import Mapping, Sequence
 
+from dimos.manipulation.planning.groups.models import PlanningGroup
 from dimos.manipulation.planning.planning_identifiers import (
     assert_global_joint_names,
     assert_local_joint_names,
@@ -24,48 +25,16 @@ from dimos.manipulation.planning.planning_identifiers import (
 from dimos.manipulation.planning.spec.models import (
     GlobalJointName,
     LocalModelJointName,
-    PlanningGroupDescriptor,
     PlanningGroupID,
-    ResolvedPlanningGroup,
-    RobotName,
 )
 from dimos.msgs.sensor_msgs.JointState import JointState
 
 
-def planning_group_id_from_selector(
-    selector: PlanningGroupID | PlanningGroupDescriptor,
-) -> PlanningGroupID:
+def planning_group_id_from_selector(selector: PlanningGroupID | PlanningGroup) -> PlanningGroupID:
     """Return the planning-group ID represented by a selector."""
-    if isinstance(selector, PlanningGroupDescriptor):
+    if isinstance(selector, PlanningGroup):
         return selector.id
     return selector
-
-
-def single_planning_group_id_for_robot(
-    groups: Sequence[PlanningGroupDescriptor],
-    robot_name: RobotName,
-) -> PlanningGroupID:
-    """Return a robot's only planning group ID, or raise if ambiguous."""
-    group_ids = [group.id for group in groups if group.robot_name == robot_name]
-    if len(group_ids) != 1:
-        raise ValueError(
-            f"Robot '{robot_name}' has {len(group_ids)} planning groups; "
-            "select a planning group explicitly"
-        )
-    return group_ids[0]
-
-
-def primary_pose_planning_group_id_for_robot(
-    groups: Sequence[PlanningGroupDescriptor],
-    robot_name: RobotName,
-) -> PlanningGroupID | None:
-    """Return the first pose-targetable group ID for compatibility paths."""
-    # TODO: Replace this compatibility selection with either one TF publication per
-    # pose-targetable planning group or backend-level whole-robot TF publishing.
-    for group in groups:
-        if group.robot_name == robot_name and group.has_pose_target:
-            return group.id
-    return None
 
 
 def matching_global_joint_name(
@@ -113,7 +82,7 @@ def filter_joint_state_to_selected_joints(
 
 
 def joint_target_to_global_names(
-    group: ResolvedPlanningGroup,
+    group: PlanningGroup,
     target: JointState,
 ) -> JointState:
     """Convert a group joint target to global joint names in group order.

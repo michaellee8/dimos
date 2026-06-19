@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from dimos.manipulation.planning.groups import PlanningGroup, PlanningGroupSelection
 from dimos.manipulation.planning.planning_identifiers import (
     local_joint_name_from_global,
     make_global_joint_names,
@@ -33,9 +34,8 @@ from dimos.manipulation.planning.planning_identifiers import (
 from dimos.manipulation.planning.spec.enums import PlanningStatus
 from dimos.manipulation.planning.spec.models import (
     JointPath,
-    PlanningGroupID,
     PlanningResult,
-    ResolvedPlanningGroup,
+    RobotName,
     WorldRobotID,
 )
 from dimos.manipulation.planning.spec.protocols import WorldSpec
@@ -167,19 +167,14 @@ class RRTConnectPlanner:
     def plan_selected_joint_path(
         self,
         world: WorldSpec,
-        group_ids: list[PlanningGroupID] | tuple[PlanningGroupID, ...],
+        selection: PlanningGroupSelection,
         start: JointState,
         goal: JointState,
         timeout: float = 10.0,
     ) -> PlanningResult:
         """Plan a collision-free path for an explicit planning-group selection."""
-        try:
-            resolved_groups = world.resolve_planning_groups(tuple(group_ids))
-        except (KeyError, ValueError) as exc:
-            return _create_failure_result(PlanningStatus.INVALID_GOAL, str(exc))
-
         selected_joint_names = [
-            joint_name for group in resolved_groups for joint_name in group.joint_names
+            joint_name for group in selection.groups for joint_name in group.joint_names
         ]
         exact_error = _validate_exact_joint_keys(start, selected_joint_names, "start")
         if exact_error is not None:
@@ -188,11 +183,17 @@ class RRTConnectPlanner:
         if exact_error is not None:
             return exact_error
 
-        robot_ids = {group.robot_id for group in resolved_groups}
+        try:
+            robot_ids_by_name = _robot_ids_by_name(world, selection.robot_names)
+        except (KeyError, ValueError) as exc:
+            return _create_failure_result(PlanningStatus.INVALID_GOAL, str(exc))
+
+        robot_ids = set(robot_ids_by_name.values())
         if len(robot_ids) != 1:
             return self._plan_multi_robot_selected_joint_path(
                 world=world,
-                resolved_groups=resolved_groups,
+                groups=selection.groups,
+                robot_ids_by_name=robot_ids_by_name,
                 start=start,
                 goal=goal,
                 timeout=timeout,
@@ -244,7 +245,8 @@ class RRTConnectPlanner:
     def _plan_multi_robot_selected_joint_path(
         self,
         world: WorldSpec,
-        resolved_groups: tuple[ResolvedPlanningGroup, ...],
+        groups: tuple[PlanningGroup, ...],
+        robot_ids_by_name: dict[RobotName, WorldRobotID],
         start: JointState,
         goal: JointState,
         timeout: float,
@@ -258,14 +260,16 @@ class RRTConnectPlanner:
                 "World must be finalized before planning",
             )
 
-        selected_joint_names = [joint for group in resolved_groups for joint in group.joint_names]
+        selected_joint_names = [joint for group in groups for joint in group.joint_names]
         q_start = np.array(
             _order_joint_state(start, selected_joint_names).position, dtype=np.float64
         )
         q_goal = np.array(_order_joint_state(goal, selected_joint_names).position, dtype=np.float64)
 
         try:
-            robot_order, robot_joint_names = _validate_full_robot_groups(world, resolved_groups)
+            robot_order, robot_joint_names = _validate_full_robot_groups(
+                world, groups, robot_ids_by_name
+            )
         except KeyError as exc:
             return _create_failure_result(PlanningStatus.NO_SOLUTION, str(exc))
         if not robot_order:
@@ -641,19 +645,39 @@ def _create_failure_result(
 
 def _validate_full_robot_groups(
     world: WorldSpec,
-    resolved_groups: tuple[ResolvedPlanningGroup, ...],
+    groups: tuple[PlanningGroup, ...],
+    robot_ids_by_name: dict[RobotName, WorldRobotID],
 ) -> tuple[list[WorldRobotID], dict[WorldRobotID, list[str]]]:
     robot_order: list[WorldRobotID] = []
     robot_joint_names: dict[WorldRobotID, list[str]] = {}
     known_robot_ids = set(world.get_robot_ids())
-    for group in resolved_groups:
-        if group.robot_id not in known_robot_ids:
-            raise KeyError(f"Robot '{group.robot_id}' not found")
-        if group.robot_id not in robot_joint_names:
-            robot_joint_names[group.robot_id] = []
-            robot_order.append(group.robot_id)
-        robot_joint_names[group.robot_id].extend(group.joint_names)
+    for group in groups:
+        robot_id = robot_ids_by_name[group.robot_name]
+        if robot_id not in known_robot_ids:
+            raise KeyError(f"Robot '{robot_id}' not found")
+        if robot_id not in robot_joint_names:
+            robot_joint_names[robot_id] = []
+            robot_order.append(robot_id)
+        robot_joint_names[robot_id].extend(group.joint_names)
     return robot_order, robot_joint_names
+
+
+def _robot_ids_by_name(
+    world: WorldSpec, robot_names: tuple[RobotName, ...]
+) -> dict[RobotName, WorldRobotID]:
+    robot_ids_by_name: dict[RobotName, WorldRobotID] = {}
+    for robot_name in robot_names:
+        matches = [
+            robot_id
+            for robot_id in world.get_robot_ids()
+            if world.get_robot_config(robot_id).name == robot_name
+        ]
+        if not matches:
+            raise KeyError(f"Robot '{robot_name}' not found")
+        if len(matches) > 1:
+            raise ValueError(f"Robot name '{robot_name}' is not unique in planning world")
+        robot_ids_by_name[robot_name] = matches[0]
+    return robot_ids_by_name
 
 
 def _validate_selected_groups_cover_full_robots(

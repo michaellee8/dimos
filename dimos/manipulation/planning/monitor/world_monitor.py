@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.manipulation.planning.factory import create_world
+from dimos.manipulation.planning.groups import PlanningGroupRegistry
 from dimos.manipulation.planning.monitor.robot_state_monitor import RobotStateMonitor
 from dimos.manipulation.planning.monitor.world_obstacle_monitor import WorldObstacleMonitor
 from dimos.manipulation.planning.spec.protocols import VisualizationSpec
@@ -68,6 +69,8 @@ class WorldMonitor:
         )
         self._lock = threading.RLock()
         self._robot_joints: dict[WorldRobotID, list[str]] = {}
+        self._robot_ids_by_name: dict[str, WorldRobotID] = {}
+        self._planning_groups = PlanningGroupRegistry()
         self._state_monitors: dict[WorldRobotID, RobotStateMonitor] = {}
         self._obstacle_monitor: WorldObstacleMonitor | None = None
         self._viz_thread: threading.Thread | None = None
@@ -81,8 +84,17 @@ class WorldMonitor:
         with self._lock:
             robot_id = self._world.add_robot(config)
             self._robot_joints[robot_id] = config.joint_names
+            if config.name in self._robot_ids_by_name:
+                raise ValueError(f"Robot name '{config.name}' is already registered")
+            self._robot_ids_by_name[config.name] = robot_id
+            self._planning_groups.add_robot(config)
             logger.info(f"Added robot '{config.name}' as '{robot_id}'")
             return robot_id
+
+    @property
+    def planning_groups(self) -> PlanningGroupRegistry:
+        """Backend-independent planning-group registry for added robots."""
+        return self._planning_groups
 
     def get_robot_ids(self) -> list[WorldRobotID]:
         """Get all robot IDs."""
@@ -364,12 +376,12 @@ class WorldMonitor:
         self, group_id: PlanningGroupID, joint_state: JointState | None = None
     ) -> PoseStamped:
         """Get planning group target-frame pose using current state by default."""
-        group = self._world.resolve_planning_groups((group_id,))[0]
+        robot_id = self._robot_id_for_group(group_id)
         with self._world.scratch_context() as ctx:
             if joint_state is None:
-                joint_state = self.get_current_joint_state(group.robot_id)
+                joint_state = self.get_current_joint_state(robot_id)
             if joint_state is not None:
-                self._world.set_joint_state(ctx, group.robot_id, joint_state)
+                self._world.set_joint_state(ctx, robot_id, joint_state)
 
             return self._world.get_group_pose(ctx, group_id)
 
@@ -414,17 +426,18 @@ class WorldMonitor:
         self, group_id: PlanningGroupID, joint_state: JointState
     ) -> NDArray[np.float64]:
         """Get planning group target-frame 6xN Jacobian matrix."""
-        group = self._world.resolve_planning_groups((group_id,))[0]
+        self._planning_groups.get(group_id)
+        robot_id = self._robot_id_for_group(group_id)
         with self._world.scratch_context() as ctx:
-            self._world.set_joint_state(ctx, group.robot_id, joint_state)
+            self._world.set_joint_state(ctx, robot_id, joint_state)
             return self._world.get_group_jacobian(ctx, group_id)
 
     def _unique_pose_group_id_for_robot(self, robot_id: WorldRobotID) -> PlanningGroupID:
         robot_name = self._world.get_robot_config(robot_id).name
         pose_group_ids = [
             group.id
-            for group in self._world.list_planning_groups()
-            if group.robot_name == robot_name and group.has_pose_target
+            for group in self._planning_groups.groups_for_robot(robot_name)
+            if group.has_pose_target
         ]
         if len(pose_group_ids) != 1:
             raise ValueError(
@@ -432,6 +445,15 @@ class WorldMonitor:
                 "call get_group_pose/get_group_jacobian with an explicit planning group ID"
             )
         return pose_group_ids[0]
+
+    def _robot_id_for_group(self, group_id: PlanningGroupID) -> WorldRobotID:
+        group = self._planning_groups.get(group_id)
+        try:
+            return self._robot_ids_by_name[group.robot_name]
+        except KeyError as exc:
+            raise KeyError(
+                f"Robot '{group.robot_name}' not found for planning group {group_id}"
+            ) from exc
 
     # Lifecycle
 

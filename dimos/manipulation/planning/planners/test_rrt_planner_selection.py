@@ -23,10 +23,10 @@ from typing import cast
 
 import numpy as np
 
+from dimos.manipulation.planning.groups import PlanningGroup, PlanningGroupSelection
 from dimos.manipulation.planning.planners.rrt_planner import RRTConnectPlanner
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import PlanningStatus
-from dimos.manipulation.planning.spec.models import ResolvedPlanningGroup
 from dimos.manipulation.planning.spec.protocols import WorldSpec
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.JointState import JointState
@@ -52,13 +52,11 @@ def _joint_state(names: list[str], positions: list[float]) -> JointState:
 
 def _group(
     group_id: str,
-    robot_id: str,
     robot_name: str,
     joint_names: tuple[str, ...],
-) -> ResolvedPlanningGroup:
-    return ResolvedPlanningGroup(
+) -> PlanningGroup:
+    return PlanningGroup(
         id=group_id,
-        robot_id=robot_id,
         robot_name=robot_name,
         group_name=group_id.split("/", maxsplit=1)[1],
         joint_names=joint_names,
@@ -68,26 +66,23 @@ def _group(
     )
 
 
+def _selection(*groups: PlanningGroup) -> PlanningGroupSelection:
+    return PlanningGroupSelection.from_groups(tuple(groups))
+
+
 class _SelectionWorld:
     is_finalized = True
 
     def __init__(
         self,
-        groups: dict[str, ResolvedPlanningGroup],
         robot_configs: dict[str, RobotModelConfig],
         coupled_collision_predicate: Callable[[dict[str, JointState]], bool] | None = None,
     ) -> None:
-        self._groups = groups
         self._robot_configs = robot_configs
         self._coupled_collision_predicate = coupled_collision_predicate
         self.coupled_collision_checks = 0
         self.config_collision_names: list[list[str]] = []
         self.edge_collision_names: list[tuple[list[str], list[str]]] = []
-
-    def resolve_planning_groups(
-        self, group_ids: tuple[str, ...]
-    ) -> tuple[ResolvedPlanningGroup, ...]:
-        return tuple(self._groups[group_id] for group_id in group_ids)
 
     def get_robot_config(self, robot_id: str) -> RobotModelConfig:
         return self._robot_configs[robot_id]
@@ -130,14 +125,12 @@ class _SelectionWorld:
 
 
 def test_plan_selected_joint_path_rejects_missing_and_extra_start_names() -> None:
-    world = _SelectionWorld(
-        groups={"arm/arm": _group("arm/arm", "robot_1", "arm", ("arm/joint1", "arm/joint2"))},
-        robot_configs={"robot_1": _robot_config("arm", ["joint1", "joint2"])},
-    )
+    group = _group("arm/arm", "arm", ("arm/joint1", "arm/joint2"))
+    world = _SelectionWorld(robot_configs={"robot_1": _robot_config("arm", ["joint1", "joint2"])})
 
     result = RRTConnectPlanner().plan_selected_joint_path(
         cast("WorldSpec", world),
-        ["arm/arm"],
+        _selection(group),
         start=_joint_state(["arm/joint1", "arm/extra"], [0.0, 0.0]),
         goal=_joint_state(["arm/joint1", "arm/joint2"], [0.0, 0.0]),
     )
@@ -148,14 +141,12 @@ def test_plan_selected_joint_path_rejects_missing_and_extra_start_names() -> Non
 
 
 def test_plan_selected_joint_path_rejects_missing_and_extra_goal_names() -> None:
-    world = _SelectionWorld(
-        groups={"arm/arm": _group("arm/arm", "robot_1", "arm", ("arm/joint1", "arm/joint2"))},
-        robot_configs={"robot_1": _robot_config("arm", ["joint1", "joint2"])},
-    )
+    group = _group("arm/arm", "arm", ("arm/joint1", "arm/joint2"))
+    world = _SelectionWorld(robot_configs={"robot_1": _robot_config("arm", ["joint1", "joint2"])})
 
     result = RRTConnectPlanner().plan_selected_joint_path(
         cast("WorldSpec", world),
-        ["arm/arm"],
+        _selection(group),
         start=_joint_state(["arm/joint1", "arm/joint2"], [0.0, 0.0]),
         goal=_joint_state(["arm/joint1", "arm/extra"], [0.0, 0.0]),
     )
@@ -166,11 +157,9 @@ def test_plan_selected_joint_path_rejects_missing_and_extra_goal_names() -> None
 
 
 def test_plan_selected_joint_path_plans_cross_robot_full_group_selection() -> None:
+    left_group = _group("left/arm", "left", ("left/joint1",))
+    right_group = _group("right/arm", "right", ("right/joint1",))
     world = _SelectionWorld(
-        groups={
-            "left/arm": _group("left/arm", "left_robot", "left", ("left/joint1",)),
-            "right/arm": _group("right/arm", "right_robot", "right", ("right/joint1",)),
-        },
         robot_configs={
             "left_robot": _robot_config("left", ["joint1"]),
             "right_robot": _robot_config("right", ["joint1"]),
@@ -180,7 +169,7 @@ def test_plan_selected_joint_path_plans_cross_robot_full_group_selection() -> No
 
     result = RRTConnectPlanner().plan_selected_joint_path(
         cast("WorldSpec", world),
-        ["left/arm", "right/arm"],
+        _selection(left_group, right_group),
         start=joint_state,
         goal=_joint_state(["left/joint1", "right/joint1"], [0.1, -0.1]),
     )
@@ -193,21 +182,12 @@ def test_plan_selected_joint_path_plans_cross_robot_full_group_selection() -> No
 
 
 def test_plan_selected_joint_path_converts_single_robot_backend_boundary_to_local() -> None:
-    world = _SelectionWorld(
-        groups={
-            "arm/manipulator": _group(
-                "arm/manipulator",
-                "robot_1",
-                "arm",
-                ("arm/joint1", "arm/joint2"),
-            )
-        },
-        robot_configs={"robot_1": _robot_config("arm", ["joint1", "joint2"])},
-    )
+    group = _group("arm/manipulator", "arm", ("arm/joint1", "arm/joint2"))
+    world = _SelectionWorld(robot_configs={"robot_1": _robot_config("arm", ["joint1", "joint2"])})
 
     result = RRTConnectPlanner().plan_selected_joint_path(
         cast("WorldSpec", world),
-        ["arm/manipulator"],
+        _selection(group),
         start=_joint_state(["arm/joint2", "arm/joint1"], [0.2, 0.1]),
         goal=_joint_state(["arm/joint1", "arm/joint2"], [0.3, 0.4]),
     )
@@ -231,11 +211,9 @@ def test_plan_selected_joint_path_rejects_cross_robot_coupled_goal_collision() -
         right = ctx["right_robot"].position[0]
         return not (left > 0.04 and right > 0.04)
 
+    left_group = _group("left/arm", "left", ("left/joint1",))
+    right_group = _group("right/arm", "right", ("right/joint1",))
     world = _SelectionWorld(
-        groups={
-            "left/arm": _group("left/arm", "left_robot", "left", ("left/joint1",)),
-            "right/arm": _group("right/arm", "right_robot", "right", ("right/joint1",)),
-        },
         robot_configs={
             "left_robot": _robot_config("left", ["joint1"]),
             "right_robot": _robot_config("right", ["joint1"]),
@@ -245,7 +223,7 @@ def test_plan_selected_joint_path_rejects_cross_robot_coupled_goal_collision() -
 
     result = RRTConnectPlanner().plan_selected_joint_path(
         cast("WorldSpec", world),
-        ["left/arm", "right/arm"],
+        _selection(left_group, right_group),
         start=_joint_state(["left/joint1", "right/joint1"], [0.0, 0.0]),
         goal=_joint_state(["left/joint1", "right/joint1"], [0.1, 0.1]),
     )
@@ -255,15 +233,13 @@ def test_plan_selected_joint_path_rejects_cross_robot_coupled_goal_collision() -
 
 
 def test_plan_selected_joint_path_rejects_single_robot_subset_selection() -> None:
-    world = _SelectionWorld(
-        groups={"arm/wrist": _group("arm/wrist", "robot_1", "arm", ("arm/joint2",))},
-        robot_configs={"robot_1": _robot_config("arm", ["joint1", "joint2"])},
-    )
+    group = _group("arm/wrist", "arm", ("arm/joint2",))
+    world = _SelectionWorld(robot_configs={"robot_1": _robot_config("arm", ["joint1", "joint2"])})
     joint_state = _joint_state(["arm/joint2"], [0.0])
 
     result = RRTConnectPlanner().plan_selected_joint_path(
         cast("WorldSpec", world),
-        ["arm/wrist"],
+        _selection(group),
         start=joint_state,
         goal=joint_state,
     )

@@ -21,7 +21,7 @@ from pathlib import Path
 import warnings
 import xml.etree.ElementTree as ET
 
-from dimos.manipulation.planning.spec.models import PlanningGroupDefinition
+from dimos.manipulation.planning.groups.models import PlanningGroupDefinition
 from dimos.robot.model_parser import JointDescription, ModelDescription
 from dimos.utils.logging_config import setup_logger
 
@@ -204,7 +204,7 @@ def _parse_chain_group(
 
     try:
         ordered_joints = _ordered_joints_between_links(model, base_link, tip_link)
-        controlled_joints = [j for j in ordered_joints if j.type != "fixed"]
+        controlled_joints = [joint for joint in ordered_joints if joint.type != "fixed"]
         _validate_controllable(group_name, controlled_joints, controllable_joint_names)
     except PlanningGroupDiscoveryError as exc:
         _warn(f"Skipping SRDF chain group {group_name} in {srdf_path}: {exc}")
@@ -356,12 +356,3 @@ def _validate_controllable(
         raise PlanningGroupDiscoveryError(
             f"planning group {group_name} includes joints outside controllable set: {missing}"
         )
-
-
-__all__ = [
-    "FALLBACK_PLANNING_GROUP_NAME",
-    "PlanningGroupDiscoveryError",
-    "discover_planning_group_definitions",
-    "generate_fallback_planning_group",
-    "parse_srdf_planning_groups",
-]

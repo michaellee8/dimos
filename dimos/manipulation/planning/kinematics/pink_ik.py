@@ -25,18 +25,18 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from dimos.manipulation.planning.kinematics.config import PinkKinematicsConfig
-from dimos.manipulation.planning.planning_group_utils import (
+from dimos.manipulation.planning.groups import (
+    PlanningGroup,
+    PlanningGroupSelection,
     filter_joint_state_to_selected_joints,
     matching_global_joint_name,
-    planning_group_id_from_selector,
 )
+from dimos.manipulation.planning.kinematics.config import PinkKinematicsConfig
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import IKStatus
 from dimos.manipulation.planning.spec.models import (
     IKResult,
-    PlanningGroupDescriptor,
-    PlanningGroupID,
+    RobotName,
     WorldRobotID,
 )
 from dimos.manipulation.planning.spec.protocols import WorldSpec
@@ -178,8 +178,8 @@ class PinkIK:
     def solve_pose_targets(
         self,
         world: WorldSpec,
-        pose_targets: Mapping[PlanningGroupID | PlanningGroupDescriptor, PoseStamped],
-        auxiliary_groups: Sequence[PlanningGroupID | PlanningGroupDescriptor] = (),
+        pose_targets: Mapping[PlanningGroup, PoseStamped],
+        auxiliary_groups: Sequence[PlanningGroup] = (),
         seed: JointState | None = None,
         position_tolerance: float = 0.001,
         orientation_tolerance: float = 0.01,
@@ -190,36 +190,31 @@ class PinkIK:
         if not pose_targets:
             return _failure(IKStatus.NO_SOLUTION, "At least one pose target is required")
 
-        pose_group_ids = tuple(
-            planning_group_id_from_selector(group) for group in pose_targets.keys()
-        )
-        auxiliary_group_ids = tuple(
-            planning_group_id_from_selector(group) for group in auxiliary_groups
-        )
-        selected_group_ids = pose_group_ids + auxiliary_group_ids
+        pose_groups = tuple(pose_targets.keys())
         try:
-            resolved_groups = world.resolve_planning_groups(selected_group_ids)
+            selection = PlanningGroupSelection.from_groups(pose_groups + tuple(auxiliary_groups))
+            robot_ids_by_name = _robot_ids_by_name(world, selection.robot_names)
         except (KeyError, ValueError) as exc:
             return _failure(IKStatus.NO_SOLUTION, str(exc))
 
-        if len(pose_group_ids) != 1:
+        if len(pose_groups) != 1:
             return _failure(
                 IKStatus.NO_SOLUTION,
                 "PinkIK supports exactly one pose target per request",
             )
 
-        target_group = next(group for group in resolved_groups if group.id == pose_group_ids[0])
+        target_group = pose_groups[0]
         if not target_group.has_pose_target or target_group.tip_link is None:
             return _failure(
                 IKStatus.NO_SOLUTION,
                 f"Planning group '{target_group.id}' has no pose target frame",
             )
 
-        robot_ids = {group.robot_id for group in resolved_groups}
+        robot_ids = {robot_ids_by_name[group.robot_name] for group in selection.groups}
         if len(robot_ids) != 1:
             return _failure(IKStatus.NO_SOLUTION, "PinkIK does not support cross-robot pose IK")
 
-        robot_id = target_group.robot_id
+        robot_id = robot_ids_by_name[target_group.robot_name]
         if seed is None:
             with world.scratch_context() as ctx:
                 seed = world.get_joint_state(ctx, robot_id)
@@ -264,7 +259,7 @@ class PinkIK:
 
             selected_joint_names: list[str] = []
             selected_local_names: list[str] = []
-            for group in resolved_groups:
+            for group in selection.groups:
                 selected_joint_names.extend(group.joint_names)
                 selected_local_names.extend(group.local_joint_names)
             try:
@@ -622,6 +617,24 @@ def _collision_failure(result: IKResult) -> IKResult:
         iterations=result.iterations,
         message="Pink IK solution rejected by collision check",
     )
+
+
+def _robot_ids_by_name(
+    world: WorldSpec, robot_names: tuple[RobotName, ...]
+) -> dict[RobotName, WorldRobotID]:
+    robot_ids_by_name: dict[RobotName, WorldRobotID] = {}
+    for robot_name in robot_names:
+        matches = [
+            robot_id
+            for robot_id in world.get_robot_ids()
+            if world.get_robot_config(robot_id).name == robot_name
+        ]
+        if not matches:
+            raise KeyError(f"Robot '{robot_name}' not found")
+        if len(matches) > 1:
+            raise ValueError(f"Robot name '{robot_name}' is not unique in planning world")
+        robot_ids_by_name[robot_name] = matches[0]
+    return robot_ids_by_name
 
 
 __all__ = ["PinkIK", "PinkIKConfig", "PinkIKDependencyError"]

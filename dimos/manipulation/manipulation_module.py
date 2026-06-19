@@ -40,23 +40,21 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In
 from dimos.manipulation.planning.factory import create_kinematics, create_planner
+from dimos.manipulation.planning.groups import (
+    PlanningGroup,
+    joint_target_to_global_names,
+    planning_group_id_from_selector,
+)
 from dimos.manipulation.planning.kinematics.config import (
     JacobianKinematicsConfig,
     ManipulationKinematicsConfig,
     kinematics_config_from_name,
 )
 from dimos.manipulation.planning.monitor.world_monitor import WorldMonitor
-from dimos.manipulation.planning.planning_group_utils import (
-    joint_target_to_global_names,
-    planning_group_id_from_selector,
-    primary_pose_planning_group_id_for_robot,
-)
-from dimos.manipulation.planning.planning_groups import FALLBACK_PLANNING_GROUP_NAME
 from dimos.manipulation.planning.planning_identifiers import (
     assert_global_joint_names,
     assert_local_joint_names,
     make_global_joint_names,
-    make_planning_group_id,
 )
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import IKStatus, ObstacleType
@@ -64,7 +62,6 @@ from dimos.manipulation.planning.spec.models import (
     GeneratedPlan,
     IKResult,
     Obstacle,
-    PlanningGroupDescriptor,
     PlanningGroupID,
     PlanningResult,
     RobotName,
@@ -345,9 +342,7 @@ class ManipulationModule(Module):
                     target_frame = config.end_effector_link
                     pose_group_id = self._primary_pose_group_id_for_robot(config.name)
                     if pose_group_id is not None:
-                        pose_group = self._world_monitor.world.resolve_planning_groups(
-                            (pose_group_id,)
-                        )[0]
+                        pose_group = self._world_monitor.planning_groups.get(pose_group_id)
                         target_frame = pose_group.tip_link
                         ee_pose = self._world_monitor.get_group_pose(pose_group_id)
                     else:
@@ -484,22 +479,19 @@ class ManipulationModule(Module):
     def _default_group_id_for_robot(self, robot_name: RobotName) -> PlanningGroupID | None:
         """Return the generated fallback group used by robot-scoped wrappers."""
         assert self._world_monitor is not None
-        group_id = make_planning_group_id(robot_name, FALLBACK_PLANNING_GROUP_NAME)
-        if any(group.id == group_id for group in self._world_monitor.world.list_planning_groups()):
+        group_id = self._world_monitor.planning_groups.default_group_id_for_robot(robot_name)
+        if group_id is not None:
             return group_id
         logger.error(
-            "Robot '%s' has no generated default planning group '%s'; use explicit group APIs",
+            "Robot '%s' has no generated default planning group; use explicit group APIs",
             robot_name,
-            group_id,
         )
         return None
 
     def _primary_pose_group_id_for_robot(self, robot_name: RobotName) -> PlanningGroupID | None:
         """Return the first pose-targetable group for robot-scoped compatibility paths."""
         assert self._world_monitor is not None
-        return primary_pose_planning_group_id_for_robot(
-            self._world_monitor.world.list_planning_groups(), robot_name
-        )
+        return self._world_monitor.planning_groups.primary_pose_group_id_for_robot(robot_name)
 
     def _current_positions_by_name(
         self, robot_name: RobotName, current: JointState
@@ -527,14 +519,18 @@ class ManipulationModule(Module):
     def _selected_joint_state(self, group_ids: tuple[PlanningGroupID, ...]) -> JointState | None:
         """Collect current state for exactly the selected global joints."""
         assert self._world_monitor is not None
-        resolved_groups = self._world_monitor.world.resolve_planning_groups(group_ids)
+        selection = self._world_monitor.planning_groups.select(group_ids)
 
-        robot_names_by_id: dict[WorldRobotID, RobotName] = {}
-        for group in resolved_groups:
-            robot_names_by_id.setdefault(group.robot_id, group.robot_name)
+        robot_ids_by_name: dict[RobotName, WorldRobotID] = {}
+        for robot_name in selection.robot_names:
+            try:
+                robot_ids_by_name[robot_name] = self._robots[robot_name][0]
+            except KeyError:
+                logger.error("Robot '%s' is not registered", robot_name)
+                return None
 
-        current_by_robot: dict[WorldRobotID, dict[str, float]] = {}
-        for robot_id, robot_name in robot_names_by_id.items():
+        current_by_robot: dict[RobotName, dict[str, float]] = {}
+        for robot_name, robot_id in robot_ids_by_name.items():
             current = self._world_monitor.get_current_joint_state(robot_id)
             if current is None:
                 logger.error("No joint state for robot '%s'", robot_name)
@@ -542,12 +538,12 @@ class ManipulationModule(Module):
             indexed_current = self._current_positions_by_name(robot_name, current)
             if indexed_current is None:
                 return None
-            current_by_robot[robot_id] = indexed_current
+            current_by_robot[robot_name] = indexed_current
 
         names: list[str] = []
         positions: list[float] = []
-        for group in resolved_groups:
-            robot_state = current_by_robot[group.robot_id]
+        for group in selection.groups:
+            robot_state = current_by_robot[group.robot_name]
             for resolved_name, local_name in zip(
                 group.joint_names, group.local_joint_names, strict=True
             ):
@@ -565,7 +561,7 @@ class ManipulationModule(Module):
     ) -> JointState | None:
         """Convert a group joint target to global joint names in group order."""
         assert self._world_monitor is not None
-        group = self._world_monitor.world.resolve_planning_groups((group_id,))[0]
+        group = self._world_monitor.planning_groups.get(group_id)
         try:
             return joint_target_to_global_names(group, target)
         except ValueError as exc:
@@ -575,12 +571,7 @@ class ManipulationModule(Module):
     def _affected_robot_names(self, plan: GeneratedPlan) -> list[RobotName]:
         """Get stable robot names affected by a generated plan."""
         assert self._world_monitor is not None
-        resolved_groups = self._world_monitor.world.resolve_planning_groups(plan.group_ids)
-        names: list[RobotName] = []
-        for group in resolved_groups:
-            if group.robot_name not in names:
-                names.append(group.robot_name)
-        return names
+        return list(self._world_monitor.planning_groups.select(plan.group_ids).robot_names)
 
     def _store_generated_plan(
         self, group_ids: tuple[PlanningGroupID, ...], result: PlanningResult
@@ -603,7 +594,7 @@ class ManipulationModule(Module):
         assert self._world_monitor and self._planner
         result = self._planner.plan_selected_joint_path(
             world=self._world_monitor.world,
-            group_ids=group_ids,
+            selection=self._world_monitor.planning_groups.select(group_ids),
             start=start,
             goal=goal,
             timeout=self.config.planning_timeout,
@@ -712,8 +703,8 @@ class ManipulationModule(Module):
     @rpc
     def plan_to_poses(
         self,
-        pose_targets: Mapping[PlanningGroupID | PlanningGroupDescriptor, Pose],
-        auxiliary_groups: Sequence[PlanningGroupID | PlanningGroupDescriptor] = (),
+        pose_targets: Mapping[PlanningGroupID | PlanningGroup, Pose],
+        auxiliary_groups: Sequence[PlanningGroupID | PlanningGroup] = (),
     ) -> bool:
         """Plan to one or more group pose targets with optional auxiliary groups."""
         if self._world_monitor is None or self._kinematics is None:
@@ -745,8 +736,13 @@ class ManipulationModule(Module):
 
         ik = self._kinematics.solve_pose_targets(
             world=self._world_monitor.world,
-            pose_targets=stamped_targets,
-            auxiliary_groups=auxiliary_ids,
+            pose_targets={
+                self._world_monitor.planning_groups.get(group_id): pose
+                for group_id, pose in stamped_targets.items()
+            },
+            auxiliary_groups=tuple(
+                self._world_monitor.planning_groups.get(group_id) for group_id in auxiliary_ids
+            ),
             seed=start,
             check_collision=True,
         )
@@ -774,7 +770,7 @@ class ManipulationModule(Module):
 
     @rpc
     def plan_to_joint_targets(
-        self, joint_targets: Mapping[PlanningGroupID | PlanningGroupDescriptor, JointState]
+        self, joint_targets: Mapping[PlanningGroupID | PlanningGroup, JointState]
     ) -> bool:
         """Plan to joint targets keyed by planning group."""
         if self._world_monitor is None or self._planner is None:
@@ -896,8 +892,7 @@ class ManipulationModule(Module):
                     "source": group.source,
                     "has_pose_target": group.has_pose_target,
                 }
-                for group in self._world_monitor.world.list_planning_groups()
-                if group.robot_name == robot_name
+                for group in self._world_monitor.planning_groups.groups_for_robot(robot_name)
             ]
             if self._world_monitor is not None
             else []

@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 from dimos.manipulation.planning.factory import create_kinematics
+from dimos.manipulation.planning.groups import PlanningGroup
 from dimos.manipulation.planning.kinematics.config import PinkKinematicsConfig
 from dimos.manipulation.planning.kinematics.pink_ik import (
     PinkIK,
@@ -37,7 +38,7 @@ from dimos.manipulation.planning.kinematics.pink_ik import (
 )
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import IKStatus
-from dimos.manipulation.planning.spec.models import IKResult, ResolvedPlanningGroup
+from dimos.manipulation.planning.spec.models import IKResult
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -198,6 +199,29 @@ class _FakeWorld:
     def __init__(self, collision_free: bool = True) -> None:
         self.config = _robot_config()
         self.collision_free = collision_free
+        self.groups = {
+            "arm/wrist": PlanningGroup(
+                id="arm/wrist",
+                robot_name="arm",
+                group_name="wrist",
+                joint_names=("arm/joint_a", "arm/joint_b"),
+                local_joint_names=("joint_a", "joint_b"),
+                base_link="base",
+                tip_link="wrist_tool",
+            ),
+            "arm/gripper": PlanningGroup(
+                id="arm/gripper",
+                robot_name="arm",
+                group_name="gripper",
+                joint_names=("arm/joint_c",),
+                local_joint_names=("joint_c",),
+                base_link="base",
+                tip_link=None,
+            ),
+        }
+
+    def get_robot_ids(self) -> list[str]:
+        return ["robot"]
 
     def get_robot_config(self, robot_id: str) -> RobotModelConfig:
         return self.config
@@ -216,33 +240,6 @@ class _FakeWorld:
 
     def check_config_collision_free(self, robot_id: str, joint_state: JointState) -> bool:
         return self.collision_free
-
-    def resolve_planning_groups(
-        self, group_ids: tuple[str, ...]
-    ) -> tuple[ResolvedPlanningGroup, ...]:
-        groups = {
-            "arm/wrist": ResolvedPlanningGroup(
-                id="arm/wrist",
-                robot_id="robot",
-                robot_name="arm",
-                group_name="wrist",
-                joint_names=("arm/joint_a", "arm/joint_b"),
-                local_joint_names=("joint_a", "joint_b"),
-                base_link="base",
-                tip_link="wrist_tool",
-            ),
-            "arm/gripper": ResolvedPlanningGroup(
-                id="arm/gripper",
-                robot_id="robot",
-                robot_name="arm",
-                group_name="gripper",
-                joint_names=("arm/joint_c",),
-                local_joint_names=("joint_c",),
-                base_link="base",
-                tip_link=None,
-            ),
-        }
-        return tuple(groups[group_id] for group_id in group_ids)
 
 
 def test_create_kinematics_pink_missing_dependency_is_actionable(
@@ -419,15 +416,16 @@ def test_solve_pose_targets_returns_selected_resolved_joints_and_group_tip(
 
     monkeypatch.setattr(ik, "_solve_single", fake_solve_single)
 
+    world = _FakeWorld(collision_free=True)
     result = ik.solve_pose_targets(
-        world=cast("Any", _FakeWorld(collision_free=True)),
+        world=cast("Any", world),
         pose_targets={
-            "arm/wrist": PoseStamped(
+            world.groups["arm/wrist"]: PoseStamped(
                 position=Vector3(0.1, 0.0, 0.0),
                 orientation=Quaternion(0.0, 0.0, 0.0, 1.0),
             )
         },
-        auxiliary_groups=["arm/gripper"],
+        auxiliary_groups=[world.groups["arm/gripper"]],
         seed=JointState(
             {"name": ["arm/joint_a", "arm/joint_b", "arm/joint_c"], "position": [0.0, 0.0, 0.0]}
         ),

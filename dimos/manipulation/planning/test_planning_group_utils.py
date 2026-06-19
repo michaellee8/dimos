@@ -18,15 +18,13 @@ from __future__ import annotations
 
 import pytest
 
-from dimos.manipulation.planning.planning_group_utils import joint_target_to_global_names
-from dimos.manipulation.planning.spec.models import ResolvedPlanningGroup
+from dimos.manipulation.planning.groups import PlanningGroup, joint_target_to_global_names
 from dimos.msgs.sensor_msgs.JointState import JointState
 
 
-def _make_group() -> ResolvedPlanningGroup:
-    return ResolvedPlanningGroup(
+def _make_group() -> PlanningGroup:
+    return PlanningGroup(
         id="left/arm",
-        robot_id="robot_left",
         robot_name="left",
         group_name="arm",
         joint_names=("left/j1", "left/j2", "left/j3"),

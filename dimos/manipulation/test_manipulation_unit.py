@@ -27,6 +27,7 @@ from dimos.manipulation.manipulation_module import (
     ManipulationModuleConfig,
     ManipulationState,
 )
+from dimos.manipulation.planning.groups import PlanningGroup, PlanningGroupSelection
 from dimos.manipulation.planning.kinematics.config import PinkKinematicsConfig
 from dimos.manipulation.planning.monitor.world_monitor import WorldMonitor
 from dimos.manipulation.planning.spec.config import RobotModelConfig
@@ -34,7 +35,6 @@ from dimos.manipulation.planning.spec.enums import IKStatus, PlanningStatus
 from dimos.manipulation.planning.spec.models import (
     GeneratedPlan,
     IKResult,
-    ResolvedPlanningGroup,
 )
 from dimos.manipulation.planning.spec.protocols import VisualizationSpec
 from dimos.msgs.geometry_msgs.Pose import Pose
@@ -360,9 +360,9 @@ class TestExecute:
             end_effector_link="ee",
         )
         module = _make_module_with_monitor(config_no_task)
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("arm", "manipulator", ["j1"])
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [_make_global_group("arm", "manipulator", ["j1"])]
+        )
         module._world_monitor.get_current_joint_state.return_value = JointState(
             name=["j1"], position=[0.0]
         )
@@ -380,9 +380,9 @@ class TestExecute:
         generator = MagicMock()
         generator.generate.return_value = simple_trajectory
         module._robots = {"test_arm": ("id", robot_config, generator)}
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("test_arm", "manipulator", ["joint1", "joint2", "joint3"])
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [_make_global_group("test_arm", "manipulator", ["joint1", "joint2", "joint3"])]
+        )
         module._world_monitor.get_current_joint_state.return_value = JointState(
             name=["joint1", "joint2", "joint3"], position=[0.0, 0.0, 0.0]
         )
@@ -423,9 +423,9 @@ class TestExecute:
         generator = MagicMock()
         generator.generate.return_value = simple_trajectory
         module._robots = {"test_arm": ("id", robot_config, generator)}
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("test_arm", "manipulator", ["joint1", "joint2", "joint3"])
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [_make_global_group("test_arm", "manipulator", ["joint1", "joint2", "joint3"])]
+        )
         module._world_monitor.get_current_joint_state.return_value = JointState(
             name=["joint1", "joint2", "joint3"], position=[0.0, 0.0, 0.0]
         )
@@ -460,6 +460,12 @@ def _make_module_with_monitor(*configs: RobotModelConfig) -> ManipulationModule:
     for config in configs:
         robot_id = f"robot_{config.name}"
         module._robots[config.name] = (robot_id, config, MagicMock())
+    module._world_monitor.planning_groups = _FakePlanningGroups(
+        [
+            _make_global_group(config.name, "manipulator", list(config.joint_names))
+            for config in configs
+        ]
+    )
     return module
 
 
@@ -483,12 +489,9 @@ def _make_robot_config(
     )
 
 
-def _make_global_group(
-    robot_name: str, group_name: str, joints: list[str]
-) -> ResolvedPlanningGroup:
-    return ResolvedPlanningGroup(
+def _make_global_group(robot_name: str, group_name: str, joints: list[str]) -> PlanningGroup:
+    return PlanningGroup(
         id=f"{robot_name}/{group_name}",
-        robot_id=f"robot_{robot_name}",
         robot_name=robot_name,
         group_name=group_name,
         joint_names=tuple(f"{robot_name}/{joint}" for joint in joints),
@@ -496,6 +499,32 @@ def _make_global_group(
         base_link="base",
         tip_link="ee",
     )
+
+
+class _FakePlanningGroups:
+    def __init__(self, groups: list[PlanningGroup]) -> None:
+        self._groups = {group.id: group for group in groups}
+
+    def get(self, group_id: str) -> PlanningGroup:
+        return self._groups[group_id]
+
+    def select(self, group_ids: tuple[str, ...]) -> PlanningGroupSelection:
+        return PlanningGroupSelection.from_groups(
+            tuple(self._groups[group_id] for group_id in group_ids)
+        )
+
+    def groups_for_robot(self, robot_name: str) -> tuple[PlanningGroup, ...]:
+        return tuple(group for group in self._groups.values() if group.robot_name == robot_name)
+
+    def default_group_id_for_robot(self, robot_name: str) -> str | None:
+        group_id = f"{robot_name}/manipulator"
+        return group_id if group_id in self._groups else None
+
+    def primary_pose_group_id_for_robot(self, robot_name: str) -> str | None:
+        for group in self.groups_for_robot(robot_name):
+            if group.has_pose_target:
+                return group.id
+        return None
 
 
 def _make_generated_plan(group_ids: tuple[str, ...], *points: list[float]) -> GeneratedPlan:
@@ -741,9 +770,9 @@ class TestManipulationPreview:
     def test_preview_plan_respects_robot_filter(self):
         module = _make_module()
         module._world_monitor = MagicMock()
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("arm", "manipulator", ["j1"])
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [_make_global_group("arm", "manipulator", ["j1"])]
+        )
         module._last_plan = GeneratedPlan(
             group_ids=("arm/manipulator",),
             path=[JointState(name=["arm/j1"], position=[0.0])],
@@ -757,9 +786,9 @@ class TestManipulationPreview:
     def test_preview_plan_rejects_unaffected_robot_filter(self):
         module = _make_module()
         module._world_monitor = MagicMock()
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("arm", "manipulator", ["j1"])
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [_make_global_group("arm", "manipulator", ["j1"])]
+        )
         module._last_plan = GeneratedPlan(
             group_ids=("arm/manipulator",),
             path=[JointState(name=["arm/j1"], position=[0.0])],
@@ -783,9 +812,9 @@ class TestGeneratedPlanProjection:
     def test_selected_joint_state_accepts_local_current_state_names(self):
         config = _make_robot_config("left", ["j1", "j2"], "task")
         module = _make_module_with_monitor(config)
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("left", "arm", ["j1", "j2"])
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [_make_global_group("left", "arm", ["j1", "j2"])]
+        )
         module._world_monitor.get_current_joint_state.return_value = JointState(
             name=["j1", "j2"], position=[1.0, 2.0]
         )
@@ -799,9 +828,9 @@ class TestGeneratedPlanProjection:
     def test_selected_joint_state_rejects_mixed_current_state_names(self):
         config = _make_robot_config("left", ["j1", "j2"], "task")
         module = _make_module_with_monitor(config)
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("left", "arm", ["j1", "j2"])
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [_make_global_group("left", "arm", ["j1", "j2"])]
+        )
         module._world_monitor.get_current_joint_state.return_value = JointState(
             name=["left/j1", "j2"], position=[1.0, 2.0]
         )
@@ -820,10 +849,12 @@ class TestGeneratedPlanProjection:
         right_gen = _trajectory_generator()
         module._robots["left"] = ("robot_left", left_config, left_gen)
         module._robots["right"] = ("robot_right", right_config, right_gen)
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("left", "arm", ["j1", "j2"]),
-            _make_global_group("right", "arm", ["j1"]),
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [
+                _make_global_group("left", "arm", ["j1", "j2"]),
+                _make_global_group("right", "arm", ["j1"]),
+            ]
+        )
         module._world_monitor.get_current_joint_state.side_effect = [
             JointState(name=["j1", "j2", "j3"], position=[0.0, 0.0, 9.0]),
             JointState(name=["j1", "j2"], position=[0.0, 8.0]),
@@ -853,9 +884,9 @@ class TestGeneratedPlanProjection:
         module = _make_module_with_monitor(config)
         generator = _trajectory_generator()
         module._robots["left"] = ("robot_left", config, generator)
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("left", "arm", ["j2"])
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [_make_global_group("left", "arm", ["j2"])]
+        )
         module._world_monitor.get_current_joint_state.return_value = JointState(
             name=["j1", "j2", "j3"], position=[10.0, 20.0, 30.0]
         )
@@ -882,9 +913,9 @@ class TestGeneratedPlanProjection:
     def test_execute_plan_rejects_local_waypoint_names(self):
         config = _make_robot_config("left", ["j1", "j2"], "task")
         module = _make_module_with_monitor(config)
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("left", "arm", ["j1"])
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [_make_global_group("left", "arm", ["j1"])]
+        )
         module._world_monitor.get_current_joint_state.return_value = JointState(
             name=["j1", "j2"], position=[10.0, 20.0]
         )
@@ -901,9 +932,9 @@ class TestGeneratedPlanProjection:
     def test_preview_plan_with_last_plan_animates_generated_plan(self):
         config = _make_robot_config("left", ["j1", "j2"], "task")
         module = _make_module_with_monitor(config)
-        module._world_monitor.world.resolve_planning_groups.return_value = [
-            _make_global_group("left", "arm", ["j1"])
-        ]
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [_make_global_group("left", "arm", ["j1"])]
+        )
         module._last_plan = GeneratedPlan(
             group_ids=("left/arm",),
             path=[
