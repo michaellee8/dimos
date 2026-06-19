@@ -221,8 +221,8 @@ def test_vamp_dependency_error_has_install_guidance(mocker) -> None:
         load_vamp_robot_module(OfficialVampArtifactConfig(robot="panda"))
 
 
-def test_non_vamp_planner_creation_does_not_import_vamp(mocker) -> None:
-    """Default planner creation stays independent of the optional VAMP package."""
+def test_rrt_planner_creation_works_when_vamp_unavailable(mocker) -> None:
+    """Default planner creation still works when the optional VAMP package is unavailable."""
     mocker.patch("dimos.manipulation.planning.vamp.loader._vamp_module", None)
 
     planner = create_planner(config=RRTConnectPlannerConfig())

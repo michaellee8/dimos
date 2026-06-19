@@ -24,9 +24,10 @@ from dimos.robot.catalog.franka import (
     FRANKA_PANDA_SRDF,
     franka_panda,
 )
+from dimos.utils.data import LfsPath
 
 
-def _lfs_filename(path: object) -> str:
+def _lfs_filename(path: LfsPath) -> str:
     filename = object.__getattribute__(path, "_lfs_filename")
     assert isinstance(filename, str)
     return filename
@@ -71,6 +72,7 @@ def test_franka_panda_robot_model_config_preserves_vamp_joint_order() -> None:
     model = config.to_robot_model_config()
 
     assert model.name == "panda"
+    assert isinstance(model.model_path, LfsPath)
     assert _lfs_filename(model.model_path) == _lfs_filename(FRANKA_PANDA_MODEL)
     assert model.joint_names == FRANKA_PANDA_JOINT_NAMES
     assert model.joint_name_mapping == {
@@ -92,5 +94,6 @@ def test_franka_panda_task_config_supports_mock_coordinator_benchmark_path() -> 
     assert task.name == "cartesian_ik_panda"
     assert task.type == "cartesian_ik"
     assert task.joint_names == [f"panda/{joint}" for joint in FRANKA_PANDA_JOINT_NAMES]
+    assert isinstance(task.params["model_path"], LfsPath)
     assert _lfs_filename(task.params["model_path"]) == _lfs_filename(FRANKA_PANDA_FK_MODEL)
     assert task.params["ee_joint_id"] == 7

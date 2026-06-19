@@ -17,11 +17,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from dimos.core.module import Module
 from dimos.manipulation.manipulation_module import (
     ManipulationModule,
     ManipulationModuleConfig,
@@ -97,20 +97,9 @@ def simple_trajectory():
 
 
 def _make_module():
-    """Create a ManipulationModule instance with mocked __init__."""
-    with patch.object(ManipulationModule, "__init__", lambda self: None):
-        module = ManipulationModule.__new__(ManipulationModule)
-        module._state = ManipulationState.IDLE
-        module._lock = threading.Lock()
-        module._error_message = ""
-        module._robots = {}
-        module._planned_paths = {}
-        module._planned_trajectories = {}
-        module._world_monitor = None
-        module._planner = None
-        module._kinematics = None
-        module._coordinator_client = None
-        return module
+    """Create a ManipulationModule while skipping only base Module side effects."""
+    with patch.object(Module, "__init__", return_value=None):
+        return ManipulationModule()
 
 
 class TestStateMachine:
@@ -205,7 +194,7 @@ class TestRobotSelection:
 class TestPlanningInitialization:
     """Test planning backend configuration wiring."""
 
-    def test_kinematics_config_is_passed_to_factory(self, robot_config):
+    def test_kinematics_config_is_passed_to_factory(self, robot_config, mocker):
         """ManipulationModule config selects the requested IK backend."""
         module = _make_module()
         kinematics = PinkKinematicsConfig(max_iterations=100, dt=0.02)
@@ -217,22 +206,22 @@ class TestPlanningInitialization:
         mock_world_monitor = MagicMock(spec=WorldMonitor)
         mock_world_monitor.add_robot.return_value = "robot_id"
 
-        with (
-            patch(
-                "dimos.manipulation.manipulation_module.WorldMonitor",
-                return_value=mock_world_monitor,
-            ),
-            patch("dimos.manipulation.manipulation_module.JointTrajectoryGenerator"),
-            patch("dimos.manipulation.manipulation_module.create_planner") as mock_planner,
-            patch("dimos.manipulation.manipulation_module.create_kinematics") as mock_kinematics,
-        ):
-            module._initialize_planning()
+        mocker.patch(
+            "dimos.manipulation.manipulation_module.WorldMonitor",
+            return_value=mock_world_monitor,
+        )
+        mocker.patch("dimos.manipulation.manipulation_module.JointTrajectoryGenerator")
+        mock_planner = mocker.patch("dimos.manipulation.manipulation_module.create_planner")
+        mock_kinematics = mocker.patch("dimos.manipulation.manipulation_module.create_kinematics")
 
+        module._initialize_planning()
+
+        mock_planner.assert_called_once()
         planner_config = mock_planner.call_args.kwargs["config"]
         assert isinstance(planner_config, RRTConnectPlannerConfig)
         mock_kinematics.assert_called_once_with(config=kinematics)
 
-    def test_legacy_kinematics_name_still_selects_backend(self, robot_config):
+    def test_legacy_kinematics_name_still_selects_backend(self, robot_config, mocker):
         """The old kinematics_name field remains a compatibility shim."""
         module = _make_module()
         with pytest.warns(DeprecationWarning, match="kinematics_name is deprecated"):
@@ -244,17 +233,17 @@ class TestPlanningInitialization:
         mock_world_monitor = MagicMock(spec=WorldMonitor)
         mock_world_monitor.add_robot.return_value = "robot_id"
 
-        with (
-            patch(
-                "dimos.manipulation.manipulation_module.WorldMonitor",
-                return_value=mock_world_monitor,
-            ),
-            patch("dimos.manipulation.manipulation_module.JointTrajectoryGenerator"),
-            patch("dimos.manipulation.manipulation_module.create_planner"),
-            patch("dimos.manipulation.manipulation_module.create_kinematics") as mock_kinematics,
-        ):
-            module._initialize_planning()
+        mocker.patch(
+            "dimos.manipulation.manipulation_module.WorldMonitor",
+            return_value=mock_world_monitor,
+        )
+        mocker.patch("dimos.manipulation.manipulation_module.JointTrajectoryGenerator")
+        mocker.patch("dimos.manipulation.manipulation_module.create_planner")
+        mock_kinematics = mocker.patch("dimos.manipulation.manipulation_module.create_kinematics")
 
+        module._initialize_planning()
+
+        mock_kinematics.assert_called_once()
         call_config = mock_kinematics.call_args.kwargs["config"]
         assert isinstance(call_config, PinkKinematicsConfig)
 
@@ -676,6 +665,9 @@ class TestOnJointState:
         )
         module._on_joint_state(msg)
 
+        assert module._world_monitor is None
+        assert module._init_joints == {}
+
 
 class TestWorldMonitorVisualization:
     def test_visualization_routing_and_stop_all_monitors(self):
@@ -719,6 +711,9 @@ class TestManipulationPreview:
         module = _make_module()
 
         module._dismiss_preview("robot_id")
+
+        assert module._world_monitor is None
+        assert module._state == ManipulationState.IDLE
 
     def test_dismiss_preview_routes_to_monitor(self):
         module = _make_module()
