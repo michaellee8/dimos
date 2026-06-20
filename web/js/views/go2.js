@@ -31,6 +31,14 @@ const ACTIONS = [
 // Speed bar. Normal/High = browser-side velocity scale (lin m/s-ish, ang).
 // Rage = firmware Rage Mode (set_mode RPC) + full scale. mode is sent to the
 // robot; scale is applied locally in buildTwist via state.speedScale.
+// Camera tabs → robot composites the selected cameras into the one video track.
+// cam1 = Go2, cam2 = RealSense. Toggle on/off; both = side-by-side. (B-ready:
+// the same {camera_select, cams:[...]} protocol works for per-camera tracks.)
+const CAMS = [
+    { id: 'cam1', label: 'Cam 1 · Go2' },
+    { id: 'cam2', label: 'Cam 2 · RealSense' },
+];
+
 const SPEEDS = [
     { mode: 'normal', label: 'Normal', scale: { lin: 0.5, ang: 0.5 } },
     { mode: 'high', label: 'High', scale: { lin: 1.0, ang: 1.0 } },
@@ -48,6 +56,7 @@ const ui = {
     posture: 'StandReady',  // robot auto-stands+balances on blueprint start
     estopped: false,
     speedMode: 'normal',      // speed bar selection
+    selectedCams: ['cam1'],   // active camera tabs (default Go2)
     nonce: 0,                 // monotonic command id for ack matching
     pending: new Map(),       // nonce -> {el, timer}
 };
@@ -72,7 +81,6 @@ export function renderGo2(c) {
                 <span class="text-gray-300 text-sm">${escHtml(state.activeRobot?.robot_name || 'go2')}</span>
             </div>
             <div class="flex items-center gap-3">
-                <span class="text-sm text-gray-400">🔋 Battery <span id="batt-pct" class="font-semibold text-dim-400">—%</span></span>
                 <span id="link-pill" class="pill pill-good"><span class="dot"></span><span>LINK OK</span></span>
                 <button id="disconnectBtn" class="term-caps px-3 py-1.5 text-xs text-gray-400 hover:text-white border border-[#2a2a2a] rounded">[ disconnect ]</button>
             </div>
@@ -81,6 +89,10 @@ export function renderGo2(c) {
         <div class="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-4">
             <!-- LEFT: video -->
             <section class="bg-bg-950 border border-[#2a2a2a] rounded-xl overflow-hidden flex flex-col min-h-0">
+                <!-- Camera tabs: toggle which cameras the robot composites into the
+                     single video. cam1 (Go2) default; cam2 (RealSense) optional;
+                     both → side-by-side. At least one stays selected. -->
+                <div class="flex items-center gap-2 p-2 border-b border-[#2a2a2a] shrink-0" id="cam-tabs"></div>
                 <div class="relative flex-1 bg-black flex items-center justify-center min-h-0">
                     <video id="robot-cam" autoplay muted playsinline
                         class="w-full h-full object-contain" style="display:none;"></video>
@@ -114,7 +126,12 @@ export function renderGo2(c) {
             <!-- RIGHT: control column -->
             <aside class="flex flex-col gap-3 min-h-0 overflow-y-auto pr-1">
                 <div id="blocked" class="hidden blocked-banner rounded-lg px-3 py-2 text-xs term-caps shrink-0"></div>
-                <!-- Battery is in the header (just the %, no bar). -->
+
+                <!-- Battery: symbol+label left, % right. No bar. -->
+                <section class="bg-bg-950 border border-[#2a2a2a] rounded-xl p-4 shrink-0 flex items-center justify-between">
+                    <span class="text-sm text-gray-400">🔋 Battery</span>
+                    <span id="batt-pct" class="text-sm font-semibold text-dim-400">—%</span>
+                </section>
 
                 <!-- Telemetry -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-xl p-4 shrink-0">
@@ -172,6 +189,15 @@ export function renderGo2(c) {
 function wireGo2() {
     document.getElementById('disconnectBtn').onclick = disconnect;
 
+    // Camera tabs: render toggles, wire selection.
+    const tabs = document.getElementById('cam-tabs');
+    tabs.innerHTML = CAMS.map((c) =>
+        `<button data-cam="${c.id}" class="px-3 py-1 rounded text-xs border border-[#2a2a2a] text-gray-400">${c.label}</button>`
+    ).join('');
+    tabs.querySelectorAll('[data-cam]').forEach((b) =>
+        b.addEventListener('click', () => toggleCam(b.dataset.cam)));
+    renderCamTabs();
+
     // Speed bar: render 3 segments, select current, wire selection.
     const bar = document.getElementById('speed-bar');
     bar.innerHTML = SPEEDS.map((s) =>
@@ -218,6 +244,35 @@ function wireGo2() {
     state.onCmdAck = onCmdAck;
 
     selectSpeed(ui.speedMode, /*sendToRobot=*/ false);  // reflect default selection
+}
+
+// ── camera tabs ──────────────────────────────────────────────────────
+function toggleCam(id) {
+    const sel = new Set(ui.selectedCams);
+    if (sel.has(id)) {
+        if (sel.size === 1) return;  // keep at least one camera on
+        sel.delete(id);
+    } else {
+        sel.add(id);
+    }
+    // Preserve CAMS order so side-by-side order is stable.
+    ui.selectedCams = CAMS.map((c) => c.id).filter((id) => sel.has(id));
+    renderCamTabs();
+    sendCameraSelect();
+}
+
+function renderCamTabs() {
+    document.querySelectorAll('#cam-tabs [data-cam]').forEach((b) => {
+        const on = ui.selectedCams.includes(b.dataset.cam);
+        b.className = 'px-3 py-1 rounded text-xs border ' +
+            (on ? 'bg-dim-500 text-bg-950 border-dim-500' : 'border-[#2a2a2a] text-gray-400');
+    });
+}
+
+function sendCameraSelect() {
+    if (state.stateChannel && state.stateChannel.readyState === 'open') {
+        state.stateChannel.send(JSON.stringify({ type: 'camera_select', cams: ui.selectedCams }));
+    }
 }
 
 // ── speed bar ────────────────────────────────────────────────────────
