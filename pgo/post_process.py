@@ -77,6 +77,9 @@ RAW_STREAM = arg("--tags", "raw_april_tags")  # input unfiltered AprilTag stream
 OUT_PREFIX = arg("--out", "gt_pointlio")  # output prefix -> <out>_odometry / <out>_lidar
 WRITE_LCM = "--no-lcm" not in sys.argv  # also emit <out>_lidar.pc2.lcm of the corrected cloud
 OPEN_RRD = "--no-rrd" not in sys.argv  # build + open a comparison rrd at the end
+LCM_VOXEL = float(arg("--lcm-voxel", "0.05"))  # voxel size for the aggregated .pc2.lcm cloud
+LCM_OUTLIER_NN = 20  # statistical outlier removal: neighbor count
+LCM_OUTLIER_STD = 2.0  # ...and std-ratio threshold (lower = more aggressive)
 
 # --- RELAXED gates (vs the strict eval defaults 60 / 2.0 / 1.0 / 45 / 0.5) -------------------
 # Loosened to keep more of each tag's raw viewings as constraints (esp. tag 5 / blurry tag 3),
@@ -457,15 +460,28 @@ if WHAT in ("lidar", "both"):
         st.delete_stream(name)
     out = st.stream(name, PointCloud2)
 
-    lcm_log = None
-    lcm_path = REC / f"{name}.pc2.lcm"
+    # The db stream stays per-scan, but the .pc2.lcm is ONE aggregated cloud (voxel-downsampled +
+    # statistical-outlier-removed), not 5184 per-scan events. Intensity rides through open3d's
+    # voxel averaging via the color channel. Chunks are collapsed every CHUNK scans to bound memory.
     if WRITE_LCM:
-        import lcm
+        import open3d as o3d
 
-        if lcm_path.exists():
-            lcm_path.unlink()
-        lcm_log = lcm.EventLog(str(lcm_path), "w", overwrite=True)
-        print(f"also writing LCM log: {lcm_path}", flush=True)
+    CHUNK = 1000
+    agg_xyz, agg_i = [], []  # incrementally voxel-downsampled chunks
+    buf_xyz, buf_i = [], []
+    have_inten = False
+
+    def collapse(xyz_list, i_list, voxel):
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(np.concatenate(xyz_list).astype(np.float64))
+        carry = bool(i_list)
+        if carry:
+            inten_col = np.concatenate(i_list).astype(np.float64)[:, None]
+            pc.colors = o3d.utility.Vector3dVector(np.repeat(inten_col, 3, axis=1))
+        pc = pc.voxel_down_sample(voxel)
+        dx = np.asarray(pc.points, np.float32)
+        di = np.asarray(pc.colors, np.float32)[:, 0] if carry else None
+        return dx, di
 
     print(f"writing {name} (corrected lidar)...", flush=True)
     n = 0
@@ -481,16 +497,60 @@ if WHAT in ("lidar", "both"):
         m = PointCloud2.from_numpy(
             xyz2, frame_id="odom", intensities=(np.asarray(inten) if inten is not None else None)
         )
+        m.ts = ts  # stamp the cloud (lcm_encode needs a non-None ts)
         out.append(m, ts=ts, pose=pose_tuple(Cts.compose(base_pose(ts))))
-        if lcm_log is not None:
-            lcm_log.write_event(int(ts * 1e6), name, m.lcm_encode())
+        if WRITE_LCM:
+            buf_xyz.append(xyz2)
+            if inten is not None:
+                have_inten = True
+                buf_i.append(np.asarray(inten, np.float32))
+            if len(buf_xyz) >= CHUNK:
+                dx, di = collapse(buf_xyz, buf_i if have_inten else [], LCM_VOXEL)
+                agg_xyz.append(dx)
+                if di is not None:
+                    agg_i.append(di)
+                buf_xyz, buf_i = [], []
         n += 1
         if n % 2000 == 0:
             print(f"  {n} scans, {time.time() - t0:.0f}s", flush=True)
-    if lcm_log is not None:
-        lcm_log.close()
-        print(f"wrote {lcm_path}: {n} clouds", flush=True)
     print(f"wrote {name}: {n} scans in {time.time() - t0:.0f}s", flush=True)
+
+    if WRITE_LCM:
+        import lcm
+
+        if buf_xyz:  # flush remainder
+            dx, di = collapse(buf_xyz, buf_i if have_inten else [], LCM_VOXEL)
+            agg_xyz.append(dx)
+            if di is not None:
+                agg_i.append(di)
+        # final unified voxel pass over the per-chunk results, then statistical outlier removal
+        merged_i = agg_i if have_inten else []
+        dx, di = collapse(agg_xyz, merged_i, LCM_VOXEL)
+        print(
+            f"aggregating .pc2.lcm: {len(dx):,} pts after voxel, removing outliers...", flush=True
+        )
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(dx.astype(np.float64))
+        if di is not None:
+            pc.colors = o3d.utility.Vector3dVector(
+                np.repeat(di.astype(np.float64)[:, None], 3, axis=1)
+            )
+        pc, _keep = pc.remove_statistical_outlier(LCM_OUTLIER_NN, LCM_OUTLIER_STD)
+        merged_xyz = np.asarray(pc.points, np.float32)
+        merged_inten = np.asarray(pc.colors, np.float32)[:, 0] if di is not None else None
+        merged = PointCloud2.from_numpy(merged_xyz, frame_id="odom", intensities=merged_inten)
+        merged.ts = float(fo_ts[0])
+        lcm_path = REC / f"{name}.pc2.lcm"
+        if lcm_path.exists():
+            lcm_path.unlink()
+        lcm_log = lcm.EventLog(str(lcm_path), "w", overwrite=True)
+        lcm_log.write_event(int(merged.ts * 1e6), name, merged.lcm_encode())
+        lcm_log.close()
+        print(
+            f"wrote {lcm_path}: 1 aggregated cloud, {len(merged_xyz):,} pts "
+            f"(voxel {LCM_VOXEL} m, outlier nn={LCM_OUTLIER_NN}/std={LCM_OUTLIER_STD})",
+            flush=True,
+        )
 
 # --- build + open the comparison rrd ---------------------------------------------------------
 if OPEN_RRD and WHAT in ("lidar", "both"):
