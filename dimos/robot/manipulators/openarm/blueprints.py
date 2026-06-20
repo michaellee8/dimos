@@ -16,9 +16,12 @@
 
 from __future__ import annotations
 
-from dimos.control.coordinator import ControlCoordinator
+from dimos.control.components import HardwareComponent, HardwareType
+from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
+from dimos.core.transport import LCMTransport
 from dimos.manipulation.manipulation_module import ManipulationModule
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.robot.catalog.openarm import (
     OPENARM_V10_FK_MODEL,
     OPENARM_V10_RIGHT_MODEL,
@@ -76,6 +79,11 @@ _openarm_rs_hw = _openarm(
     adapter_kwargs=_OPENARM_RS_ADAPTER_KWARGS,
 )
 
+OPENARM_DUAL_WHOLE_BODY_JOINTS = [
+    *[f"openarm/openarm_left_joint{i}" for i in range(1, 8)],
+    *[f"openarm/openarm_right_joint{i}" for i in range(1, 8)],
+]
+
 coordinator_openarm_left = ControlCoordinator.blueprint(
     hardware=[_left_hw.to_hardware_component()],
     tasks=[_left_hw.to_task_config()],
@@ -102,6 +110,29 @@ coordinator_openarm_rs = ControlCoordinator.blueprint(
     {
         ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
     }
+)
+
+openarm_dual_whole_body = ControlCoordinator.blueprint(
+    hardware=[
+        HardwareComponent(
+            hardware_id="openarm",
+            hardware_type=HardwareType.WHOLE_BODY,
+            joints=OPENARM_DUAL_WHOLE_BODY_JOINTS,
+            adapter_type="openarm_dual",
+            adapter_kwargs={
+                "left_address": LEFT_CAN,
+                "right_address": RIGHT_CAN,
+                "gravity_comp": True,
+            },
+        )
+    ],
+    tasks=[
+        TaskConfig(
+            name="traj_openarm",
+            type="trajectory",
+            joint_names=OPENARM_DUAL_WHOLE_BODY_JOINTS,
+        )
+    ],
 )
 
 openarm_rs_planner_coordinator = autoconnect(
@@ -211,6 +242,7 @@ __all__ = [
     "coordinator_openarm_rs",
     "keyboard_teleop_openarm",
     "keyboard_teleop_openarm_mock",
+    "openarm_dual_whole_body",
     "openarm_mock_planner_coordinator",
     "openarm_planner_coordinator",
     "openarm_rs_planner_coordinator",

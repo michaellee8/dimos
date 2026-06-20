@@ -73,6 +73,7 @@ all_blueprints = {
     "mid360-fastlio-voxels-native": "dimos.hardware.sensors.lidar.fastlio2.fastlio_blueprints:mid360_fastlio_voxels_native",
     "mid360-pointlio": "dimos.hardware.sensors.lidar.pointlio.pointlio_blueprints:mid360_pointlio",
     "mid360-pointlio-voxels": "dimos.hardware.sensors.lidar.pointlio.pointlio_blueprints:mid360_pointlio_voxels",
+    "openarm-dual-whole-body": "dimos.robot.manipulators.openarm.blueprints:openarm_dual_whole_body",
     "openarm-mock-planner-coordinator": "dimos.robot.manipulators.openarm.blueprints:openarm_mock_planner_coordinator",
     "openarm-planner-coordinator": "dimos.robot.manipulators.openarm.blueprints:openarm_planner_coordinator",
     "openarm-rs-planner-coordinator": "dimos.robot.manipulators.openarm.blueprints:openarm_rs_planner_coordinator",

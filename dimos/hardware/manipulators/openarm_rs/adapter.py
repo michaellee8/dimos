@@ -17,14 +17,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from dimos.hardware.manipulators.damiao.base_adapter import (
+from dimos.hardware.damiao.arm_adapter import DamiaoArmAdapter
+from dimos.hardware.damiao.runtime import (
     _DEFAULT_ADDRESS,
     _DEFAULT_STATE_CACHE_TTL_S,
     _DEFAULT_TICK_DEADLINE_US,
-    DamiaoArmAdapterBase,
     DamiaoBindingUnavailableError,
 )
-from dimos.hardware.manipulators.damiao.specs import DamiaoArmSpec, DamiaoMotorSpec
+from dimos.hardware.damiao.specs import DamiaoArmSpec, DamiaoMotorSpec, DamiaoRobotSpec
 
 if TYPE_CHECKING:
     from dimos.hardware.manipulators.registry import AdapterRegistry
@@ -34,7 +34,7 @@ class OpenArmRSBindingUnavailableError(DamiaoBindingUnavailableError):
     pass
 
 
-class OpenArmRSAdapter(DamiaoArmAdapterBase):
+class OpenArmRSAdapter(DamiaoArmAdapter):
     _adapter_type: str = "openarm_rs"
     _binding_error_type: type[RuntimeError] = OpenArmRSBindingUnavailableError
     _DEFAULT_OPENARM_MOTORS: tuple[DamiaoMotorSpec, ...] = (
@@ -109,9 +109,13 @@ class OpenArmRSAdapter(DamiaoArmAdapterBase):
             arm_name=arm_name,
             fd=canfd if fd is None else fd,
         )
+        robot_spec = DamiaoRobotSpec.from_arm_spec(
+            arm_spec,
+            address=str(address) if address is not None else _DEFAULT_ADDRESS,
+        )
         super().__init__(
-            arm_spec=arm_spec,
-            address=address,
+            robot_spec=robot_spec,
+            group_name=arm_name,
             hardware_id=hardware_id,
             config_path=config_path,
             use_mock_bus=use_mock_bus,
