@@ -144,7 +144,7 @@ export async function setupWebRTC(sessionId) {
             startVideoStats(state.stateChannel);
         };
         // Fallback for old brokers w/o state_back_channel_id (no-op on new ones).
-        state.stateChannel.onmessage = (e) => handleStateMessage(e.data);
+        state.stateChannel.onmessage = (e) => { console.log('[rx state_reliable]', e.data); handleStateMessage(e.data); };
         state.stateChannel.onerror = (e) => console.warn('[state-channel] error', e);
         state.stateChannel.onclose = () => console.info('[state-channel] closed');
     }
@@ -156,7 +156,7 @@ export async function setupWebRTC(sessionId) {
             id: bridge.state_back_channel_id,
             ordered: true,
         });
-        state.stateBackChannel.onmessage = (e) => handleStateMessage(e.data);
+        state.stateBackChannel.onmessage = (e) => { console.log('[rx state_back]', e.data); handleStateMessage(e.data); };
         state.stateBackChannel.onerror = (e) => console.warn('[state-back-channel] error', e);
         state.stateBackChannel.onclose = () => console.info('[state-back-channel] closed');
     }
