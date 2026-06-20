@@ -497,21 +497,24 @@ If you want motion planning (collision-free trajectories via Drake), you need a 
 
 ### 4a. Add your URDF
 
-Prefer an upstream Robot Description Source and add a typed declaration in `dimos/robot/assets/declarations.py`. `RobotAssetPath` is a lazy `Path`-like adapter: importing the catalog does not clone or update the repo, but the first concrete path access resolves the source into `~/.cache/dimos/robot_assets`.
+Prefer an upstream Robot Description Source and create a `RobotDescriptionSource` handle beside your robot adapter. Joining paths from the source is lazy: importing the catalog does not clone or update the repo, but the first concrete path access resolves the source into the robot asset cache.
 
 Use `LfsPath` only when the asset is intentionally vendored, locally modified, or has no suitable upstream source.
 
 ```python skip
-from dimos.robot.assets.manager import RobotAssetPath, robot_asset_package_paths
+from dimos.robot.assets.source import RobotDescriptionSource
 from dimos.manipulation.manipulation_module import manipulation_module
 from dimos.manipulation.planning.spec import RobotModelConfig
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 
-# Add a RobotAssetDeclaration for "yourarm" in dimos/robot/assets/declarations.py.
-# Common artifact roles are "urdf", "mjcf", "srdf", and "mesh_dir".
-_YOURARM_URDF_PATH = RobotAssetPath("yourarm", "urdf")
+_YOURARM_REPO = RobotDescriptionSource(
+    url="https://github.com/example/yourarm_description",
+    ref="main",
+)
+_YOURARM_URDF_PATH = _YOURARM_REPO / "urdf" / "yourarm.urdf.xacro"
+_YOURARM_PACKAGE_PATHS = {"yourarm_description": _YOURARM_REPO / "."}
 
 
 def _make_base_pose(x=0.0, y=0.0, z=0.0) -> PoseStamped:
@@ -550,7 +553,7 @@ def _make_yourarm_config(
         joint_names=joint_names,
         end_effector_link="link6",      # Last link in your URDF's kinematic chain
         base_link="base_link",          # Root link of your URDF
-        package_paths=robot_asset_package_paths("yourarm"),
+        package_paths=_YOURARM_PACKAGE_PATHS,
         xacro_args={},                  # Xacro arguments if using .xacro files
         collision_exclusion_pairs=[],   # Pairs of links that can touch (e.g., gripper fingers)
         auto_convert_meshes=True,       # Convert DAE/STL meshes for Drake

@@ -26,9 +26,9 @@ import warnings
 
 from filelock import FileLock
 from git import GitCommandError, InvalidGitRepositoryError, NoSuchPathError, Repo
+from platformdirs import user_cache_path
 
-DEFAULT_GIT_ASSET_CACHE_ROOT = Path.home() / ".cache" / "dimos" / "robot_assets"
-DEFAULT_ROBOT_ASSET_CACHE_ROOT = DEFAULT_GIT_ASSET_CACHE_ROOT
+DEFAULT_ROBOT_ASSET_CACHE_ROOT = user_cache_path("dimos", appauthor=False) / "robot_assets"
 
 
 class GitAssetCacheError(RuntimeError):
@@ -61,7 +61,7 @@ class GitAssetCache:
     - if the cached repository has local changes, warn and skip updates.
     """
 
-    def __init__(self, cache_root: Path | str = DEFAULT_GIT_ASSET_CACHE_ROOT) -> None:
+    def __init__(self, cache_root: Path | str = DEFAULT_ROBOT_ASSET_CACHE_ROOT) -> None:
         self.cache_root = Path(cache_root).expanduser()
         self._sources_root = self.cache_root / "sources"
         self._locks_root = self.cache_root / "locks"

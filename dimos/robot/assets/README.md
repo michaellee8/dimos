@@ -9,7 +9,7 @@ not add compatibility wrappers outside this module for new code. Import directly
 from the source modules, for example:
 
 ```python
-from dimos.robot.assets.manager import RobotAssetPath, robot_asset_package_paths
+from dimos.robot.assets.source import RobotDescriptionSource
 ```
 
 There is no `__init__.py` on purpose: DimOS disallows package `__init__.py` files
@@ -20,7 +20,7 @@ except at the root package to avoid accidental import side effects.
 Assets live under:
 
 ```text
-~/.cache/dimos/robot_assets/
+<platform user cache>/dimos/robot_assets/
 ├── sources/                 # Git checkouts by source identity
 ├── locks/                   # per-source file locks
 └── derived/
@@ -35,46 +35,41 @@ Assets live under:
 - warn and keep cached content if update fails;
 - warn and skip update for dirty cached repos, preserving local edits.
 
-## Declaring a robot asset
+## Using a robot description source
 
-Add declarations in `declarations.py`:
+Create a source handle wherever the robot adapter or catalog is defined, then
+join paths from the repository root:
 
 ```python
-from dimos.robot.assets.manager import RobotAssetDeclaration
+from dimos.robot.assets.source import RobotDescriptionSource
 
-ROBOT_ASSETS["myarm"] = RobotAssetDeclaration(
-    model="myarm",
-    repo_url="https://github.com/example/myarm_description",
-    ref="main",  # branch, tag, or commit
-    artifacts={
-        "urdf": "urdf/myarm.urdf.xacro",
-        "mesh_dir": "meshes",
-    },
-    package_roots={"myarm_description": "."},
-    xacro_args={"limited": "true"},
+_MYARM_REPO = RobotDescriptionSource(
+    url="https://github.com/example/myarm_description",
+    ref="main",
 )
+
+model_path = _MYARM_REPO / "urdf" / "myarm.urdf.xacro"
+package_paths = {"myarm_description": _MYARM_REPO / "."}
 ```
 
-Artifact role keys are strings. Common roles are `urdf`, `mjcf`, `srdf`, and
-`mesh_dir`; extra flat roles such as `urdf_ik` are allowed when a catalog needs
-an additional model variant.
-
-`package_roots` maps ROS package names to directories inside the checkout. These
-roots are used for `package://...` URIs and Xacro `$(find package_name)`.
+Package roots map ROS package names to source-relative directories. These roots
+are used for `package://...` URIs and Xacro `$(find package_name)`.
 
 ## Using assets in catalogs
 
 Catalogs should stay lazy at import time:
 
 ```python
-from dimos.robot.assets.manager import RobotAssetPath, robot_asset_package_paths
+from dimos.robot.assets.source import RobotDescriptionSource
 
-model_path = RobotAssetPath("myarm", "urdf")
-package_paths = robot_asset_package_paths("myarm")
+_MYARM_REPO = RobotDescriptionSource(url="https://github.com/example/myarm_description", ref="main")
+
+model_path = _MYARM_REPO / "urdf" / "myarm.urdf.xacro"
+package_paths = {"myarm_description": _MYARM_REPO / "."}
 ```
 
-`RobotAssetPath` and `RobotAssetPackagePath` defer clone/update/path validation
-until path operations such as `str(path)`, `path.resolve()`, or `path.exists()`.
+`RobotDescriptionPath` defers clone/update/path validation until path operations
+such as `str(path)`, `path.resolve()`, or `path.exists()`.
 
 ## Rendering URDFs
 

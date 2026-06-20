@@ -18,13 +18,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from dimos.robot.assets.manager import (
-    RobotAssetPath,
-    robot_asset_package_paths,
-    robot_asset_xacro_args,
-)
+from dimos.robot.assets.source import RobotDescriptionSource
 from dimos.robot.config import GripperConfig, RobotConfig
 from dimos.utils.data import LfsPath
+
+XARM_ROS2_REPO = "https://github.com/xArm-Developer/xarm_ros2"
+_XARM_REPO = RobotDescriptionSource(url=XARM_ROS2_REPO, ref="humble")
+_XARM_MODEL_PATH = _XARM_REPO / "xarm_description" / "urdf" / "xarm_device.urdf.xacro"
+_XARM_PACKAGE_PATHS = {"xarm_description": _XARM_REPO / "xarm_description"}
 
 # Pre-built URDFs for Pinocchio FK. The upstream xarm_ros2 source provides
 # Xacro-only model files, so these generated FK URDFs intentionally stay on LFS.
@@ -71,7 +72,9 @@ def xarm7(
     **overrides: Any,
 ) -> RobotConfig:
     """Create an xArm7 robot configuration."""
-    xacro_args = robot_asset_xacro_args("xarm7") | {
+    xacro_args = {
+        "dof": "7",
+        "limited": "true",
         "attach_xyz": f"{x_offset} {y_offset} {z_offset}",
         "attach_rpy": f"0 {pitch} 0",
     }
@@ -80,7 +83,7 @@ def xarm7(
 
     defaults: dict[str, Any] = {
         "name": name,
-        "model_path": RobotAssetPath("xarm7", "urdf"),
+        "model_path": _XARM_MODEL_PATH,
         "end_effector_link": "link_tcp" if add_gripper else "link7",
         "adapter_type": adapter_type,
         "address": address,
@@ -88,7 +91,7 @@ def xarm7(
         "base_link": "link_base",
         "home_joints": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "base_pose": [x_offset, y_offset, z_offset, 0, 0, 0, 1],
-        "package_paths": robot_asset_package_paths("xarm7"),
+        "package_paths": _XARM_PACKAGE_PATHS,
         "xacro_args": xacro_args,
         "auto_convert_meshes": True,
         "collision_exclusion_pairs": XARM_GRIPPER_COLLISION_EXCLUSIONS if add_gripper else [],
@@ -121,7 +124,9 @@ def xarm6(
     **overrides: Any,
 ) -> RobotConfig:
     """Create an xArm6 robot configuration."""
-    xacro_args = robot_asset_xacro_args("xarm6") | {
+    xacro_args = {
+        "dof": "6",
+        "limited": "true",
         "attach_xyz": f"{x_offset} {y_offset} {z_offset}",
         "attach_rpy": f"0 {pitch} 0",
     }
@@ -130,7 +135,7 @@ def xarm6(
 
     defaults: dict[str, Any] = {
         "name": name,
-        "model_path": RobotAssetPath("xarm6", "urdf"),
+        "model_path": _XARM_MODEL_PATH,
         "end_effector_link": "link_tcp" if add_gripper else "link6",
         "adapter_type": adapter_type,
         "address": address,
@@ -138,7 +143,7 @@ def xarm6(
         "base_link": "link_base",
         "home_joints": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "base_pose": [x_offset, y_offset, z_offset, 0, 0, 0, 1],
-        "package_paths": robot_asset_package_paths("xarm6"),
+        "package_paths": _XARM_PACKAGE_PATHS,
         "xacro_args": xacro_args,
         "auto_convert_meshes": True,
         "collision_exclusion_pairs": XARM_GRIPPER_COLLISION_EXCLUSIONS if add_gripper else [],

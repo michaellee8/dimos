@@ -16,17 +16,17 @@ _Avoid_: LFS replacement, description downloader, asset loader
 The standard user cache directory where DimOS stores fetched robot description source checkouts for reuse across runs.
 _Avoid_: Data directory, vendored assets, repository assets
 
-**Robot Asset Manifest**:
-A DimOS-maintained declaration of robot model assets, their robot description sources, default revisions, package roots, and provenance metadata. It may be represented as typed Python objects; it does not imply a YAML/TOML file.
-_Avoid_: Registry, asset list, dependency file, YAML manifest
+**Robot Asset Supply Path**:
+The source and resolution route by which DimOS obtains robot model assets for both built-in and user-supplied robots.
+_Avoid_: Built-in asset path, custom asset path, deployment path
+
+**Robot Description Source Handle**:
+A path-like object that names a robot description source and resolves to the local checkout root for that source. Callers form concrete model paths by joining relative paths from this root.
+_Avoid_: Registry entry, artifact lookup, asset manifest
 
 **ROS Package Root**:
 The local directory corresponding to a ROS-style package name, used to resolve `package://...` URIs and `$(find package_name)` expressions in robot model files.
 _Avoid_: Package path, asset package, Python package
-
-**Artifact Role**:
-A string key naming a supported robot model asset file or directory kind. Common roles include `urdf`, `mjcf`, `srdf`, and `mesh_dir`; extra role keys such as `urdf_ik` may be used when a robot needs additional files. Strings are the canonical internal representation.
-_Avoid_: Parser mode, arbitrary attachment, file purpose
 
 **DimOS Robot Model Config**:
 A DimOS configuration object that names the model paths, package paths, joints, links, and robot-specific metadata needed by planning, control, simulation, or visualization.

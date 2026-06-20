@@ -36,7 +36,7 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.JointState import JointState
-from dimos.robot.assets.manager import RobotAssetPath, robot_asset_package_paths
+from dimos.robot.catalog.ufactory import _XARM_MODEL_PATH, _XARM_PACKAGE_PATHS
 
 pytestmark = pytest.mark.self_hosted
 
@@ -47,7 +47,7 @@ def _drake_available() -> bool:
 
 def _xarm_urdf_available() -> bool:
     try:
-        model_path = RobotAssetPath("xarm7", "urdf")
+        model_path = _XARM_MODEL_PATH
         return model_path.exists()
     except Exception:
         return False
@@ -57,12 +57,12 @@ def _get_xarm7_config() -> RobotModelConfig:
     """Create XArm7 robot config for testing."""
     return RobotModelConfig(
         name="test_arm",
-        model_path=RobotAssetPath("xarm7", "urdf"),
+        model_path=_XARM_MODEL_PATH,
         base_pose=PoseStamped(position=Vector3(), orientation=Quaternion()),
         joint_names=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7"],
         end_effector_link="link7",
         base_link="link_base",
-        package_paths=robot_asset_package_paths("xarm7"),
+        package_paths=_XARM_PACKAGE_PATHS,
         xacro_args={"dof": "7", "limited": "true"},
         auto_convert_meshes=True,
         max_velocity=1.0,

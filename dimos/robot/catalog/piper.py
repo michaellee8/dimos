@@ -18,12 +18,21 @@ from __future__ import annotations
 
 from typing import Any
 
-from dimos.robot.assets.manager import RobotAssetPath, robot_asset_package_paths
+from dimos.robot.assets.source import RobotDescriptionSource
 from dimos.robot.config import GripperConfig, RobotConfig
 from dimos.utils.data import LfsPath
 
+PIPER_DESCRIPTION_REPO = "https://github.com/agilexrobotics/agx_arm_urdf"
+_PIPER_REPO = RobotDescriptionSource(url=PIPER_DESCRIPTION_REPO, ref="main")
+_PIPER_PACKAGE_PATHS = {
+    # Upstream URDFs reference package://agx_arm_description/agx_arm_urdf/...
+    # and expect the checkout directory to be named agx_arm_urdf inside the
+    # package root. GitAssetCache preserves that checkout directory name.
+    "agx_arm_description": _PIPER_REPO.parent,
+}
+
 # Static no-gripper URDF for Pinocchio FK (xacro not supported by Pinocchio)
-PIPER_FK_MODEL = RobotAssetPath("piper", "urdf_ik")
+PIPER_FK_MODEL = _PIPER_REPO / "piper" / "urdf" / "piper_description.urdf"
 
 # Simulation model path (MJCF)
 PIPER_SIM_PATH = LfsPath("piper/scene.xml")
@@ -60,7 +69,7 @@ def piper(
     """
     defaults: dict[str, Any] = {
         "name": name,
-        "model_path": RobotAssetPath("piper", "urdf"),
+        "model_path": _PIPER_REPO / "piper" / "urdf" / "piper_with_gripper_description.xacro",
         "end_effector_link": "gripper_base",
         "adapter_type": adapter_type,
         "address": address,
@@ -68,7 +77,7 @@ def piper(
         "base_link": "base_link",
         "home_joints": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         "base_pose": [0, y_offset, 0, 0, 0, 0, 1],
-        "package_paths": robot_asset_package_paths("piper"),
+        "package_paths": _PIPER_PACKAGE_PATHS,
         "xacro_args": {},
         "auto_convert_meshes": True,
         "collision_exclusion_pairs": PIPER_GRIPPER_COLLISION_EXCLUSIONS,

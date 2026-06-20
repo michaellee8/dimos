@@ -192,11 +192,9 @@ visualization backend.
 
 ## Robot model assets
 
-XArm6, XArm7, Piper, and A-750 runtime model paths are resolved through the Robot Asset Manager (`dimos.robot.assets`). Catalogs use `RobotAssetPath` so imports stay lightweight: no network or Git work happens until a concrete path is accessed.
+XArm6, XArm7, Piper, and A-750 runtime model paths are resolved through Git-backed robot description source handles (`dimos.robot.assets`). Catalogs join relative paths from a `RobotDescriptionSource`, so imports stay lightweight: no network or Git work happens until a concrete path is accessed.
 
-Declared upstream sources are cached under `~/.cache/dimos/robot_assets`. The cache is fresh-when-safe: a missing checkout is cloned, a clean checkout is updated, update failures warn and continue with the cached copy, and dirty local checkouts are preserved with a warning.
-
-Common artifact roles are flat strings: `urdf`, `mjcf`, `srdf`, and `mesh_dir`. Extra roles such as `urdf_ik` may be declared for robot-specific planning/FK needs.
+Upstream sources are cached under the platform user cache directory in `dimos/robot_assets`. The cache is fresh-when-safe: a missing checkout is cloned, a clean checkout is updated, update failures warn and continue with the cached copy, and dirty local checkouts are preserved with a warning.
 
 Some FK-only Pinocchio assets remain on LFS when the upstream source does not publish a static no-gripper URDF/MJCF equivalent. OpenArm also remains on the existing path because DimOS carries local model modifications.
 

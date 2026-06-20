@@ -19,9 +19,13 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from dimos.robot.assets.manager import RobotAssetPath, robot_asset_package_paths
+from dimos.robot.assets.source import RobotDescriptionSource
 from dimos.robot.config import GripperConfig, RobotConfig
 from dimos.utils.data import LfsPath
+
+A750_DESCRIPTION_REPO = "https://github.com/adob/a750_description"
+_A750_REPO = RobotDescriptionSource(url=A750_DESCRIPTION_REPO, ref="master")
+_A750_PACKAGE_PATHS = {"a750_description": _A750_REPO / "."}
 
 # Static no-gripper URDF for Pinocchio FK. The upstream source only publishes the
 # full gripper model, so this generated FK variant intentionally stays on LFS.
@@ -73,7 +77,7 @@ def a750(
     """
     defaults: dict[str, Any] = {
         "name": name,
-        "model_path": RobotAssetPath("a750", "urdf"),
+        "model_path": _A750_REPO / "urdf" / "a750_rev1.urdf",
         "end_effector_link": "gripper_base",
         "adapter_type": adapter_type,
         "address": device_path,
@@ -81,7 +85,7 @@ def a750(
         "base_link": "base_link",
         "home_joints": [0.0, 0.0, -math.radians(90), 0.0, 0.0, 0.0],
         "base_pose": [0, 0, 0, 0, 0, 0, 1],  # base_pose is where the robot sits in the world
-        "package_paths": robot_asset_package_paths("a750"),
+        "package_paths": _A750_PACKAGE_PATHS,
         "xacro_args": {},
         "auto_convert_meshes": True,
         "collision_exclusion_pairs": A750_GRIPPER_COLLISION_EXCLUSIONS,
