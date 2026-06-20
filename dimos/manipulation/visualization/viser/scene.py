@@ -155,6 +155,9 @@ class ViserManipulationScene:
         self._handles[handle_key] = handle
         return handle
 
+    def remove_target_controls(self, robot_id: str) -> None:
+        self._remove_handle(f"{robot_id}:ee_control")
+
     def update_current_robot(self, robot_id: str, joint_state: JointState | None) -> None:
         config = self._configs_by_id.get(robot_id)
         if config is None or joint_state is None:

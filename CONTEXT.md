@@ -32,8 +32,12 @@ _Avoid_: Planning group definition
 The set of one or more planning groups chosen for a planning request.
 _Avoid_: Composite group
 
+**Planning Target Set**:
+The atomic manipulation UI/planning state built on top of a planning group selection: selected planning groups, target authoring state, combined IK joint target, whole-set feasibility, and generated plan. Per-group UI panels are views into this target set, not independent planning states.
+_Avoid_: Independent group cards, per-robot plan state
+
 **Auxiliary Planning Group**:
-A planning group selected to participate in a specific planning request without receiving a direct end-effector pose constraint in that request. A planning group may be auxiliary in one request and directly targeted in another.
+A planning group selected to participate in a planning target set without receiving a direct end-effector pose target in that request. It is solved, checked, planned, previewed, and executed with the whole target set; it simply has no assigned target gizmo. A planning group may be auxiliary in one request and directly targeted in another.
 _Avoid_: Joint-only group, intrinsic auxiliary group
 
 **Coordinated Planning Problem**:

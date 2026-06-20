@@ -868,6 +868,103 @@ class TestManipulationPreview:
         assert module.preview_plan() is False
 
 
+class TestTargetSetEvaluation:
+    def test_evaluate_joint_target_set_projects_selected_targets_to_full_robot_states(self):
+        left_config = _make_robot_config("left", ["j1", "j2"], "left_task")
+        right_config = _make_robot_config("right", ["j1", "j2"], "right_task")
+        module = _make_module_with_monitor(left_config, right_config)
+        module._world_monitor.planning_groups = _FakePlanningGroups(
+            [
+                _make_global_group("left", "arm", ["j1"]),
+                _make_global_group("right", "arm", ["j2"]),
+            ]
+        )
+        module._world_monitor.get_current_joint_state.side_effect = [
+            JointState(name=["j1", "j2"], position=[0.0, 9.0]),
+            JointState(name=["j1", "j2"], position=[8.0, 0.0]),
+        ]
+        module._world_monitor.is_state_valid.return_value = True
+        left_pose = PoseStamped(position=Vector3(x=1.0), orientation=Quaternion())
+        right_pose = PoseStamped(position=Vector3(x=2.0), orientation=Quaternion())
+        module._world_monitor.get_group_pose.side_effect = [left_pose, right_pose]
+
+        result = module.evaluate_joint_target_set(
+            {
+                "left/arm": JointState(name=["j1"], position=[1.0]),
+                "right/arm": JointState(name=["j2"], position=[2.0]),
+            }
+        )
+
+        assert result["success"] is True
+        assert result["collision_free"] is True
+        assert result["target_joints"] is not None
+        assert result["target_joints"].name == ["left/j1", "right/j2"]
+        assert result["target_joints"].position == [1.0, 2.0]
+        left_target = module._world_monitor.is_state_valid.call_args_list[0].args[1]
+        right_target = module._world_monitor.is_state_valid.call_args_list[1].args[1]
+        assert left_target.name == ["j1", "j2"]
+        assert left_target.position == [1.0, 9.0]
+        assert right_target.name == ["j1", "j2"]
+        assert right_target.position == [8.0, 2.0]
+        assert result["group_poses"] == {"left/arm": left_pose, "right/arm": right_pose}
+
+    def test_evaluate_joint_target_set_reports_collision_per_group(self):
+        config = _make_robot_config("left", ["j1"], "task")
+        module = _make_module_with_monitor(config)
+        module._world_monitor.get_current_joint_state.return_value = JointState(
+            name=["j1"], position=[0.0]
+        )
+        module._world_monitor.is_state_valid.return_value = False
+        module._world_monitor.get_group_pose.return_value = None
+
+        result = module.evaluate_joint_target_set(
+            {"left/manipulator": JointState(name=["j1"], position=[1.0])}
+        )
+
+        assert result["success"] is False
+        assert result["status"] == "COLLISION"
+        assert result["collision_free"] is False
+        assert result["message"] == "Target set is in collision"
+        assert result["group_diagnostics"] == {"left/manipulator": "Target is in collision"}
+
+    def test_evaluate_pose_target_set_uses_whole_set_seed_and_auxiliary_groups(self):
+        config = _make_robot_config("left", ["j1", "j2"], "task")
+        arm_group = _make_global_group("left", "arm", ["j1"])
+        wrist_group = _make_global_group("left", "wrist", ["j2"])
+        module = _make_module_with_monitor(config)
+        module._world_monitor.planning_groups = _FakePlanningGroups([arm_group, wrist_group])
+        module._world_monitor.get_current_joint_state.return_value = JointState(
+            name=["j1", "j2"], position=[0.1, 0.2]
+        )
+        module._world_monitor.is_state_valid.return_value = True
+        module._world_monitor.get_group_pose.return_value = PoseStamped(
+            position=Vector3(x=1.0), orientation=Quaternion()
+        )
+        module._kinematics = MagicMock()
+        module._kinematics.solve_pose_targets.return_value = IKResult(
+            status=IKStatus.SUCCESS,
+            joint_state=JointState(name=["left/j1", "left/j2"], position=[1.0, 2.0]),
+            message="solved",
+            position_error=0.01,
+            orientation_error=0.02,
+        )
+        pose = Pose(position=Vector3(x=0.5), orientation=Quaternion())
+
+        result = module.evaluate_pose_target_set(
+            {"left/arm": pose}, auxiliary_groups=("left/wrist",)
+        )
+
+        assert result["success"] is True
+        assert result["target_joints"] is not None
+        assert result["target_joints"].name == ["left/j1", "left/j2"]
+        assert result["target_joints"].position == [1.0, 2.0]
+        _, kwargs = module._kinematics.solve_pose_targets.call_args
+        assert list(kwargs["pose_targets"]) == [arm_group]
+        assert kwargs["auxiliary_groups"] == (wrist_group,)
+        assert kwargs["seed"].name == ["left/j1", "left/j2"]
+        assert kwargs["seed"].position == [0.1, 0.2]
+
+
 class TestGeneratedPlanProjection:
     def test_selected_joint_state_accepts_local_current_state_names(self):
         config = _make_robot_config("left", ["j1", "j2"], "task")

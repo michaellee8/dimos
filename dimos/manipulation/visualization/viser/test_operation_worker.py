@@ -141,6 +141,12 @@ class FakeOperationAdapter(InProcessViserAdapter):
     def plan_to_joints(self, joints: JointState, robot_name: str | None = None) -> bool:
         return True
 
+    def plan_target_set(self, joint_targets: dict[str, JointState]) -> bool:
+        return True
+
+    def preview_target_set_plan(self) -> bool:
+        return True
+
 
 def test_operation_worker_uses_per_operation_timeout() -> None:
     errors: list[str] = []
@@ -205,7 +211,8 @@ def test_gui_only_preview_submits_timeout_override(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(gui, "_operation_worker", FakeTimeoutSubmitWorker(submissions))
     gui.state.runtime = PanelRuntime.RUNNING
     gui.state.backend_status = BackendConnectionStatus.READY
-    gui.state.selected_robot = "arm"
+    gui.state.selected_group_ids = ("arm:manipulator",)
+    gui.state.target_joints = JointState({"name": ["arm/j1"], "position": [1.0]})
     gui.state.target_status = TargetStatus.FEASIBLE
     gui.state.manipulation_state = "IDLE"
 

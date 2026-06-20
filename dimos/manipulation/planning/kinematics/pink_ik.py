@@ -28,10 +28,10 @@ import numpy as np
 from dimos.manipulation.planning.groups import (
     PlanningGroup,
     PlanningGroupSelection,
-    filter_joint_state_to_selected_joints,
     matching_global_joint_name,
 )
 from dimos.manipulation.planning.kinematics.config import PinkKinematicsConfig
+from dimos.manipulation.planning.planning_identifiers import make_global_joint_name
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import IKStatus
 from dimos.manipulation.planning.spec.models import (
@@ -186,7 +186,7 @@ class PinkIK:
         check_collision: bool = True,
         max_attempts: int = 10,
     ) -> IKResult:
-        """Solve a planning-group pose target and return only selected global joints."""
+        """Solve planning-group pose targets and return selected global joints."""
         if not pose_targets:
             return _failure(IKStatus.NO_SOLUTION, "At least one pose target is required")
 
@@ -197,50 +197,129 @@ class PinkIK:
         except (KeyError, ValueError) as exc:
             return _failure(IKStatus.NO_SOLUTION, str(exc))
 
-        if len(pose_groups) != 1:
-            return _failure(
-                IKStatus.NO_SOLUTION,
-                "PinkIK supports exactly one pose target per request",
-            )
+        groups_by_robot: dict[RobotName, list[PlanningGroup]] = {}
+        pose_groups_by_robot: dict[RobotName, list[PlanningGroup]] = {}
+        for group in selection.groups:
+            groups_by_robot.setdefault(group.robot_name, []).append(group)
+        for group in pose_groups:
+            if not group.has_pose_target or group.tip_link is None:
+                return _failure(
+                    IKStatus.NO_SOLUTION,
+                    f"Planning group '{group.id}' has no pose target frame",
+                )
+            pose_groups_by_robot.setdefault(group.robot_name, []).append(group)
 
-        target_group = pose_groups[0]
-        if not target_group.has_pose_target or target_group.tip_link is None:
-            return _failure(
-                IKStatus.NO_SOLUTION,
-                f"Planning group '{target_group.id}' has no pose target frame",
-            )
+        selected_positions_by_name: dict[str, float] = {}
+        max_position_error = 0.0
+        max_orientation_error = 0.0
+        total_iterations = 0
+        for robot_name, groups in groups_by_robot.items():
+            robot_id = robot_ids_by_name[robot_name]
+            robot_pose_groups = pose_groups_by_robot.get(robot_name, [])
+            if robot_pose_groups:
+                result = self._solve_pose_targets_for_robot(
+                    world=world,
+                    robot_id=robot_id,
+                    pose_targets={group: pose_targets[group] for group in robot_pose_groups},
+                    seed=_seed_for_robot(world, robot_id, seed),
+                    position_tolerance=position_tolerance,
+                    orientation_tolerance=orientation_tolerance,
+                    check_collision=check_collision,
+                    max_attempts=max_attempts,
+                )
+                if not result.is_success() or result.joint_state is None:
+                    return result
+            else:
+                result = IKResult(
+                    status=IKStatus.SUCCESS,
+                    joint_state=_seed_for_robot(world, robot_id, seed),
+                    message="Auxiliary group retained seed state",
+                )
+            joint_state = result.joint_state
+            if joint_state is None:
+                return _failure(
+                    IKStatus.NO_SOLUTION,
+                    f"Pink IK result for robot '{robot_name}' has no joint state",
+                )
 
-        robot_ids = {robot_ids_by_name[group.robot_name] for group in selection.groups}
-        if len(robot_ids) != 1:
-            return _failure(IKStatus.NO_SOLUTION, "PinkIK does not support cross-robot pose IK")
+            max_position_error = max(max_position_error, result.position_error)
+            max_orientation_error = max(max_orientation_error, result.orientation_error)
+            total_iterations += result.iterations
+            local_positions = dict(zip(joint_state.name, joint_state.position, strict=True))
+            for group in groups:
+                for global_name, local_name in zip(
+                    group.joint_names, group.local_joint_names, strict=True
+                ):
+                    if local_name not in local_positions:
+                        return _failure(
+                            IKStatus.NO_SOLUTION,
+                            f"Pink IK result for robot '{robot_name}' is missing joint '{local_name}'",
+                        )
+                    selected_positions_by_name[global_name] = float(local_positions[local_name])
 
-        robot_id = robot_ids_by_name[target_group.robot_name]
-        if seed is None:
-            with world.scratch_context() as ctx:
-                seed = world.get_joint_state(ctx, robot_id)
+        selected_positions = [selected_positions_by_name[name] for name in selection.joint_names]
+        return IKResult(
+            status=IKStatus.SUCCESS,
+            joint_state=JointState(
+                {"name": list(selection.joint_names), "position": selected_positions}
+            ),
+            position_error=max_position_error,
+            orientation_error=max_orientation_error,
+            iterations=total_iterations,
+            message="Pink IK target set solution found",
+        )
 
+    def _solve_pose_targets_for_robot(
+        self,
+        world: WorldSpec,
+        robot_id: WorldRobotID,
+        pose_targets: Mapping[PlanningGroup, PoseStamped],
+        seed: JointState,
+        position_tolerance: float,
+        orientation_tolerance: float,
+        check_collision: bool,
+        max_attempts: int,
+    ) -> IKResult:
+        """Solve one robot's one-or-more frame targets."""
         try:
-            robot_context = self._get_robot_context(world, robot_id, target_group.tip_link)
+            contexts = [
+                self._get_robot_context(world, robot_id, group.tip_link)
+                for group in pose_targets
+                if group.tip_link is not None
+            ]
         except (FileNotFoundError, ImportError, ValueError) as exc:
             return _failure(IKStatus.NO_SOLUTION, f"Pink IK model setup failed: {exc}")
 
+        config = world.get_robot_config(robot_id)
         lower_limits, upper_limits = world.get_joint_limits(robot_id)
-        target_pose = pose_targets[next(iter(pose_targets.keys()))]
-        target_model = self._target_in_model_frame(world.get_robot_config(robot_id), target_pose)
+        target_models = [
+            self._target_in_model_frame(config, pose) for pose in pose_targets.values()
+        ]
         fallback_result: IKResult | None = None
 
         for attempt in range(max_attempts):
             try:
-                q0 = self._initial_q(robot_context, seed, lower_limits, upper_limits, attempt)
-                result = self._solve_single(
-                    robot_context=robot_context,
-                    target_model=target_model,
-                    seed_q=q0,
-                    lower_limits=lower_limits,
-                    upper_limits=upper_limits,
-                    position_tolerance=position_tolerance,
-                    orientation_tolerance=orientation_tolerance,
-                )
+                q0 = self._initial_q(contexts[0], seed, lower_limits, upper_limits, attempt)
+                if len(contexts) == 1:
+                    result = self._solve_single(
+                        robot_context=contexts[0],
+                        target_model=target_models[0],
+                        seed_q=q0,
+                        lower_limits=lower_limits,
+                        upper_limits=upper_limits,
+                        position_tolerance=position_tolerance,
+                        orientation_tolerance=orientation_tolerance,
+                    )
+                else:
+                    result = self._solve_multi_frame(
+                        robot_contexts=contexts,
+                        target_models=target_models,
+                        seed_q=q0,
+                        lower_limits=lower_limits,
+                        upper_limits=upper_limits,
+                        position_tolerance=position_tolerance,
+                        orientation_tolerance=orientation_tolerance,
+                    )
             except ValueError as exc:
                 return _failure(IKStatus.NO_SOLUTION, f"Pink IK mapping failed: {exc}")
             except Exception as exc:
@@ -250,26 +329,11 @@ class PinkIK:
                 if fallback_result is None:
                     fallback_result = result
                 continue
-
             if check_collision and not world.check_config_collision_free(
                 robot_id, result.joint_state
             ):
                 fallback_result = _collision_failure(result)
                 continue
-
-            selected_joint_names: list[str] = []
-            selected_local_names: list[str] = []
-            for group in selection.groups:
-                selected_joint_names.extend(group.joint_names)
-                selected_local_names.extend(group.local_joint_names)
-            try:
-                result.joint_state = filter_joint_state_to_selected_joints(
-                    result.joint_state,
-                    selected_joint_names,
-                    selected_local_names,
-                )
-            except ValueError as exc:
-                return _failure(IKStatus.NO_SOLUTION, str(exc))
             return result
 
         if fallback_result is not None:
@@ -338,6 +402,95 @@ class PinkIK:
             configuration.integrate_inplace(velocity, self.config.dt)
 
             joint_positions = self._q_to_dimos_positions(robot_context, configuration.q)
+            if not _within_limits(joint_positions, lower_limits, upper_limits):
+                return IKResult(
+                    status=IKStatus.JOINT_LIMITS,
+                    joint_state=None,
+                    position_error=final_position_error,
+                    orientation_error=final_orientation_error,
+                    iterations=iteration + 1,
+                    message="Pink IK candidate violates DimOS joint limits",
+                )
+
+        return IKResult(
+            status=IKStatus.NO_SOLUTION,
+            joint_state=None,
+            position_error=final_position_error,
+            orientation_error=final_orientation_error,
+            iterations=self.config.max_iterations,
+            message="Pink IK did not converge within the iteration budget",
+        )
+
+    def _solve_multi_frame(
+        self,
+        robot_contexts: Sequence[_PinkRobotContext],
+        target_models: Sequence[NDArray[np.float64]],
+        seed_q: NDArray[np.float64],
+        lower_limits: NDArray[np.float64],
+        upper_limits: NDArray[np.float64],
+        position_tolerance: float,
+        orientation_tolerance: float,
+    ) -> IKResult:
+        """Solve multiple frame tasks for one robot model."""
+        pink = self._modules.pink
+        pinocchio = self._modules.pinocchio
+        primary_context = robot_contexts[0]
+        configuration = pink.Configuration(
+            primary_context.model, primary_context.data, seed_q.copy()
+        )
+
+        tasks: list[Any] = []
+        for context, target_model in zip(robot_contexts, target_models, strict=True):
+            frame_task = pink.tasks.FrameTask(
+                context.frame_name,
+                position_cost=self.config.position_cost,
+                orientation_cost=self.config.orientation_cost,
+                lm_damping=self.config.lm_damping,
+                gain=self.config.gain,
+            )
+            frame_task.set_target(_matrix_to_se3(pinocchio, target_model))
+            tasks.append(frame_task)
+
+        if self.config.posture_cost > 0.0:
+            posture_task = pink.tasks.PostureTask(cost=self.config.posture_cost)
+            posture_task.set_target_from_configuration(configuration)
+            tasks.append(posture_task)
+
+        final_position_error = float("inf")
+        final_orientation_error = float("inf")
+        for iteration in range(self.config.max_iterations):
+            position_errors: list[float] = []
+            orientation_errors: list[float] = []
+            for context, target_model in zip(robot_contexts, target_models, strict=True):
+                current_pose = self._current_frame_matrix(context, configuration.q)
+                position_error, orientation_error = compute_pose_error(current_pose, target_model)
+                position_errors.append(position_error)
+                orientation_errors.append(orientation_error)
+            final_position_error = max(position_errors)
+            final_orientation_error = max(orientation_errors)
+            if (
+                final_position_error <= position_tolerance
+                and final_orientation_error <= orientation_tolerance
+            ):
+                return _success(
+                    primary_context.mapping.dimos_joint_names,
+                    self._q_to_dimos_positions(primary_context, configuration.q),
+                    final_position_error,
+                    final_orientation_error,
+                    iteration + 1,
+                )
+
+            velocity = pink.solve_ik(
+                configuration,
+                tasks,
+                self.config.dt,
+                solver=self.config.solver,
+                damping=self.config.damping,
+                safety_break=self.config.safety_break,
+            )
+            configuration.integrate_inplace(velocity, self.config.dt)
+
+            joint_positions = self._q_to_dimos_positions(primary_context, configuration.q)
             if not _within_limits(joint_positions, lower_limits, upper_limits):
                 return IKResult(
                     status=IKStatus.JOINT_LIMITS,
@@ -596,7 +749,7 @@ def _success(
 ) -> IKResult:
     return IKResult(
         status=IKStatus.SUCCESS,
-        joint_state=JointState(name=joint_names, position=joint_positions.tolist()),
+        joint_state=JointState({"name": joint_names, "position": joint_positions.tolist()}),
         position_error=position_error,
         orientation_error=orientation_error,
         iterations=iterations,
@@ -617,6 +770,40 @@ def _collision_failure(result: IKResult) -> IKResult:
         iterations=result.iterations,
         message="Pink IK solution rejected by collision check",
     )
+
+
+def _seed_for_robot(
+    world: WorldSpec, robot_id: WorldRobotID, seed: JointState | None
+) -> JointState:
+    """Return a full local seed state for one robot from local/global seed input."""
+    config = world.get_robot_config(robot_id)
+    with world.scratch_context() as ctx:
+        current = world.get_joint_state(ctx, robot_id)
+    if seed is None:
+        return JointState(current)
+    if not seed.name:
+        if len(seed.position) == len(config.joint_names):
+            return JointState({"name": list(config.joint_names), "position": list(seed.position)})
+        raise ValueError(
+            f"Seed has {len(seed.position)} positions for robot '{config.name}', "
+            f"expected {len(config.joint_names)}"
+        )
+    if len(seed.name) != len(seed.position):
+        raise ValueError(f"Seed has {len(seed.name)} names but {len(seed.position)} positions")
+    seed_by_name = dict(zip(seed.name, seed.position, strict=True))
+    current_by_name = dict(zip(current.name, current.position, strict=True))
+    positions: list[float] = []
+    for local_name in config.joint_names:
+        global_name = make_global_joint_name(config.name, local_name)
+        if local_name in seed_by_name:
+            positions.append(float(seed_by_name[local_name]))
+        elif global_name in seed_by_name:
+            positions.append(float(seed_by_name[global_name]))
+        elif local_name in current_by_name:
+            positions.append(float(current_by_name[local_name]))
+        else:
+            raise ValueError(f"Seed/current state is missing joint '{local_name}'")
+    return JointState({"name": list(config.joint_names), "position": positions})
 
 
 def _robot_ids_by_name(

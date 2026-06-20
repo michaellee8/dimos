@@ -76,7 +76,7 @@ from dimos.manipulation.visualization.config import (
     NoManipulationVisualizationConfig,
 )
 from dimos.manipulation.visualization.factory import create_manipulation_visualization
-from dimos.manipulation.visualization.types import TargetEvaluation
+from dimos.manipulation.visualization.types import TargetEvaluation, TargetSetEvaluation
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -1051,6 +1051,309 @@ class ManipulationModule(Module):
             "orientation_error": ik.orientation_error,
             "collision_free": collision_free,
         }
+
+    def _selected_target_by_name(
+        self, group_ids: tuple[PlanningGroupID, ...], target_joints: JointState
+    ) -> dict[str, float] | None:
+        """Validate and index a global target joint state for a group selection."""
+        assert self._world_monitor is not None
+        selection = self._world_monitor.planning_groups.select(group_ids)
+        if len(target_joints.name) != len(target_joints.position):
+            logger.error(
+                "Target set has %d names but %d positions",
+                len(target_joints.name),
+                len(target_joints.position),
+            )
+            return None
+        try:
+            assert_global_joint_names(target_joints.name)
+        except ValueError as exc:
+            logger.error("Invalid target-set joint names: %s", exc)
+            return None
+
+        target_by_name = dict(zip(target_joints.name, target_joints.position, strict=True))
+        missing = [name for name in selection.joint_names if name not in target_by_name]
+        extra = set(target_by_name) - set(selection.joint_names)
+        if missing:
+            logger.error("Target set missing joints: %s", missing)
+            return None
+        if extra:
+            logger.error("Target set has extra joints: %s", sorted(extra))
+            return None
+        return target_by_name
+
+    def _local_target_states_for_selection(
+        self, group_ids: tuple[PlanningGroupID, ...], target_joints: JointState
+    ) -> dict[RobotName, tuple[WorldRobotID, RobotModelConfig, JointState]] | None:
+        """Project selected global targets to full local robot states for evaluation."""
+        assert self._world_monitor is not None
+        selection = self._world_monitor.planning_groups.select(group_ids)
+        target_by_name = self._selected_target_by_name(group_ids, target_joints)
+        if target_by_name is None:
+            return None
+
+        local_targets: dict[RobotName, tuple[WorldRobotID, RobotModelConfig, JointState]] = {}
+        for robot_name in selection.robot_names:
+            robot = self._robots.get(robot_name)
+            if robot is None:
+                logger.error("Robot '%s' is not registered", robot_name)
+                return None
+            robot_id, config, _ = robot
+            current = self._world_monitor.get_current_joint_state(robot_id)
+            if current is None:
+                logger.error("No joint state for robot '%s'", robot_name)
+                return None
+            current_by_name = self._current_positions_by_name(robot_name, current)
+            if current_by_name is None:
+                return None
+
+            positions: list[float] = []
+            for local_name, global_name in zip(
+                config.joint_names,
+                make_global_joint_names(robot_name, config.joint_names),
+                strict=True,
+            ):
+                if global_name in target_by_name:
+                    positions.append(float(target_by_name[global_name]))
+                elif local_name in current_by_name:
+                    positions.append(float(current_by_name[local_name]))
+                else:
+                    logger.error("Current state missing joint '%s'", global_name)
+                    return None
+            local_targets[robot_name] = (
+                robot_id,
+                config,
+                JointState(name=list(config.joint_names), position=positions),
+            )
+        return local_targets
+
+    def _target_set_poses(
+        self,
+        group_ids: tuple[PlanningGroupID, ...],
+        local_targets: Mapping[RobotName, tuple[WorldRobotID, RobotModelConfig, JointState]],
+    ) -> dict[PlanningGroupID, PoseStamped | None]:
+        """Compute pose outputs for pose-targetable groups in a target set."""
+        assert self._world_monitor is not None
+        poses: dict[PlanningGroupID, PoseStamped | None] = {}
+        for group in self._world_monitor.planning_groups.select(group_ids).groups:
+            if not group.has_pose_target:
+                continue
+            robot_target = local_targets.get(group.robot_name)
+            if robot_target is None:
+                poses[group.id] = None
+                continue
+            _, _, joint_state = robot_target
+            try:
+                poses[group.id] = self._world_monitor.get_group_pose(group.id, joint_state)
+            except Exception as exc:
+                logger.warning("Failed to evaluate pose for group '%s': %s", group.id, exc)
+                poses[group.id] = None
+        return poses
+
+    def _evaluate_global_target_set(
+        self,
+        group_ids: tuple[PlanningGroupID, ...],
+        target_joints: JointState | None,
+        *,
+        status: str = "FEASIBLE",
+        message: str = "Target set is feasible",
+        position_error: float = 0.0,
+        orientation_error: float = 0.0,
+    ) -> TargetSetEvaluation:
+        """Evaluate whole-set collision and pose outputs for global target joints."""
+        if self._world_monitor is None:
+            return {
+                "success": False,
+                "status": "UNAVAILABLE",
+                "message": "Planning is not initialized",
+                "collision_free": False,
+                "group_ids": group_ids,
+                "target_joints": None,
+            }
+        if target_joints is None:
+            return {
+                "success": False,
+                "status": "NO_TARGET",
+                "message": "No target joints provided",
+                "collision_free": False,
+                "group_ids": group_ids,
+                "target_joints": None,
+            }
+        try:
+            local_targets = self._local_target_states_for_selection(group_ids, target_joints)
+        except (KeyError, ValueError) as exc:
+            return {
+                "success": False,
+                "status": "INVALID",
+                "message": str(exc),
+                "collision_free": False,
+                "group_ids": group_ids,
+                "target_joints": None,
+            }
+        if local_targets is None:
+            return {
+                "success": False,
+                "status": "INVALID",
+                "message": "Invalid target-set joints",
+                "collision_free": False,
+                "group_ids": group_ids,
+                "target_joints": None,
+            }
+
+        collision_free = True
+        diagnostics: dict[PlanningGroupID, str] = {}
+        selection = self._world_monitor.planning_groups.select(group_ids)
+        for robot_name, (robot_id, _, local_target) in local_targets.items():
+            robot_collision_free = self._world_monitor.is_state_valid(robot_id, local_target)
+            collision_free = collision_free and robot_collision_free
+            for group in selection.groups:
+                if group.robot_name == robot_name:
+                    diagnostics[group.id] = (
+                        "Target is collision-free"
+                        if robot_collision_free
+                        else "Target is in collision"
+                    )
+
+        return {
+            "success": collision_free,
+            "status": status if collision_free else "COLLISION",
+            "message": message if collision_free else "Target set is in collision",
+            "collision_free": collision_free,
+            "group_ids": group_ids,
+            "target_joints": JointState(target_joints),
+            "group_diagnostics": diagnostics,
+            "group_poses": self._target_set_poses(group_ids, local_targets),
+            "position_error": position_error,
+            "orientation_error": orientation_error,
+        }
+
+    def evaluate_joint_target_set(
+        self, joint_targets: Mapping[PlanningGroupID | PlanningGroup, JointState]
+    ) -> TargetSetEvaluation:
+        """Evaluate joint targets for a whole planning target set."""
+        if self._world_monitor is None:
+            return {
+                "success": False,
+                "status": "UNAVAILABLE",
+                "message": "Planning is not initialized",
+                "collision_free": False,
+                "target_joints": None,
+            }
+        if not joint_targets:
+            return {
+                "success": False,
+                "status": "NO_TARGET",
+                "message": "No joint targets provided",
+                "collision_free": False,
+                "target_joints": None,
+            }
+
+        group_ids = tuple(
+            dict.fromkeys(planning_group_id_from_selector(group) for group in joint_targets)
+        )
+        goal_names: list[str] = []
+        goal_positions: list[float] = []
+        for group_selector, target in joint_targets.items():
+            group_id = planning_group_id_from_selector(group_selector)
+            target_global = self._joint_target_to_global_names(group_id, target)
+            if target_global is None:
+                return {
+                    "success": False,
+                    "status": "INVALID",
+                    "message": f"Invalid joint target for '{group_id}'",
+                    "collision_free": False,
+                    "group_ids": group_ids,
+                    "target_joints": None,
+                }
+            goal_names.extend(target_global.name)
+            goal_positions.extend(target_global.position)
+
+        return self._evaluate_global_target_set(
+            group_ids,
+            JointState(name=goal_names, position=goal_positions),
+        )
+
+    def evaluate_pose_target_set(
+        self,
+        pose_targets: Mapping[PlanningGroupID | PlanningGroup, Pose | PoseStamped],
+        auxiliary_groups: Sequence[PlanningGroupID | PlanningGroup] = (),
+        seed: JointState | None = None,
+    ) -> TargetSetEvaluation:
+        """Evaluate pose targets for a whole planning target set using configured IK."""
+        if self._world_monitor is None or self._kinematics is None:
+            return {
+                "success": False,
+                "status": "UNAVAILABLE",
+                "message": "Planning is not initialized",
+                "collision_free": False,
+                "target_joints": None,
+            }
+        if not pose_targets:
+            return {
+                "success": False,
+                "status": "NO_TARGET",
+                "message": "No pose targets provided",
+                "collision_free": False,
+                "target_joints": None,
+            }
+
+        def stamped_pose(pose: Pose | PoseStamped) -> PoseStamped:
+            if isinstance(pose, PoseStamped):
+                return pose
+            return PoseStamped(
+                frame_id="world", position=pose.position, orientation=pose.orientation
+            )
+
+        stamped_targets = {
+            planning_group_id_from_selector(group): stamped_pose(pose)
+            for group, pose in pose_targets.items()
+        }
+        auxiliary_ids = tuple(planning_group_id_from_selector(group) for group in auxiliary_groups)
+        group_ids = tuple(dict.fromkeys((*stamped_targets.keys(), *auxiliary_ids)))
+        try:
+            target_groups = {
+                self._world_monitor.planning_groups.get(group_id): pose
+                for group_id, pose in stamped_targets.items()
+            }
+            auxiliary = tuple(
+                self._world_monitor.planning_groups.get(group_id) for group_id in auxiliary_ids
+            )
+            ik = self._kinematics.solve_pose_targets(
+                world=self._world_monitor.world,
+                pose_targets=target_groups,
+                auxiliary_groups=auxiliary,
+                seed=seed or self._selected_joint_state(group_ids),
+                check_collision=False,
+            )
+        except (KeyError, ValueError) as exc:
+            return {
+                "success": False,
+                "status": "INVALID",
+                "message": str(exc),
+                "collision_free": False,
+                "group_ids": group_ids,
+                "target_joints": None,
+            }
+
+        if not ik.is_success() or ik.joint_state is None:
+            return {
+                "success": False,
+                "status": ik.status.name,
+                "message": ik.message,
+                "collision_free": False,
+                "group_ids": group_ids,
+                "target_joints": None,
+                "position_error": ik.position_error,
+                "orientation_error": ik.orientation_error,
+            }
+        return self._evaluate_global_target_set(
+            group_ids,
+            ik.joint_state,
+            status=ik.status.name,
+            message=ik.message,
+            position_error=ik.position_error,
+            orientation_error=ik.orientation_error,
+        )
 
     @rpc
     def set_init_joints(self, joint_state: JointState, robot_name: RobotName | None = None) -> bool:

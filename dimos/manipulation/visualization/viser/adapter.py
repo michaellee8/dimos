@@ -15,16 +15,22 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
-from dimos.manipulation.visualization.types import RobotInfo, TargetEvaluation
+from dimos.manipulation.visualization.types import (
+    PlanningGroupInfo,
+    RobotInfo,
+    TargetEvaluation,
+    TargetSetEvaluation,
+)
 from dimos.msgs.sensor_msgs.JointState import JointState
 
 if TYPE_CHECKING:
     from dimos.manipulation.manipulation_module import ManipulationModule
+    from dimos.manipulation.planning.groups import PlanningGroup
     from dimos.manipulation.planning.monitor.world_monitor import WorldMonitor
     from dimos.manipulation.planning.spec.config import RobotModelConfig
-    from dimos.manipulation.planning.spec.models import RobotName, WorldRobotID
+    from dimos.manipulation.planning.spec.models import PlanningGroupID, RobotName, WorldRobotID
     from dimos.msgs.geometry_msgs.Pose import Pose
     from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
@@ -84,7 +90,30 @@ class InProcessViserAdapter:
             "init_joints": None
             if info["init_joints"] is None
             else [float(value) for value in info["init_joints"]],
+            "planning_groups": [
+                {
+                    "id": str(group["id"]),
+                    "name": str(group["name"]),
+                    "robot_name": str(info["name"]),
+                    "joint_names": [str(name) for name in group["joint_names"]],
+                    "local_joint_names": [str(name) for name in group["local_joint_names"]],
+                    "base_link": str(group["base_link"]),
+                    "tip_link": None if group["tip_link"] is None else str(group["tip_link"]),
+                    "has_pose_target": bool(group["has_pose_target"]),
+                    "source": str(group["source"]),
+                }
+                for group in info.get("planning_groups", [])
+            ],
         }
+
+    def list_planning_groups(self) -> list[PlanningGroupInfo]:
+        groups: list[PlanningGroupInfo] = []
+        for robot_name in self.list_robots():
+            info = self.get_robot_info(robot_name)
+            if info is None:
+                continue
+            groups.extend(info.get("planning_groups", []))
+        return groups
 
     def get_init_joints(self, robot_name: RobotName) -> JointState | None:
         return copy_joint_state(self._module.get_init_joints(robot_name))
@@ -127,6 +156,45 @@ class InProcessViserAdapter:
         )
         return result
 
+    def evaluate_joint_target_set(
+        self, joint_targets: dict[PlanningGroupID, JointState]
+    ) -> TargetSetEvaluation:
+        result: TargetSetEvaluation = {
+            **self._module.evaluate_joint_target_set(
+                cast(
+                    "dict[PlanningGroupID | PlanningGroup, JointState]",
+                    {
+                        group_id: copy_joint_state(target) or target
+                        for group_id, target in joint_targets.items()
+                    },
+                )
+            )
+        }
+        target_joints = result.get("target_joints")
+        result["target_joints"] = copy_joint_state(
+            target_joints if isinstance(target_joints, JointState) else None
+        )
+        return result
+
+    def evaluate_pose_target_set(
+        self,
+        pose_targets: dict[PlanningGroupID, Pose | PoseStamped],
+        auxiliary_groups: Sequence[PlanningGroupID] = (),
+        seed: JointState | None = None,
+    ) -> TargetSetEvaluation:
+        result: TargetSetEvaluation = {
+            **self._module.evaluate_pose_target_set(
+                cast("dict[PlanningGroupID | PlanningGroup, Pose | PoseStamped]", pose_targets),
+                auxiliary_groups=auxiliary_groups,
+                seed=copy_joint_state(seed),
+            )
+        }
+        target_joints = result.get("target_joints")
+        result["target_joints"] = copy_joint_state(
+            target_joints if isinstance(target_joints, JointState) else None
+        )
+        return result
+
     def get_module_state(self) -> str:
         return str(self._module.get_state())
 
@@ -142,11 +210,22 @@ class InProcessViserAdapter:
     def plan_to_joints(self, joints: JointState, robot_name: RobotName | None = None) -> bool:
         return self._module.plan_to_joints(joints, robot_name)
 
+    def plan_target_set(self, joint_targets: dict[PlanningGroupID, JointState]) -> bool:
+        return self._module.plan_to_joint_targets(
+            cast("dict[PlanningGroupID | PlanningGroup, JointState]", joint_targets)
+        )
+
     def preview_plan(self, robot_name: RobotName | None = None) -> bool:
         return self._module.preview_plan(robot_name=robot_name)
 
+    def preview_target_set_plan(self) -> bool:
+        return self._module.preview_plan()
+
     def execute(self, robot_name: RobotName | None = None) -> bool:
         return self._module.execute(robot_name)
+
+    def execute_target_set_plan(self) -> bool:
+        return self._module.execute()
 
     def cancel(self) -> bool:
         return self._module.cancel()

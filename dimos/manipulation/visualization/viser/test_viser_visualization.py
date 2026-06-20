@@ -25,7 +25,7 @@ import pytest
 
 pytest.importorskip("viser", reason="Viser optional dependency is not installed")
 
-from dimos.manipulation.visualization.types import RobotInfo, TargetEvaluation
+from dimos.manipulation.visualization.types import RobotInfo, TargetEvaluation, TargetSetEvaluation
 from dimos.manipulation.visualization.viser.adapter import InProcessViserAdapter
 from dimos.manipulation.visualization.viser.animation import (
     PreviewAnimator,
@@ -52,6 +52,7 @@ from dimos.msgs.sensor_msgs.JointState import JointState
 GuiCallback = Callable[[SimpleNamespace], None]
 ThemeValue = str | bool | tuple[int, int, int] | dict[str, str | dict[str, str]] | None
 RobotConfigOverride = str | list[str] | list[float] | None
+DEFAULT_GROUP_ID = "arm:manipulator"
 
 
 @dataclass
@@ -346,6 +347,23 @@ def make_robot_config(**overrides: RobotConfigOverride) -> RobotConfigStub:
     return config
 
 
+def make_planning_group_info(
+    robot_name: str, config: RobotConfigStub | SimpleNamespace
+) -> dict[str, object]:
+    joint_names = [str(name) for name in config.joint_names]
+    return {
+        "id": f"{robot_name}:manipulator",
+        "name": "manipulator",
+        "robot_name": robot_name,
+        "joint_names": [f"{robot_name}/{name}" for name in joint_names],
+        "local_joint_names": joint_names,
+        "base_link": str(config.base_link),
+        "tip_link": str(config.end_effector_link),
+        "has_pose_target": True,
+        "source": "fallback",
+    }
+
+
 class FakeManipulationModule(SimpleNamespace):
     """Public ManipulationModule surface used by the in-process Viser adapter tests."""
 
@@ -382,6 +400,7 @@ class FakeManipulationModule(SimpleNamespace):
             "name": config.name,
             "world_robot_id": self.robot_id_for_name(robot_name) or robot_name,
             "joint_names": list(config.joint_names),
+            "planning_groups": [make_planning_group_info(robot_name, config)],
             "end_effector_link": config.end_effector_link,
             "base_link": config.base_link,
             "max_velocity": 1.0,
@@ -428,6 +447,37 @@ class FakeManipulationModule(SimpleNamespace):
             "message": "No fake pose IK",
             "collision_free": False,
         }
+
+    def evaluate_joint_target_set(
+        self, joint_targets: dict[str, JointState]
+    ) -> TargetSetEvaluation:
+        if not joint_targets:
+            return {"success": False, "status": "INVALID", "target_joints": None}
+        names: list[str] = []
+        positions: list[float] = []
+        collision_free = True
+        group_poses = {}
+        world_monitor = getattr(self, "_world_monitor", None)
+        for group_id, target in joint_targets.items():
+            robot_name = group_id.split(":", 1)[0]
+            robot_id = self.robot_id_for_name(robot_name)
+            names.extend(target.name)
+            positions.extend(float(value) for value in target.position)
+            if world_monitor is not None and robot_id is not None:
+                collision_free = collision_free and world_monitor.is_state_valid(robot_id, target)
+                group_poses[group_id] = world_monitor.get_ee_pose(robot_id, target)
+        return {
+            "success": True,
+            "status": "FEASIBLE" if collision_free else "COLLISION",
+            "message": "Target is collision-free" if collision_free else "Target is in collision",
+            "collision_free": collision_free,
+            "target_joints": JointState({"name": names, "position": positions}),
+            "group_ids": tuple(joint_targets),
+            "group_poses": group_poses,
+        }
+
+    def plan_to_joint_targets(self, _joint_targets: dict[str, JointState]) -> bool:
+        return True
 
 
 def make_adapter_with_robot() -> InProcessViserAdapter:
@@ -559,8 +609,8 @@ def test_gui_ignores_target_evaluation_after_close(
     request = TargetEvaluationRequest(
         sequence_id=sequence_id,
         source="joints",
-        robot_name="arm",
-        joints=FakeJointState(["j1", "j2"], position=[0.1, 0.2]),
+        group_ids=(DEFAULT_GROUP_ID,),
+        joint_targets={DEFAULT_GROUP_ID: FakeJointState(["arm/j1", "arm/j2"], position=[0.1, 0.2])},
     )
     gui.close()
 
@@ -1106,10 +1156,38 @@ def test_gui_initializes_pose_selector_to_current_ee_pose(
         FakeTransformServer(), lambda *args, **kwargs: FakeViserUrdfWithMeshes(), preview_fps=10.0
     )
     gui = make_panel(FakeGuiServer(), adapter, ViserVisualizationConfig(panel_enabled=True), scene)
-    control = scene._handles["robot-1:ee_control"]
+    control = scene._handles[f"{DEFAULT_GROUP_ID}:ee_control"]
     assert control.position == (0.1, 0.2, 0.3)
     assert control.wxyz == (0.9, 0.1, 0.2, 0.3)
     assert gui.state.cartesian_target is current_pose
+
+
+def test_gui_removes_pose_selector_when_group_is_deselected(
+    make_panel: Callable[..., ViserPanelGui],
+) -> None:
+    current = FakeJointState(["j1"], position=[0.25])
+    current_pose = SimpleNamespace(
+        position=SimpleNamespace(x=0.1, y=0.2, z=0.3),
+        orientation=SimpleNamespace(w=1.0, x=0.0, y=0.0, z=0.0),
+    )
+    config = make_robot_config(joint_names=["j1"], home_joints=[0.0])
+    module = FakeManipulationModule(_robots={"arm": ("robot-1", config, None)})
+    world_monitor = SimpleNamespace(
+        get_current_joint_state=lambda robot_id: current,
+        is_state_stale=lambda robot_id, max_age=1.0: False,
+        get_ee_pose=lambda robot_id, joint_state=None: current_pose,
+    )
+    adapter = InProcessViserAdapter(world_monitor=world_monitor, manipulation_module=module)
+    scene = ViserManipulationScene(
+        FakeTransformServer(), lambda *args, **kwargs: FakeViserUrdfWithMeshes(), preview_fps=10.0
+    )
+    gui = make_panel(FakeGuiServer(), adapter, ViserVisualizationConfig(panel_enabled=True), scene)
+    control = scene._handles[f"{DEFAULT_GROUP_ID}:ee_control"]
+
+    gui._set_group_selected(DEFAULT_GROUP_ID, False)
+
+    assert f"{DEFAULT_GROUP_ID}:ee_control" not in scene._handles
+    assert control.removed is True
 
 
 def test_gui_preset_dropdown_and_controls_include_init_home_current_and_callbacks(
@@ -1130,11 +1208,11 @@ def test_gui_preset_dropdown_and_controls_include_init_home_current_and_callback
     adapter = InProcessViserAdapter(world_monitor=world_monitor, manipulation_module=module)
     gui = make_panel(FakeGuiServer(), adapter)
     assert gui._handles["preset"].options == ["Select preset...", "Init", "Current", "Home"]
-    assert list(gui._joint_sliders) == ["j1", "j2"]
+    assert list(gui._joint_sliders) == ["arm/j1", "arm/j2"]
     gui._apply_preset("Home")
-    assert [gui._joint_sliders[name].value for name in ("j1", "j2")] == [1.0, 2.0]
+    assert [gui._joint_sliders[name].value for name in ("arm/j1", "arm/j2")] == [1.0, 2.0]
     gui._apply_preset("Current")
-    assert [gui._joint_sliders[name].value for name in ("j1", "j2")] == [0.25, 0.5]
+    assert [gui._joint_sliders[name].value for name in ("arm/j1", "arm/j2")] == [0.25, 0.5]
     gui._submit_execute()
     assert gui.state.error == "Panel execution disabled; set allow_plan_execute=True to enable"
 
@@ -1158,10 +1236,12 @@ def test_gui_rebuilding_joint_sliders_removes_stale_viser_handles(
     assert [slider.value for slider in stale_sliders] == [0.0, 0.0]
 
     current.position = [-0.738, -0.2826151825863572]
+    gui.state.target_joints = None
+    gui.state.group_joint_targets.clear()
     gui._build_joint_sliders()
 
     assert all(slider.removed is True for slider in stale_sliders)
-    assert [gui._joint_sliders[name].value for name in ("j1", "j2")] == [
+    assert [gui._joint_sliders[name].value for name in ("arm/j1", "arm/j2")] == [
         -0.738,
         -0.2826151825863572,
     ]
@@ -1204,9 +1284,9 @@ def test_panel_execution_is_gated_by_default_and_refresh_updates_robot_controls(
     gui = make_panel(FakeGuiServer(), adapter)
     gui.refresh()
     assert gui.state.selected_robot == "arm"
-    assert list(gui._joint_sliders) == ["j1"]
+    assert list(gui._joint_sliders) == ["arm/j1"]
     gui._apply_preset("Home")
-    assert gui._joint_sliders["j1"].value == 0.5
+    assert gui._joint_sliders["arm/j1"].value == 0.5
 
     gui._submit_execute()
     assert "Panel execution disabled" in gui.state.error
@@ -1241,38 +1321,44 @@ def test_gui_moves_joint_target_immediately_and_stores_evaluated_joint_solution(
     gui._worker = SimpleNamespace(
         submit=lambda request: requests.append(request), stop=lambda: None
     )
-    gui._joint_sliders["j1"].value = 0.25
-    gui._joint_sliders["j2"].value = 0.75
+    gui._joint_sliders["arm/j1"].value = 0.25
+    gui._joint_sliders["arm/j2"].value = 0.75
     gui._submit_joint_target_evaluation()
     assert target_updates[-1] == ("robot-1", ["j1", "j2"], [0.25, 0.75])
-    assert target_pose_updates[-1] == ("robot-1", target_pose)
+    assert target_pose_updates[-1] == (DEFAULT_GROUP_ID, target_pose)
     assert requests[-1].source == "joints"
 
-    stale_request = TargetEvaluationRequest(sequence_id=1, source="joints", robot_name="arm")
-    fresh_request = TargetEvaluationRequest(sequence_id=2, source="joints", robot_name="arm")
+    stale_request = TargetEvaluationRequest(
+        sequence_id=1, source="joints", group_ids=(DEFAULT_GROUP_ID,)
+    )
+    fresh_request = TargetEvaluationRequest(
+        sequence_id=2, source="joints", group_ids=(DEFAULT_GROUP_ID,)
+    )
     gui.state.latest_sequence_id = 2
     gui._apply_target_evaluation_result(
         stale_request,
         {
             "success": True,
             "collision_free": True,
-            "joint_state": adapter.joints_from_values(["j1", "j2"], [9.0, 9.0]),
+            "target_joints": adapter.joints_from_values(["arm/j1", "arm/j2"], [9.0, 9.0]),
         },
     )
-    assert gui.state.joint_target == [0.25, 0.75]
+    assert gui.state.target_joints is not None
+    assert list(gui.state.target_joints.position) == [0.25, 0.75]
 
     gui._apply_target_evaluation_result(
         fresh_request,
         {
             "success": True,
             "collision_free": True,
-            "joint_state": adapter.joints_from_values(["j1", "j2"], [1.0, 2.0]),
+            "target_joints": adapter.joints_from_values(["arm/j1", "arm/j2"], [1.0, 2.0]),
         },
     )
     assert gui.state.target_status == TargetStatus.FEASIBLE
     assert gui.state.feasibility.status == FeasibilityStatus.FEASIBLE
-    assert gui.state.joint_target == [1.0, 2.0]
-    assert [gui._joint_sliders[name].value for name in ("j1", "j2")] == [0.25, 0.75]
+    assert gui.state.target_joints is not None
+    assert list(gui.state.target_joints.position) == [1.0, 2.0]
+    assert [gui._joint_sliders[name].value for name in ("arm/j1", "arm/j2")] == [0.25, 0.75]
     assert target_updates[-1] == ("robot-1", ["j1", "j2"], [0.25, 0.75])
 
 
@@ -1302,7 +1388,9 @@ def test_gui_cartesian_ik_result_does_not_rewrite_active_gizmo(
     gui.state.cartesian_target = Pose(
         {"position": [0.1, 0.2, 0.3], "orientation": [0.0, 0.0, 0.0, 1.0]}
     )
-    request = TargetEvaluationRequest(sequence_id=1, source="cartesian", robot_name="arm")
+    request = TargetEvaluationRequest(
+        sequence_id=1, source="cartesian", group_ids=(DEFAULT_GROUP_ID,)
+    )
     gui.state.latest_sequence_id = 1
 
     gui._apply_target_evaluation_result(
@@ -1310,12 +1398,12 @@ def test_gui_cartesian_ik_result_does_not_rewrite_active_gizmo(
         {
             "success": True,
             "collision_free": True,
-            "joint_state": adapter.joints_from_values(["j1", "j2"], [1.0, 2.0]),
+            "target_joints": adapter.joints_from_values(["arm/j1", "arm/j2"], [1.0, 2.0]),
         },
     )
 
     assert gui.state.target_status == TargetStatus.FEASIBLE
-    assert [gui._joint_sliders[name].value for name in ("j1", "j2")] == [1.0, 2.0]
+    assert [gui._joint_sliders[name].value for name in ("arm/j1", "arm/j2")] == [1.0, 2.0]
     assert target_joint_updates[-1] == ("robot-1", ["j1", "j2"], [1.0, 2.0])
     assert target_pose_updates == []
 
@@ -1345,7 +1433,7 @@ def test_gui_collision_evaluation_marks_target_infeasible_and_colors_scene(
         set_target_visual_state=lambda *args: visual_states.append(args),
     )
     gui = make_panel(FakeGuiServer(), adapter, ViserVisualizationConfig(panel_enabled=True), scene)
-    request = TargetEvaluationRequest(sequence_id=1, source="joints", robot_name="arm")
+    request = TargetEvaluationRequest(sequence_id=1, source="joints", group_ids=(DEFAULT_GROUP_ID,))
     gui.state.latest_sequence_id = 1
     result = adapter.evaluate_joint_target(FakeJointState(["j1"], position=[1.0]), "arm")
 
@@ -1355,7 +1443,7 @@ def test_gui_collision_evaluation_marks_target_infeasible_and_colors_scene(
     assert gui.state.target_status == TargetStatus.INFEASIBLE
     assert gui.state.feasibility.status == FeasibilityStatus.COLLISION
     assert gui.state.error == "Target is in collision"
-    assert visual_states[-1] == ("robot-1", False)
+    assert visual_states[-1] == (DEFAULT_GROUP_ID, False)
 
 
 def test_gui_safe_execute_requires_fresh_matching_plan_and_clear_resets_path(
@@ -1400,8 +1488,8 @@ def test_gui_safe_execute_requires_fresh_matching_plan_and_clear_resets_path(
     gui.state.target_status = TargetStatus.FEASIBLE
     gui.state.plan_state = PanelPlanState(
         status=PlanStatus.FRESH,
-        robot="arm",
-        start_joints_snapshot=[1.2],
+        group_ids=(DEFAULT_GROUP_ID,),
+        start_joints_snapshot={DEFAULT_GROUP_ID: [1.2]},
         planned_path=planned,
     )
     gui._submit_execute()
@@ -1410,9 +1498,9 @@ def test_gui_safe_execute_requires_fresh_matching_plan_and_clear_resets_path(
 
     gui.state.action_status = ActionStatus.IDLE
     gui.state.error = ""
-    gui.state.plan_state.start_joints_snapshot = [1.0]
+    gui.state.plan_state.start_joints_snapshot = {DEFAULT_GROUP_ID: [1.0]}
     gui._submit_execute()
-    assert executed == ["arm"]
+    assert executed == [None]
 
     gui._submit_clear()
     assert cleared == [True]
@@ -1433,7 +1521,8 @@ def test_gui_plan_target_failure_recovers_action_state(
             submit=lambda operation, **_kwargs: operation(), stop=lambda timeout=2.0: None
         ),
     )
-    gui.state.selected_robot = "missing"
+    gui.state.selected_group_ids = ("missing",)
+    gui.state.target_joints = JointState({"name": ["missing/j1"], "position": [1.0]})
     gui.state.target_status = TargetStatus.FEASIBLE
     gui.state.manipulation_state = "IDLE"
 
@@ -1441,7 +1530,7 @@ def test_gui_plan_target_failure_recovers_action_state(
 
     assert gui.state.action_status == ActionStatus.IDLE
     assert gui.state.plan_state.status == PlanStatus.FAILED
-    assert gui.state.error == "No robot config"
+    assert gui.state.error == "Unknown planning group: missing"
     assert gui.state.last_result == "plan_to_joints=False"
 
 
@@ -1465,12 +1554,12 @@ def test_gui_resets_fault_before_replanning(
         calls.append("reset")
         return True
 
-    def plan_to_joints(_joints: JointState, _robot_name: str | None = None) -> bool:
+    def plan_target_set(_joint_targets: dict[str, JointState]) -> bool:
         calls.append("plan")
         return True
 
     monkeypatch.setattr(adapter, "reset", reset)
-    monkeypatch.setattr(adapter, "plan_to_joints", plan_to_joints)
+    monkeypatch.setattr(adapter, "plan_target_set", plan_target_set)
     gui.state.target_status = TargetStatus.FEASIBLE
     gui.state.manipulation_state = "FAULT"
 
@@ -1529,8 +1618,12 @@ def test_operation_worker_stop_can_wait_for_in_flight_operation() -> None:
 
 def test_target_evaluation_worker_coalesces_pending_requests() -> None:
     worker = TargetEvaluationWorker(lambda request: {}, lambda request, result: None)
-    old_request = TargetEvaluationRequest(sequence_id=1, source="joints", robot_name="arm")
-    new_request = TargetEvaluationRequest(sequence_id=2, source="joints", robot_name="arm")
+    old_request = TargetEvaluationRequest(
+        sequence_id=1, source="joints", group_ids=(DEFAULT_GROUP_ID,)
+    )
+    new_request = TargetEvaluationRequest(
+        sequence_id=2, source="joints", group_ids=(DEFAULT_GROUP_ID,)
+    )
 
     worker.submit(old_request)
     worker.submit(new_request)

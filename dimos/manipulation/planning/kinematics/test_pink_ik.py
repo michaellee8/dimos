@@ -245,6 +245,47 @@ class _FakeWorld:
         return self.collision_free
 
 
+class _FakeMultiRobotWorld:
+    is_finalized = True
+
+    def __init__(self) -> None:
+        self.configs = {
+            "left_robot": RobotModelConfig(
+                name="left",
+                model_path=Path("/tmp/left.urdf"),
+                base_pose=PoseStamped(
+                    position=Vector3(), orientation=Quaternion(0.0, 0.0, 0.0, 1.0)
+                ),
+                joint_names=["joint_a", "joint_b"],
+                end_effector_link="tool",
+                base_link="base",
+            ),
+            "right_robot": RobotModelConfig(
+                name="right",
+                model_path=Path("/tmp/right.urdf"),
+                base_pose=PoseStamped(
+                    position=Vector3(), orientation=Quaternion(0.0, 0.0, 0.0, 1.0)
+                ),
+                joint_names=["joint_c"],
+                end_effector_link="tool",
+                base_link="base",
+            ),
+        }
+
+    def get_robot_ids(self) -> list[str]:
+        return list(self.configs)
+
+    def get_robot_config(self, robot_id: str) -> RobotModelConfig:
+        return self.configs[robot_id]
+
+    def scratch_context(self) -> nullcontext[None]:
+        return nullcontext(None)
+
+    def get_joint_state(self, ctx: object, robot_id: str) -> JointState:
+        config = self.get_robot_config(robot_id)
+        return JointState(name=list(config.joint_names), position=[0.0] * len(config.joint_names))
+
+
 def test_create_kinematics_pink_missing_dependency_is_actionable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -441,6 +482,135 @@ def test_solve_pose_targets_returns_selected_resolved_joints_and_group_tip(
     assert result.joint_state is not None
     assert result.joint_state.name == ["arm/joint_a", "arm/joint_b", "arm/joint_c"]
     assert result.joint_state.position == [0.1, 0.2, 0.3]
+
+
+def test_solve_pose_targets_same_robot_uses_one_multi_frame_solve(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ik = _pink_ik(converge=True)
+    wrist_context = _context()
+    wrist_context.frame_name = "wrist_tool"
+    wrist_context.frame_id = 1
+    tool_context = _context()
+    ik._robot_contexts = {"robot:wrist_tool": wrist_context, "robot:tool": tool_context}
+    world = _FakeWorld(collision_free=True)
+    tool_group = PlanningGroup(
+        id="arm/tool",
+        robot_name="arm",
+        group_name="tool",
+        joint_names=("arm/joint_c",),
+        local_joint_names=("joint_c",),
+        base_link="base",
+        tip_link="tool",
+    )
+    seen_frames: list[list[str]] = []
+
+    def fake_solve_multi_frame(**kwargs: object) -> IKResult:
+        contexts = cast("list[_PinkRobotContext]", kwargs["robot_contexts"])
+        seen_frames.append([context.frame_name for context in contexts])
+        return IKResult(
+            status=IKStatus.SUCCESS,
+            joint_state=JointState(
+                {"name": ["joint_a", "joint_b", "joint_c"], "position": [0.1, 0.2, 0.3]}
+            ),
+            position_error=0.0,
+            orientation_error=0.0,
+            iterations=2,
+        )
+
+    monkeypatch.setattr(ik, "_solve_multi_frame", fake_solve_multi_frame)
+
+    result = ik.solve_pose_targets(
+        world=cast("Any", world),
+        pose_targets={
+            world.groups["arm/wrist"]: PoseStamped(
+                position=Vector3(0.1, 0.0, 0.0),
+                orientation=Quaternion(0.0, 0.0, 0.0, 1.0),
+            ),
+            tool_group: PoseStamped(
+                position=Vector3(0.2, 0.0, 0.0),
+                orientation=Quaternion(0.0, 0.0, 0.0, 1.0),
+            ),
+        },
+        seed=JointState(
+            {"name": ["arm/joint_a", "arm/joint_b", "arm/joint_c"], "position": [0.0, 0.0, 0.0]}
+        ),
+        check_collision=False,
+        max_attempts=1,
+    )
+
+    assert seen_frames == [["wrist_tool", "tool"]]
+    assert result.status == IKStatus.SUCCESS
+    assert result.joint_state is not None
+    assert result.joint_state.name == ["arm/joint_a", "arm/joint_b", "arm/joint_c"]
+    assert result.joint_state.position == [0.1, 0.2, 0.3]
+
+
+def test_solve_pose_targets_cross_robot_combines_global_joint_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ik = _pink_ik(converge=True)
+    world = _FakeMultiRobotWorld()
+    left_group = PlanningGroup(
+        id="left/arm",
+        robot_name="left",
+        group_name="arm",
+        joint_names=("left/joint_a",),
+        local_joint_names=("joint_a",),
+        base_link="base",
+        tip_link="tool",
+    )
+    right_group = PlanningGroup(
+        id="right/arm",
+        robot_name="right",
+        group_name="arm",
+        joint_names=("right/joint_c",),
+        local_joint_names=("joint_c",),
+        base_link="base",
+        tip_link="tool",
+    )
+    seen_robot_ids: list[str] = []
+
+    def fake_solve_pose_targets_for_robot(**kwargs: object) -> IKResult:
+        robot_id = str(kwargs["robot_id"])
+        seen_robot_ids.append(robot_id)
+        if robot_id == "left_robot":
+            return IKResult(
+                status=IKStatus.SUCCESS,
+                joint_state=JointState(name=["joint_a", "joint_b"], position=[1.0, 9.0]),
+            )
+        return IKResult(
+            status=IKStatus.SUCCESS,
+            joint_state=JointState(name=["joint_c"], position=[2.0]),
+        )
+
+    monkeypatch.setattr(ik, "_solve_pose_targets_for_robot", fake_solve_pose_targets_for_robot)
+
+    result = ik.solve_pose_targets(
+        world=cast("Any", world),
+        pose_targets={
+            left_group: PoseStamped(
+                position=Vector3(0.1, 0.0, 0.0),
+                orientation=Quaternion(0.0, 0.0, 0.0, 1.0),
+            ),
+            right_group: PoseStamped(
+                position=Vector3(0.2, 0.0, 0.0),
+                orientation=Quaternion(0.0, 0.0, 0.0, 1.0),
+            ),
+        },
+        seed=JointState(
+            name=["left/joint_a", "left/joint_b", "right/joint_c"],
+            position=[0.0, 0.0, 0.0],
+        ),
+        check_collision=False,
+        max_attempts=1,
+    )
+
+    assert seen_robot_ids == ["left_robot", "right_robot"]
+    assert result.status == IKStatus.SUCCESS
+    assert result.joint_state is not None
+    assert result.joint_state.name == ["left/joint_a", "right/joint_c"]
+    assert result.joint_state.position == [1.0, 2.0]
 
 
 def test_solve_retries_after_joint_limit_failure(monkeypatch: pytest.MonkeyPatch) -> None:
