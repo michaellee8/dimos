@@ -21,11 +21,13 @@ const POSTURE = [
     { name: 'StandDown', label: 'Sit' },
     { name: 'RecoveryStand', label: 'Recovery' },
 ];
-// Only commands verified working on the robot's firmware (probe_commands.py).
-// Stretch/Pose/gaits excluded — they 3203/3202 on >=V1.1.6.
-// Damp (Relax) removed from here — it's now the E-STOP action.
+// Robot actions. Hello/Stretch verified working; Pounce/Jump are acrobatic and
+// UNVERIFIED on this firmware (may no-op) — and the robot leaps, so clear space.
 const ACTIONS = [
-    { name: 'Hello', label: 'Hello 👋' },
+    { name: 'Hello', label: 'Shake Hand 🤝' },
+    { name: 'Stretch', label: 'Stretch 🧎' },
+    { name: 'FrontPounce', label: 'Pounce 🐅' },
+    { name: 'FrontJump', label: 'Jump Forward ⬆️' },
 ];
 
 // Speed bar. Normal/High = browser-side velocity scale (lin m/s-ish, ang).
