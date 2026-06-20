@@ -191,6 +191,13 @@ def _make_coordinator(mode: str = "default"):
                 ("go2_cmd_vel", Twist): LCMTransport("/go2/cmd_vel", Twist),
                 ("go2_odom", PoseStamped): LCMTransport("/go2/odom", PoseStamped),
                 ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+                # The coordinator's pose Out stream is named coordinator_joint_state,
+                # so it must be routed to the same /coordinator/joint_state topic the
+                # characterizer / recorder / benchmark all read (else it defaults to
+                # /coordinator_joint_state and nothing receives pose).
+                ("coordinator_joint_state", JointState): LCMTransport(
+                    "/coordinator/joint_state", JointState
+                ),
             }
         )
         .global_config(obstacle_avoidance=False)
