@@ -93,6 +93,7 @@ class ViserManipulationScene:
         self._grid_handle: GridHandle | None = None
         self._grid_visible = True
         self._preview_visible: dict[str, bool] = {}
+        self._target_active: dict[str, bool] = {}
         self._target_tracks_current: dict[str, bool] = {}
         self._ensure_reference_grid()
 
@@ -108,8 +109,16 @@ class ViserManipulationScene:
     def register_robot(self, robot_id: str, config: RobotModelConfig) -> None:
         self._configs_by_id[robot_id] = config
         self._preview_visible.setdefault(robot_id, False)
+        self._target_active.setdefault(robot_id, False)
         self._target_tracks_current.setdefault(robot_id, True)
         self._ensure_robot_urdfs(robot_id, config)
+
+    def set_target_active(self, robot_id: str, active: bool) -> None:
+        """Show target ghost only when at least one group on the robot is active."""
+        self._target_active[robot_id] = active
+        if not active:
+            self._target_tracks_current[robot_id] = True
+        self._set_target_visibility(robot_id, active)
 
     def _ensure_reference_grid(self) -> None:
         try:
@@ -169,7 +178,7 @@ class ViserManipulationScene:
         self.set_urdf_joints(current, config.joint_names, joint_state.position)
         if self._target_tracks_current.get(robot_id, True):
             self._set_target_joints(robot_id, config.joint_names, joint_state.position)
-            self._set_target_visibility(robot_id, True)
+            self._set_target_visibility(robot_id, self._target_active.get(robot_id, False))
 
     def show_preview(self, robot_id: str) -> None:
         """Show the transient preview-animation ghost.
@@ -202,6 +211,7 @@ class ViserManipulationScene:
         target = self._urdfs.get(f"{robot_id}:target")
         if target is None:
             return False
+        self._target_active[robot_id] = True
         self._target_tracks_current[robot_id] = False
         self._set_target_joints(robot_id, joint_names, joints)
         self._set_target_visibility(robot_id, True)
@@ -263,6 +273,7 @@ class ViserManipulationScene:
         self._root_frames.clear()
         self._configs_by_id.clear()
         self._preview_visible.clear()
+        self._target_active.clear()
         self._target_tracks_current.clear()
 
     def _ensure_robot_urdfs(self, robot_id: str, config: RobotModelConfig) -> None:
@@ -288,7 +299,9 @@ class ViserManipulationScene:
                 self._set_urdf_mesh_material(
                     self._urdfs[key], GOAL_ROBOT_FEASIBLE_COLOR, GOAL_ROBOT_FEASIBLE_OPACITY
                 )
-                self._set_handle_visibility(self._urdfs[key], True)
+                self._set_handle_visibility(
+                    self._urdfs[key], self._target_active.get(robot_id, False)
+                )
             elif kind == "preview":
                 self._set_urdf_mesh_material(
                     self._urdfs[key], PREVIEW_ROBOT_COLOR, PREVIEW_ROBOT_OPACITY

@@ -360,18 +360,22 @@ def make_robot_config(**overrides: RobotConfigOverride) -> RobotConfigStub:
 
 
 def make_planning_group_info(
-    robot_name: str, config: RobotConfigStub | SimpleNamespace
+    robot_name: str,
+    config: RobotConfigStub | SimpleNamespace,
+    *,
+    group_name: str = "manipulator",
+    has_pose_target: bool = True,
 ) -> dict[str, object]:
     joint_names = [str(name) for name in config.joint_names]
     return {
-        "id": f"{robot_name}:manipulator",
-        "name": "manipulator",
+        "id": f"{robot_name}:{group_name}",
+        "name": group_name,
         "robot_name": robot_name,
         "joint_names": [f"{robot_name}/{name}" for name in joint_names],
         "local_joint_names": joint_names,
         "base_link": str(config.base_link),
-        "tip_link": str(config.end_effector_link),
-        "has_pose_target": True,
+        "tip_link": str(config.end_effector_link) if has_pose_target else None,
+        "has_pose_target": has_pose_target,
         "source": "fallback",
     }
 
@@ -408,11 +412,18 @@ class FakeManipulationModule(SimpleNamespace):
             return None
         init = self.get_init_joints(robot_name)
         home_joints = config.home_joints if hasattr(config, "home_joints") else None
+        planning_groups = getattr(self, "_planning_groups", None)
+        if planning_groups is None:
+            planning_groups = [make_planning_group_info(robot_name, config)]
+        else:
+            planning_groups = [
+                group for group in planning_groups if str(group["robot_name"]) == robot_name
+            ]
         return {
             "name": config.name,
             "world_robot_id": self.robot_id_for_name(robot_name) or robot_name,
             "joint_names": list(config.joint_names),
-            "planning_groups": [make_planning_group_info(robot_name, config)],
+            "planning_groups": planning_groups,
             "end_effector_link": config.end_effector_link,
             "base_link": config.base_link,
             "max_velocity": 1.0,
@@ -579,8 +590,20 @@ def test_gui_builds_controls_in_manipulation_panel_folder(
     assert server.folders[0].label == "Manipulation Panel"
     assert server.folders[0].kwargs == {"expand_by_default": True}
     assert "status" in gui._handles
-    assert "robot" in gui._handles
+    assert "robot" not in gui._handles
+    assert "planning_groups_heading" in gui._handles
+    assert "target_heading" in gui._handles
+    assert "target_summary" in gui._handles
+    assert "actions_heading" in gui._handles
     assert "plan" in gui._handles
+    handle_order = list(gui._handles)
+    assert handle_order.index(f"group:{DEFAULT_GROUP_ID}") < handle_order.index("plan")
+    assert handle_order.index("target_summary") < handle_order.index("plan")
+    assert handle_order.index("plan") < handle_order.index("actions_folder")
+    assert isinstance(gui._handles["status"], GuiMarkdownHandle)
+    assert "Starting" not in gui._handles["status"].value
+    assert isinstance(gui._handles["target_summary"], GuiMarkdownHandle)
+    assert "Primary:" in gui._handles["target_summary"].value
     assert gui._operation_worker._timeout_seconds is None
 
 
@@ -616,14 +639,11 @@ def test_gui_close_removes_handles_and_late_callbacks_are_noops(
     )
     adapter = make_adapter_with_robot()
     gui = make_panel(server, adapter, ViserVisualizationConfig(), scene)
-    robot_dropdown = gui._handles["robot"]
     plan_button = server.buttons["Plan"]
     grid = grid_server.grids[0]
     handles = list(gui._handles.values())
 
     gui.close()
-    if isinstance(robot_dropdown, GuiDropdownHandle) and robot_dropdown.update_callback is not None:
-        robot_dropdown.update_callback(SimpleNamespace(target=SimpleNamespace(value="arm")))
     if plan_button.click_callback is not None:
         plan_button.click_callback(SimpleNamespace())
     gui._set_scene_grid_visible(False)
@@ -812,8 +832,10 @@ def test_preview_visibility_only_affects_preview_ghost_and_close_removes_handles
     scene.register_robot("robot1", config)
     target = scene._urdfs["robot1:target"]
     preview = scene._urdfs["robot1:preview"]
-    assert all(mesh.visible is True for mesh in target._meshes)
+    assert all(mesh.visible is False for mesh in target._meshes)
     assert all(mesh.visible is False for mesh in preview._meshes)
+    scene.set_target_active("robot1", True)
+    assert all(mesh.visible is True for mesh in target._meshes)
     scene.show_preview("robot1")
     assert all(mesh.visible is True for mesh in preview._meshes)
     assert all(mesh.visible is True for mesh in target._meshes)
@@ -825,7 +847,7 @@ def test_preview_visibility_only_affects_preview_ghost_and_close_removes_handles
     assert all(mesh.visible is False for mesh in preview._meshes)
 
 
-def test_target_ghost_is_visible_and_tracks_current_until_target_moves_it() -> None:
+def test_target_ghost_tracks_current_but_is_visible_only_when_active() -> None:
     server = FakeServer()
     urdfs = [FakeViserUrdfWithMeshes(("joint1",)) for _ in range(3)]
     scene = ViserManipulationScene(server, lambda *args, **kwargs: urdfs.pop(0), preview_fps=10.0)
@@ -843,18 +865,25 @@ def test_target_ghost_is_visible_and_tracks_current_until_target_moves_it() -> N
     target = scene._urdfs["robot1:target"]
     preview = scene._urdfs["robot1:preview"]
 
-    assert all(mesh.visible is True for mesh in target._meshes)
+    assert all(mesh.visible is False for mesh in target._meshes)
     assert all(mesh.visible is False for mesh in preview._meshes)
     scene.update_current_robot("robot1", FakeJointState(["joint1"], position=[0.25]))
     assert current.cfg == [0.25]
     assert target.cfg == [0.25]
     assert preview.cfg is None
+    assert all(mesh.visible is False for mesh in target._meshes)
+
+    scene.set_target_active("robot1", True)
+    assert all(mesh.visible is True for mesh in target._meshes)
 
     scene.set_target_joints("robot1", ["joint1"], [0.8])
     scene.update_current_robot("robot1", FakeJointState(["joint1"], position=[0.1]))
     assert current.cfg == [0.1]
     assert target.cfg == [0.8]
     assert preview.cfg is None
+
+    scene.set_target_active("robot1", False)
+    assert all(mesh.visible is False for mesh in target._meshes)
 
 
 def test_scene_parents_urdfs_under_base_pose_frame() -> None:
@@ -932,7 +961,7 @@ def test_preview_animation_uses_separate_colored_ghost_and_hides_after_playback(
     assert ok is True
     assert preview.cfg == [1.0]
     assert all(mesh.visible is False for mesh in preview._meshes)
-    assert all(mesh.visible is True for mesh in target._meshes)
+    assert all(mesh.visible is False for mesh in target._meshes)
 
 
 def test_scene_target_helpers_handle_missing_robot_and_pose() -> None:
@@ -1137,7 +1166,7 @@ def test_scene_registers_goal_robot_coloring_and_updates_visibility() -> None:
     assert all(mesh.visible is True for mesh in preview._meshes)
     scene.hide_preview("robot1")
     assert all(mesh.visible is False for mesh in preview._meshes)
-    assert all(mesh.visible is True for mesh in target._meshes)
+    assert all(mesh.visible is False for mesh in target._meshes)
 
 
 def test_scene_transform_controls_update_pose_callback_and_visual_state() -> None:
@@ -1264,6 +1293,96 @@ def test_gui_removes_pose_selector_when_group_is_deselected(
 
     assert f"{DEFAULT_GROUP_ID}:ee_control" not in scene._handles
     assert control.removed is True
+
+
+def test_gui_group_selector_derives_primary_and_auxiliary_groups(
+    make_panel: Callable[..., ViserPanelGui],
+) -> None:
+    current = FakeJointState(["j1", "grip"], position=[0.25, 0.5])
+    config = make_robot_config(joint_names=["j1", "grip"], home_joints=[0.0, 0.0])
+    pose_group = make_planning_group_info("arm", config)
+    auxiliary_group = make_planning_group_info(
+        "arm", config, group_name="gripper", has_pose_target=False
+    )
+    module = FakeManipulationModule(
+        _robots={"arm": ("robot-1", config, None)},
+        _planning_groups=[pose_group, auxiliary_group],
+    )
+    world_monitor = SimpleNamespace(
+        get_current_joint_state=lambda robot_id: current,
+        is_state_stale=lambda robot_id, max_age=1.0: False,
+        is_state_valid=lambda robot_id, joint_state: True,
+        get_ee_pose=lambda robot_id, joint_state=None: Pose(
+            {"position": [0.0, 0.0, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]}
+        ),
+    )
+    adapter = InProcessViserAdapter(world_monitor=world_monitor, manipulation_module=module)
+    target_controls = []
+    scene = SimpleNamespace(
+        has_reference_grid=lambda: False,
+        ensure_target_controls=lambda *args: target_controls.append(args) or object(),
+        remove_target_controls=lambda *args: None,
+        set_target_active=lambda *args: None,
+        set_target_joints=lambda *args: True,
+        set_target_pose=lambda *args: None,
+        set_target_visual_state=lambda *args: None,
+    )
+    server = FakeGuiServer()
+
+    gui = make_panel(server, adapter, ViserVisualizationConfig(panel_enabled=True), scene)
+    aux_label = "Aux: arm gripper"
+    assert "robot" not in gui._handles
+    assert server.checkboxes["Pose: arm"].value is True
+    assert server.checkboxes[aux_label].value is False
+
+    server.checkboxes[aux_label].update_callback(
+        SimpleNamespace(target=SimpleNamespace(value=True))
+    )
+
+    assert gui.state.selected_group_ids == ("arm:manipulator", "arm:gripper")
+    assert gui.state.auxiliary_group_ids == ("arm:gripper",)
+    assert [call[0] for call in target_controls] == ["arm:manipulator"]
+
+
+def test_gui_target_ghost_visibility_follows_active_selected_groups(
+    make_panel: Callable[..., ViserPanelGui],
+) -> None:
+    left_config = make_robot_config(name="left", joint_names=["j1"], home_joints=[0.0])
+    right_config = make_robot_config(name="right", joint_names=["j1"], home_joints=[0.0])
+    module = FakeManipulationModule(
+        _robots={
+            "left": ("left-id", left_config, None),
+            "right": ("right-id", right_config, None),
+        }
+    )
+    current = FakeJointState(["j1"], position=[0.0])
+    world_monitor = SimpleNamespace(
+        get_current_joint_state=lambda robot_id: current,
+        is_state_stale=lambda robot_id, max_age=1.0: False,
+        is_state_valid=lambda robot_id, joint_state: True,
+        get_ee_pose=lambda robot_id, joint_state=None: Pose(
+            {"position": [0.0, 0.0, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]}
+        ),
+    )
+    adapter = InProcessViserAdapter(world_monitor=world_monitor, manipulation_module=module)
+    active_updates = []
+    scene = SimpleNamespace(
+        has_reference_grid=lambda: False,
+        ensure_target_controls=lambda *args: object(),
+        remove_target_controls=lambda *args: None,
+        set_target_active=lambda *args: active_updates.append(args),
+        set_target_joints=lambda *args: True,
+        set_target_pose=lambda *args: None,
+        set_target_visual_state=lambda *args: None,
+    )
+
+    gui = make_panel(FakeGuiServer(), adapter, ViserVisualizationConfig(panel_enabled=True), scene)
+
+    assert active_updates[-2:] == [("left-id", True), ("right-id", False)]
+    gui._set_group_selected("right:manipulator", True)
+    assert active_updates[-2:] == [("left-id", True), ("right-id", True)]
+    gui._set_group_selected("left:manipulator", False)
+    assert active_updates[-2:] == [("left-id", False), ("right-id", True)]
 
 
 def test_gui_preset_dropdown_and_controls_include_init_home_current_and_callbacks(

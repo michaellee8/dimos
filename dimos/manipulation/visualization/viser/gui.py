@@ -19,7 +19,6 @@ from typing import TypeAlias
 from dimos.manipulation.planning.spec.models import PlanningGroupID
 from dimos.manipulation.visualization.types import (
     PlanningGroupInfo,
-    RobotInfo,
     TargetEvaluation,
     TargetSetEvaluation,
 )
@@ -140,18 +139,22 @@ class ViserPanelGui:
             BackendConnectionStatus.READY if robots else BackendConnectionStatus.WAITING_FOR_ROBOT
         )
         if not self.state.selected_group_ids and groups and not self._default_group_initialized:
-            self.state.selected_group_ids = (str(groups[0]["id"]),)
-            self.state.selected_robot = str(groups[0]["robot_name"])
+            first_pose_group = next(
+                (group for group in groups if bool(group["has_pose_target"])), groups[0]
+            )
+            self.state.selected_group_ids = (str(first_pose_group["id"]),)
             self.state.target_status = TargetStatus.EMPTY
             self._default_group_initialized = True
+            self._sync_group_selection_state()
             self._initialize_selected_group_targets()
             self._build_joint_sliders()
-        self._sync_robot_dropdown(robots)
-        self._sync_group_checkboxes(groups)
+        self._sync_group_selector(groups)
         self._refresh_selected_robot_state()
         self._ensure_scene_controls()
+        self._sync_target_ghost_visibility()
         self._sync_preset_dropdown()
         self._update_status_text()
+        self._update_target_summary()
         self._update_control_state()
 
     def _build(self) -> None:
@@ -162,41 +165,46 @@ class ViserPanelGui:
             self._build_panel_controls(gui)
 
     def _build_panel_controls(self, gui: GuiApi) -> None:
-        self._handles["status"] = gui.add_markdown("Starting manipulation panel...")
-        robots = self.adapter.list_robots()
+        self._handles["status"] = gui.add_markdown("**Status:** Ready")
         self._build_scene_controls(gui)
-        robot_dropdown = gui.add_dropdown(
-            "Robot",
-            options=robots or [""],
-            initial_value=robots[0] if robots else "",
+        self._handles["planning_groups_heading"] = gui.add_markdown(
+            "### Planning Groups\nChoose active target groups."
         )
-        robot_dropdown.on_update(lambda event: self._select_robot(event.target.value))
-        self._handles["robot"] = robot_dropdown
-        select_all_button = gui.add_button("Select all manipulators")
+        self._sync_group_selector(self.adapter.list_planning_groups())
+        select_all_button = gui.add_button("Select all")
         select_all_button.on_click(lambda _: self._select_all_manipulators())
         self._handles["select_all_manipulators"] = select_all_button
+        clear_selection_button = gui.add_button("Clear selection")
+        clear_selection_button.on_click(lambda _: self._clear_group_selection())
+        self._handles["clear_group_selection"] = clear_selection_button
+        self._handles["target_heading"] = gui.add_markdown("### Target")
         preset_dropdown = gui.add_dropdown(
-            "Target Preset",
+            "Preset",
             options=["Select preset...", "Current"],
             initial_value="Select preset...",
         )
         preset_dropdown.on_update(lambda event: self._apply_preset(event.target.value))
         self._handles["preset"] = preset_dropdown
+        self._handles["target_summary"] = gui.add_markdown("Select a group to define a target.")
+        self._handles["actions_heading"] = gui.add_markdown("### Actions")
         plan_button = gui.add_button("Plan", disabled=True)
         plan_button.on_click(lambda _: self._submit_plan())
         self._handles["plan"] = plan_button
-        preview_button = gui.add_button("Preview", disabled=True)
-        preview_button.on_click(lambda _: self._submit_preview())
-        self._handles["preview"] = preview_button
-        execute_button = gui.add_button("Execute", disabled=True)
-        execute_button.on_click(lambda _: self._submit_execute())
-        self._handles["execute"] = execute_button
-        cancel_button = gui.add_button("Cancel")
-        cancel_button.on_click(lambda _: self._submit_cancel())
-        self._handles["cancel"] = cancel_button
-        clear_button = gui.add_button("Clear plan")
-        clear_button.on_click(lambda _: self._submit_clear())
-        self._handles["clear"] = clear_button
+        more_actions = gui.add_folder("Plan controls", expand_by_default=False)
+        self._handles["actions_folder"] = more_actions
+        with more_actions:
+            preview_button = gui.add_button("Preview", disabled=True)
+            preview_button.on_click(lambda _: self._submit_preview())
+            self._handles["preview"] = preview_button
+            execute_button = gui.add_button("Execute", disabled=True)
+            execute_button.on_click(lambda _: self._submit_execute())
+            self._handles["execute"] = execute_button
+            cancel_button = gui.add_button("Cancel")
+            cancel_button.on_click(lambda _: self._submit_cancel())
+            self._handles["cancel"] = cancel_button
+            clear_button = gui.add_button("Clear plan")
+            clear_button.on_click(lambda _: self._submit_clear())
+            self._handles["clear"] = clear_button
         self._build_joint_sliders()
 
     def _build_scene_controls(self, gui: GuiApi) -> None:
@@ -236,14 +244,7 @@ class ViserPanelGui:
         if self.scene is None:
             return
         groups = self._group_info_by_id()
-        selected = set(self.state.selected_group_ids)
-        active_pose_groups = {
-            group_id
-            for group_id in selected
-            if (group := groups.get(group_id)) is not None
-            and bool(group["has_pose_target"])
-            and group_id not in self.state.auxiliary_group_ids
-        }
+        active_pose_groups = set(self._selected_pose_group_ids())
         for key in [key for key in self._handles if key.startswith("ee_control:")]:
             group_id = key.split(":", 1)[1]
             if group_id in active_pose_groups:
@@ -256,22 +257,19 @@ class ViserPanelGui:
                 remove = getattr(handle, "remove", None)
                 if callable(remove):
                     remove()
-        for group_id in selected:
+        for group_id in active_pose_groups:
             group = groups.get(group_id)
             if group is None or not bool(group["has_pose_target"]):
                 continue
-            if group_id in self.state.auxiliary_group_ids:
-                continue
             handle_key = f"ee_control:{group_id}"
-            handle_exists = handle_key in self._handles
+            if handle_key in self._handles:
+                continue
             ee_control = self.scene.ensure_target_controls(
                 group_id,
                 lambda target, gid=group_id: self._on_transform_update(gid, target),
             )
             if ee_control is not None:
                 self._handles[handle_key] = ee_control
-            if handle_exists:
-                continue
             pose = self.state.pose_targets.get(group_id)
             if pose is not None:
                 self._suppress_target_callbacks = True
@@ -281,10 +279,10 @@ class ViserPanelGui:
                     self._suppress_target_callbacks = False
 
     def _build_joint_sliders(self) -> None:
-        if not self.state.selected_group_ids:
-            return
         gui = self.server.gui
         self._clear_joint_sliders()
+        if not self.state.selected_group_ids:
+            return
         groups = self._group_info_by_id()
         target_by_name: dict[str, float] = {}
         if self.state.target_joints is not None:
@@ -378,59 +376,19 @@ class ViserPanelGui:
                 remove()
             self._handles.pop(key, None)
 
-    def _select_robot(self, robot_name: str) -> None:
-        if self._closed:
-            return
-        if (robot_name or None) == self.state.selected_robot:
-            self.refresh()
-            return
-        self.state.selected_robot = robot_name or None
-        groups = [
-            group
-            for group in self.adapter.list_planning_groups()
-            if str(group["robot_name"]) == self.state.selected_robot
-        ]
-        self.state.selected_group_ids = (str(groups[0]["id"]),) if groups else ()
-        self.state.auxiliary_group_ids = ()
-        self.state.group_joint_targets.clear()
-        self.state.pose_targets.clear()
-        self.state.target_status = TargetStatus.EMPTY
-        self.state.feasibility.status = FeasibilityStatus.UNKNOWN
-        self.state.plan_state = PanelPlanState()
-        self._initialize_selected_group_targets()
-        self._build_joint_sliders()
-        self._sync_preset_dropdown()
-        self.refresh()
-
-    def _sync_robot_dropdown(self, robots: list[str]) -> None:
-        handle = self._handles.get("robot")
-        if handle is None:
-            return
-        options = robots or [""]
-        for attr in ("options", "values"):
-            if hasattr(handle, attr):
-                try:
-                    self._set_optional_handle_attr(handle, attr, options)
-                except Exception:
-                    logger.warning("Could not set robot dropdown %s", attr, exc_info=True)
-        if hasattr(handle, "value") and self.state.selected_robot in robots:
-            try:
-                self._set_optional_handle_attr(handle, "value", self.state.selected_robot)
-            except Exception:
-                logger.warning("Could not set robot dropdown value", exc_info=True)
-
-    def _sync_group_checkboxes(self, groups: list[PlanningGroupInfo]) -> None:
+    def _sync_group_selector(self, groups: list[PlanningGroupInfo]) -> None:
         seen_keys: set[str] = set()
         selected = set(self.state.selected_group_ids)
-        for group in groups:
+        for group in sorted(
+            groups, key=lambda item: (not bool(item["has_pose_target"]), str(item["id"]))
+        ):
             group_id = str(group["id"])
             key = f"group:{group_id}"
             seen_keys.add(key)
             handle = self._handles.get(key)
+            label = self._group_selector_label(group)
             if handle is None:
-                handle = self.server.gui.add_checkbox(
-                    f"Group {group_id}", initial_value=group_id in selected
-                )
+                handle = self.server.gui.add_checkbox(label, initial_value=group_id in selected)
                 handle.on_update(
                     lambda event, gid=group_id: self._set_group_selected(
                         gid, bool(event.target.value)
@@ -447,6 +405,17 @@ class ViserPanelGui:
                 if callable(remove):
                     remove()
 
+    @staticmethod
+    def _group_selector_label(group: PlanningGroupInfo) -> str:
+        role = "Pose" if bool(group["has_pose_target"]) else "Aux"
+        return f"{role}: {ViserPanelGui._group_display_name(group)}"
+
+    @staticmethod
+    def _group_display_name(group: PlanningGroupInfo) -> str:
+        robot_name = str(group["robot_name"])
+        group_name = str(group["name"])
+        return robot_name if group_name == "manipulator" else f"{robot_name} {group_name}"
+
     def _set_group_selected(self, group_id: PlanningGroupID, selected: bool) -> None:
         current = list(self.state.selected_group_ids)
         if selected and group_id not in current:
@@ -454,10 +423,8 @@ class ViserPanelGui:
         elif not selected and group_id in current:
             current.remove(group_id)
         self.state.selected_group_ids = tuple(current)
-        self.state.auxiliary_group_ids = tuple(
-            group_id for group_id in self.state.auxiliary_group_ids if group_id in current
-        )
-        self._sync_selected_robot_from_groups()
+        self._sync_group_selection_state()
+        self._prune_inactive_group_state()
         self._initialize_selected_group_targets()
         self.state.mark_plan_stale()
         self._build_joint_sliders()
@@ -471,8 +438,20 @@ class ViserPanelGui:
         self.state.selected_group_ids = tuple(
             manipulator_groups or [str(group["id"]) for group in groups]
         )
-        self._sync_selected_robot_from_groups()
+        self._sync_group_selection_state()
         self._initialize_selected_group_targets()
+        self._build_joint_sliders()
+        self.refresh()
+
+    def _clear_group_selection(self) -> None:
+        if self._closed:
+            return
+        self.state.selected_group_ids = ()
+        self._sync_group_selection_state()
+        self._prune_inactive_group_state()
+        self.state.target_status = TargetStatus.EMPTY
+        self.state.feasibility.status = FeasibilityStatus.UNKNOWN
+        self.state.plan_state = PanelPlanState()
         self._build_joint_sliders()
         self.refresh()
 
@@ -485,6 +464,45 @@ class ViserPanelGui:
             groups.get(self.state.selected_group_ids[0]) if self.state.selected_group_ids else None
         )
         self.state.selected_robot = None if first_group is None else str(first_group["robot_name"])
+
+    def _sync_group_selection_state(self) -> None:
+        self._sync_selected_robot_from_groups()
+        self.state.auxiliary_group_ids = self._selected_auxiliary_group_ids()
+
+    def _selected_pose_group_ids(self) -> tuple[PlanningGroupID, ...]:
+        groups = self._group_info_by_id()
+        return tuple(
+            group_id
+            for group_id in self.state.selected_group_ids
+            if (group := groups.get(group_id)) is not None and bool(group["has_pose_target"])
+        )
+
+    def _selected_auxiliary_group_ids(self) -> tuple[PlanningGroupID, ...]:
+        groups = self._group_info_by_id()
+        return tuple(
+            group_id
+            for group_id in self.state.selected_group_ids
+            if (group := groups.get(group_id)) is not None and not bool(group["has_pose_target"])
+        )
+
+    def _active_pose_targets(self) -> dict[PlanningGroupID, Pose]:
+        return {
+            group_id: self.state.pose_targets[group_id]
+            for group_id in self._selected_pose_group_ids()
+            if group_id in self.state.pose_targets
+        }
+
+    def _prune_inactive_group_state(self) -> None:
+        selected = set(self.state.selected_group_ids)
+        for mapping in (
+            self.state.pose_targets,
+            self.state.group_joint_targets,
+            self.state.group_poses,
+            self.state.group_diagnostics,
+        ):
+            for group_id in [group_id for group_id in mapping if group_id not in selected]:
+                mapping.pop(group_id, None)
+        self._refresh_target_joints_from_groups()
 
     def _initialize_selected_group_targets(self) -> None:
         groups = self._group_info_by_id()
@@ -545,18 +563,21 @@ class ViserPanelGui:
 
     def _sync_preset_dropdown(self) -> None:
         handle = self._handles.get("preset")
-        if handle is None or self.state.selected_robot is None:
+        if handle is None:
             return
-        info: RobotInfo | None = self.adapter.get_robot_info(self.state.selected_robot)
-        config = self.adapter.get_robot_config(self.state.selected_robot)
+        selected_robot_names = self._selected_robot_names()
         options = ["Select preset..."]
-        if (info is not None and info["init_joints"] is not None) or self.adapter.get_init_joints(
-            self.state.selected_robot
-        ) is not None:
+        if any(
+            self.adapter.get_init_joints(robot_name) is not None
+            for robot_name in selected_robot_names
+        ):
             options.append("Init")
         options.append("Current")
-        home_joints = config.home_joints if config is not None else None
-        if (info is not None and info["home_joints"] is not None) or home_joints is not None:
+        if any(
+            (config := self.adapter.get_robot_config(robot_name)) is not None
+            and config.home_joints is not None
+            for robot_name in selected_robot_names
+        ):
             options.append("Home")
         for attr in ("options", "values"):
             if hasattr(handle, attr):
@@ -568,35 +589,16 @@ class ViserPanelGui:
     def _apply_preset(self, preset: str) -> None:
         if self._closed:
             return
-        robot_name = self.state.selected_robot
-        if robot_name is None:
-            return
-        config = self.adapter.get_robot_config(robot_name)
-        if config is None:
-            return
-        if preset == "Current":
-            current = self.adapter.get_current_joint_state(robot_name)
-            values_by_name = (
-                dict(zip(current.name, current.position, strict=False))
-                if current is not None
-                else {}
-            )
-        elif preset == "Init":
-            init = self.adapter.get_init_joints(robot_name)
-            values_by_name = (
-                dict(zip(init.name, init.position, strict=False)) if init is not None else {}
-            )
-        elif preset == "Home":
-            values_by_name = dict(zip(config.joint_names, config.home_joints or [], strict=False))
-        else:
+        if preset not in {"Current", "Init", "Home"}:
             return
         groups = [
             group
             for group in self.adapter.list_planning_groups()
             if group["id"] in self.state.selected_group_ids
-            and str(group["robot_name"]) == robot_name
         ]
         for group in groups:
+            robot_name = str(group["robot_name"])
+            values_by_name = self._preset_values_by_name(preset, robot_name)
             global_names = [str(name) for name in group["joint_names"]]
             local_names = [str(name) for name in group["local_joint_names"]]
             values = [
@@ -607,6 +609,43 @@ class ViserPanelGui:
         self.state.joint_target = [float(handle.value) for handle in self._joint_sliders.values()]
         self._submit_joint_target_evaluation()
         self.refresh()
+
+    def _selected_robot_names(self) -> tuple[str, ...]:
+        groups = self._group_info_by_id()
+        names: list[str] = []
+        for group_id in self.state.selected_group_ids:
+            group = groups.get(group_id)
+            if group is None:
+                continue
+            robot_name = str(group["robot_name"])
+            if robot_name not in names:
+                names.append(robot_name)
+        return tuple(names)
+
+    def _preset_values_by_name(self, preset: str, robot_name: str) -> dict[str, float]:
+        if preset == "Current":
+            current = self.adapter.get_current_joint_state(robot_name)
+            if current is None:
+                return {}
+            return {
+                str(name): float(value)
+                for name, value in zip(current.name, current.position, strict=False)
+            }
+        if preset == "Init":
+            init = self.adapter.get_init_joints(robot_name)
+            if init is None:
+                return {}
+            return {
+                str(name): float(value)
+                for name, value in zip(init.name, init.position, strict=False)
+            }
+        config = self.adapter.get_robot_config(robot_name)
+        if config is None:
+            return {}
+        return {
+            str(name): float(value)
+            for name, value in zip(config.joint_names, config.home_joints or [], strict=False)
+        }
 
     def _set_slider_values(self, joint_names: list[str], values: list[float]) -> None:
         self._suppress_target_callbacks = True
@@ -655,8 +694,8 @@ class ViserPanelGui:
                 sequence_id=sequence_id,
                 source="cartesian",
                 group_ids=self.state.selected_group_ids,
-                auxiliary_group_ids=self.state.auxiliary_group_ids,
-                pose_targets=dict(self.state.pose_targets),
+                auxiliary_group_ids=self._selected_auxiliary_group_ids(),
+                pose_targets=self._active_pose_targets(),
                 check_collision=self.config.target_evaluation_check_collision,
             )
         )
@@ -700,6 +739,24 @@ class ViserPanelGui:
                 for global_name in group["joint_names"]
             ]
             self.scene.set_target_joints(str(robot_id), group["local_joint_names"], joints)
+
+    def _sync_target_ghost_visibility(self) -> None:
+        if self.scene is None:
+            return
+        active_robot_ids: set[str] = set()
+        groups = self._group_info_by_id()
+        for group_id in self._selected_pose_group_ids():
+            group = groups.get(group_id)
+            if group is None:
+                continue
+            robot_id = self.adapter.robot_id_for_name(str(group["robot_name"]))
+            if robot_id is not None:
+                active_robot_ids.add(str(robot_id))
+        set_target_active = getattr(self.scene, "set_target_active", None)
+        if not callable(set_target_active):
+            return
+        for _robot_name, robot_id, _config in self.adapter.robot_items():
+            set_target_active(str(robot_id), str(robot_id) in active_robot_ids)
 
     def _handle_target_evaluation_request(
         self, request: TargetEvaluationRequest
@@ -775,11 +832,11 @@ class ViserPanelGui:
             group = groups.get(group_id)
             if group is None or not bool(group["has_pose_target"]):
                 continue
-            if group_id in self.state.auxiliary_group_ids:
+            if group_id not in self._selected_pose_group_ids():
                 continue
             self.state.pose_targets[group_id] = pose
             updated_group_ids.append(group_id)
-        first_group_id = next(iter(self.state.selected_group_ids), None)
+        first_group_id = next(iter(self._selected_pose_group_ids()), None)
         if first_group_id is not None:
             self.state.cartesian_target = self.state.pose_targets.get(first_group_id)
         self._sync_scene_target_pose_controls(updated_group_ids)
@@ -798,15 +855,10 @@ class ViserPanelGui:
 
     def _update_status_text(self) -> None:
         current = self.state.current_joints
+        status_label = self.state.error or self.state.module_state
         status = [
-            "### Manipulation Panel",
-            f"Robot: `{self.state.selected_robot or 'none'}`",
-            f"Module: `{self.state.module_state}`",
-            f"Backend: `{self.state.backend_status.value}`",
-            f"Target: `{self.state.target_status.value}`",
-            f"Feasibility: `{self.state.feasibility.status.value}`",
-            f"Plan: `{self.state.plan_state.status.value}`",
-            f"Action: `{self.state.action_status.value}`",
+            f"**Status:** {status_label}",
+            f"Target: `{self.state.target_status.value}` · Plan: `{self.state.plan_state.status.value}`",
         ]
         if self.state.selected_robot is not None:
             status.append(
@@ -816,9 +868,34 @@ class ViserPanelGui:
             status.append(f"Current joints: `{[round(v, 3) for v in current]}`")
         if self.state.last_result:
             status.append(f"Last result: `{self.state.last_result}`")
-        if self.state.error:
-            status.append(f"Error: `{self.state.error}`")
         self._set_handle_value("status", "\n\n".join(status))
+
+    def _update_target_summary(self) -> None:
+        primary_groups = self._selected_pose_group_ids()
+        auxiliary_groups = self._selected_auxiliary_group_ids()
+        ghost_groups = list(primary_groups)
+        lines = [
+            f"Primary: `{self._summary_group_names(primary_groups)}`",
+            f"Auxiliary: `{self._summary_group_names(auxiliary_groups)}`",
+            f"Ghosts: `{self._summary_group_names(tuple(ghost_groups))}`",
+            f"Feasibility: `{self.state.feasibility.status.value}`",
+        ]
+        if not self.state.selected_group_ids:
+            lines = ["Select a planning group to define a target."]
+        elif not primary_groups and auxiliary_groups:
+            lines.append("Auxiliary-only selection: no pose target ghost will be shown.")
+        self._set_handle_value("target_summary", "\n\n".join(lines))
+
+    def _summary_group_names(self, group_ids: tuple[PlanningGroupID, ...]) -> list[str]:
+        groups = self._group_info_by_id()
+        names: list[str] = []
+        for group_id in group_ids:
+            group = groups.get(group_id)
+            if group is None:
+                names.append(str(group_id))
+                continue
+            names.append(self._group_display_name(group))
+        return names
 
     def _update_control_state(self) -> None:
         self._set_disabled("plan", not self.state.can_plan())
@@ -830,7 +907,9 @@ class ViserPanelGui:
                 and self.state.can_execute(self.config.current_match_tolerance)
             ),
         )
-        self._set_disabled("cancel", not self.state.can_cancel())
+        can_cancel = self.state.can_cancel()
+        self._set_disabled("cancel", not can_cancel)
+        self._set_visible("cancel", can_cancel)
         self._update_target_visual_state()
 
     def _update_target_visual_state(self) -> None:
@@ -1035,13 +1114,21 @@ class ViserPanelGui:
 
     def _set_handle_value(self, key: str, value: str) -> None:
         handle = self._handles.get(key)
-        if isinstance(handle, GuiMarkdownHandle):
-            self._set_optional_handle_attr(handle, "value", value)
+        if handle is None:
+            return
+        if hasattr(handle, "content") or hasattr(handle, "value"):
+            attr = "content" if hasattr(handle, "content") else "value"
+            self._set_optional_handle_attr(handle, attr, value)
 
     def _set_disabled(self, key: str, disabled: bool) -> None:
         handle = self._handles.get(key)
         if isinstance(handle, GuiButtonHandle):
             self._set_optional_handle_attr(handle, "disabled", disabled)
+
+    def _set_visible(self, key: str, visible: bool) -> None:
+        handle = self._handles.get(key)
+        if handle is not None:
+            self._set_optional_handle_attr(handle, "visible", visible)
 
     @staticmethod
     def _set_optional_handle_attr(handle: object, attr: str, value: object) -> None:
