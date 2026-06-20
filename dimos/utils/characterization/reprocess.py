@@ -24,6 +24,7 @@ re-fit the dynamics. This does.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass, field
 from datetime import date
 import json
@@ -33,7 +34,7 @@ import warnings
 import numpy as np
 
 from dimos.utils.benchmarking.plant import FopdtChannelParams, TwistBasePlantParams
-from dimos.utils.benchmarking.tuning import Provenance, derive_config
+from dimos.utils.benchmarking.tuning import Provenance, derive_config, git_sha
 from dimos.utils.characterization.modeling.pose_fopdt import (
     PoseFopdtParams,
     estimate_deadtime,
@@ -257,9 +258,78 @@ def reprocess(
     return artifact_path
 
 
+def main() -> None:
+    """CLI: pose-domain re-fit of a recording -> TuningConfig artifact.
+
+    Example::
+
+        python -m dimos.utils.characterization.reprocess \\
+            data/characterization/go2/go2_recording_default_2026-06-19_<sha>.db \\
+            --robot-id go2_u01 --surface concrete --sim-or-hw hw
+    """
+    parser = argparse.ArgumentParser(
+        description="Re-fit a characterization recording with the pose-domain "
+        "(output-error) FOPDT method and write a TuningConfig artifact."
+    )
+    parser.add_argument("db", help="path to the recording .db to re-fit")
+    parser.add_argument("--robot-id", default="go2", help="per-unit id, e.g. go2_u01")
+    parser.add_argument("--surface", default="concrete")
+    parser.add_argument("--mode", default="default", help="gait mode")
+    parser.add_argument(
+        "--sim-or-hw",
+        default="hw",
+        choices=["hw", "sim", "self-test"],
+        help="hw -> artifact is valid_for_tuning; sim/self-test -> not",
+    )
+    parser.add_argument("--out", default=None, help="output dir (default: alongside the .db)")
+    parser.add_argument("--git-sha", default=git_sha(), help="provenance git sha")
+    parser.add_argument(
+        "--no-estimate-l",
+        action="store_true",
+        help="skip deadtime profiling; use --l-vx/--l-vy/--l-wz (or nominal) instead",
+    )
+    parser.add_argument("--l-vx", type=float, default=None, help="fixed deadtime L for vx (s)")
+    parser.add_argument("--l-vy", type=float, default=None, help="fixed deadtime L for vy (s)")
+    parser.add_argument("--l-wz", type=float, default=None, help="fixed deadtime L for wz (s)")
+    args = parser.parse_args()
+
+    l_by_axis: dict[str, float] | None = None
+    fixed = {
+        a: v for a, v in (("vx", args.l_vx), ("vy", args.l_vy), ("wz", args.l_wz)) if v is not None
+    }
+    if fixed:
+        l_by_axis = fixed
+
+    artifact = reprocess(
+        args.db,
+        robot_id=args.robot_id,
+        surface=args.surface,
+        mode=args.mode,
+        sim_or_hw=args.sim_or_hw,
+        out_dir=args.out,
+        git_sha=args.git_sha,
+        estimate_l=not args.no_estimate_l,
+        l_by_axis=l_by_axis,
+    )
+    quality = json.loads((artifact.parent / f"{artifact.stem}_quality.json").read_text())
+    print(f"\nartifact: {artifact}")
+    print(f"quality:  {artifact.parent / (artifact.stem + '_quality.json')}\n")
+    print(f"{'axis':5s} {'K':>8s} {'tau(s)':>8s} {'L(s)':>8s} {'r²':>7s}  valid")
+    for axis in _AXES:
+        q = quality[axis]
+        print(
+            f"{axis:5s} {q['K']:8.3f} {q['tau']:8.3f} {q['L']:8.3f} "
+            f"{q['r_squared']:7.3f}  {q['valid']}"
+        )
+
+
 __all__ = [
     "AxisFit",
     "PoseDomainFit",
     "fit_recording_pose_domain",
     "reprocess",
 ]
+
+
+if __name__ == "__main__":
+    main()
