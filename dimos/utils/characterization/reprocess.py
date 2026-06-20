@@ -53,6 +53,21 @@ from dimos.utils.characterization.recording_io import (
 _AXES = ("vx", "vy", "wz")
 # Nominal deadtime if an axis can't be estimated (mid-range of the Go2 bound).
 _NOMINAL_L_S = 0.15
+# Minimum net step displacement (m for vx/vy, rad for wz) to count as real
+# motion. Floor-probe steps (commanded below the floor) move ~0 and produce
+# meaningless fits -- they are excluded from fitting AND plotting.
+_MOTION_MIN = 0.3
+
+
+def _net_motion(recording: Recording, span: StepSpan) -> float:
+    """Net displacement magnitude of a step's pose channel (0 if no samples)."""
+    _, p = step_pose_channel(recording, span)
+    return abs(float(p[-1] - p[0])) if p.size else 0.0
+
+
+def _moving_spans(recording: Recording, spans: list[StepSpan]) -> list[StepSpan]:
+    """Steps that actually moved the robot (drops sub-floor / no-motion probes)."""
+    return [s for s in spans if _net_motion(recording, s) >= _MOTION_MIN]
 
 
 @dataclass
@@ -95,7 +110,11 @@ def _fit_axis(
 ) -> AxisFit:
     """Estimate L (decoupled), then fit (K, tau) per segment and aggregate."""
     channels = [(span, *step_pose_channel(recording, span)) for span in spans]
-    channels = [(span, t, p) for span, t, p in channels if t.size >= 4]
+    channels = [
+        (span, t, p)
+        for span, t, p in channels
+        if t.size >= 4 and abs(float(p[-1] - p[0])) >= _MOTION_MIN
+    ]
 
     if not channels:
         return AxisFit(
@@ -191,7 +210,10 @@ def fit_recording_pose_domain(
         axis_k = axes[axis].K
         if np.isnan(axis_k):
             continue
-        rows = [{"amplitude": abs(span.amplitude), "K": axis_k} for span in by_axis[axis]]
+        rows = [
+            {"amplitude": abs(span.amplitude), "K": axis_k}
+            for span in _moving_spans(recording, by_axis[axis])
+        ]
         if rows:
             per_amplitude[axis] = rows
     return PoseDomainFit(plant=plant, axes=axes, per_amplitude=per_amplitude)
@@ -213,9 +235,11 @@ def _write_pose_plots(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    by_axis: dict[str, list[StepSpan]] = {a: [] for a in _AXES}
-    for span in segment_steps(recording):
-        by_axis[span.axis].append(span)
+    # Only real-motion SI steps -- floor probes (sub-floor, ~0 motion) are dropped.
+    by_axis: dict[str, list[StepSpan]] = {
+        a: _moving_spans(recording, [s for s in segment_steps(recording) if s.axis == a])
+        for a in _AXES
+    }
     written: list[Path] = []
 
     active = {a: spans for a, spans in by_axis.items() if spans}
@@ -236,21 +260,24 @@ def _write_pose_plots(
                     ax.axis("off")
                     continue
                 ax.plot(t_rel, p_meas, "k.", ms=4, label="measured")
+                panel_r2 = float("nan")
                 if np.isfinite(axis_fit.K):
                     model = float(p_meas[0]) + pose_step_response(
                         t_rel, axis_fit.K, axis_fit.tau, axis_fit.L, span.amplitude
                     )
                     ax.plot(t_rel, model, "-", lw=2, color="tab:green", label="pose-domain")
-                ax.set_title(
-                    f"{axis} @ {span.amplitude:g}  (r²={axis_fit.r_squared:.3f})", fontsize=9
-                )
+                    # Honest PER-PANEL r^2 of the axis model against THIS step.
+                    ss_res = float(np.sum((p_meas - model) ** 2))
+                    ss_tot = float(np.sum((p_meas - np.mean(p_meas)) ** 2))
+                    panel_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan")
+                ax.set_title(f"{axis} @ {span.amplitude:g}  (panel r²={panel_r2:.3f})", fontsize=9)
                 if row == nrows - 1:
                     ax.set_xlabel("t since cmd (s)")
                 if col == 0:
-                    ax.set_ylabel("pose channel")
+                    ax.set_ylabel("displacement (m / rad)")
                 if row == 0 and col == 0:
                     ax.legend(fontsize=7)
-        fig.suptitle(f"{stem} — measured pose vs pose-domain fit")
+        fig.suptitle(f"{stem} — measured pose vs pose-domain fit (real-motion steps only)")
         fig.tight_layout()
         steps_path = out_dir / f"{stem}_steps.png"
         fig.savefig(steps_path, dpi=110)
@@ -272,8 +299,11 @@ def _write_pose_plots(
                 amps.append(abs(span.amplitude))
                 ks.append(single.K)
                 taus.append(single.tau)
-        axes[0][col].plot(amps, ks, "o-", color="tab:blue")
-        axes[1][col].plot(amps, taus, "o-", color="tab:orange")
+        amps_arr = np.asarray(amps, dtype=float)
+        order = np.argsort(amps_arr)
+        # Scatter (NOT connected lines) -- repeats at one amplitude are points, not a zigzag.
+        axes[0][col].scatter(amps_arr[order], np.asarray(ks)[order], color="tab:blue", s=30)
+        axes[1][col].scatter(amps_arr[order], np.asarray(taus)[order], color="tab:orange", s=30)
         if np.isfinite(axis_fit.K):
             axes[0][col].axhline(
                 axis_fit.K, ls="--", color="gray", label=f"joint K={axis_fit.K:.2f}"
