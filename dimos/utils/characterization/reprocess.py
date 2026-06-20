@@ -206,8 +206,15 @@ def reprocess(
     git_sha: str = "unknown",
     estimate_l: bool = True,
     l_by_axis: dict[str, float] | None = None,
+    tau_bounds: tuple[float, float] = (0.03, 0.6),
+    l_bounds: tuple[float, float] = (0.05, 0.30),
 ) -> Path:
     """Re-fit ``db_path`` with the pose-domain method and write a TuningConfig.
+
+    ``tau_bounds``/``l_bounds`` are the per-robot plausibility bounds; widen them
+    for a robot whose true dynamics legitimately sit near the default Go2 edge.
+    Note a fit pinned exactly at a bound is a red flag (poor excitation), not a
+    reason to widen -- widening then hides the bad fit instead of flagging it.
 
     Returns the artifact path. Also writes a ``*_posefit_quality.json`` sidecar
     with per-axis r_squared/RMSE (on pose) and the plausibility verdict, and
@@ -215,7 +222,13 @@ def reprocess(
     """
     db_path = Path(db_path)
     recording = load_recording(db_path)
-    fit = fit_recording_pose_domain(recording, estimate_l=estimate_l, l_by_axis=l_by_axis)
+    fit = fit_recording_pose_domain(
+        recording,
+        estimate_l=estimate_l,
+        l_by_axis=l_by_axis,
+        tau_bounds=tau_bounds,
+        l_bounds=l_bounds,
+    )
 
     implausible = [a for a, f in fit.axes.items() if not f.valid]
     if implausible:
@@ -291,6 +304,18 @@ def main() -> None:
     parser.add_argument("--l-vx", type=float, default=None, help="fixed deadtime L for vx (s)")
     parser.add_argument("--l-vy", type=float, default=None, help="fixed deadtime L for vy (s)")
     parser.add_argument("--l-wz", type=float, default=None, help="fixed deadtime L for wz (s)")
+    parser.add_argument(
+        "--l-min", type=float, default=0.05, help="plausibility lower bound on L (s)"
+    )
+    parser.add_argument(
+        "--l-max", type=float, default=0.30, help="plausibility upper bound on L (s)"
+    )
+    parser.add_argument(
+        "--tau-min", type=float, default=0.03, help="plausibility lower bound on tau (s)"
+    )
+    parser.add_argument(
+        "--tau-max", type=float, default=0.6, help="plausibility upper bound on tau (s)"
+    )
     args = parser.parse_args()
 
     l_by_axis: dict[str, float] | None = None
@@ -310,6 +335,8 @@ def main() -> None:
         git_sha=args.git_sha,
         estimate_l=not args.no_estimate_l,
         l_by_axis=l_by_axis,
+        tau_bounds=(args.tau_min, args.tau_max),
+        l_bounds=(args.l_min, args.l_max),
     )
     quality = json.loads((artifact.parent / f"{artifact.stem}_quality.json").read_text())
     print(f"\nartifact: {artifact}")
