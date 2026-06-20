@@ -43,7 +43,6 @@ from dimos.mapping.voxels import VoxelGridMapper
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
-from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.JointState import JointState
@@ -129,12 +128,7 @@ coordinator_mock_twist_base = ControlCoordinator.blueprint(
             priority=20,
         ),
     ],
-).transports(
-    {
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-    }
-)
+).remappings([(ControlCoordinator, "twist_command", "cmd_vel")])
 
 # FlowBase holonomic twist base (3-DOF: vx, vy, wz) over Portal RPC
 coordinator_flowbase = ControlCoordinator.blueprint(
@@ -156,12 +150,7 @@ coordinator_flowbase = ControlCoordinator.blueprint(
             priority=20,
         ),
     ],
-).transports(
-    {
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-    }
-)
+).remappings([(ControlCoordinator, "twist_command", "cmd_vel")])
 
 # FlowBase + WASD pygame keyboard teleop in a single blueprint
 coordinator_flowbase_keyboard_teleop = autoconnect(
@@ -194,12 +183,7 @@ coordinator_flowbase_keyboard_teleop = autoconnect(
         ],
     ),
     KeyboardTeleop.blueprint(publish_only_when_active=True),
-).transports(
-    {
-        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-    }
-)
+).remappings([(ControlCoordinator, "twist_command", "cmd_vel")])
 
 # FlowBase + Livox MID-360 + FastLio2 SLAM + nav stack with click-to-drive in Rerun. The velocity
 # sink is ControlCoordinator + FlowBaseAdapter
@@ -305,7 +289,22 @@ def _make_flowbase_nav(lookahead_distance: float, *, record_db: str = "nav_recor
 coordinator_flowbase_nav = _make_flowbase_nav(2.0)
 # SAME stack, shorter global-planner lookahead → tighter curve tracking, for an
 # apples-to-apples click-to-go comparison vs the baseline.
-coordinator_flowbase_nav_tuned = _make_flowbase_nav(_FLOWBASE_NAV_LOOKAHEAD)
+coordinator_flowbase_nav_tuned = (
+    _make_flowbase_nav(_FLOWBASE_NAV_LOOKAHEAD)
+    .remappings(
+        [
+            (FastLio2, "lidar", "registered_scan"),
+            (FastLio2, "global_map", "global_map_fastlio"),
+            # SimplePlanner / FarPlanner owns way_point — disconnect MovementManager's
+            # redundant pass-through copy (matches unitree-g1-nav-onboard).
+            (MovementManager, "way_point", "_mgr_way_point_unused"),
+            # MovementManager.cmd_vel publishes to LCM /cmd_vel by default; the
+            # coordinator's twist_command listens on the same name.
+            (ControlCoordinator, "twist_command", "cmd_vel"),
+        ]
+    )
+    .global_config(n_workers=8)
+)
 
 
 # Mock arm (7-DOF) + mock holonomic base (3-DOF)
@@ -331,12 +330,7 @@ coordinator_mobile_manip_mock = ControlCoordinator.blueprint(
             priority=20,
         ),
     ],
-).transports(
-    {
-        ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
-        ("twist_command", Twist): LCMTransport("/cmd_vel", Twist),
-    }
-)
+).remappings([(ControlCoordinator, "twist_command", "cmd_vel")])
 
 
 # FOPDT in-process sim plant + a ControlCoordinator on top, so the
