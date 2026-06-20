@@ -421,9 +421,7 @@ def detect_apriltags(
     return detections
 
 
-# ---------------------------------------------------------------------------
 # Streaming / incremental API
-# ---------------------------------------------------------------------------
 
 _DEFAULT_MARKER_LENGTH = 0.10
 _DEFAULT_DICTIONARY = "DICT_APRILTAG_36h11"

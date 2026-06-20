@@ -81,7 +81,7 @@ LCM_VOXEL = float(arg("--lcm-voxel", "0.05"))  # voxel size for the aggregated .
 LCM_OUTLIER_NN = 20  # statistical outlier removal: neighbor count
 LCM_OUTLIER_STD = 2.0  # ...and std-ratio threshold (lower = more aggressive)
 
-# --- RELAXED gates (vs the strict eval defaults 60 / 2.0 / 1.0 / 45 / 0.5) -------------------
+# RELAXED gates (vs the strict eval defaults 60 / 2.0 / 1.0 / 45 / 0.5)
 # Loosened to keep more of each tag's raw viewings as constraints (esp. tag 5 / blurry tag 3),
 # while still rejecting genuinely bad PnP poses. Speed == -1 means "unknown" and always passes.
 GATE = dict(
@@ -161,7 +161,7 @@ for obs in st.stream(RAW_STREAM):
     )
 gated = [t for t in raw if passes(t)]
 
-# --- keyframes from raw odometry -------------------------------------------------------------
+# keyframes from raw odometry
 con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
 fo = np.array(
     list(
@@ -201,7 +201,7 @@ for t in gated:
     if key not in bucket or t["reproj_px"] < bucket[key]["reproj_px"]:
         bucket[key] = t
 
-# --- revisit report --------------------------------------------------------------------------
+# revisit report
 raw_by, vis_by = {}, {}
 for t in raw:
     raw_by.setdefault(t["marker_id"], 0)
@@ -234,7 +234,7 @@ print(
     f"\ntags NOT revisited (no loop-closure constraint): {not_revisited if not_revisited else 'none'}\n"
 )
 
-# --- factor graph + solve --------------------------------------------------------------------
+# factor graph + solve
 odom = noiseModel.Diagonal.Variances(np.array([1e-8, 1e-8, 1e-5, 1e-4, 1e-4, 1e-6]))
 grav0 = noiseModel.Diagonal.Variances(np.array([1e-8, 1e-8, 1e-6, 1e-8, 1e-8, 1e-8]))
 
@@ -295,7 +295,7 @@ lm_params.setMaxIterations(200)
 est = LevenbergMarquardtOptimizer(g, v, lm_params).optimize()
 raw_kf = [Pose3(kfs[i][0], Point3(kfs[i][1])) for i in range(N)]
 
-# ============ STAGE 2: ICP loop-closure refinement (tags=macro, lidar ICP=local anchor) ======
+# STAGE 2: ICP loop-closure refinement (tags=macro, lidar ICP=local anchor)
 # Tag PGO has pulled revisits roughly together; now ICP the lidar submaps of spatially-close,
 # temporally-distant keyframe pairs to add precise 6-DOF relative constraints, then re-solve.
 ICP = "--no-icp" not in sys.argv
@@ -552,7 +552,7 @@ if WHAT in ("lidar", "both"):
             flush=True,
         )
 
-# --- build + open the comparison rrd ---------------------------------------------------------
+# build + open the comparison rrd
 if OPEN_RRD and WHAT in ("lidar", "both"):
     import subprocess
 

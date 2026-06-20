@@ -146,7 +146,7 @@ class PGO(NativeModule, LoopClosure):
     def stop(self) -> None:
         super().stop()
 
-    # --- TF passthrough (same as the nav_stack wrapper) -----------------------
+    # TF passthrough (same as the nav_stack wrapper)
 
     def _publish_tf(
         self,
@@ -205,7 +205,7 @@ class PGO(NativeModule, LoopClosure):
         if event is not None:
             self.loop_closure_event.publish(event)
 
-    # --- synthesized pose graph (the binary doesn't expose its own) ----------
+    # synthesized pose graph (the binary doesn't expose its own)
 
     def _on_raw_odometry(self, msg: Odometry) -> None:
         rotation = Rotation.from_quat(
