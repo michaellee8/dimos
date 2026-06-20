@@ -173,7 +173,7 @@ def _directory_fingerprint(root: Path) -> str:
         relative_path = path.relative_to(root)
         digest.update(str(relative_path).encode())
         digest.update(str(stat.st_size).encode())
-        digest.update(str(stat.st_mtime_ns).encode())
+        digest.update(path.read_bytes())
     return digest.hexdigest()[:16]
 
 
