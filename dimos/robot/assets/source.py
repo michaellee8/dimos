@@ -137,13 +137,15 @@ class RobotDescriptionPath(type(Path())):  # type: ignore[misc]
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, RobotDescriptionPath):
             return self._resolve() == other
-        return object.__getattribute__(
-            self, "_robot_description_source"
-        ) == object.__getattribute__(
+        source: RobotDescriptionSource = object.__getattribute__(self, "_robot_description_source")
+        other_source: RobotDescriptionSource = object.__getattribute__(
             other, "_robot_description_source"
-        ) and object.__getattribute__(
-            self, "_robot_description_relative_path"
-        ) == object.__getattribute__(other, "_robot_description_relative_path")
+        )
+        relative_path: Path = object.__getattribute__(self, "_robot_description_relative_path")
+        other_relative_path: Path = object.__getattribute__(
+            other, "_robot_description_relative_path"
+        )
+        return source == other_source and relative_path == other_relative_path
 
     def __hash__(self) -> int:
         return hash(
