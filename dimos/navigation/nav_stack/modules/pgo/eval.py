@@ -53,7 +53,9 @@ import asyncio
 from collections.abc import AsyncGenerator, Iterable
 import importlib
 import json
+import os
 from pathlib import Path
+import sys
 import tempfile
 import time
 from typing import Any
@@ -117,6 +119,31 @@ VOXEL_MAX_SCANS = 300
 
 # Bump to invalidate every cached cell (scoring/replay semantics changed).
 EVAL_VERSION = 1
+
+# Each eval runs on its own LCM multicast port so a concurrent dimos instance
+# on the same machine (e.g. a live robot stack on another clone) can't inject
+# its own odometry/scans into the replay. Cross-talk silently corrupts results:
+# a live odom message stamped with wall-clock time poisons PGO's monotonic
+# out-of-order guard and every replayed scan gets dropped. LCM's udpm default
+# ttl is 0 (loopback only), so the port alone isolates without leaking to the
+# LAN; note a literal "?ttl=0" query string hangs the worker transport setup,
+# so we deliberately omit it.
+_EVAL_LCM_GROUP = "239.255.76.67"
+_EVAL_LCM_BASE_PORT = 7800
+_EVAL_LCM_PORT_SPAN = 100
+
+
+def isolate_lcm() -> None:
+    if os.environ.get("LCM_DEFAULT_URL"):
+        return
+    # The forkserver workers snapshot the environment when the pool spawns, and
+    # setting LCM_DEFAULT_URL here (in main) lands too late for them — the host
+    # and workers end up on different ports and module startup deadlocks. So
+    # re-exec with the var already in the environment; the recursive call then
+    # short-circuits above. eval_all.py sets it pre-launch and skips this path.
+    port = _EVAL_LCM_BASE_PORT + os.getpid() % _EVAL_LCM_PORT_SPAN
+    os.environ["LCM_DEFAULT_URL"] = f"udpm://{_EVAL_LCM_GROUP}:{port}"
+    os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 def cell_fingerprint(
@@ -827,6 +854,7 @@ def evaluate(
 
 
 def main() -> None:
+    isolate_lcm()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db-path", type=Path, required=True)
     parser.add_argument("--odom-stream", required=True)

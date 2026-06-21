@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -52,6 +53,14 @@ PGO_DIR = Path(__file__).resolve().parent
 EVAL_PY = PGO_DIR / "eval.py"
 RESULTS_DIR = PGO_DIR / "eval_results"
 TABLE_PATH = RESULTS_DIR / "comparison.md"
+
+# Each cell subprocess runs on its own LCM multicast port so a concurrent dimos
+# instance on the same machine can't inject odometry/scans into the replay (see
+# isolate_lcm in eval.py). Set pre-launch here so the forkserver workers inherit
+# it; the port is per-driver-process so parallel drivers don't collide.
+_LCM_GROUP = "239.255.76.67"
+_LCM_BASE_PORT = 7800
+_LCM_PORT_SPAN = 100
 
 DEFAULT_RECORDINGS_ROOT = Path("~/datasets/go2_recordings").expanduser()
 SIDECAR_NAME = "camera_intrinsics.json"
@@ -217,7 +226,12 @@ def run_cell(environment: Environment, algorithm: Algorithm) -> bool:
     if algorithm.overrides:
         command += ["--pgo-config-json", json.dumps(algorithm.overrides)]
     print(f"\n=== {environment.name} x {algorithm.name} ===", flush=True)
-    result = subprocess.run(command, check=False)
+    env = dict(os.environ)
+    env.setdefault(
+        "LCM_DEFAULT_URL",
+        f"udpm://{_LCM_GROUP}:{_LCM_BASE_PORT + os.getpid() % _LCM_PORT_SPAN}",
+    )
+    result = subprocess.run(command, check=False, env=env)
     print(f"=== {environment.name} x {algorithm.name} exit: {result.returncode} ===", flush=True)
     return result.returncode == 0
 

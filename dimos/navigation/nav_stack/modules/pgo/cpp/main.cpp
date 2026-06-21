@@ -36,6 +36,7 @@ static void signal_handler(int) { g_running.store(false); }
 static std::mutex g_buffer_mutex;
 static std::queue<CloudWithPose> g_cloud_buffer;
 static double g_last_message_time = 0.0;
+static std::atomic<bool> g_debug{false};
 
 // Latest odometry for non-keyframe TF broadcasting
 static std::mutex g_odom_mutex;
@@ -71,14 +72,20 @@ public:
     void on_registered_scan(const lcm::ReceiveBuffer*, const std::string&,
                             const sensor_msgs::PointCloud2* msg) {
         std::lock_guard<std::mutex> odom_lock(g_odom_mutex);
+        if (g_debug)
+            fprintf(stderr, "DBG scan: has_odom=%d g_latest_time=%.3f g_last_msg=%.3f\n",
+                    (int)g_has_odom, g_latest_time, g_last_message_time);
         if (!g_has_odom)
             return;
 
         double ts = g_latest_time;
 
         // Reject out-of-order messages
-        if (ts < g_last_message_time)
+        if (ts < g_last_message_time) {
+            if (g_debug)
+                fprintf(stderr, "DBG scan DROPPED out-of-order ts=%.3f < %.3f\n", ts, g_last_message_time);
             return;
+        }
         g_last_message_time = ts;
 
         CloudWithPose cloud_with_pose;
@@ -252,6 +259,7 @@ int main(int argc, char** argv)
 
     bool debug = native_module.arg_bool("debug", false);
     config.debug = debug;
+    g_debug.store(debug);
 
     pcl::console::setVerbosityLevel(
         debug ? pcl::console::L_INFO : pcl::console::L_ERROR);
@@ -429,6 +437,8 @@ int main(int argc, char** argv)
         std::this_thread::sleep_for(std::chrono::milliseconds(timer_period_ms));
     }
 
-    if (debug) fprintf(stderr, "PGO native module shutting down\n");
+    if (debug) {
+        fprintf(stderr, "PGO native module shutting down\n");
+    }
     return 0;
 }
