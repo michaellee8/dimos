@@ -19,7 +19,6 @@ from contextlib import suppress
 from typing import TYPE_CHECKING
 
 from dimos.manipulation.planning.groups.identifiers import make_global_joint_name
-from dimos.manipulation.visualization.viser.adapter import InProcessViserAdapter
 from dimos.manipulation.visualization.viser.animation import (
     GroupPreviewAnimation,
     PreviewTrack,
@@ -75,7 +74,6 @@ class ViserManipulationVisualizer:
         self.config = config or ViserVisualizationConfig()
         self._runtime: ViserRuntime | None = None
         self._server: ViserServer | None = None
-        self._adapter: InProcessViserAdapter | None = None
         self._scene: ViserManipulationScene | None = None
         self._gui: ViserPanelGui | None = None
         self._closed = False
@@ -89,17 +87,19 @@ class ViserManipulationVisualizer:
         try:
             server = runtime.start()
             apply_dimos_theme(server)
-            adapter = InProcessViserAdapter(
-                world_monitor=self._world_monitor,
-                manipulation_module=self._manipulation_module,
-            )
             scene = ViserManipulationScene(
                 server,
                 ViserUrdf,
                 preview_fps=self.config.preview_fps,
             )
             gui = (
-                ViserPanelGui(server, adapter, self.config, scene)
+                ViserPanelGui(
+                    server,
+                    self._world_monitor,
+                    self._manipulation_module,
+                    self.config,
+                    scene,
+                )
                 if self.config.panel_enabled
                 else None
             )
@@ -116,14 +116,12 @@ class ViserManipulationVisualizer:
                 runtime.close()
             self._runtime = None
             self._server = None
-            self._adapter = None
             self._scene = None
             self._gui = None
             self._closed = True
             raise
         self._runtime = runtime
         self._server = server
-        self._adapter = adapter
         self._scene = scene
         self._gui = gui
         self._closed = False
@@ -153,10 +151,17 @@ class ViserManipulationVisualizer:
         if self._closed:
             return
         self._ensure_started()
-        if self._adapter is None or self._scene is None:
+        if self._scene is None:
             return
-        for _robot_name, robot_id, _config in self._adapter.robot_items():
-            current = self._adapter.get_current_joint_state(_robot_name)
+        for robot_name, robot_id, _config in self._manipulation_module.robot_items():
+            get_current_joint_state = getattr(
+                self._manipulation_module, "get_current_joint_state", None
+            )
+            current = (
+                get_current_joint_state(robot_name)
+                if callable(get_current_joint_state)
+                else self._world_monitor.get_current_joint_state(robot_id)
+            )
             self._scene.update_current_robot(str(robot_id), current)
         if self._gui is not None:
             self._gui.refresh()
@@ -181,21 +186,28 @@ class ViserManipulationVisualizer:
         if self._closed:
             return
         self._ensure_started()
-        if self._adapter is None or self._scene is None:
+        if self._scene is None:
             return
         preview = self._build_group_preview_animation(plan)
         if preview is not None:
             self._scene.animate_preview(preview, duration)
 
     def _build_group_preview_animation(self, plan: GeneratedPlan) -> GroupPreviewAnimation | None:
-        if self._adapter is None:
-            return None
         selection = self._world_monitor.planning_groups.select(plan.group_ids)
         tracks: list[PreviewTrack] = []
         for robot_name in selection.robot_names:
-            robot_id = self._adapter.robot_id_for_name(robot_name)
-            config = self._adapter.get_robot_config(robot_name)
-            current = self._adapter.get_current_joint_state(robot_name)
+            robot_id = self._manipulation_module.robot_id_for_name(robot_name)
+            config = self._manipulation_module.get_robot_config(robot_name)
+            get_current_joint_state = getattr(
+                self._manipulation_module, "get_current_joint_state", None
+            )
+            current = (
+                get_current_joint_state(robot_name)
+                if callable(get_current_joint_state)
+                else self._world_monitor.get_current_joint_state(robot_id)
+                if robot_id is not None
+                else None
+            )
             if robot_id is None or config is None or current is None:
                 logger.warning(
                     "Cannot build group preview for robot '%s': missing id, config, or state",
@@ -221,12 +233,10 @@ class ViserManipulationVisualizer:
         return GroupPreviewAnimation(group_ids=plan.group_ids, tracks=tuple(tracks))
 
     def _robot_ids_for_groups(self, group_ids: Sequence[PlanningGroupID]) -> list[str]:
-        if self._adapter is None:
-            return []
         selection = self._world_monitor.planning_groups.select(group_ids)
         robot_ids: list[str] = []
         for robot_name in selection.robot_names:
-            robot_id = self._adapter.robot_id_for_name(robot_name)
+            robot_id = self._manipulation_module.robot_id_for_name(robot_name)
             if robot_id is not None:
                 robot_ids.append(str(robot_id))
         return robot_ids
@@ -300,7 +310,6 @@ class ViserManipulationVisualizer:
                     errors.append(e)
             self._runtime = None
             self._server = None
-            self._adapter = None
             self._scene = None
             self._gui = None
         if errors:

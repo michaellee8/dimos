@@ -23,7 +23,6 @@ import pytest
 pytest.importorskip("viser", reason="Viser optional dependency is not installed")
 
 from dimos.manipulation.visualization.types import RobotInfo
-from dimos.manipulation.visualization.viser.adapter import InProcessViserAdapter
 from dimos.manipulation.visualization.viser.config import ViserVisualizationConfig
 from dimos.manipulation.visualization.viser.gui import ViserPanelGui
 from dimos.manipulation.visualization.viser.state import (
@@ -106,11 +105,14 @@ class FakeRestartableOperationWorker(FakeOperationSubmitWorker):
         self.stop_calls.append(timeout)
 
 
-class FakeOperationAdapter(InProcessViserAdapter):
+class FakeOperationAdapter:
     def __init__(self) -> None:
         self.cancel_calls = 0
 
     def list_robots(self) -> list[str]:
+        return []
+
+    def list_planning_groups(self) -> list[dict[str, object]]:
         return []
 
     def get_module_state(self) -> str:

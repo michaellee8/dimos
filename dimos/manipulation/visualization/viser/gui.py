@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias, cast
 
 from dimos.manipulation.planning.spec.models import PlanningGroupID
 from dimos.manipulation.visualization.types import (
@@ -22,8 +22,8 @@ from dimos.manipulation.visualization.types import (
     TargetEvaluation,
     TargetSetEvaluation,
 )
-from dimos.manipulation.visualization.viser.adapter import InProcessViserAdapter
 from dimos.manipulation.visualization.viser.config import ViserVisualizationConfig
+from dimos.manipulation.visualization.viser.module_access import ViserModuleAccess
 from dimos.manipulation.visualization.viser.runtime import VISER_INSTALL_HINT
 from dimos.manipulation.visualization.viser.scene import ViserManipulationScene
 from dimos.manipulation.visualization.viser.state import (
@@ -42,6 +42,10 @@ from dimos.manipulation.visualization.viser.state import (
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.utils.logging_config import setup_logger
+
+if TYPE_CHECKING:
+    from dimos.manipulation.manipulation_module import ManipulationModule
+    from dimos.manipulation.planning.monitor.world_monitor import WorldMonitor
 
 logger = setup_logger()
 
@@ -84,14 +88,25 @@ class ViserPanelGui:
     def __init__(
         self,
         server: ViserServer,
-        adapter: InProcessViserAdapter,
-        config: ViserVisualizationConfig,
+        world_monitor: WorldMonitor | ViserModuleAccess,
+        manipulation_module: ManipulationModule | ViserVisualizationConfig,
+        config: ViserVisualizationConfig | ViserManipulationScene | None = None,
         scene: ViserManipulationScene | None = None,
     ) -> None:
         self.server = server
-        self.adapter = adapter
-        self.config = config
-        self.scene = scene
+        if isinstance(manipulation_module, ViserVisualizationConfig):
+            self.adapter = cast("ViserModuleAccess", world_monitor)
+            self.config = manipulation_module
+            self.scene = cast("ViserManipulationScene | None", config)
+        else:
+            assert not isinstance(manipulation_module, ViserVisualizationConfig)
+            assert isinstance(config, ViserVisualizationConfig)
+            self.adapter = ViserModuleAccess(
+                cast("WorldMonitor", world_monitor),
+                cast("ManipulationModule", manipulation_module),
+            )
+            self.config = config
+            self.scene = scene
         self.state = PanelState(runtime=PanelRuntime.STARTING)
         self._closed = False
         self._operation_sequence_id = 0
@@ -302,11 +317,7 @@ class ViserPanelGui:
                 continue
             config = self.adapter.get_robot_config(str(group["robot_name"]))
             current = self.adapter.get_current_joint_state(str(group["robot_name"]))
-            current_by_name = (
-                dict(zip(current.name, current.position, strict=False))
-                if current is not None
-                else {}
-            )
+            current_by_name = self._joint_values_by_name(str(group["robot_name"]), current)
             joint_limits_lower = config.joint_limits_lower if config is not None else None
             joint_limits_upper = config.joint_limits_upper if config is not None else None
             for index, (global_name, local_name) in enumerate(
@@ -314,7 +325,14 @@ class ViserPanelGui:
             ):
                 joint_name = str(global_name)
                 local = str(local_name)
-                value = float(target_by_name.get(joint_name, current_by_name.get(local, 0.0)))
+                value = float(
+                    target_by_name.get(
+                        joint_name,
+                        target_by_name.get(
+                            local, current_by_name.get(joint_name, current_by_name.get(local, 0.0))
+                        ),
+                    )
+                )
                 lower, upper = DEFAULT_JOINT_LIMITS
                 if joint_limits_lower is not None and index < len(joint_limits_lower):
                     lower = joint_limits_lower[index]
@@ -533,10 +551,13 @@ class ViserPanelGui:
             current = self.adapter.get_current_joint_state(str(group["robot_name"]))
             if current is None:
                 continue
-            current_by_name = dict(zip(current.name, current.position, strict=False))
+            current_by_name = self._joint_values_by_name(str(group["robot_name"]), current)
             names = [str(name) for name in group["joint_names"]]
             local_names = [str(name) for name in group["local_joint_names"]]
-            positions = [float(current_by_name.get(local, 0.0)) for local in local_names]
+            positions = [
+                float(current_by_name.get(global_name, current_by_name.get(local, 0.0)))
+                for global_name, local in zip(names, local_names, strict=False)
+            ]
             self.state.group_joint_targets[group_id] = JointState(
                 {"name": names, "position": positions}
             )
@@ -572,12 +593,31 @@ class ViserPanelGui:
             current = self.adapter.get_current_joint_state(str(group["robot_name"]))
             if current is None:
                 continue
-            current_by_name = dict(zip(current.name, current.position, strict=False))
+            current_by_name = self._joint_values_by_name(str(group["robot_name"]), current)
             snapshot[group_id] = [
-                float(current_by_name.get(str(local_name), 0.0))
-                for local_name in group["local_joint_names"]
+                float(
+                    current_by_name.get(str(global_name), current_by_name.get(str(local_name), 0.0))
+                )
+                for global_name, local_name in zip(
+                    group["joint_names"], group["local_joint_names"], strict=False
+                )
             ]
         return snapshot
+
+    @staticmethod
+    def _joint_values_by_name(robot_name: str, joint_state: JointState | None) -> dict[str, float]:
+        if joint_state is None:
+            return {}
+        values: dict[str, float] = {}
+        for name, position in zip(joint_state.name, joint_state.position, strict=False):
+            name_str = str(name)
+            position_float = float(position)
+            values[name_str] = position_float
+            if "/" in name_str:
+                values[name_str.rsplit("/", 1)[1]] = position_float
+            else:
+                values[f"{robot_name}/{name_str}"] = position_float
+        return values
 
     def _sync_preset_dropdown(self) -> None:
         handle = self._handles.get("preset")
@@ -674,18 +714,6 @@ class ViserPanelGui:
                     handle.value = float(value)
         finally:
             self._suppress_target_callbacks = False
-
-    def _target_from_sliders(self, robot_name: str) -> JointState | None:
-        config = self.adapter.get_robot_config(robot_name)
-        if config is None:
-            self._set_error("No robot config")
-            return None
-        values = [
-            float(self._joint_sliders[name].value)
-            for name in config.joint_names
-            if name in self._joint_sliders
-        ]
-        return self.adapter.joints_from_values(config.joint_names, values)
 
     def _on_joint_slider_update(self, _joint_name: str) -> None:
         if self._closed:

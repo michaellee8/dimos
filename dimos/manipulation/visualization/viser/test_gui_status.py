@@ -19,7 +19,6 @@ import pytest
 pytest.importorskip("viser", reason="Viser optional dependency is not installed")
 
 from dimos.manipulation.visualization.types import TargetEvaluation
-from dimos.manipulation.visualization.viser.adapter import InProcessViserAdapter
 from dimos.manipulation.visualization.viser.config import ViserVisualizationConfig
 from dimos.manipulation.visualization.viser.gui import ViserPanelGui
 from dimos.manipulation.visualization.viser.state import FeasibilityStatus
@@ -29,9 +28,8 @@ class StatusOnlyServer:
     pass
 
 
-class StatusOnlyAdapter(InProcessViserAdapter):
-    def __init__(self) -> None:
-        pass
+class StatusOnlyAdapter:
+    pass
 
 
 @pytest.mark.parametrize(

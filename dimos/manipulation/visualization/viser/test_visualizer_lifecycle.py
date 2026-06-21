@@ -28,7 +28,6 @@ from dimos.manipulation.visualization.viser import (
     runtime as runtime_module,
     visualizer as visualizer_module,
 )
-from dimos.manipulation.visualization.viser.adapter import InProcessViserAdapter
 from dimos.manipulation.visualization.viser.animation import GroupPreviewAnimation
 from dimos.manipulation.visualization.viser.config import ViserVisualizationConfig
 from dimos.manipulation.visualization.viser.runtime import ViserRuntime
@@ -123,10 +122,12 @@ def test_visualizer_initializes_all_scene_robots_from_planning_scene(
         def __init__(
             self,
             server: FakeServer,
-            adapter: InProcessViserAdapter,
+            world_monitor: object,
+            manipulation_module: object,
             config: ViserVisualizationConfig,
             scene: FakeScene,
         ) -> None:
+            del world_monitor, manipulation_module, config, scene
             calls.append(("create", "gui"))
 
         def start(self) -> None:
@@ -201,10 +202,12 @@ def test_visualizer_closes_partial_startup_when_gui_start_fails(
         def __init__(
             self,
             server: FakeServer,
-            adapter: InProcessViserAdapter,
+            world_monitor: object,
+            manipulation_module: object,
             config: ViserVisualizationConfig,
             scene: FakeScene,
         ) -> None:
+            del world_monitor, manipulation_module, config, scene
             pass
 
         def start(self) -> None:
@@ -307,10 +310,12 @@ def test_visualizer_close_is_best_effort_when_gui_raises(
         def __init__(
             self,
             server: FakeServer,
-            adapter: InProcessViserAdapter,
+            world_monitor: object,
+            manipulation_module: object,
             config: ViserVisualizationConfig,
             scene: FakeScene,
         ) -> None:
+            del world_monitor, manipulation_module, config, scene
             pass
 
         def start(self) -> None:
