@@ -22,16 +22,9 @@ from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.global_config import global_config
 from dimos.core.stream import In
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
-from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
-from dimos.hardware.sensors.lidar.fastlio2.recorder import FastLio2Recorder
 from dimos.hardware.sensors.lidar.livox.module import Mid360
-from dimos.mapping.recording.mid360_realsense.static_transforms import (
-    MID360_TO_WORLD,
-    REALSENSE_COLOR_OPTICAL_FRAME_TO_MID360_IMU_FRAME,
-)
-from dimos.memory2.module import pose_setter_for
-from dimos.msgs.geometry_msgs.Pose import Pose
-from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.hardware.sensors.lidar.pointlio.module import PointLio
+from dimos.hardware.sensors.lidar.pointlio.recorder import PointlioRecorder
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image
@@ -40,22 +33,6 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.utils.logging_config import set_run_log_dir, setup_logger
 
 logger = setup_logger()
-
-# FAST-LIO odom is the Mid-360 IMU frame; map it to the RealSense color optical
-# frame. See static_transforms.py for the geometry and sources.
-MID360_TO_CAMERA_OPTICAL = REALSENSE_COLOR_OPTICAL_FRAME_TO_MID360_IMU_FRAME.inverse()
-
-# FAST-LIO inits level (gravity zeroes pitch/roll) with its origin at the Mid-360 IMU, so its
-# world frame already shares our flat world's orientation and only differs by the screw->IMU
-# lever arm. Re-anchor onto the camera screw with a pure translation -- no rotation, since both
-# frames are level and share heading (the rig's screw->IMU offset is pure pitch). Applying the
-# full mid360->world rotation here would wrongly tilt the trajectory by the lidar's ~26deg pitch.
-WORLD_TO_FASTLIO_WORLD = Transform(
-    translation=MID360_TO_WORLD.inverse().translation,
-    frame_id="world",
-    child_frame_id="fastlio_world",
-)
-
 
 _LIDAR_IP = os.getenv("LIDAR_IP", "192.168.1.107")
 
@@ -66,22 +43,17 @@ def _default_recording_dir() -> Path:
     return Path("recordings") / stamp
 
 
-class TfHackRecorder(FastLio2Recorder):
-    """Records with statically-applied transforms instead of querying tf.
+class RealsenseRecorder(PointlioRecorder):
+    """Records Point-LIO odom + lidar plus the RealSense + raw Livox streams.
 
-    FastLio2 tracks the Mid-360 (``mid360_link``) and reports its pose in the
-    ``world`` frame as ``fastlio_odometry``; its registered cloud is likewise
-    already in that world frame. Recorded observations are anchored from the
-    latest fastlio odom and the fixed camera mount:
-
-    - ``fastlio_lidar`` / ``fastlio_odometry`` -> ``mid360_link`` pose in world
-    - ``color_image`` / ``realsense_depth_image`` / ``realsense_pointcloud``
-      -> ``camera_optical`` pose in world
-    - everything else (odom, camera_info, imu) -> tf fallback / no pose
+    Point-LIO stamps each ``pointlio_lidar`` frame with the latest odometry pose
+    (inherited ``@pose_setter_for``), so the trajectory is baked into the cloud at
+    record time. The camera and raw-livox streams are recorded as-is; the offline
+    post-process aligns them.
     """
 
-    fastlio_lidar: In[PointCloud2]
-    fastlio_odometry: In[Odometry]
+    pointlio_odometry: In[Odometry]
+    pointlio_lidar: In[PointCloud2]
     color_image: In[Image]
     realsense_depth_image: In[Image]
     realsense_pointcloud: In[PointCloud2]
@@ -90,41 +62,6 @@ class TfHackRecorder(FastLio2Recorder):
     realsense_imu: In[Imu]
     livox_lidar: In[PointCloud2]
     livox_imu: In[Imu]
-
-    _latest_fastlio_odom: Odometry | None = None
-
-    @pose_setter_for("fastlio_odometry")
-    def _odom_pose(self, msg: Odometry) -> Pose | None:
-        self._latest_fastlio_odom = msg
-        world_to_mid360 = self._world_to_mid360_from_fastlio()
-        return world_to_mid360.to_pose() if world_to_mid360 is not None else None
-
-    @pose_setter_for("fastlio_lidar")
-    def _lidar_pose(self, msg: PointCloud2) -> Pose | None:
-        world_to_mid360 = self._world_to_mid360_from_fastlio()
-        return world_to_mid360.to_pose() if world_to_mid360 is not None else None
-
-    @pose_setter_for("color_image", "realsense_depth_image", "realsense_pointcloud")
-    def _camera_pose(self, msg: object) -> Pose | None:
-        world_to_mid360 = self._world_to_mid360_from_fastlio()
-        if world_to_mid360 is None:
-            return None
-        return (world_to_mid360 + MID360_TO_CAMERA_OPTICAL).to_pose()
-
-    def _world_to_mid360_from_fastlio(self) -> Transform | None:
-        odom = self._latest_fastlio_odom
-        if odom is None:
-            return None
-        fastlio_pose = Transform(
-            translation=odom.position,
-            rotation=odom.orientation,
-            frame_id="fastlio_world",
-            child_frame_id="mid360_link",
-            ts=odom.ts,
-        )
-        world_to_mid360 = WORLD_TO_FASTLIO_WORLD + fastlio_pose
-        world_to_mid360.ts = odom.ts
-        return world_to_mid360
 
 
 realsense_mid360_record = autoconnect(
@@ -145,16 +82,16 @@ realsense_mid360_record = autoconnect(
             (Mid360, "imu", "livox_imu"),
         ]
     ),
-    FastLio2.blueprint(
+    PointLio.blueprint(
         frame_id="world",
         lidar_ip=_LIDAR_IP,
     ).remappings(
         [
-            (FastLio2, "lidar", "fastlio_lidar"),
-            (FastLio2, "odometry", "fastlio_odometry"),
+            (PointLio, "lidar", "pointlio_lidar"),
+            (PointLio, "odometry", "pointlio_odometry"),
         ]
     ),
-    TfHackRecorder.blueprint(),
+    RealsenseRecorder.blueprint(),
 ).global_config(n_workers=6)
 
 
@@ -165,6 +102,6 @@ if __name__ == "__main__":
     global_config.obstacle_avoidance = False
     coordinator = ModuleCoordinator.build(
         realsense_mid360_record,
-        {TfHackRecorder.name: {"db_path": str(recording_dir / "mem2.db")}},
+        {RealsenseRecorder.name: {"db_path": str(recording_dir / "mem2.db")}},
     )
     coordinator.loop()

@@ -52,7 +52,6 @@ from dimos.mapping.recording.mid360_realsense.post_process import (
 from dimos.mapping.recording.utils.apriltags import detect_apriltags
 from dimos.mapping.recording.utils.build_rrd import _log_map, _log_path_gradient
 from dimos.mapping.recording.utils.gtsam_gt import build_gtsam_gt, write_gtsam_odom
-from dimos.mapping.recording.utils.lidar_reanchor import reanchor_stream
 from dimos.mapping.recording.utils.post_process import CameraParams
 from dimos.memory2.store.sqlite import SqliteStore
 
@@ -63,10 +62,9 @@ MIN_SHARED_TAGS = 3  # rigid SE3 needs >=3 non-collinear correspondences
 DB_NAME = "mem2.db"
 DOG_TAG_ID = 17  # mounted on the robot dog -> not a static landmark, ignored
 GTSAM_STREAM = "gtsam_odom"
-FASTLIO_LIDAR = "fastlio_lidar"
-FASTLIO_ODOM = "fastlio_odometry"
+POINTLIO_LIDAR = "pointlio_lidar"
+POINTLIO_ODOM = "pointlio_odometry"
 LOOP_LIDAR = "livox_lidar"  # raw sensor-frame cloud (loop closure needs sensor, not world, frame)
-CORRECTED_LIDAR = "fastlio_lidar_corrected"
 REALSENSE_INFO_STREAM = "realsense_camera_info"
 
 
@@ -167,7 +165,7 @@ def _solve(
             detections,
             optical_in_base,
             exclude_marker_ids=(DOG_TAG_ID,),
-            pose_stream=FASTLIO_ODOM,
+            pose_stream=POINTLIO_ODOM,
             loop_lidar_stream=LOOP_LIDAR,
             add_loop_closures=add_loop_closures,
             return_landmarks=True,
@@ -176,22 +174,14 @@ def _solve(
 
 
 def _write_corrected(db: Path, trajectory: Trajectory) -> None:
-    """Write `gtsam_odom` (+ .tum) and re-anchor the fastlio lidar onto it."""
+    """Write `gtsam_odom` (+ .tum) — the drift-corrected groundtruth trajectory.
+
+    Point-LIO already stamps ``pointlio_lidar`` with its odom pose at record time,
+    so there's no separate lidar re-anchor pass (dropped in the post-process
+    refactor); the map viz below uses that recorder-stamped cloud directly.
+    """
     with SqliteStore(path=str(db)) as store:
         write_gtsam_odom(store, trajectory, GTSAM_STREAM, db.parent / "gtsam_odom.tum")
-        stream_names = store.list_streams()
-        if FASTLIO_LIDAR in stream_names and FASTLIO_ODOM in stream_names:
-            try:
-                reanchor_stream(
-                    store,
-                    str(db),
-                    lidar_stream=FASTLIO_LIDAR,
-                    odom_stream=FASTLIO_ODOM,
-                    gtsam_stream=GTSAM_STREAM,
-                    out_stream=CORRECTED_LIDAR,
-                )
-            except Exception as error:
-                print(f"   re-anchor {CORRECTED_LIDAR} failed: {error}")
 
 
 def build_combined_rrd(
@@ -214,9 +204,9 @@ def build_combined_rrd(
     )
 
     # raw odom dim, corrected odom bright; anchor in greens/cyan, target in warms.
-    _log_path_gradient(str(anchor_db), FASTLIO_ODOM, "world/anchor/fastlio_raw", (0, 110, 150))
+    _log_path_gradient(str(anchor_db), POINTLIO_ODOM, "world/anchor/pointlio_raw", (0, 110, 150))
     _log_path_gradient(str(anchor_db), GTSAM_STREAM, "world/anchor/corrected", (0, 220, 120))
-    _log_path_gradient(str(target_db), FASTLIO_ODOM, "world/target/fastlio_raw", (150, 110, 0))
+    _log_path_gradient(str(target_db), POINTLIO_ODOM, "world/target/pointlio_raw", (150, 110, 0))
     _log_path_gradient(str(target_db), GTSAM_STREAM, "world/target/corrected", (255, 150, 60))
 
     for marker_id, pose7 in sorted(tag_map.items()):
@@ -234,9 +224,9 @@ def build_combined_rrd(
 
     if with_maps:
         with SqliteStore(path=str(anchor_db)) as store:
-            _log_map(store, CORRECTED_LIDAR, "world/anchor/map", 0.1, (0, 180, 170))
+            _log_map(store, POINTLIO_LIDAR, "world/anchor/map", 0.1, (0, 180, 170))
         with SqliteStore(path=str(target_db)) as store:
-            _log_map(store, CORRECTED_LIDAR, "world/target/map", 0.1, (240, 160, 40))
+            _log_map(store, POINTLIO_LIDAR, "world/target/map", 0.1, (240, 160, 40))
 
     print(f"   wrote {out_path}")
 
@@ -254,7 +244,7 @@ def main() -> None:
     parser.add_argument(
         "--loop",
         action="store_true",
-        help="add lidar loop-closure constraints (off by default: with fastlio_odometry as the "
+        help="add lidar loop-closure constraints (off by default: with pointlio_odometry as the "
         "pose chain the livox_lidar revisits are unreliable and currently degrade the solve)",
     )
     parser.add_argument("--no-maps", action="store_true", help="skip the re-anchored lidar maps")

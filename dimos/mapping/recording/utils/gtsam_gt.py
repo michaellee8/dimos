@@ -57,9 +57,9 @@ def _pose_to7(pose3):
 
 
 def pick_pose_stream(connection) -> str:
-    """The odom stream to use as the pose chain (go2_odom / fastlio_odometry preferred)."""
+    """The odom stream to use as the pose chain (go2_odom / pointlio_odometry preferred)."""
     stream_names = [row[0] for row in connection.execute("SELECT name FROM _streams").fetchall()]
-    candidates = [name for name in ["go2_odom", "fastlio_odometry"] if name in stream_names]
+    candidates = [name for name in ["go2_odom", "pointlio_odometry"] if name in stream_names]
     candidates += [
         name for name in stream_names if "odom" in name.lower() and name not in candidates
     ]

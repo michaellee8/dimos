@@ -22,18 +22,10 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.global_config import global_config
 from dimos.core.stream import In
-from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
-from dimos.hardware.sensors.lidar.fastlio2.recorder import FastLio2Recorder
-from dimos.hardware.sensors.lidar.fastlio2.speed_warner import SpeedWarner
 from dimos.hardware.sensors.lidar.livox.module import Mid360
-from dimos.mapping.recording.go2_mid360.static_transforms import (
-    BASE_TO_CAMERA_OPTICAL,
-    MID360_TO_BASE,
-)
-from dimos.memory2.module import pose_setter_for
-from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.hardware.sensors.lidar.pointlio.module import PointLio
+from dimos.hardware.sensors.lidar.pointlio.recorder import PointlioRecorder
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.Imu import Imu
@@ -55,22 +47,18 @@ def _default_recording_dir() -> Path:
     return Path("recordings") / stamp
 
 
-class Go2TfHackRecorder(FastLio2Recorder):
-    """Records with statically-applied transforms instead of querying tf.
+class Go2Recorder(PointlioRecorder):
+    """Records Point-LIO odom + lidar plus the Go2's companion streams.
 
-    FastLio2 tracks the Mid-360 (``mid360_link``) and reports its pose in the
-    ``world`` frame as ``fastlio_odometry``; its registered cloud is likewise
-    already in that world frame. We anchor recorded observations to the robot
-    body, building every pose from the latest fastlio odom and fixed mounts:
-
-    - ``fastlio_lidar`` -> ``base_link`` pose in world (odom, then mid360_link -> base_link)
-    - ``color_image``   -> ``camera_optical`` pose in world (odom, mid360_link -> base_link,
-      then base_link -> camera_optical)
-    - everything else (odom streams, imu) -> tf fallback / no pose
+    Point-LIO stamps each ``pointlio_lidar`` frame with the latest odometry pose
+    (inherited ``@pose_setter_for``), so the trajectory is baked into the cloud at
+    record time — no static-transform pose-fill needed here. The companion streams
+    (camera, raw livox, go2 odom/lidar) are recorded as-is; the offline
+    post-process aligns them.
     """
 
-    fastlio_lidar: In[PointCloud2]
-    fastlio_odometry: In[Odometry]
+    pointlio_odometry: In[Odometry]
+    pointlio_lidar: In[PointCloud2]
     go2_lidar: In[PointCloud2]
     go2_odom: In[PoseStamped]
     color_image: In[Image]
@@ -78,43 +66,6 @@ class Go2TfHackRecorder(FastLio2Recorder):
     zed_imu: In[Imu]
     livox_lidar: In[PointCloud2]
     livox_imu: In[Imu]
-
-    _latest_fastlio_odom: Odometry | None = None
-
-    @pose_setter_for("fastlio_odometry")
-    def _odom_pose(self, msg: Odometry) -> Pose | None:
-        self._latest_fastlio_odom = msg
-        world_to_base = self._world_to_base_from_fastlio()
-        return world_to_base.to_pose() if world_to_base is not None else None
-
-    @pose_setter_for("fastlio_lidar")
-    def _lidar_pose(self, msg: PointCloud2) -> Pose | None:
-        world_to_base = self._world_to_base_from_fastlio()
-        return world_to_base.to_pose() if world_to_base is not None else None
-
-    @pose_setter_for("color_image", "zed_color_image")
-    def _image_pose(self, msg: Image) -> Pose | None:
-        world_to_base = self._world_to_base_from_fastlio()
-        if world_to_base is None:
-            return None
-        return (world_to_base + BASE_TO_CAMERA_OPTICAL).to_pose()
-
-    @pose_setter_for("go2_odom")
-    def _go2_odom_pose(self, msg: PoseStamped) -> Pose | None:
-        return msg
-
-    def _world_to_base_from_fastlio(self) -> Transform | None:
-        odom = self._latest_fastlio_odom
-        if odom is None:
-            return None
-        world_to_mid360 = Transform(
-            translation=odom.position,
-            rotation=odom.orientation,
-            frame_id="world",
-            child_frame_id="mid360_link",
-            ts=odom.ts,
-        )
-        return world_to_mid360 + MID360_TO_BASE
 
 
 def _zed_camera_blueprint() -> Any:
@@ -163,21 +114,16 @@ unitree_go2_record = autoconnect(
             (Mid360, "imu", "livox_imu"),
         ]
     ),
-    FastLio2.blueprint(
+    PointLio.blueprint(
         frame_id="world",
         lidar_ip=_LIDAR_IP,
     ).remappings(
         [
-            (FastLio2, "lidar", "fastlio_lidar"),
-            (FastLio2, "odometry", "fastlio_odometry"),
+            (PointLio, "lidar", "pointlio_lidar"),
+            (PointLio, "odometry", "pointlio_odometry"),
         ]
     ),
-    Go2TfHackRecorder.blueprint(),
-    SpeedWarner.blueprint().remappings(
-        [
-            (SpeedWarner, "odometry", "fastlio_odometry"),
-        ]
-    ),
+    Go2Recorder.blueprint(),
     # Pygame keyboard teleop (WASD + Q/E, Z=lie down, X=stand). Its cmd_vel
     # feeds MovementManager's tele_cmd_vel; sit/stand are handled internally
     # via the auto-wired GO2ConnectionSpec.
@@ -196,6 +142,6 @@ if __name__ == "__main__":
     global_config.obstacle_avoidance = False
     coordinator = ModuleCoordinator.build(
         unitree_go2_record,
-        {Go2TfHackRecorder.name: {"db_path": str(recording_dir / "mem2.db")}},
+        {Go2Recorder.name: {"db_path": str(recording_dir / "mem2.db")}},
     )
     coordinator.loop()

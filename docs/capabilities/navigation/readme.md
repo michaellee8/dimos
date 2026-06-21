@@ -9,3 +9,7 @@ Note: in the future these will be merged into one system.
 ## Simple Nav
 
 - [Simple Navigation](/docs/capabilities/navigation/native/index.md) — column-carving voxel mapping + slope-based costmap
+
+## Recording
+
+- [Recording a Map](/docs/capabilities/navigation/recording_a_map.md) — drive a Go2 + Mid-360 around a space and capture lidar, odometry, and camera for offline mapping

@@ -173,7 +173,7 @@ def _log_odom_frames(db_path, stride=5):
     for stream, name in [
         ("gtsam_odom", "gtsam"),
         ("go2_odom", "go2"),
-        ("fastlio_odometry", "fastlio"),
+        ("pointlio_odometry", "pointlio"),
         ("odom", "odom"),
     ]:
         try:
@@ -244,7 +244,7 @@ def _log_apriltags(store, db_path, cam_xform, intrinsics, resolution, max_views_
         return
     print("   rrd: placing april_tags in 3D ...", flush=True)
     connection = sqlite3.connect(db_path)
-    traj_stream = "gtsam_odom" if _has_rows(connection, "gtsam_odom") else "fastlio_odometry"
+    traj_stream = "gtsam_odom" if _has_rows(connection, "gtsam_odom") else "pointlio_odometry"
     pose_rows = connection.execute(
         f"SELECT ts,pose_x,pose_y,pose_z,pose_qx,pose_qy,pose_qz,pose_qw "
         f'FROM "{traj_stream}" WHERE pose_qw IS NOT NULL ORDER BY ts'
@@ -436,15 +436,15 @@ def build_rrd(
         track = (
             "/world/go2_frame"
             if "go2_odom" in streams
-            else "/world/fastlio_frame"
-            if "fastlio_odometry" in streams
+            else "/world/pointlio_frame"
+            if "pointlio_odometry" in streams
             else "/world/gtsam_frame"
         )
         hide = {
             f"/world/{m}": rrb.EntityBehavior(visible=False)
             for m in (
                 "go2_map",
-                "fastlio_map",
+                "pointlio_map",
                 "onboard_map",
             )
         }
@@ -476,7 +476,7 @@ def build_rrd(
         ci = 0  # rotate a distinct base color through each point cloud
         for name, stream in [
             ("go2", "go2_lidar"),
-            ("fastlio", "fastlio_lidar"),
+            ("pointlio", "pointlio_lidar"),
             ("onboard", "lidar"),  # legacy Go2 onboard L1, own frame
         ]:
             if stream in streams:
@@ -490,7 +490,7 @@ def build_rrd(
         for stream, entity, base in [
             ("gtsam_odom", "world/gtsam_path", (0, 220, 0)),  # corrected GT -> green
             ("go2_odom", "world/go2_path", (220, 200, 0)),  # go2 odom -> yellow
-            ("fastlio_odometry", "world/fastlio_path", (0, 200, 220)),  # cyan
+            ("pointlio_odometry", "world/pointlio_path", (0, 200, 220)),  # cyan
             ("odom", "world/odom_path", (255, 165, 0)),  # Go2 onboard odom -> orange
         ]:
             _log_path_gradient(db_path, stream, entity, base)

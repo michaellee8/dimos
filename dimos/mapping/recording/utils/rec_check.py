@@ -32,8 +32,8 @@ STREAMS = (
     "color_image",
     "livox_imu",
     "livox_lidar",
-    "fastlio_lidar",
-    "fastlio_odometry",
+    "pointlio_lidar",
+    "pointlio_odometry",
     "go2_odom",
     "go2_color_image",
     "realsense_color_image",
@@ -136,7 +136,7 @@ def stream_rows(cur: sqlite3.Cursor, name: str) -> tuple[int, float | None, floa
 
 def odometry_travel(cur: sqlite3.Cursor) -> dict | None:
     rows = cur.execute(
-        "SELECT pose_x, pose_y, pose_z FROM fastlio_odometry WHERE pose_x IS NOT NULL ORDER BY ts"
+        "SELECT pose_x, pose_y, pose_z FROM pointlio_odometry WHERE pose_x IS NOT NULL ORDER BY ts"
     ).fetchall()
     if not rows:
         return None
@@ -169,7 +169,7 @@ def summarize(directory: Path) -> dict[str, Any]:
         "files": {},
         "pcap": None,
         "streams": {},
-        "fastlio_odometry_travel": None,
+        "pointlio_odometry_travel": None,
     }
     for path in (pcap, db, directory / "mem2.db-wal", directory / "mem2.db-shm"):
         summary["files"][path.name] = path.stat().st_size if path.exists() else None
@@ -205,7 +205,7 @@ def summarize(directory: Path) -> dict[str, Any]:
             "hz": (n - 1) / span if span > 0 else 0,
             "pose_pct": 100 * pose_n / n if n else 0,
         }
-    summary["fastlio_odometry_travel"] = odometry_travel(cur)
+    summary["pointlio_odometry_travel"] = odometry_travel(cur)
     connection.close()
     return summary
 
@@ -282,7 +282,7 @@ def report(directory: Path) -> int:
         sx, sy, sz = travel["start"]
         ex, ey, ez = travel["end"]
         bx, by, bz = travel["bbox_x"], travel["bbox_y"], travel["bbox_z"]
-        print("fastlio_odometry travel:")
+        print("pointlio_odometry travel:")
         print(f"  start          x={sx:.2f}  y={sy:.2f}  z={sz:.2f}")
         print(f"  end            x={ex:.2f}  y={ey:.2f}  z={ez:.2f}")
         print(f"  path_length    {travel['path_length']:.2f} m")
@@ -292,7 +292,7 @@ def report(directory: Path) -> int:
             f"y=[{by[0]:.1f},{by[1]:.1f}]  z=[{bz[0]:.1f},{bz[1]:.1f}]"
         )
     else:
-        print("fastlio_odometry travel: no pose-stamped rows")
+        print("pointlio_odometry travel: no pose-stamped rows")
 
     return 0
 
