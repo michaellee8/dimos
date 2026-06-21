@@ -86,7 +86,7 @@ You don't fuss with poses while recording — the Point-LIO recorder stamps each
 
 ## 5. Post-process
 
-This detects AprilTags, runs the drift-corrected trajectory solve, and writes a `.rrd` you can open in Rerun:
+This straightens the recording into a ground-truth map: it detects the AprilTags, runs the AprilTag pose-graph solve plus ICP loop closures to pull out drift, writes the corrected `gt_pointlio_*` streams back into the recording, and opens a before/after `.rrd` in Rerun.
 
 ```bash
 uv run --no-sync python dimos/mapping/recording/go2_mid360/post_process.py
@@ -97,6 +97,8 @@ With no argument it grabs the most recent recording. Point it at a specific one 
 ```bash
 uv run --no-sync python dimos/mapping/recording/go2_mid360/post_process.py recordings/2026-06-22_03-15pm-PST
 ```
+
+It also drops a `gt_pointlio_lidar.pc2.lcm` next to the recording — that's your **relocalization premap**. Point the relocalization module at it to localize a live robot against this map; see [Relocalization](/docs/capabilities/mapping/relocalization.md). Pass `--no-icp`, `--no-lcm`, or `--no-rrd` to skip a stage.
 
 ## 6. Sanity-check it
 
