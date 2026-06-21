@@ -12,16 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""G1 physical description and sensor odometry offsets."""
+"""G1 physical description, URDF frames, and sensor mounting."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
-from dimos.msgs.geometry_msgs.Pose import Pose
-from dimos.msgs.geometry_msgs.Quaternion import Quaternion
-from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.robot.config import RobotConfig
+from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.robot.urdf_loader import UrdfLoader
 from dimos.utils.data import LfsPath
 
 # this is robot-specific, but only needed for the local_planner module
@@ -29,13 +28,28 @@ from dimos.utils.data import LfsPath
 # probably only needs to be regenerated on robots that are notably different than the g1 (the go2 in rage mode probably needs different local planning paths)
 G1_LOCAL_PLANNER_PRECOMPUTED_PATHS = LfsPath("unitree_g1_local_planner_precomputed_paths")
 
-G1 = RobotConfig(
+
+@dataclass(frozen=True)
+class G1Config:
+    """Physical metadata used by G1 navigation and sensor blueprints."""
+
+    name: str
+    urdf: UrdfLoader
+    height_clearance: float
+    width_clearance: float
+    # Lidar height above the ground when standing (used as the LIO init pose).
+    # This is a stance value, not a kinematic mount, so it is NOT in the URDF.
+    sensor_height: float
+
+    @property
+    def static_transforms(self) -> dict[str, Transform]:
+        return self.urdf.static_transforms
+
+
+G1 = G1Config(
     name="unitree_g1",
-    model_path=Path(__file__).parent / "g1.urdf",
+    urdf=UrdfLoader(name="unitree_g1", model_path=Path(__file__).parent / "g1.urdf"),
     height_clearance=1.2,
     width_clearance=0.6,
-    internal_odom_offsets={
-        # Mid-360 lidar: 1.2 m above ground.
-        "mid360_link": Pose(0.0, 0.0, 1.2, *Quaternion.from_euler(Vector3(0, 0, 0))),
-    },
+    sensor_height=1.2,
 )

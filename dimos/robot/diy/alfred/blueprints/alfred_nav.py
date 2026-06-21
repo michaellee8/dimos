@@ -54,7 +54,7 @@ alfred_nav = (
         FastLio2.blueprint(
             host_ip=os.getenv("LIDAR_HOST_IP", "192.168.1.5"),
             lidar_ip=os.getenv("LIDAR_IP", "192.168.1.189"),
-            mount=ALFRED.internal_odom_offsets["mid360_link"],
+            mount=ALFRED.sensor_mount,
             map_freq=1.0,
             config="default.yaml",
         ),

@@ -256,6 +256,3 @@ def _parse_triple(value: str) -> tuple[float, float, float]:
     if len(parts) != 3:
         raise ValueError(f"Expected 3 floats, got {value!r}")
     return (float(parts[0]), float(parts[1]), float(parts[2]))
-
-
-__all__ = ["JointDescription", "ModelDescription", "parse_model"]

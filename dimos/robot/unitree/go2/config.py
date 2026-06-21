@@ -22,7 +22,7 @@ from dimos.constants import (
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
-from dimos.robot.config import RobotConfig
+from dimos.robot.urdf_loader import UrdfLoader
 
 _FRONT_CAMERA_720_YAML = resources.files("dimos.robot.unitree.go2").joinpath(
     "front_camera_720.yaml"
@@ -34,7 +34,7 @@ def camera_info_static() -> CameraInfo:
         return CameraInfo.from_yaml(str(yaml_path))
 
 
-Go2Config = RobotConfig(
+Go2Config = UrdfLoader(
     name="unitree_go2",
     model_path=Path(__file__).parent / "go2.urdf",
 )

@@ -810,7 +810,7 @@ class TestMultiTBuffer:
 
 
 class TestStaticTransforms:
-    LCM_PROPAGATION_DELAY = 2
+    LCM_PROPAGATION_DELAY = 0.2
     MODULE_START_DELAY = 0.05
     STRICT_TOLERANCE = 0.001
     STALE_AGE = 1000
