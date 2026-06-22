@@ -285,9 +285,3 @@ class RobotConfig(BaseModel):
             auto_start=auto_start,
             params=params,
         )
-
-
-__all__ = [
-    "GripperConfig",
-    "RobotConfig",
-]

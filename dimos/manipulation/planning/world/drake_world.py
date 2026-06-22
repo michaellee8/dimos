@@ -36,6 +36,7 @@ from dimos.manipulation.planning.spec.models import (
     GeneratedPlan,
     Obstacle,
     PlanningGroupID,
+    PlanningSceneInfo,
     WorldRobotID,
 )
 from dimos.manipulation.planning.spec.protocols import VisualizationSpec, WorldSpec

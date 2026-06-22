@@ -364,6 +364,7 @@ class ManipulationModule(Module):
                     # backend's full robot TF tree, once consumers stop assuming a
                     # single robot-scoped end-effector frame.
                     target_frame = config.end_effector_link
+                    ee_pose: PoseStamped | None
                     pose_group_id = self._primary_pose_group_id_for_robot(config.name)
                     if pose_group_id is not None:
                         pose_group = self._world_monitor.planning_groups.get(pose_group_id)
@@ -1016,7 +1017,7 @@ class ManipulationModule(Module):
             else []
         )
 
-        return {
+        info: RobotInfo = {
             "name": config.name,
             "world_robot_id": robot_id,
             "joint_names": config.joint_names,
@@ -1032,6 +1033,7 @@ class ManipulationModule(Module):
             if (init := self._init_joints.get(robot_name))
             else None,
         }
+        return info
 
     def robot_items(self) -> list[tuple[RobotName, WorldRobotID, RobotModelConfig]]:
         """Return configured robots for in-process visualization adapters."""
@@ -1207,13 +1209,14 @@ class ManipulationModule(Module):
         )
         assert self._world_monitor is not None
 
-        dispatches: list[tuple[RobotName, RobotModelConfig, JointTrajectory]] = []
+        dispatches: list[tuple[RobotName, str, RobotModelConfig, JointTrajectory]] = []
         for name in affected:
             robot = self._get_robot(name)
             if robot is None:
                 return False
             resolved_name, robot_id, config, traj_gen = robot
-            if not config.coordinator_task_name:
+            task_name = config.coordinator_task_name
+            if not task_name:
                 logger.error(f"No coordinator_task_name for '{resolved_name}'")
                 return False
 
@@ -1266,31 +1269,27 @@ class ManipulationModule(Module):
                 points=local_trajectory.points,
                 timestamp=local_trajectory.timestamp,
             )
-            dispatches.append((resolved_name, config, trajectory))
+            dispatches.append((resolved_name, task_name, config, trajectory))
 
         self._state = ManipulationState.EXECUTING
-        for _name, config, trajectory in dispatches:
+        for _name, task_name, config, trajectory in dispatches:
             logger.info(
                 "Executing: task='%s', %d pts, %.2fs",
-                config.coordinator_task_name,
+                task_name,
                 len(trajectory.points),
                 trajectory.duration,
             )
             try:
                 result = self._invoke_coordinator_task(
                     client,
-                    config.coordinator_task_name,
+                    task_name,
                     "execute",
                     {"trajectory": trajectory},
                 )
             except TimeoutError as exc:
-                return self._fail(
-                    f"Coordinator RPC timed out for task '{config.coordinator_task_name}': {exc}"
-                )
+                return self._fail(f"Coordinator RPC timed out for task '{task_name}': {exc}")
             except Exception as exc:
-                return self._fail(
-                    f"Coordinator RPC failed for task '{config.coordinator_task_name}': {exc}"
-                )
+                return self._fail(f"Coordinator RPC failed for task '{task_name}': {exc}")
             logger.info(
                 "Coordinator execute result: task='%s', result=%r",
                 config.coordinator_task_name,

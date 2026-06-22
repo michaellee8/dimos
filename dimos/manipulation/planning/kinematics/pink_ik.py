@@ -47,9 +47,9 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
 try:
-    import pink
-    import pinocchio
-    import qpsolvers
+    import pink  # type: ignore[import-not-found, import-untyped]
+    import pinocchio  # type: ignore[import-not-found]
+    import qpsolvers  # type: ignore[import-not-found]
 except ImportError as exc:
     pink = None  # type: ignore[assignment]
     pinocchio = None  # type: ignore[assignment]
@@ -817,6 +817,3 @@ def _single_pose_group_for_robot(world: WorldSpec, robot_name: RobotName) -> Pla
             f"Robot '{robot_name}' has {len(pose_groups)} pose-targetable planning groups"
         )
     return pose_groups[0]
-
-
-__all__ = ["PinkIK", "PinkIKConfig", "PinkIKDependencyError"]

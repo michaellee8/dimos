@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, TypeAlias, cast
 
 from dimos.manipulation.planning.groups.models import PlanningGroup
@@ -361,7 +361,10 @@ class ViserPanelGui:
                 continue
             ee_control = self.scene.ensure_target_controls(
                 group_id,
-                lambda target, gid=group_id: self._on_transform_update(gid, target),
+                cast(
+                    "Callable[[TransformControlsHandle], None]",
+                    lambda target, gid=group_id: self._on_transform_update(gid, target),
+                ),
             )
             if ee_control is not None:
                 self._handles[handle_key] = ee_control
@@ -380,7 +383,8 @@ class ViserPanelGui:
             return
         joint_folder = self._handles.get("joint_control_folder")
         if joint_folder is not None:
-            with joint_folder:
+            folder = cast("GuiFolderHandle", joint_folder)
+            with folder:
                 self._build_joint_slider_handles(gui)
             return
         self._build_joint_slider_handles(gui)
@@ -502,7 +506,12 @@ class ViserPanelGui:
                     ),
                     hint="Click to toggle this planning group in the target set.",
                 )
-                handle.on_click(lambda _event, gid=group_id: self._toggle_group_selected(gid))
+                handle.on_click(
+                    cast(
+                        "Callable[[object], None]",
+                        lambda _event, gid=group_id: self._toggle_group_selected(gid),
+                    )
+                )
                 self._handles[key] = handle
             else:
                 self._set_optional_handle_attr(handle, "label", label)
@@ -783,7 +792,7 @@ class ViserPanelGui:
             return
         if self._suppress_target_callbacks or group_id not in self.state.selected_group_ids:
             return
-        pose = pose_from_transform_values(target.position, target.wxyz)
+        pose = pose_from_transform_values(target.position.tolist(), target.wxyz.tolist())
         self.state.cartesian_target = pose
         self.state.pose_targets[group_id] = pose
         sequence_id = self.state.next_sequence_id()

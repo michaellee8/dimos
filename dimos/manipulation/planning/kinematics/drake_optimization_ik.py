@@ -16,10 +16,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from dimos.manipulation.planning.groups.models import PlanningGroup
 from dimos.manipulation.planning.spec.enums import IKStatus
 from dimos.manipulation.planning.spec.models import IKResult, WorldRobotID
 from dimos.manipulation.planning.spec.protocols import WorldSpec
@@ -150,6 +152,44 @@ class DrakeOptimizationIK:
             f"IK failed after {max_attempts} attempts",
         )
 
+    def solve_pose_targets(
+        self,
+        world: WorldSpec,
+        pose_targets: Mapping[PlanningGroup, PoseStamped],
+        auxiliary_groups: Sequence[PlanningGroup] = (),
+        seed: JointState | None = None,
+        position_tolerance: float = 0.001,
+        orientation_tolerance: float = 0.01,
+        max_attempts: int = 10,
+    ) -> IKResult:
+        """Solve a single planning-group pose target for protocol compatibility."""
+        if auxiliary_groups:
+            return _create_failure_result(
+                IKStatus.NO_SOLUTION,
+                "DrakeOptimizationIK does not support auxiliary planning groups",
+            )
+        if len(pose_targets) != 1:
+            return _create_failure_result(
+                IKStatus.NO_SOLUTION,
+                "DrakeOptimizationIK supports exactly one pose target",
+            )
+        group, target_pose = next(iter(pose_targets.items()))
+        robot_id = _robot_id_for_name(world, group.robot_name)
+        if robot_id is None:
+            return _create_failure_result(
+                IKStatus.NO_SOLUTION,
+                f"No robot named '{group.robot_name}'",
+            )
+        return self.solve(
+            world=world,
+            robot_id=robot_id,
+            target_pose=target_pose,
+            seed=seed,
+            position_tolerance=position_tolerance,
+            orientation_tolerance=orientation_tolerance,
+            max_attempts=max_attempts,
+        )
+
     def _solve_single(
         self,
         world: WorldSpec,
@@ -251,6 +291,13 @@ def _create_success_result(
         iterations=iterations,
         message="IK solution found",
     )
+
+
+def _robot_id_for_name(world: WorldSpec, robot_name: str) -> WorldRobotID | None:
+    for robot_id in world.get_robot_ids():
+        if world.get_robot_config(robot_id).name == robot_name:
+            return robot_id
+    return None
 
 
 def _create_failure_result(
