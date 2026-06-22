@@ -129,55 +129,11 @@ touching `WorldSpec`, IK, planner objects, or live Drake contexts directly. Rend
 mutable joint state/path containers at the read boundary, then updates the Viser scene after
 manipulation/world accessors have returned.
 
-#### Viser Planning Target Set workflow
-
-The Viser manipulation panel is planning-group centric. Select one or more planning groups
-to form a **Planning Target Set**; IK, feasibility checks, planning, preview, execute,
-clear-plan, and plan freshness are scoped to that whole set. A single xArm uses the same
-workflow as a one-group target set, while dual-arm stacks can select both manipulators and
-plan them together.
-
-- Use the planning-group checklist to add or remove groups. **Select all manipulators**
-  selects every planning group named `manipulator`.
-- Pose target gizmos are keyed by planning group ID. Moving any selected pose gizmo triggers
-  whole-set IK evaluation and updates the global target joints when IK succeeds.
-- Joint sliders are grouped by planning group. Editing joints triggers whole-set joint
-  evaluation and refreshes visible pose gizmos from FK outputs when available.
-- Auxiliary groups are selected target-set members without direct gizmos. Their joints still
-  participate in IK seeds, target joints, feasibility, planning, preview, and execute.
-- The panel exposes one Plan, Preview, Execute, Cancel, and Clear row for the whole target set;
-  normal operation does not expose per-robot preview or execute controls.
-
-Single xArm Viser example:
-
-```bash
-uv run dimos run xarm7-planner-coordinator \
-  -o manipulationmodule.visualization.backend=viser
-```
-
-Enable browser-panel execution only when an operator is intentionally allowed to execute plans:
-
-```bash
-uv run dimos run xarm7-planner-coordinator \
-  -o manipulationmodule.visualization.backend=viser \
-  -o manipulationmodule.visualization.allow_plan_execute=true
-```
-
-Dual-arm mock Viser example:
-
-```bash
-uv run dimos run dual-xarm6-planner-coordinator
-```
-
 External manipulation visualizers are initialized from a backend-neutral planning-scene snapshot
 after the planning world has added its robots. This snapshot maps world robot IDs to
 `RobotModelConfig` metadata so Viser can prepare current, target, and transient preview robot
 visuals without `WorldMonitor` depending on Viser-specific hooks. Embedded Meshcat visualization
 does not need extra setup because it observes the Drake world directly.
-
-Viser renders robot placement as authored in the prepared URDF/xacro output. It does not apply
-`RobotModelConfig.base_pose` as an additional implicit visual transform, which avoids
-double-applying placement for multi-robot models that already encode offsets in URDF/xacro.
 
 Panel execution is opt-in. Leave `allow_plan_execute=False` unless the operator intentionally
 wants the browser panel to call the existing manipulation execution path.
