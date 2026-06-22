@@ -35,6 +35,7 @@ from dimos.manipulation.visualization.viser.panel_backend import (
     is_state_stale,
     joint_values_by_name,
     pose_from_transform_values,
+    update_target_visual_state,
 )
 from dimos.manipulation.visualization.viser.runtime import VISER_INSTALL_HINT
 from dimos.manipulation.visualization.viser.scene import ViserManipulationScene
@@ -889,10 +890,11 @@ class ViserPanelGui:
         )
         self.state.error = "" if success and collision_free else self.state.feasibility.message
         target_joints = result.get("target_joints") or result.get("joint_state")
-        if isinstance(target_joints, JointState) and success and collision_free:
+        if isinstance(target_joints, JointState):
             self.state.target_joints = JointState(target_joints)
-            self.state.last_valid_target_joints = JointState(target_joints)
             self._split_target_joints_by_group(target_joints)
+            if success and collision_free:
+                self.state.last_valid_target_joints = JointState(target_joints)
         group_poses = result.get("group_poses", {})
         if isinstance(group_poses, dict):
             self.state.group_poses = {
@@ -900,14 +902,14 @@ class ViserPanelGui:
                 for group_id, pose in group_poses.items()
                 if isinstance(pose, Pose)
             }
-        if request.source == "joints" and success and collision_free:
+        if request.source == "joints" and isinstance(target_joints, JointState):
             self._sync_pose_targets_from_group_poses()
         group_diagnostics = result.get("group_diagnostics", {})
         if isinstance(group_diagnostics, dict):
             self.state.group_diagnostics = {
                 str(group_id): str(message) for group_id, message in group_diagnostics.items()
             }
-        if request.source == "cartesian" and success and collision_free:
+        if request.source == "cartesian" and isinstance(target_joints, JointState):
             self._sync_controls_from_targets()
         self._update_target_visual_state()
         self.refresh()
@@ -991,10 +993,13 @@ class ViserPanelGui:
     def _update_target_visual_state(self) -> None:
         if self.scene is None:
             return
-        for group_id in self.state.selected_group_ids:
-            self.scene.set_target_visual_state(
-                group_id, self.state.feasibility.status == FeasibilityStatus.FEASIBLE
-            )
+        update_target_visual_state(
+            self.scene,
+            self._group_info_by_id(),
+            self.state.selected_group_ids,
+            self.manipulation_module.robot_id_for_name,
+            self.state.feasibility.status == FeasibilityStatus.FEASIBLE,
+        )
 
     def _submit_plan(self) -> None:
         if self._closed:

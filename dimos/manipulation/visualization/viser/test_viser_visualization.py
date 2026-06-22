@@ -1667,6 +1667,70 @@ def test_gui_cartesian_ik_result_does_not_rewrite_active_gizmo(
     assert gui.state.group_poses[DEFAULT_GROUP_ID] is solved_pose
 
 
+def test_gui_cartesian_collision_still_updates_target_ghost_red(
+    make_panel: Callable[..., ViserPanelGui],
+) -> None:
+    current = FakeJointState(["j1", "j2"], position=[0.0, 0.0])
+    config = make_robot_config(joint_names=["j1", "j2"], home_joints=[0.5, 0.6])
+    module = FakeManipulationModule(_robots={"arm": ("robot-1", config, None)})
+    world_monitor = SimpleNamespace(
+        get_current_joint_state=lambda robot_id: current,
+        is_state_stale=lambda robot_id, max_age=1.0: False,
+        is_state_valid=lambda robot_id, joint_state: False,
+        get_ee_pose=lambda robot_id, joint_state=None: None,
+    )
+    module_context = (world_monitor, module)
+    target_joint_updates = []
+    target_pose_updates = []
+    visual_states = []
+    scene = SimpleNamespace(
+        has_reference_grid=lambda: False,
+        ensure_target_controls=lambda *args: object(),
+        set_target_joints=lambda *args: target_joint_updates.append(args) or True,
+        set_target_pose=lambda *args: target_pose_updates.append(args),
+        set_target_visual_state=lambda *args: visual_states.append(args),
+    )
+    gui = make_panel(
+        FakeGuiServer(), module_context, ViserVisualizationConfig(panel_enabled=True), scene
+    )
+    dragged_pose = Pose({"position": [0.1, 0.2, 0.3], "orientation": [0.0, 0.0, 0.0, 1.0]})
+    solved_pose = Pose({"position": [0.4, 0.5, 0.6], "orientation": [0.0, 0.0, 0.0, 1.0]})
+    gui.state.cartesian_target = dragged_pose
+    gui.state.pose_targets[DEFAULT_GROUP_ID] = dragged_pose
+    target_joint_updates.clear()
+    target_pose_updates.clear()
+    visual_states.clear()
+    request = TargetEvaluationRequest(
+        sequence_id=1, source="cartesian", group_ids=(DEFAULT_GROUP_ID,)
+    )
+    gui.state.latest_sequence_id = 1
+
+    gui._apply_target_evaluation_result(
+        request,
+        {
+            "success": False,
+            "status": "COLLISION",
+            "message": "Target is in collision",
+            "collision_free": False,
+            "target_joints": joints_from_values(["arm/j1", "arm/j2"], [1.0, 2.0]),
+            "group_poses": {DEFAULT_GROUP_ID: solved_pose},
+        },
+    )
+
+    assert gui.state.target_status == TargetStatus.INFEASIBLE
+    assert gui.state.feasibility.status == FeasibilityStatus.COLLISION
+    assert gui.state.target_joints is not None
+    assert list(gui.state.target_joints.position) == [1.0, 2.0]
+    assert gui.state.last_valid_target_joints is None
+    assert [gui._joint_sliders[name].value for name in ("arm/j1", "arm/j2")] == [1.0, 2.0]
+    assert target_joint_updates[-1] == ("robot-1", ["j1", "j2"], [1.0, 2.0])
+    assert (DEFAULT_GROUP_ID, False) in visual_states
+    assert ("robot-1", False) in visual_states
+    assert target_pose_updates == []
+    assert gui.state.pose_targets[DEFAULT_GROUP_ID] is dragged_pose
+    assert gui.state.group_poses[DEFAULT_GROUP_ID] is solved_pose
+
+
 def test_gui_can_disable_collision_check_for_cartesian_target_evaluation(
     make_panel: Callable[..., ViserPanelGui],
 ) -> None:
@@ -1753,7 +1817,8 @@ def test_gui_collision_evaluation_marks_target_infeasible_and_colors_scene(
     assert gui.state.target_status == TargetStatus.INFEASIBLE
     assert gui.state.feasibility.status == FeasibilityStatus.COLLISION
     assert gui.state.error == "Target is in collision"
-    assert visual_states[-1] == (DEFAULT_GROUP_ID, False)
+    assert (DEFAULT_GROUP_ID, False) in visual_states
+    assert ("robot-1", False) in visual_states
 
 
 def test_gui_safe_execute_requires_fresh_matching_plan_and_clear_resets_path(

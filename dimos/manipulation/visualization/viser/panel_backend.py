@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, cast
 
 from dimos.manipulation.planning.groups.models import PlanningGroup
@@ -239,3 +239,30 @@ def feasibility_status(
     if normalized in {"NO_SOLUTION", "SINGULARITY", "JOINT_LIMITS", "TIMEOUT"}:
         return FeasibilityStatus.IK_FAILED
     return FeasibilityStatus.INVALID
+
+
+def update_target_visual_state(
+    scene: object,
+    groups: Mapping[PlanningGroupID, PlanningGroup],
+    selected_group_ids: Sequence[PlanningGroupID],
+    robot_id_for_name: Callable[[RobotName], object | None],
+    feasible: bool,
+) -> None:
+    set_visual_state = getattr(scene, "set_target_visual_state", None)
+    if not callable(set_visual_state):
+        return
+    updated: set[str] = set()
+    for group_id in selected_group_ids:
+        group_id_str = str(group_id)
+        if group_id_str not in updated:
+            set_visual_state(group_id_str, feasible)
+            updated.add(group_id_str)
+        group = groups.get(group_id_str)
+        if group is None:
+            continue
+        robot_id = robot_id_for_name(str(group.robot_name))
+        robot_id_str = None if robot_id is None else str(robot_id)
+        if robot_id_str is None or robot_id_str in updated:
+            continue
+        set_visual_state(robot_id_str, feasible)
+        updated.add(robot_id_str)
