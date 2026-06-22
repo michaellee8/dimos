@@ -30,6 +30,13 @@ export function transportLabel() {
     return state.activeRobot?.transport === 'livekit' ? 'LiveKit' : 'Cloudflare';
 }
 
+// ICE path the media/data actually traverses, once getStats() has a selected
+// pair: direct (host) / STUN (srflx) / TURN (relay). '' until known.
+export function iceTypeLabel() {
+    const t = state.liveStats.iceType;
+    return t === 'turn' ? 'TURN' : t === 'stun' ? 'STUN' : t === 'direct' ? 'direct' : '';
+}
+
 export function hudSummaryLine() {
     const v = state.liveStats.video;
     const fps = v ? `${(v.fps ?? 0).toFixed(0)}fps` : '—fps';
@@ -48,8 +55,9 @@ export function hudDetailLines() {
         : '—';
     const rateLine = `sent ${sentHz.toFixed(0)}Hz` +
         (c ? ` → recv ${(c.rate_hz ?? 0).toFixed(0)}Hz` : '');
+    const ice = iceTypeLabel();
     return [
-        `Link   ${transportLabel()}`,
+        `Link   ${transportLabel()}${ice ? `  ·  ${ice}` : ''}`,
         `Video  ${(v.fps ?? 0).toFixed(0)}fps  ${(((v.kbps ?? 0) / 1000)).toFixed(1)}mbps  ${v.width ?? '—'}x${v.height ?? '—'}`,
         `       loss ${(v.loss_pct ?? 0).toFixed(1)}%  jbuf ${(v.jitter_buffer_ms ?? 0).toFixed(0)}ms`,
         `       decode ${(v.decode_ms ?? 0).toFixed(0)}ms  freezes ${v.freezes ?? 0}`,

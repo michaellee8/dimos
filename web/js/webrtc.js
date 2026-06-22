@@ -29,6 +29,7 @@ export async function setupWebRTC(sessionId) {
     // to gather with the offer. Best-effort: a broker without TURN
     // configured returns STUN-only, and a failed fetch degrades to it.
     let iceServers = STUN_ONLY;
+    const tFetch = performance.now();
     try {
         const turn = await api('GET', '/sessions/turn-credentials');
         if (turn.ice_servers?.length) iceServers = turn.ice_servers;
@@ -40,6 +41,10 @@ export async function setupWebRTC(sessionId) {
         }
         console.warn('[turn] credential fetch failed — STUN only:', err);
     }
+    const relayCount = iceServers.filter(s =>
+        [].concat(s.urls || []).some(u => u.startsWith('turn'))).length;
+    console.info(`[ice] credentials ${(performance.now() - tFetch).toFixed(0)}ms ` +
+        `(${relayCount} TURN server(s))`);
     state.pc = new RTCPeerConnection({ iceServers });
     const pc = state.pc;
 
@@ -71,7 +76,10 @@ export async function setupWebRTC(sessionId) {
     await pc.setLocalDescription(offer);
 
     // Non-trickle ICE; cap the wait so a stalled gather can't hang forever —
-    // proceed with whatever candidates we have.
+    // proceed with whatever candidates we have. Relay (TURN) allocation makes
+    // this phase longer than STUN-only — log the duration to see the cost.
+    const tGather = performance.now();
+    let gatherTimedOut = false;
     await Promise.race([
         new Promise(resolve => {
             if (pc.iceGatheringState === 'complete') return resolve();
@@ -79,8 +87,10 @@ export async function setupWebRTC(sessionId) {
                 if (pc.iceGatheringState === 'complete') resolve();
             };
         }),
-        new Promise(resolve => setTimeout(resolve, GATHER_TIMEOUT_MS)),
+        new Promise(resolve => setTimeout(() => { gatherTimedOut = true; resolve(); }, GATHER_TIMEOUT_MS)),
     ]);
+    console.info(`[ice] gather ${(performance.now() - tGather).toFixed(0)}ms` +
+        (gatherTimedOut ? ` (hit ${GATHER_TIMEOUT_MS}ms cap)` : ''));
 
     const data = await api('POST', `/sessions/${sessionId}/join`, {
         role: 'operator',
@@ -207,6 +217,25 @@ export function stopClockSync() {
 }
 
 // ─── Video stats ─────────────────────────────────────────────────────────
+// Resolve the in-use ICE path from a getStats() report: find the active
+// candidate-pair, look up its local candidate, map candidateType → label.
+//   host/srflx (prflx) → direct over STUN-discovered address
+//   relay              → going through a TURN relay
+function selectedIceType(report) {
+    let pair = null;
+    report.forEach((r) => {
+        if (r.type !== 'candidate-pair') return;
+        // `selected` (Chrome) or nominated+succeeded (spec) marks the active pair.
+        if (r.selected || (r.nominated && r.state === 'succeeded')) pair = r;
+    });
+    if (!pair) return null;
+    const local = report.get(pair.localCandidateId);
+    if (!local) return null;
+    return local.candidateType === 'relay' ? 'turn'
+        : local.candidateType === 'srflx' || local.candidateType === 'prflx' ? 'stun'
+        : 'direct';  // host
+}
+
 // getStats() lives only in the browser, so the operator samples the inbound
 // track and reports health to the robot (rate/bitrate/loss = deltas between
 // consecutive 1s samples). Robot folds it into report.md.
@@ -215,11 +244,13 @@ export function startVideoStats(channel) {
     state.videoStatsTimer = setInterval(async () => {
         if (!channel || channel.readyState !== 'open' || !state.pc) return;
         let inbound = null;
+        let report = null;
         try {
-            const stats = await state.pc.getStats();
-            stats.forEach((r) => {
+            report = await state.pc.getStats();
+            report.forEach((r) => {
                 if (r.type === 'inbound-rtp' && r.kind === 'video') inbound = r;
             });
+            state.liveStats.iceType = selectedIceType(report);  // direct/stun/turn
         } catch (_) { return; }
         if (!inbound) return;
 
