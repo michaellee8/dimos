@@ -33,12 +33,8 @@ from dimos.manipulation.visualization.viser.panel_backend import (
     feasibility_status,
     get_current_joint_state,
     get_ee_pose,
-    group_display_name,
-    group_selector_color,
     is_state_stale,
     joint_values_by_name,
-    list_planning_groups,
-    normalize_robot_info,
     pose_from_transform_values,
 )
 from dimos.manipulation.visualization.viser.runtime import VISER_INSTALL_HINT
@@ -97,6 +93,20 @@ DEFAULT_JOINT_LIMITS = (-3.14, 3.14)
 PRIMARY_ACTION_COLOR = (0, 102, 179)
 ACTIVE_GROUP_COLOR = PRIMARY_ACTION_COLOR
 INACTIVE_GROUP_COLOR = (52, 52, 52)
+
+
+def group_display_name(group: PlanningGroupInfo) -> str:
+    robot_name = str(group["robot_name"])
+    group_name = str(group["name"])
+    return robot_name if group_name == "manipulator" else f"{robot_name} {group_name}"
+
+
+def group_selector_color(
+    selected: bool,
+    active_color: tuple[int, int, int],
+    inactive_color: tuple[int, int, int],
+) -> tuple[int, int, int]:
+    return active_color if selected else inactive_color
 
 
 class ViserPanelGui:
@@ -187,12 +197,10 @@ class ViserPanelGui:
         return list(self.manipulation_module.list_robots())
 
     def _list_planning_groups(self) -> list[PlanningGroupInfo]:
-        return list_planning_groups(self.manipulation_module)
+        return self.manipulation_module.list_planning_groups()
 
     def _get_robot_info(self, robot_name: RobotName) -> RobotInfo | None:
-        return normalize_robot_info(
-            cast("RobotInfo | None", self.manipulation_module.get_robot_info(robot_name))
-        )
+        return self.manipulation_module.get_robot_info(robot_name)
 
     def _get_init_joints(self, robot_name: RobotName) -> JointState | None:
         return copy_joint_state(self.manipulation_module.get_init_joints(robot_name))

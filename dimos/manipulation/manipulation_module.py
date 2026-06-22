@@ -79,6 +79,7 @@ from dimos.manipulation.visualization.config import (
     NoManipulationVisualizationConfig,
 )
 from dimos.manipulation.visualization.factory import create_manipulation_visualization
+from dimos.manipulation.visualization.types import PlanningGroupInfo, RobotInfo
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -672,11 +673,15 @@ class ManipulationModule(Module):
             )
         return self._world_monitor.check_collision(target_joints, max_age=max_age)
 
-    def list_planning_groups(self) -> list[PlanningGroup]:
-        """Return all planning groups in stable registry order."""
+    def _planning_group_models(self) -> list[PlanningGroup]:
+        """Return all planning group models in stable registry order."""
         if self._world_monitor is None:
             return []
         return list(self._world_monitor.planning_groups.list())
+
+    def list_planning_groups(self) -> list[PlanningGroupInfo]:
+        """Return all planning groups as visualization-friendly typed dictionaries."""
+        return [self._planning_group_info(group) for group in self._planning_group_models()]
 
     def get_current_joint_state(self, robot_name: RobotName) -> JointState | None:
         """Return the named robot's current local joint state with names."""
@@ -1048,7 +1053,7 @@ class ManipulationModule(Module):
         return list(self._robots.keys())
 
     @rpc
-    def get_robot_info(self, robot_name: RobotName | None = None) -> dict[str, Any] | None:
+    def get_robot_info(self, robot_name: RobotName | None = None) -> RobotInfo | None:
         """Get information about a robot.
 
         Args:
@@ -1064,16 +1069,7 @@ class ManipulationModule(Module):
         robot_name, robot_id, config, _ = robot
         planning_groups = (
             [
-                {
-                    "id": group.id,
-                    "name": group.group_name,
-                    "joint_names": list(group.joint_names),
-                    "local_joint_names": list(group.local_joint_names),
-                    "base_link": group.base_link,
-                    "tip_link": group.tip_link,
-                    "source": group.source,
-                    "has_pose_target": group.has_pose_target,
-                }
+                self._planning_group_info(group)
                 for group in self._world_monitor.planning_groups.groups_for_robot(robot_name)
             ]
             if self._world_monitor is not None
@@ -1095,6 +1091,19 @@ class ManipulationModule(Module):
             "init_joints": list(init.position)
             if (init := self._init_joints.get(robot_name))
             else None,
+        }
+
+    def _planning_group_info(self, group: PlanningGroup) -> PlanningGroupInfo:
+        return {
+            "id": group.id,
+            "name": group.group_name,
+            "robot_name": group.robot_name,
+            "joint_names": list(group.joint_names),
+            "local_joint_names": list(group.local_joint_names),
+            "base_link": group.base_link,
+            "tip_link": group.tip_link,
+            "source": group.source,
+            "has_pose_target": group.has_pose_target,
         }
 
     def robot_items(self) -> list[tuple[RobotName, WorldRobotID, RobotModelConfig]]:

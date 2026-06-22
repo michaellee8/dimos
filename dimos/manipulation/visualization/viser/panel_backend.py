@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, cast
 from dimos.manipulation.planning.spec.models import PlanningGroupID, RobotName
 from dimos.manipulation.visualization.types import (
     PlanningGroupInfo,
-    RobotInfo,
     TargetSetEvaluation,
 )
 from dimos.manipulation.visualization.viser.state import FeasibilityStatus
@@ -35,56 +34,6 @@ if TYPE_CHECKING:
 
 def copy_joint_state(joint_state: JointState | None) -> JointState | None:
     return None if joint_state is None else JointState(joint_state)
-
-
-def normalize_robot_info(info: RobotInfo | None) -> RobotInfo | None:
-    if info is None:
-        return None
-    coordinator_task_name = info.get("coordinator_task_name")
-    home_joints = info.get("home_joints")
-    init_joints = info.get("init_joints")
-    robot_name = str(info.get("name", ""))
-    return {
-        "name": robot_name,
-        "world_robot_id": str(info.get("world_robot_id", "")),
-        "joint_names": [str(name) for name in info.get("joint_names", [])],
-        "end_effector_link": str(info.get("end_effector_link", "")),
-        "base_link": str(info.get("base_link", "")),
-        "max_velocity": float(info.get("max_velocity", 0.0)),
-        "max_acceleration": float(info.get("max_acceleration", 0.0)),
-        "has_joint_name_mapping": bool(info.get("has_joint_name_mapping", False)),
-        "coordinator_task_name": None
-        if coordinator_task_name is None
-        else str(coordinator_task_name),
-        "home_joints": None if home_joints is None else [float(value) for value in home_joints],
-        "pre_grasp_offset": float(info.get("pre_grasp_offset", 0.0)),
-        "init_joints": None if init_joints is None else [float(value) for value in init_joints],
-        "planning_groups": [
-            {
-                "id": str(group["id"]),
-                "name": str(group["name"]),
-                "robot_name": robot_name,
-                "joint_names": [str(name) for name in group["joint_names"]],
-                "local_joint_names": [str(name) for name in group["local_joint_names"]],
-                "base_link": str(group["base_link"]),
-                "tip_link": None if group["tip_link"] is None else str(group["tip_link"]),
-                "has_pose_target": bool(group["has_pose_target"]),
-                "source": str(group["source"]),
-            }
-            for group in info.get("planning_groups", [])
-        ],
-    }
-
-
-def list_planning_groups(manipulation_module: ManipulationModule) -> list[PlanningGroupInfo]:
-    groups: list[PlanningGroupInfo] = []
-    for robot_name in manipulation_module.list_robots():
-        info = normalize_robot_info(
-            cast("RobotInfo | None", manipulation_module.get_robot_info(robot_name))
-        )
-        if info is not None:
-            groups.extend(info.get("planning_groups", []))
-    return groups
 
 
 def get_current_joint_state(
@@ -277,20 +226,6 @@ def pose_from_transform_values(position: Sequence[float], wxyz: Sequence[float])
     px, py, pz = (float(value) for value in position)
     qw, qx, qy, qz = (float(value) for value in wxyz)
     return Pose({"position": [px, py, pz], "orientation": [qx, qy, qz, qw]})
-
-
-def group_display_name(group: PlanningGroupInfo) -> str:
-    robot_name = str(group["robot_name"])
-    group_name = str(group["name"])
-    return robot_name if group_name == "manipulator" else f"{robot_name} {group_name}"
-
-
-def group_selector_color(
-    selected: bool,
-    active_color: tuple[int, int, int],
-    inactive_color: tuple[int, int, int],
-) -> tuple[int, int, int]:
-    return active_color if selected else inactive_color
 
 
 def feasibility_status(
