@@ -1,4 +1,4 @@
-# Copyright 2025-2026 Dimensional Inc.
+# Copyright 2026 Dimensional Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,18 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Basic control coordinator blueprint.
+"""FlowBase platform constants."""
 
-Usage:
-    dimos run coordinator-basic
-"""
+from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 
-from __future__ import annotations
-
-from dimos.control.coordinator import ControlCoordinator
-
-coordinator_basic = ControlCoordinator.blueprint(
-    tick_rate=100.0,
-    publish_joint_state=True,
-    joint_state_frame_id="coordinator",
-)
+# Mid-360 mount pose on the FlowBase (position + orientation) in the base frame.
+FLOWBASE_MID360_MOUNT = Pose(0.20, -0.20, 0.10, *Quaternion.from_euler(Vector3(0, 0, 0)))
