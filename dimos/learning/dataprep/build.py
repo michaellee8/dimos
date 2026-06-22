@@ -97,18 +97,14 @@ def run_dataprep(config: DataPrepConfig) -> Path:
     try:
         logger.info("[dataprep] streams in source: %s", store.list_streams())
         all_eps = extract_episodes(store, config.episodes)
-        # Reindex survivors so sidecar ids match the writers' episode_index.
-        episodes = [
-            e.model_copy(update={"id": f"ep_{i:06d}"})
-            for i, e in enumerate(e for e in all_eps if e.success)
-        ]
+        successful = [e for e in all_eps if e.success]
         logger.info(
             "[dataprep] episodes extracted: %d total / %d successful",
             len(all_eps),
-            len(episodes),
+            len(successful),
         )
 
-        if not episodes:
+        if not successful:
             raise RuntimeError(
                 f"No successful episodes extracted from {config.source!r} "
                 f"using extractor={config.episodes.extractor!r}. "
@@ -138,11 +134,13 @@ def run_dataprep(config: DataPrepConfig) -> Path:
 
         samples_seen = 0
         episodes_done = 0
-        total = len(episodes)
+        total = len(successful)
+        produced: list[Episode] = []  # episodes that yielded ≥1 sample
 
         def _all_samples() -> Iterator[Sample]:
             nonlocal samples_seen, episodes_done
-            for ep in episodes:
+            for ep in successful:
+                before = samples_seen
                 for sample in iter_episode_samples(
                     store=store,
                     episode=ep,
@@ -161,14 +159,17 @@ def run_dataprep(config: DataPrepConfig) -> Path:
                             total,
                         )
                     yield sample
+                if samples_seen > before:
+                    produced.append(ep)
                 episodes_done += 1
 
         dataset_path = Path(writer(_all_samples(), output))
-        _write_dimos_meta(dataset_path, config, episodes)
+        written = [e.model_copy(update={"id": f"ep_{i:06d}"}) for i, e in enumerate(produced)]
+        _write_dimos_meta(dataset_path, config, written)
         logger.info(
             "[dataprep] succeeded — wrote %d samples across %d episodes to %s",
             samples_seen,
-            total,
+            len(written),
             dataset_path,
         )
         return dataset_path
