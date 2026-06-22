@@ -309,14 +309,12 @@ class PinkIK:
         position_tolerance: float,
         orientation_tolerance: float,
     ) -> IKResult:
-        pink_module = _pink()
-        pinocchio_module = _pinocchio()
-        configuration = pink_module.Configuration(
-            robot_context.model, robot_context.data, seed_q.copy()
-        )
-        target_se3 = _matrix_to_se3(pinocchio_module, target_model)
+        assert pink is not None
+        assert pinocchio is not None
+        configuration = pink.Configuration(robot_context.model, robot_context.data, seed_q.copy())
+        target_se3 = _matrix_to_se3(pinocchio, target_model)
 
-        frame_task = pink_module.tasks.FrameTask(
+        frame_task = pink.tasks.FrameTask(
             robot_context.frame_name,
             position_cost=self.config.position_cost,
             orientation_cost=self.config.orientation_cost,
@@ -327,7 +325,7 @@ class PinkIK:
         tasks: list[Any] = [frame_task]
 
         if self.config.posture_cost > 0.0:
-            posture_task = pink_module.tasks.PostureTask(cost=self.config.posture_cost)
+            posture_task = pink.tasks.PostureTask(cost=self.config.posture_cost)
             posture_task.set_target_from_configuration(configuration)
             tasks.append(posture_task)
 
@@ -351,7 +349,7 @@ class PinkIK:
                     iteration + 1,
                 )
 
-            velocity = pink_module.solve_ik(
+            velocity = pink.solve_ik(
                 configuration,
                 tasks,
                 self.config.dt,
@@ -392,27 +390,27 @@ class PinkIK:
         orientation_tolerance: float,
     ) -> IKResult:
         """Solve multiple frame tasks for one robot model."""
-        pink_module = _pink()
-        pinocchio_module = _pinocchio()
+        assert pink is not None
+        assert pinocchio is not None
         primary_context = robot_contexts[0]
-        configuration = pink_module.Configuration(
+        configuration = pink.Configuration(
             primary_context.model, primary_context.data, seed_q.copy()
         )
 
         tasks: list[Any] = []
         for context, target_model in zip(robot_contexts, target_models, strict=True):
-            frame_task = pink_module.tasks.FrameTask(
+            frame_task = pink.tasks.FrameTask(
                 context.frame_name,
                 position_cost=self.config.position_cost,
                 orientation_cost=self.config.orientation_cost,
                 lm_damping=self.config.lm_damping,
                 gain=self.config.gain,
             )
-            frame_task.set_target(_matrix_to_se3(pinocchio_module, target_model))
+            frame_task.set_target(_matrix_to_se3(pinocchio, target_model))
             tasks.append(frame_task)
 
         if self.config.posture_cost > 0.0:
-            posture_task = pink_module.tasks.PostureTask(cost=self.config.posture_cost)
+            posture_task = pink.tasks.PostureTask(cost=self.config.posture_cost)
             posture_task.set_target_from_configuration(configuration)
             tasks.append(posture_task)
 
@@ -440,7 +438,7 @@ class PinkIK:
                     iteration + 1,
                 )
 
-            velocity = pink_module.solve_ik(
+            velocity = pink.solve_ik(
                 configuration,
                 tasks,
                 self.config.dt,
@@ -491,13 +489,13 @@ class PinkIK:
     def _build_robot_context(
         self, config: RobotModelConfig, frame_name: str | None = None
     ) -> _PinkRobotContext:
-        pinocchio_module = _pinocchio()
+        assert pinocchio is not None
         model_path = Path(config.model_path).resolve()
         if not model_path.exists():
             raise FileNotFoundError(f"Robot model not found: {model_path}")
 
         if model_path.suffix == ".xml":
-            model = pinocchio_module.buildModelFromMJCF(str(model_path))
+            model = pinocchio.buildModelFromMJCF(str(model_path))
         else:
             prepared_path = prepare_urdf_for_drake(
                 urdf_path=model_path,
@@ -508,8 +506,8 @@ class PinkIK:
                 if config.strip_model_world_joint
                 else None,
             )
-            model = pinocchio_module.buildModelFromUrdf(str(prepared_path))
-        model = _lock_uncontrolled_model_joints(pinocchio_module, model, config)
+            model = pinocchio.buildModelFromUrdf(str(prepared_path))
+        model = _lock_uncontrolled_model_joints(pinocchio, model, config)
 
         data = model.createData()
         target_frame = frame_name or config.end_effector_link
@@ -533,7 +531,8 @@ class PinkIK:
         upper_limits: NDArray[np.float64],
         attempt: int,
     ) -> NDArray[np.float64]:
-        neutral = _pinocchio().neutral(context.model)
+        assert pinocchio is not None
+        neutral = pinocchio.neutral(context.model)
         q = np.array(neutral, dtype=np.float64)
 
         if attempt == 0:
@@ -553,9 +552,9 @@ class PinkIK:
     def _current_frame_matrix(
         self, context: _PinkRobotContext, q: NDArray[np.float64]
     ) -> NDArray[np.float64]:
-        pinocchio_module = _pinocchio()
-        pinocchio_module.forwardKinematics(context.model, context.data, q)
-        pinocchio_module.updateFramePlacements(context.model, context.data)
+        assert pinocchio is not None
+        pinocchio.forwardKinematics(context.model, context.data, q)
+        pinocchio.updateFramePlacements(context.model, context.data)
         placement = context.data.oMf[context.frame_id]
         matrix: NDArray[np.float64] = np.eye(4)
         matrix[:3, :3] = np.asarray(placement.rotation, dtype=np.float64)
@@ -588,24 +587,6 @@ def _check_optional_dependencies(solver: str) -> None:
             "Install manipulation dependencies with uv sync --extra manipulation, "
             "which includes qpsolvers[proxqp]."
         )
-
-
-def _pink() -> Any:
-    if _PINK_IMPORT_ERROR is not None or pink is None:
-        raise PinkIKDependencyError(
-            "Pink IK backend requires Pink. "
-            f"{_MANIPULATION_EXTRA_HINT} PyPI package: pin-pink; import name: pink."
-        ) from _PINK_IMPORT_ERROR
-    return pink
-
-
-def _pinocchio() -> Any:
-    if _PINK_IMPORT_ERROR is not None or pinocchio is None:
-        raise PinkIKDependencyError(
-            "Pink IK backend requires Pinocchio (import name 'pinocchio'). "
-            f"{_MANIPULATION_EXTRA_HINT}"
-        ) from _PINK_IMPORT_ERROR
-    return pinocchio
 
 
 def _build_joint_mapping(model: Any, config: RobotModelConfig) -> _JointMapping:
