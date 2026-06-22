@@ -45,9 +45,9 @@ from dimos.manipulation.visualization.viser.gui import (
     ACTIVE_GROUP_COLOR,
     INACTIVE_GROUP_COLOR,
     PRIMARY_ACTION_COLOR,
-    ViserModuleAccess,
     ViserPanelGui,
 )
+from dimos.manipulation.visualization.viser.panel_backend import pose_from_transform_values
 from dimos.manipulation.visualization.viser.scene import ViserManipulationScene
 from dimos.manipulation.visualization.viser.state import (
     ActionStatus,
@@ -404,7 +404,7 @@ def make_planning_group_info(
 
 
 class FakeManipulationModule(SimpleNamespace):
-    """Public ManipulationModule surface used by the in-process Viser adapter tests."""
+    """Public ManipulationModule surface used by the in-process Viser panel tests."""
 
     def list_robots(self) -> list[str]:
         return list(getattr(self, "_robots", {}).keys())
@@ -557,8 +557,11 @@ class FakeManipulationModule(SimpleNamespace):
     def plan_to_joint_targets(self, _joint_targets: dict[str, JointState]) -> bool:
         return True
 
+    def reset(self) -> bool:
+        return True
 
-def make_adapter_with_robot() -> ViserModuleAccess:
+
+def make_module_with_robot() -> tuple[SimpleNamespace, FakeManipulationModule]:
     current = FakeJointState(["j1", "j2"], position=[0.3, 0.4])
     config = make_robot_config(
         name="arm",
@@ -580,7 +583,11 @@ def make_adapter_with_robot() -> ViserModuleAccess:
         _error_message="",
         _world_monitor=world_monitor,
     )
-    return ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    return world_monitor, module
+
+
+def joints_from_values(joint_names: Sequence[str], values: Sequence[float]) -> JointState:
+    return JointState({"name": list(joint_names), "position": [float(value) for value in values]})
 
 
 @pytest.fixture
@@ -590,12 +597,16 @@ def make_panel() -> Iterator[Callable[..., ViserPanelGui]]:
 
     def _make(
         server: FakeGuiServer | FakeServer,
-        adapter: ViserModuleAccess,
+        module_context: tuple[SimpleNamespace, FakeManipulationModule],
         config: ViserVisualizationConfig | None = None,
         scene: ViserManipulationScene | None = None,
     ) -> ViserPanelGui:
         gui = ViserPanelGui(
-            server, adapter, config or ViserVisualizationConfig(panel_enabled=True), scene
+            server,
+            module_context[0],
+            module_context[1],
+            config or ViserVisualizationConfig(panel_enabled=True),
+            scene,
         )
         gui.start()
         panels.append(gui)
@@ -614,8 +625,8 @@ def test_gui_builds_controls_in_manipulation_panel_folder(
     make_panel: Callable[..., ViserPanelGui],
 ) -> None:
     server = FakeGuiServer()
-    adapter = make_adapter_with_robot()
-    gui = make_panel(server, adapter, ViserVisualizationConfig())
+    module_context = make_module_with_robot()
+    gui = make_panel(server, module_context, ViserVisualizationConfig())
     assert server.folders
     assert server.folders[0].label == "Manipulation Panel"
     assert server.folders[0].kwargs == {"expand_by_default": True}
@@ -669,8 +680,8 @@ def test_gui_scene_grid_checkbox_toggles_reference_grid(
         grid_server, lambda *args, **kwargs: FakeUrdf(("joint1",)), preview_fps=10.0
     )
     server = FakeGuiServer()
-    adapter = make_adapter_with_robot()
-    make_panel(server, adapter, ViserVisualizationConfig(), scene)
+    module_context = make_module_with_robot()
+    make_panel(server, module_context, ViserVisualizationConfig(), scene)
     assert grid_server.grids
     assert server.checkboxes["Scene grid"].value is True
     server.checkboxes["Scene grid"].update_callback(
@@ -691,8 +702,8 @@ def test_gui_close_removes_handles_and_late_callbacks_are_noops(
     scene = ViserManipulationScene(
         grid_server, lambda *args, **kwargs: FakeUrdf(("joint1",)), preview_fps=10.0
     )
-    adapter = make_adapter_with_robot()
-    gui = make_panel(server, adapter, ViserVisualizationConfig(), scene)
+    module_context = make_module_with_robot()
+    gui = make_panel(server, module_context, ViserVisualizationConfig(), scene)
     plan_button = server.buttons["Plan"]
     grid = grid_server.grids[0]
     handles = list(gui._handles.values())
@@ -710,8 +721,8 @@ def test_gui_close_removes_handles_and_late_callbacks_are_noops(
 def test_gui_ignores_target_evaluation_after_close(
     make_panel: Callable[..., ViserPanelGui],
 ) -> None:
-    adapter = make_adapter_with_robot()
-    gui = make_panel(FakeGuiServer(), adapter)
+    module_context = make_module_with_robot()
+    gui = make_panel(FakeGuiServer(), module_context)
     gui.state.selected_robot = "arm"
     sequence_id = gui.state.next_sequence_id()
     request = TargetEvaluationRequest(
@@ -1286,11 +1297,13 @@ def test_gui_initializes_pose_selector_to_current_ee_pose(
         is_state_stale=lambda robot_id, max_age=1.0: False,
         get_ee_pose=lambda robot_id, joint_state=None: current_pose,
     )
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    module_context = (world_monitor, module)
     scene = ViserManipulationScene(
         FakeTransformServer(), lambda *args, **kwargs: FakeViserUrdfWithMeshes(), preview_fps=10.0
     )
-    gui = make_panel(FakeGuiServer(), adapter, ViserVisualizationConfig(panel_enabled=True), scene)
+    gui = make_panel(
+        FakeGuiServer(), module_context, ViserVisualizationConfig(panel_enabled=True), scene
+    )
     control = scene._handles[f"{DEFAULT_GROUP_ID}:ee_control"]
     assert control.position == (0.1, 0.2, 0.3)
     assert control.wxyz == (0.9, 0.1, 0.2, 0.3)
@@ -1312,11 +1325,13 @@ def test_gui_removes_pose_selector_when_group_is_deselected(
         is_state_stale=lambda robot_id, max_age=1.0: False,
         get_ee_pose=lambda robot_id, joint_state=None: current_pose,
     )
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    module_context = (world_monitor, module)
     scene = ViserManipulationScene(
         FakeTransformServer(), lambda *args, **kwargs: FakeViserUrdfWithMeshes(), preview_fps=10.0
     )
-    gui = make_panel(FakeGuiServer(), adapter, ViserVisualizationConfig(panel_enabled=True), scene)
+    gui = make_panel(
+        FakeGuiServer(), module_context, ViserVisualizationConfig(panel_enabled=True), scene
+    )
     control = scene._handles[f"{DEFAULT_GROUP_ID}:ee_control"]
 
     gui._set_group_selected(DEFAULT_GROUP_ID, False)
@@ -1346,7 +1361,7 @@ def test_gui_group_selector_derives_primary_and_auxiliary_groups(
             {"position": [0.0, 0.0, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]}
         ),
     )
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    module_context = (world_monitor, module)
     target_controls = []
     scene = SimpleNamespace(
         has_reference_grid=lambda: False,
@@ -1359,7 +1374,7 @@ def test_gui_group_selector_derives_primary_and_auxiliary_groups(
     )
     server = FakeGuiServer()
 
-    gui = make_panel(server, adapter, ViserVisualizationConfig(panel_enabled=True), scene)
+    gui = make_panel(server, module_context, ViserVisualizationConfig(panel_enabled=True), scene)
     assert "robot" not in gui._handles
     pose_button = gui._handles["group:arm:manipulator"]
     aux_button = gui._handles["group:arm:gripper"]
@@ -1400,7 +1415,7 @@ def test_gui_target_ghost_visibility_follows_active_selected_groups(
             {"position": [0.0, 0.0, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]}
         ),
     )
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    module_context = (world_monitor, module)
     active_updates = []
     scene = SimpleNamespace(
         has_reference_grid=lambda: False,
@@ -1412,7 +1427,9 @@ def test_gui_target_ghost_visibility_follows_active_selected_groups(
         set_target_visual_state=lambda *args: None,
     )
 
-    gui = make_panel(FakeGuiServer(), adapter, ViserVisualizationConfig(panel_enabled=True), scene)
+    gui = make_panel(
+        FakeGuiServer(), module_context, ViserVisualizationConfig(panel_enabled=True), scene
+    )
 
     assert active_updates[-2:] == [("left-id", True), ("right-id", False)]
     gui._set_group_selected("right:manipulator", True)
@@ -1436,8 +1453,8 @@ def test_gui_preset_dropdown_and_controls_include_init_home_current_and_callback
         is_state_valid=lambda robot_id, joint_state: True,
         get_ee_pose=lambda robot_id, joint_state=None: None,
     )
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
-    gui = make_panel(FakeGuiServer(), adapter)
+    module_context = (world_monitor, module)
+    gui = make_panel(FakeGuiServer(), module_context)
     assert gui._handles["preset"].options == ["Select preset...", "Init", "Current", "Home"]
     assert list(gui._joint_sliders) == ["arm/j1", "arm/j2"]
     gui._apply_preset("Home")
@@ -1460,9 +1477,9 @@ def test_gui_rebuilding_joint_sliders_removes_stale_viser_handles(
         is_state_valid=lambda robot_id, joint_state: True,
         get_ee_pose=lambda robot_id, joint_state=None: None,
     )
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    module_context = (world_monitor, module)
     server = FakeGuiServer()
-    gui = make_panel(server, adapter)
+    gui = make_panel(server, module_context)
     stale_sliders = list(server.sliders)
     assert [slider.value for slider in stale_sliders] == [0.0, 0.0]
 
@@ -1479,16 +1496,11 @@ def test_gui_rebuilding_joint_sliders_removes_stale_viser_handles(
 
 
 def test_gui_parses_numpy_transform_control_arrays() -> None:
-    gui = ViserPanelGui(FakeGuiServer(), make_adapter_with_robot(), ViserVisualizationConfig())
-
-    pose = gui._pose_from_transform_target(
-        SimpleNamespace(
-            position=np.array([1.0, 2.0, 3.0]),
-            wxyz=np.array([0.5, 0.1, 0.2, 0.3]),
-        )
+    pose = pose_from_transform_values(
+        np.array([1.0, 2.0, 3.0]),
+        np.array([0.5, 0.1, 0.2, 0.3]),
     )
 
-    assert pose is not None
     assert list(pose.position) == [1.0, 2.0, 3.0]
     assert list(pose.orientation) == [0.1, 0.2, 0.3, 0.5]
 
@@ -1508,11 +1520,8 @@ def test_panel_execution_is_gated_by_default_and_refresh_updates_robot_controls(
         is_state_valid=lambda robot_id, joint_state: True,
         get_ee_pose=lambda robot_id, joint_state=None: None,
     )
-    adapter = ViserModuleAccess(
-        world_monitor=world_monitor,
-        manipulation_module=module,
-    )
-    gui = make_panel(FakeGuiServer(), adapter)
+    module_context = (world_monitor, module)
+    gui = make_panel(FakeGuiServer(), module_context)
     gui.refresh()
     assert gui.state.selected_robot == "arm"
     assert list(gui._joint_sliders) == ["arm/j1"]
@@ -1536,7 +1545,7 @@ def test_gui_moves_joint_target_immediately_and_stores_evaluated_joint_solution(
         is_state_valid=lambda robot_id, joint_state: True,
         get_ee_pose=lambda robot_id, joint_state=None: target_pose,
     )
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    module_context = (world_monitor, module)
     target_updates = []
     target_pose_updates = []
     scene = SimpleNamespace(
@@ -1546,7 +1555,9 @@ def test_gui_moves_joint_target_immediately_and_stores_evaluated_joint_solution(
         set_target_pose=lambda *args: target_pose_updates.append(args),
         set_target_visual_state=lambda *args: None,
     )
-    gui = make_panel(FakeGuiServer(), adapter, ViserVisualizationConfig(panel_enabled=True), scene)
+    gui = make_panel(
+        FakeGuiServer(), module_context, ViserVisualizationConfig(panel_enabled=True), scene
+    )
     requests = []
     gui._worker.stop()
     gui._worker = SimpleNamespace(
@@ -1571,7 +1582,7 @@ def test_gui_moves_joint_target_immediately_and_stores_evaluated_joint_solution(
         {
             "success": True,
             "collision_free": True,
-            "target_joints": adapter.joints_from_values(["arm/j1", "arm/j2"], [9.0, 9.0]),
+            "target_joints": joints_from_values(["arm/j1", "arm/j2"], [9.0, 9.0]),
         },
     )
     assert gui.state.target_joints is not None
@@ -1583,7 +1594,7 @@ def test_gui_moves_joint_target_immediately_and_stores_evaluated_joint_solution(
         {
             "success": True,
             "collision_free": True,
-            "target_joints": adapter.joints_from_values(["arm/j1", "arm/j2"], [1.0, 2.0]),
+            "target_joints": joints_from_values(["arm/j1", "arm/j2"], [1.0, 2.0]),
             "group_poses": {DEFAULT_GROUP_ID: joint_bar_pose},
         },
     )
@@ -1608,7 +1619,7 @@ def test_gui_cartesian_ik_result_does_not_rewrite_active_gizmo(
         is_state_valid=lambda robot_id, joint_state: True,
         get_ee_pose=lambda robot_id, joint_state=None: None,
     )
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    module_context = (world_monitor, module)
     target_joint_updates = []
     target_pose_updates = []
     scene = SimpleNamespace(
@@ -1618,7 +1629,9 @@ def test_gui_cartesian_ik_result_does_not_rewrite_active_gizmo(
         set_target_pose=lambda *args: target_pose_updates.append(args),
         set_target_visual_state=lambda *args: None,
     )
-    gui = make_panel(FakeGuiServer(), adapter, ViserVisualizationConfig(panel_enabled=True), scene)
+    gui = make_panel(
+        FakeGuiServer(), module_context, ViserVisualizationConfig(panel_enabled=True), scene
+    )
     gui._handles[f"ee_control:{DEFAULT_GROUP_ID}"] = object()
     dragged_pose = Pose({"position": [0.1, 0.2, 0.3], "orientation": [0.0, 0.0, 0.0, 1.0]})
     solved_pose = Pose({"position": [0.4, 0.5, 0.6], "orientation": [0.0, 0.0, 0.0, 1.0]})
@@ -1635,7 +1648,7 @@ def test_gui_cartesian_ik_result_does_not_rewrite_active_gizmo(
         {
             "success": True,
             "collision_free": True,
-            "target_joints": adapter.joints_from_values(["arm/j1", "arm/j2"], [1.0, 2.0]),
+            "target_joints": joints_from_values(["arm/j1", "arm/j2"], [1.0, 2.0]),
             "group_poses": {DEFAULT_GROUP_ID: solved_pose},
         },
     )
@@ -1662,7 +1675,7 @@ def test_gui_can_disable_collision_check_for_cartesian_target_evaluation(
             {"position": [0.0, 0.0, 0.0], "orientation": [0.0, 0.0, 0.0, 1.0]}
         ),
     )
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    module_context = (world_monitor, module)
     scene = SimpleNamespace(
         has_reference_grid=lambda: False,
         ensure_target_controls=lambda *args: None,
@@ -1672,7 +1685,7 @@ def test_gui_can_disable_collision_check_for_cartesian_target_evaluation(
     )
     gui = make_panel(
         FakeGuiServer(),
-        adapter,
+        module_context,
         ViserVisualizationConfig(panel_enabled=True),
         scene,
     )
@@ -1710,7 +1723,7 @@ def test_gui_collision_evaluation_marks_target_infeasible_and_colors_scene(
         ),
     )
     module._world_monitor = world_monitor
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    module_context = (world_monitor, module)
     visual_states = []
     scene = SimpleNamespace(
         has_reference_grid=lambda: False,
@@ -1719,10 +1732,12 @@ def test_gui_collision_evaluation_marks_target_infeasible_and_colors_scene(
         set_target_pose=lambda *args: None,
         set_target_visual_state=lambda *args: visual_states.append(args),
     )
-    gui = make_panel(FakeGuiServer(), adapter, ViserVisualizationConfig(panel_enabled=True), scene)
+    gui = make_panel(
+        FakeGuiServer(), module_context, ViserVisualizationConfig(panel_enabled=True), scene
+    )
     request = TargetEvaluationRequest(sequence_id=1, source="joints", group_ids=(DEFAULT_GROUP_ID,))
     gui.state.latest_sequence_id = 1
-    result = adapter.evaluate_joint_target_set(
+    result = gui._evaluate_joint_target_set(
         {DEFAULT_GROUP_ID: FakeJointState(["arm/j1"], position=[1.0])}
     )
 
@@ -1758,10 +1773,10 @@ def test_gui_safe_execute_requires_fresh_matching_plan_and_clear_resets_path(
             position=SimpleNamespace(x=0.0, y=0.0, z=0.0)
         ),
     )
-    adapter = ViserModuleAccess(world_monitor=world_monitor, manipulation_module=module)
+    module_context = (world_monitor, module)
     gui = make_panel(
         FakeGuiServer(),
-        adapter,
+        module_context,
         ViserVisualizationConfig(
             panel_enabled=True, allow_plan_execute=True, current_match_tolerance=0.05
         ),
@@ -1801,8 +1816,8 @@ def test_gui_plan_target_failure_recovers_action_state(
     make_panel: Callable[..., ViserPanelGui],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    adapter = make_adapter_with_robot()
-    gui = make_panel(FakeGuiServer(), adapter)
+    module_context = make_module_with_robot()
+    gui = make_panel(FakeGuiServer(), module_context)
     gui._operation_worker.stop()
     monkeypatch.setattr(
         gui,
@@ -1829,8 +1844,8 @@ def test_gui_resets_fault_before_replanning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = []
-    adapter = make_adapter_with_robot()
-    gui = make_panel(FakeGuiServer(), adapter)
+    module_context = make_module_with_robot()
+    gui = make_panel(FakeGuiServer(), module_context)
     gui._operation_worker.stop()
     monkeypatch.setattr(
         gui,
@@ -1848,8 +1863,8 @@ def test_gui_resets_fault_before_replanning(
         calls.append("plan")
         return True
 
-    monkeypatch.setattr(adapter, "reset", reset)
-    monkeypatch.setattr(adapter, "plan_target_set", plan_target_set)
+    monkeypatch.setattr(module_context[1], "reset", reset)
+    monkeypatch.setattr(module_context[1], "plan_to_joint_targets", plan_target_set)
     gui.state.target_status = TargetStatus.FEASIBLE
     gui.state.manipulation_state = "FAULT"
 

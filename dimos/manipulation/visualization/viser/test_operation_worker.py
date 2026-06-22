@@ -41,6 +41,14 @@ class EmptyServer:
     pass
 
 
+class EmptyWorldMonitor:
+    def get_current_joint_state(self, robot_id: str) -> None:
+        return None
+
+    def is_state_stale(self, robot_id: str, max_age: float = 1.0) -> bool:
+        return False
+
+
 @dataclass
 class FakeStopOperationWorker(OperationWorker):
     stop_calls: list[float | None]
@@ -112,10 +120,10 @@ class FakeOperationAdapter:
     def list_robots(self) -> list[str]:
         return []
 
-    def list_planning_groups(self) -> list[dict[str, object]]:
-        return []
+    def robot_id_for_name(self, robot_name: str) -> str | None:
+        return None
 
-    def get_module_state(self) -> str:
+    def get_state(self) -> str:
         return "IDLE"
 
     def get_robot_info(self, robot_name: str) -> RobotInfo | None:
@@ -143,7 +151,10 @@ class FakeOperationAdapter:
     def plan_to_joints(self, joints: JointState, robot_name: str | None = None) -> bool:
         return True
 
-    def plan_target_set(self, joint_targets: dict[str, JointState]) -> bool:
+    def robot_items(self) -> list[tuple[str, str, object]]:
+        return []
+
+    def plan_to_joint_targets(self, joint_targets: dict[str, JointState]) -> bool:
         return True
 
 
@@ -186,6 +197,7 @@ def test_gui_close_uses_bounded_operation_worker_stop(monkeypatch: pytest.Monkey
     stop_timeouts: list[float | None] = []
     gui = ViserPanelGui(
         EmptyServer(),
+        EmptyWorldMonitor(),
         FakeOperationAdapter(),
         ViserVisualizationConfig(),
     )
@@ -203,6 +215,7 @@ def test_gui_only_preview_submits_timeout_override(monkeypatch: pytest.MonkeyPat
     submissions: list[dict[str, float]] = []
     gui = ViserPanelGui(
         EmptyServer(),
+        EmptyWorldMonitor(),
         FakeOperationAdapter(),
         ViserVisualizationConfig(preview_request_timeout=0.25),
     )
@@ -229,6 +242,7 @@ def test_gui_cancel_bypasses_operation_worker(monkeypatch: pytest.MonkeyPatch) -
     adapter = FakeOperationAdapter()
     gui = ViserPanelGui(
         EmptyServer(),
+        EmptyWorldMonitor(),
         adapter,
         ViserVisualizationConfig(),
     )
@@ -254,6 +268,7 @@ def test_gui_cancelled_planning_clears_active_plan_state(monkeypatch: pytest.Mon
     adapter = FakeOperationAdapter()
     gui = ViserPanelGui(
         EmptyServer(),
+        EmptyWorldMonitor(),
         adapter,
         ViserVisualizationConfig(),
     )
@@ -292,6 +307,7 @@ def test_gui_guard_errors_keep_action_idle(
     submissions: list[Callable[[], None]] = []
     gui = ViserPanelGui(
         EmptyServer(),
+        EmptyWorldMonitor(),
         FakeOperationAdapter(),
         ViserVisualizationConfig(),
     )
@@ -312,6 +328,7 @@ def test_gui_guard_errors_keep_action_idle(
 def test_gui_ignores_stale_timed_out_operation_finish() -> None:
     gui = ViserPanelGui(
         EmptyServer(),
+        EmptyWorldMonitor(),
         FakeOperationAdapter(),
         ViserVisualizationConfig(),
     )
