@@ -108,17 +108,6 @@ class EpisodeMonitorModule(Module):
             status = self._snapshot("init", time.time())
         return self._emit(status)
 
-    @rpc
-    def get_status(self) -> EpisodeStatus:
-        with self._lock:
-            return EpisodeStatus(
-                ts=time.time(),
-                state=self._state,
-                episodes_saved=self._saved,
-                episodes_discarded=self._discarded,
-                last_event=self._last_event,
-                task_label=self.config.default_task_label,
-            )
 
     # ── port handlers ────────────────────────────────────────────────────────
 
