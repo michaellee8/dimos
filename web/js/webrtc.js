@@ -17,6 +17,9 @@ const STUN_ONLY = [{ urls: 'stun:stun.cloudflare.com:3478' }];
 const CONNECT_TIMEOUT_MS = 20000;
 const CHANNEL_OPEN_TIMEOUT_MS = 10000;
 const GATHER_TIMEOUT_MS = 10000;
+// After the first usable (srflx/relay) candidate, wait this long to scoop up
+// sibling candidates (the relay leg lands ~80ms after srflx) before proceeding.
+const GATHER_SETTLE_MS = 400;
 
 export function timeout(ms, label) {
     return new Promise((_, reject) =>
@@ -66,14 +69,18 @@ export async function setupWebRTC(sessionId) {
         v.play?.().catch(() => {});  // immersive: no user-gesture; nudge autoplay
     };
 
-    // ICE candidate-level diagnostics: which candidate types actually gather,
-    // and which TURN/STUN allocations error. A relay leg that never appears (or
-    // errors) is why non-trickle gather stalls to the GATHER_TIMEOUT cap.
+    // Resolve gather as soon as we have a routable (srflx/relay) candidate plus
+    // a short settle window — don't wait for iceGatheringState='complete'. With
+    // TURN configured, CF/Chrome keep the gatherer open probing extra relay
+    // permutations long after every usable candidate exists, so 'complete' lags
+    // ~10s behind a connection that was ready in <400ms.
+    let onUsableCandidate = null;  // set by the gather phase below
     pc.onicecandidate = (e) => {
         if (!e.candidate) { console.info('[ice] candidate gathering done (null candidate)'); return; }
         const c = e.candidate;
         console.info(`[ice] cand type=${c.type} proto=${c.protocol} ` +
             `${c.relatedAddress ? `via ${c.relatedAddress} ` : ''}@ +${since()}ms`);
+        if ((c.type === 'srflx' || c.type === 'relay') && onUsableCandidate) onUsableCandidate();
     };
     pc.onicecandidateerror = (e) => {
         // 701 = TURN/STUN server unreachable; 401 = bad creds; 300/600 = misc.
@@ -96,22 +103,28 @@ export async function setupWebRTC(sessionId) {
     await pc.setLocalDescription(offer);
     console.info(`[ice] localDescription set, gather starts @ +${since()}ms`);
 
-    // Non-trickle ICE; cap the wait so a stalled gather can't hang forever —
-    // proceed with whatever candidates we have. Relay (TURN) allocation makes
-    // this phase longer than STUN-only — log the duration to see the cost.
+    // Non-trickle ICE: proceed once we have a usable (srflx/relay) candidate,
+    // after a brief settle to scoop up siblings (e.g. the relay leg ~80ms after
+    // srflx). Falls back to iceGatheringState='complete' or the hard cap so a
+    // truly stalled gather still can't hang forever.
     const tGather = performance.now();
-    let gatherTimedOut = false;
-    await Promise.race([
-        new Promise(resolve => {
-            if (pc.iceGatheringState === 'complete') return resolve();
-            pc.onicegatheringstatechange = () => {
-                if (pc.iceGatheringState === 'complete') resolve();
-            };
-        }),
-        new Promise(resolve => setTimeout(() => { gatherTimedOut = true; resolve(); }, GATHER_TIMEOUT_MS)),
-    ]);
-    console.info(`[ice] gather ${(performance.now() - tGather).toFixed(0)}ms` +
-        (gatherTimedOut ? ` (hit ${GATHER_TIMEOUT_MS}ms cap)` : ''));
+    let how = 'cap';
+    await new Promise(resolve => {
+        let settleTimer = null;
+        const done = (reason) => { how = reason; clearTimeout(settleTimer); resolve(); };
+        if (pc.iceGatheringState === 'complete') return done('complete');
+        // First usable candidate → wait GATHER_SETTLE_MS for siblings, then go.
+        onUsableCandidate = () => {
+            if (settleTimer) return;
+            settleTimer = setTimeout(() => done('usable+settle'), GATHER_SETTLE_MS);
+        };
+        pc.onicegatheringstatechange = () => {
+            if (pc.iceGatheringState === 'complete') done('complete');
+        };
+        setTimeout(() => done('cap'), GATHER_TIMEOUT_MS);
+    });
+    onUsableCandidate = null;  // stop settling on late candidates
+    console.info(`[ice] gather ${(performance.now() - tGather).toFixed(0)}ms (${how})`);
 
     const data = await api('POST', `/sessions/${sessionId}/join`, {
         role: 'operator',
