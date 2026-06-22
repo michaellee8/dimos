@@ -25,6 +25,9 @@ export function timeout(ms, label) {
 
 export async function setupWebRTC(sessionId) {
     setStatus('Negotiating WebRTC...');
+    // All [ice] timestamps are relative to this — ms since setup began.
+    const t0 = performance.now();
+    const since = () => (performance.now() - t0).toFixed(0);
     // TURN must be in the PC's config at construction for relay candidates
     // to gather with the offer. Best-effort: a broker without TURN
     // configured returns STUN-only, and a failed fetch degrades to it.
@@ -70,7 +73,7 @@ export async function setupWebRTC(sessionId) {
         if (!e.candidate) { console.info('[ice] candidate gathering done (null candidate)'); return; }
         const c = e.candidate;
         console.info(`[ice] cand type=${c.type} proto=${c.protocol} ` +
-            `${c.relatedAddress ? `via ${c.relatedAddress} ` : ''}@ ${performance.now().toFixed(0)}ms`);
+            `${c.relatedAddress ? `via ${c.relatedAddress} ` : ''}@ +${since()}ms`);
     };
     pc.onicecandidateerror = (e) => {
         // 701 = TURN/STUN server unreachable; 401 = bad creds; 300/600 = misc.
@@ -87,8 +90,11 @@ export async function setupWebRTC(sessionId) {
         };
     });
 
+    console.info(`[ice] pc built, creating offer @ +${since()}ms`);
     const offer = await pc.createOffer();
+    console.info(`[ice] offer created @ +${since()}ms`);
     await pc.setLocalDescription(offer);
+    console.info(`[ice] localDescription set, gather starts @ +${since()}ms`);
 
     // Non-trickle ICE; cap the wait so a stalled gather can't hang forever —
     // proceed with whatever candidates we have. Relay (TURN) allocation makes
