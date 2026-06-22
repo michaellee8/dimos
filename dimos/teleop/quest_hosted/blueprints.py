@@ -16,7 +16,13 @@
 
 from dimos.control.blueprints.teleop import coordinator_teleop_xarm7
 from dimos.core.coordination.blueprints import autoconnect
-from dimos.core.transport import CloudflareTransport, CloudflareVideoTransport, LCMTransport
+from dimos.core.transport import (
+    CloudflareTransport,
+    CloudflareVideoTransport,
+    LCMTransport,
+    LiveKitTransport,
+    LiveKitVideoTransport,
+)
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
@@ -55,7 +61,6 @@ teleop_hosted_go2 = autoconnect(
     unitree_go2_basic,
 ).global_config(n_workers=8, viewer="none")
 
-
 # Hosted teleop over CF Realtime. Run with -o transports.broker.api_key=dtk_live_...
 teleop_hosted_go2_transport = (
     autoconnect(
@@ -72,6 +77,29 @@ teleop_hosted_go2_transport = (
             ("cmd_vel_stamped", TwistStamped): CloudflareTransport.spec(
                 "cmd_unreliable", TwistStamped
             ),  # recorder tap
+        }
+    )
+    .global_config(viewer="none")
+)
+
+
+# LiveKit twin of teleop_hosted_go2_transport — same channels, LiveKit SFU.
+# Run with -o transports.broker.api_key=dtk_live_...
+teleop_hosted_go2_livekit = (
+    autoconnect(
+        unitree_go2_basic.disabled_modules(GO2Connection),
+        Go2HostedConnection.blueprint(),
+    )
+    .transports(
+        {
+            ("cmd_vel", Twist): LiveKitTransport.spec("cmd_unreliable", TwistStamped),
+            ("color_image", Image): LiveKitVideoTransport.spec(),
+            ("state_json", bytes): LiveKitTransport.spec("state_reliable"),
+            ("telemetry_out", bytes): LiveKitTransport.spec("state_reliable_back"),
+            ("cmd_raw", bytes): LiveKitTransport.spec("cmd_unreliable"),  # stats tap
+            ("cmd_vel_stamped", TwistStamped): LiveKitTransport.spec(
+                "cmd_unreliable", TwistStamped
+            ),
         }
     )
     .global_config(viewer="none")
@@ -106,6 +134,7 @@ teleop_hosted_go2_multicam = (
 
 __all__ = [
     "teleop_hosted_go2",
+    "teleop_hosted_go2_livekit",
     "teleop_hosted_go2_multicam",
     "teleop_hosted_go2_transport",
     "teleop_hosted_xarm7",
