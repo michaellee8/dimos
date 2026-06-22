@@ -30,8 +30,8 @@ from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic import unitree_go2_basic
 from dimos.robot.unitree.go2.connection import GO2Connection
+from dimos.robot.unitree.go2.hosted_connection import Go2HostedConnection
 from dimos.teleop.quest.quest_types import Buttons
-from dimos.teleop.quest_hosted.go2_hosted_connection import Go2HostedConnection
 from dimos.teleop.quest_hosted.hosted_extensions import (
     HostedArmTeleopModule,
     HostedTwistTeleopModule,
