@@ -625,6 +625,7 @@ class ManipulationModule(Module):
             return []
         return list(self._world_monitor.planning_groups.list())
 
+    @rpc
     def list_planning_groups(self) -> list[PlanningGroup]:
         """Return all planning groups."""
         return self._planning_group_models()
