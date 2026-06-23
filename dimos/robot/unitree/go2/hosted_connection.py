@@ -269,12 +269,20 @@ class Go2HostedConnection(GO2Connection):
             return  # foreign / undecodable frame — skip
         self._cmd_stats.record(ts, nbytes=len(data))
 
+    def _battery_soc(self) -> int | None:
+        """Battery SOC from the cached lowstate, without invoking the logged
+        ``get_battery_soc`` skill (which the 3 Hz telemetry loop would spam)."""
+        try:
+            return int(self._latest_lowstate["data"]["bms_state"]["soc"])  # type: ignore[index]
+        except (KeyError, TypeError, ValueError):
+            return None
+
     def _start_telemetry(self) -> None:
         def runner() -> None:
             interval = 1.0 / max(self.config.telemetry_hz, 0.1)
             while not self._stop_event.is_set():
                 snap = self._cmd_stats.snapshot()
-                soc = self.get_battery_soc()  # parsed from lowstate by GO2Connection
+                soc = self._battery_soc()
                 if snap is not None or soc is not None:
                     payload = json.dumps(
                         {
