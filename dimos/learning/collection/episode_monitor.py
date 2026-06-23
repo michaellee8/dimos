@@ -74,7 +74,7 @@ class EpisodeMonitorModuleConfig(ModuleConfig):
 class EpisodeMonitorModule(Module):
     config: EpisodeMonitorModuleConfig
 
-    buttons: In[Buttons]
+    teleop_buttons: In[Buttons]
     # TODO: no KeyPress producer exists yet — add a pygame keyboard module that
     # publishes KeyPress so this port is actually fed (today only buttons drive it).
     keyboard: In[KeyPress]
@@ -93,7 +93,7 @@ class EpisodeMonitorModule(Module):
     def start(self) -> None:
         super().start()
         # Registered so the base Module.stop() disposes them on shutdown.
-        self.register_disposable(Disposable(self.buttons.subscribe(self._on_buttons)))
+        self.register_disposable(Disposable(self.teleop_buttons.subscribe(self._on_buttons)))
         self.register_disposable(Disposable(self.keyboard.subscribe(self._on_keyboard)))
         # Emit an initial idle status so subscribers (and recorders) have a
         # known starting point in the timeline.
