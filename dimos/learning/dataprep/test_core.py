@@ -38,10 +38,29 @@ from dimos.learning.dataprep.core import (
     StreamField,
     SyncConfig,
     extract_episodes,
+    is_image_array,
     iter_episode_samples,
     resolve_field,
     summarize_lengths,
 )
+
+
+@pytest.mark.parametrize(
+    ("arr", "expected"),
+    [
+        (np.zeros(8, np.float32), False),  # 1D proprio vector
+        (np.zeros((48, 64), np.uint8), True),  # 2D grayscale image
+        (np.zeros((48, 64, 3), np.uint8), True),  # RGB image
+        (np.zeros((4, 4), np.float64), False),  # SE(3) pose matrix — not an image
+        (np.zeros((3, 3), np.float32), False),  # rotation matrix
+        (np.zeros((6, 1), np.float32), False),  # stacked force-torque
+        (np.zeros((2, 7), np.float64), False),  # jacobian slice
+    ],
+)
+def test_is_image_array_disambiguates_2d_by_dtype(arr: np.ndarray, expected: bool) -> None:
+    # 2D float matrices stay low-dim; 2D integer frames are grayscale images.
+    assert is_image_array(arr) is expected
+
 
 # ── fakes ────────────────────────────────────────────────────────────────────
 

@@ -153,14 +153,17 @@ def resolve_field(msg: Any, ref: StreamField) -> NDArray[Any]:
 
 
 def is_image_array(arr: NDArray[Any]) -> bool:
-    """True for image-like *per-frame* arrays: 2D grayscale (H, W) or ≥3D
-    (H, W, C). Low-dim features (proprio, actions) are 1D vectors.
+    """Image-like per-frame array (→ video) vs low-dim feature (→ parquet).
 
-    Single source of truth for the obs-vs-image split. Note: format writers that
-    key off *time-stacked* arrays (shape (T, …)) test ``ndim >= 3`` directly —
-    the extra leading time axis shifts this bound by one.
+    3D+ is always an image; 2D is a grayscale frame only if integer — float 2D
+    is a low-dim matrix (pose/rotation/jacobian) and stays in the parquet.
+    (Writers on time-stacked (T, …) arrays use ``ndim >= 3`` directly.)
     """
-    return arr.ndim >= 2
+    if arr.ndim >= 3:
+        return True
+    if arr.ndim == 2:
+        return np.issubdtype(arr.dtype, np.integer)
+    return False
 
 
 def extract_episodes(store: SqliteStore, cfg: EpisodeExtractor) -> list[Episode]:
