@@ -40,7 +40,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from dimos.learning.dataprep.core import DEFAULT_FPS, OutputConfig, Sample
+from dimos.learning.dataprep.core import DEFAULT_FPS, OutputConfig, Sample, summarize_lengths
 from dimos.learning.dataprep.formats._stats import stats_from_metadata
 
 
@@ -156,8 +156,6 @@ def inspect(path: Path) -> dict[str, Any]:
         import h5py
     except ImportError as e:
         raise RuntimeError("HDF5 inspect requires h5py — install with `pip install h5py`") from e
-
-    from dimos.learning.dataprep.core import summarize_lengths
 
     out = Path(path)
     with h5py.File(out, "r") as h5:

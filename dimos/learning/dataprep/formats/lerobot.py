@@ -46,7 +46,13 @@ from typing import Any
 import numpy as np
 from numpy.typing import NDArray
 
-from dimos.learning.dataprep.core import DEFAULT_FPS, OutputConfig, Sample, is_image_array
+from dimos.learning.dataprep.core import (
+    DEFAULT_FPS,
+    OutputConfig,
+    Sample,
+    is_image_array,
+    summarize_lengths,
+)
 from dimos.learning.dataprep.formats._stats import StreamingStats, stats_from_metadata
 from dimos.utils.logging_config import setup_logger
 
@@ -449,8 +455,6 @@ _META_COLS = {"timestamp", "frame_index", "episode_index", "index", "task_index"
 def inspect(path: Path) -> dict[str, Any]:
     """Summarize a LeRobot v3.0 dataset from meta/ (info.json + episodes parquet)."""
     import pyarrow.parquet as pq
-
-    from dimos.learning.dataprep.core import summarize_lengths
 
     root = Path(path)
     info = json.loads((root / META_DIR / "info.json").read_text())
