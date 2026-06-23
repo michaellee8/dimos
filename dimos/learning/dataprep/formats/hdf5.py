@@ -41,7 +41,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from dimos.learning.dataprep.core import OutputConfig, Sample
-from dimos.learning.dataprep.formats._stats import StreamingStats
+from dimos.learning.dataprep.formats._stats import stats_from_metadata
 
 
 def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
@@ -56,11 +56,7 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
         out = out.with_suffix(".hdf5")
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    stats = StreamingStats(
-        image_subsample=int(output.metadata.get("image_subsample", 10)),
-        quantile_reservoir=int(output.metadata.get("quantile_reservoir", 10_000)),
-        seed=int(output.metadata.get("stats_seed", 0)),
-    )
+    stats = stats_from_metadata(output.metadata)
 
     default_task_label: str = output.metadata.get("default_task_label", "task")
     fps = float(output.metadata.get("fps", 30.0))

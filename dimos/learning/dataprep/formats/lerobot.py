@@ -47,7 +47,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from dimos.learning.dataprep.core import OutputConfig, Sample, is_image_array
-from dimos.learning.dataprep.formats._stats import StreamingStats
+from dimos.learning.dataprep.formats._stats import StreamingStats, stats_from_metadata
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -139,11 +139,7 @@ def write(samples: Iterator[Sample], output: OutputConfig) -> Path:
     default_task_label = output.metadata.get("default_task_label", "task")
 
     def _stats() -> StreamingStats:
-        return StreamingStats(
-            image_subsample=int(output.metadata.get("image_subsample", 10)),
-            quantile_reservoir=int(output.metadata.get("quantile_reservoir", 10_000)),
-            seed=int(output.metadata.get("stats_seed", 0)),
-        )
+        return stats_from_metadata(output.metadata)
 
     global_stats = _stats()  # aggregated across all frames → meta/stats.json
 

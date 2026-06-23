@@ -123,3 +123,12 @@ class StreamingStats:
                 entry["q99"] = np.quantile(stacked, 0.99, axis=0).tolist()
             out[name] = entry
         return out
+
+
+def stats_from_metadata(metadata: dict[str, Any]) -> StreamingStats:
+    """Build a StreamingStats from output metadata, with shared writer defaults."""
+    return StreamingStats(
+        image_subsample=int(metadata.get("image_subsample", 10)),
+        quantile_reservoir=int(metadata.get("quantile_reservoir", 10_000)),
+        seed=int(metadata.get("stats_seed", 0)),
+    )
