@@ -21,6 +21,7 @@ from typing import Any
 
 from dimos_lcm.std_msgs import Bool  # type: ignore[import-untyped]
 import numpy as np
+from numpy.typing import NDArray
 from reactivex.disposable import Disposable
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
@@ -74,7 +75,7 @@ class BasicPathFollower(Module):
         super().__init__(**kwargs)
         self._lock = RLock()
         self._current_odom: PoseStamped | None = None
-        self._waypoints: np.ndarray | None = None
+        self._waypoints: NDArray[np.float32] | None = None
         self._stop_event = Event()
         self._thread: Thread | None = None
 
@@ -108,7 +109,7 @@ class BasicPathFollower(Module):
                 self._waypoints = None
             self.nav_cmd_vel.publish(Twist())
             return
-        waypoints = np.array([[p.position.x, p.position.y] for p in path.poses])
+        waypoints = np.array([[p.position.x, p.position.y] for p in path.poses], dtype=np.float32)
         with self._lock:
             self._waypoints = waypoints
 
@@ -130,8 +131,8 @@ class BasicPathFollower(Module):
             elapsed = time.perf_counter() - start_time
             self._stop_event.wait(max(0.0, period - elapsed))
 
-    def _step(self, odom: PoseStamped, waypoints: np.ndarray) -> None:
-        position = np.array([odom.position.x, odom.position.y])
+    def _step(self, odom: PoseStamped, waypoints: NDArray[np.float32]) -> None:
+        position = np.array([odom.position.x, odom.position.y], dtype=np.float32)
         if float(np.linalg.norm(waypoints[-1] - position)) < self.config.goal_tolerance:
             self.nav_cmd_vel.publish(Twist())
             with self._lock:
@@ -151,12 +152,12 @@ class BasicPathFollower(Module):
             -self.config.max_angular,
             min(self.config.max_angular, self.config.heading_gain * yaw_error),
         )
-        # Taper forward speed by cos(yaw_error): decelerate into turns and pivot
-        # in place near 90 degrees, rather than stop and lurch.
         linear = self.config.speed * max(0.0, math.cos(yaw_error))
         self.nav_cmd_vel.publish(Twist(Vector3(linear, 0, 0), Vector3(0, 0, angular)))
 
-    def _lookahead_point(self, waypoints: np.ndarray, position: np.ndarray) -> np.ndarray:
+    def _lookahead_point(
+        self, waypoints: NDArray[np.float32], position: NDArray[np.float32]
+    ) -> NDArray[np.float32]:
         if len(waypoints) == 1:
             return np.asarray(waypoints[0])
 
@@ -180,8 +181,8 @@ class BasicPathFollower(Module):
         return np.asarray(waypoints[-1])
 
     def _project_onto_path(
-        self, waypoints: np.ndarray, position: np.ndarray
-    ) -> tuple[int, np.ndarray]:
+        self, waypoints: NDArray[np.float32], position: NDArray[np.float32]
+    ) -> tuple[int, NDArray[np.float32]]:
         best_idx = 0
         best_point = np.asarray(waypoints[0])
         best_dist = math.inf

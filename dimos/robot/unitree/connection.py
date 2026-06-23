@@ -51,9 +51,12 @@ from dimos.robot.unitree.type.lowstate import LowStateMsg
 from dimos.robot.unitree.type.odometry import Odometry
 from dimos.types.timestamped import Timestamped
 from dimos.utils.decorators.decorators import simple_mcache
+from dimos.utils.logging_config import setup_logger
 from dimos.utils.reactive import backpressure, callback_to_observable
 
 VideoMessage: TypeAlias = NDArray[np.uint8]  # Shape: (height, width, 3)
+
+logger = setup_logger()
 
 
 _T = TypeVar("_T", bound=Timestamped)
@@ -226,7 +229,7 @@ class UnitreeWebRTCConnection(Resource):
                 future.result()
             return True
         except Exception as e:
-            print(f"Failed to send movement command: {e}")
+            logger.warning("Failed to send movement command: %s", e)
             return False
 
     # Generic conversion of unitree subscription to Subject (used for all subs)
@@ -340,7 +343,7 @@ class UnitreeWebRTCConnection(Resource):
             resp = self.publish_request(RTC_TOPIC["MOTION_SWITCHER"], {"api_id": 1001})
             current = json.loads(resp["data"]["data"]).get("name")
         except (KeyError, TypeError, ValueError) as e:
-            print(f"Motion mode check failed: {e}")
+            logger.warning("Motion mode check failed: %s", e)
         if current == name:
             return
         self.publish_request(

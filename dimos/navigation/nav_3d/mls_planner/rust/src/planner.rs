@@ -459,30 +459,34 @@ fn select_entry(
     ))
 }
 
-/// Bounded Dijkstra from the robot cell, visiting cells within the radius.
-/// Returns per-cell distance and predecessor maps.
+/// Bounded Dijkstra from the robot cell. Cost is wall-penalized for steering,
+/// but the radius bounds metric distance, not penalized cost.
 fn robot_search(
     cells: &SurfaceCells,
     source: CellId,
     radius_m: f32,
 ) -> (AHashMap<CellId, f32>, AHashMap<CellId, CellId>) {
     let mut dist: AHashMap<CellId, f32> = AHashMap::new();
+    let mut geo: AHashMap<CellId, f32> = AHashMap::new();
     let mut pred: AHashMap<CellId, CellId> = AHashMap::new();
     let mut heap: BinaryHeap<Scored> = BinaryHeap::new();
     dist.insert(source, 0.0);
+    geo.insert(source, 0.0);
     heap.push(Scored(0.0, source));
 
     while let Some(Scored(d, u)) = heap.pop() {
-        if d > radius_m {
-            break;
-        }
         if d > dist.get(&u).copied().unwrap_or(f32::INFINITY) {
+            continue;
+        }
+        // Stop expanding past the metric radius.
+        if geo.get(&u).copied().unwrap_or(f32::INFINITY) > radius_m {
             continue;
         }
         for edge in cells.neighbors(u) {
             let nd = d + edge.cost;
             if nd < dist.get(&edge.dest).copied().unwrap_or(f32::INFINITY) {
                 dist.insert(edge.dest, nd);
+                geo.insert(edge.dest, geo[&u] + edge.base_cost);
                 pred.insert(edge.dest, u);
                 heap.push(Scored(nd, edge.dest));
             }
@@ -696,9 +700,16 @@ fn string_pull(
         let mut rough_rise = 0.0_f32;
         let mut j = anchor + 1;
         while j < cells.len() {
-            if let Some((pen, rise)) = metrics(cells[j - 1], cells[j]) {
-                rough_pen = rough_pen.max(pen);
-                rough_rise += rise;
+            match metrics(cells[j - 1], cells[j]) {
+                Some((pen, rise)) => {
+                    rough_pen = rough_pen.max(pen);
+                    rough_rise += rise;
+                }
+                // Infeasible step. Raise the baseline so the chord breaks.
+                None => {
+                    rough_pen = f32::INFINITY;
+                    rough_rise = f32::INFINITY;
+                }
             }
             match metrics(cells[anchor], cells[j]) {
                 Some((pen, rise)) if pen <= rough_pen + 1e-3 && rise <= rough_rise + 1e-3 => {
