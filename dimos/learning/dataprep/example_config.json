@@ -1,5 +1,5 @@
 {
-  "source": "data/recordings/session.db",
+  "source": "recordings/session.db",
   "episodes": {
     "extractor": "episode_status",
     "status_stream": "status"
@@ -28,7 +28,7 @@
   },
   "output": {
     "format": "lerobot",
-    "path": "data/datasets/session",
+    "path": "datasets/session",
     "metadata": {
       "robot": "xarm7",
       "default_task_label": "pick_and_place"
