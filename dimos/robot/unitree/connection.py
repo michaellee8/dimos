@@ -49,7 +49,10 @@ from dimos.robot.unitree.type.lowstate import LowStateMsg
 from dimos.robot.unitree.type.odometry import Odometry
 from dimos.types.timestamped import Timestamped
 from dimos.utils.decorators.decorators import simple_mcache
+from dimos.utils.logging_config import setup_logger
 from dimos.utils.reactive import backpressure, callback_to_observable
+
+logger = setup_logger()
 
 VideoMessage: TypeAlias = NDArray[np.uint8]  # Shape: (height, width, 3)
 
@@ -331,14 +334,13 @@ class UnitreeWebRTCConnection(Resource):
     def set_rage_mode(self, enable: bool) -> bool:
         """Toggle Rage Mode (api 2059) over WebRTC, both directions.
 
-        Mirrors the DDS adapter recipe: BalanceStand → 2059 {data:enable} →
-        on enable, settle + SwitchJoystick(True); on disable, SwitchJoystick(False)
-        to return to the normal velocity envelope. After enable, normal move()
-        twists drive at the ~2.5 m/s rage envelope.
+        BalanceStand → 2059 {data:enable} → SwitchJoystick(enable). When on,
+        normal move() twists drive at the ~2.5 m/s rage envelope.
         """
         # Re-establish BalanceStand before toggling (notes: always BalanceStand
         # before flipping Rage).
-        self.balance_stand()
+        if not self.balance_stand():
+            logger.warning("balance_stand() failed before rage toggle — proceeding")
         time.sleep(0.3)
 
         rage_ok = bool(
@@ -347,15 +349,17 @@ class UnitreeWebRTCConnection(Resource):
                 {"api_id": self._SPORT_API_ID_RAGEMODE, "parameter": {"data": enable}},
             )
         )
+        if not rage_ok:
+            return False
+
         if enable:
             time.sleep(2.0)  # let FsmRageMode transition settle
-        joystick_ok = bool(
+        return bool(
             self.publish_request(
                 RTC_TOPIC["SPORT_MOD"],
                 {"api_id": SPORT_CMD["SwitchJoystick"], "parameter": {"data": enable}},
             )
         )
-        return rage_ok and joystick_ok
 
     def liedown(self) -> bool:
         return bool(

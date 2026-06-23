@@ -274,7 +274,7 @@ class Go2HostedConnection(GO2Connection):
             interval = 1.0 / max(self.config.telemetry_hz, 0.1)
             while not self._stop_event.is_set():
                 snap = self._cmd_stats.snapshot()
-                soc = getattr(self, "_latest_soc", None)  # cached by GO2Connection
+                soc = self.get_battery_soc()  # parsed from lowstate by GO2Connection
                 if snap is not None or soc is not None:
                     payload = json.dumps(
                         {
