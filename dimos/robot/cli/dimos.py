@@ -681,6 +681,11 @@ def send(
 map_app = typer.Typer(help="Voxel-map tools over recorded sqlite datasets")
 main.add_typer(map_app, name="map")
 map_app.command("global")(_map_main)
+map_app.command("summary")(_map_summary_main)
+map_app.command("rename")(_map_rename_main)
+map_app.command("pose-fill")(_map_pose_fill_main)
+map_app.command("replay")(_map_replay_main)
+map_app.command("replay-marker")(_map_replay_marker_main)
 
 
 dataprep_app = typer.Typer(help="Build and inspect learning datasets from recordings")
@@ -718,12 +723,6 @@ def dataprep_inspect(
 
     inspect(dataset, output_format)
 
-
-map_app.command("summary")(_map_summary_main)
-map_app.command("rename")(_map_rename_main)
-map_app.command("pose-fill")(_map_pose_fill_main)
-map_app.command("replay")(_map_replay_main)
-map_app.command("replay-marker")(_map_replay_marker_main)
 
 from dimos.memory2.cli.app import mem_app
 
