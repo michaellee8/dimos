@@ -26,6 +26,9 @@
 //       --grid      'dimos/grid_map_3d#sensor_msgs.PointCloud2'    --grid_topic    /grid_map_3d \
 //       --odometry  'dimos/odom#nav_msgs.Odometry'                 --odom_topic    /ODOM \
 //       --iface eth1 --domain 0
+//
+// On networks where multicast scouting can't reach the router, dial it directly:
+//       --connect tcp/10.21.31.103:7447,tcp/10.21.33.103:7447
 
 #include "drdds/core/drdds_core.h"
 
@@ -304,6 +307,8 @@ int main(int argc, char** argv) {
     // Zenoh session: default config = peer mode + multicast scouting (auto-discovery),
     // so dimos consumers find us with no hardcoded endpoints. Pin the multicast NIC
     // when given (the M20 boxes are multi-homed; eth1 is the NOS .31 segment).
+    // When multicast can't reach the router (an L2 segment that drops multicast),
+    // pass --connect with explicit router endpoint(s) to dial it directly.
     z_owned_config_t cfg;
     const bool no_zenoh = mod.arg_bool("no_zenoh", false);  // diagnostic: skip zenoh entirely
     if (!no_zenoh) {
@@ -311,6 +316,29 @@ int main(int argc, char** argv) {
         if (!iface.empty()) {
             const std::string v = "\"" + iface + "\"";
             zc_config_insert_json5(z_config_loan_mut(&cfg), "scouting/multicast/interface", v.c_str());
+        }
+        // Explicit router endpoint(s), comma-separated (e.g.
+        // "tcp/10.21.31.103:7447,tcp/10.21.33.103:7447"). Multicast scouting still
+        // runs alongside, so this is additive: connect directly AND auto-discover.
+        const std::string connect = mod.arg("connect", "");
+        if (!connect.empty()) {
+            std::string eps = "[";
+            bool first = true;
+            for (size_t start = 0; start <= connect.size();) {
+                const size_t comma = connect.find(',', start);
+                const size_t len = comma == std::string::npos ? std::string::npos : comma - start;
+                const std::string ep = connect.substr(start, len);
+                if (!ep.empty()) {
+                    eps += first ? "\"" : ",\"";
+                    eps += ep + "\"";
+                    first = false;
+                }
+                if (comma == std::string::npos) { break; }
+                start = comma + 1;
+            }
+            eps += "]";
+            zc_config_insert_json5(z_config_loan_mut(&cfg), "connect/endpoints", eps.c_str());
+            fprintf(stderr, "[bridge] connect endpoints: %s\n", eps.c_str());
         }
         if (z_open(&g_session, z_move(cfg), nullptr) != Z_OK) {
             fprintf(stderr, "[bridge] zenoh session open failed\n");

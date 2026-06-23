@@ -47,6 +47,12 @@ via `--<port>_topic` (odometry uses `--odom_topic`). `--iface` pins the multicas
 scout NIC (eth1 = NOS .31 segment); `--shm` (default true) uses the SHM transport
 needed for SHM-only writers like `/ALIGNED_POINTS`.
 
+`--connect <eps>` adds explicit, comma-separated router endpoint(s) (e.g.
+`tcp/10.21.31.103:7447,tcp/10.21.33.103:7447`). Use this when multicast scouting
+can't reach the router — e.g. the NOS↔AOS L2 segment drops multicast (no IGMP
+querier), so the bridge never auto-discovers the router even though TCP works.
+Multicast scouting still runs alongside, so the flag is purely additive.
+
 ## Verify (on GEN, in the dimos venv)
 
 ```sh
