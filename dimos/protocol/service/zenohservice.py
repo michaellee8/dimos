@@ -131,6 +131,24 @@ class ZenohService(Service):
         self._session_pool = session_pool or default_session_pool
         self._session: zenoh.Session | None = None
 
+    def __getstate__(self) -> dict[str, Any]:
+        """Drop the live session + pool so the service survives the worker pipe.
+
+        Modules (and their transports) are pickled across the multiprocessing
+        boundary; the Rust-backed zenoh.Session and the pooled sessions can't be
+        pickled. Copy the dict first so popping never mutates the live instance.
+        Re-acquired against the worker-local default pool in start().
+        """
+        state = self.__dict__.copy()
+        state.pop("_session", None)
+        state.pop("_session_pool", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self._session = None
+        self._session_pool = default_session_pool
+
     def start(self) -> None:
         self._session = self._session_pool.acquire(self.config)
         super().start()

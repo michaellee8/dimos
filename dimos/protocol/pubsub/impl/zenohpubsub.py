@@ -114,6 +114,28 @@ class ZenohPubSubBase(ZenohService, AllPubSub[Topic, bytes]):
         self._drain_stops: list[Callable[[], None]] = []
         self._subscriber_lock = threading.Lock()
 
+    def __getstate__(self) -> dict[str, Any]:
+        # Cached publishers/subscribers wrap the (unpicklable) session and are
+        # re-declared lazily after start(); the locks can't be pickled either.
+        state: dict[str, Any] = super().__getstate__()
+        for key in (
+            "_publishers",
+            "_publisher_lock",
+            "_subscribers",
+            "_drain_stops",
+            "_subscriber_lock",
+        ):
+            state.pop(key, None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        super().__setstate__(state)
+        self._publishers = {}
+        self._publisher_lock = threading.Lock()
+        self._subscribers = []
+        self._drain_stops = []
+        self._subscriber_lock = threading.Lock()
+
     def _qos_rules(self) -> tuple[ZenohQoS, ...]:
         if self.config.qos is not None:
             return self.config.qos
