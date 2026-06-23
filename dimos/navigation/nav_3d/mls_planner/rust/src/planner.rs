@@ -22,6 +22,11 @@ const SNAP_SEARCH_RADIUS_M: f32 = 1.5;
 /// Max snap candidates tried when connecting the start.
 const MAX_SNAP_ATTEMPTS: usize = 64;
 
+/// Standoff held from a blockage on a truncated path. The robot follows the
+/// cached route to best effort and stops this far short of the last
+/// traversable point, in meters.
+const BEST_EFFORT_DISTANCE_M: f32 = 1.0;
+
 /// World-frame waypoints paired with the string-pulled cell path that produced
 /// them. The cell path is cached for later safe truncation.
 type PlannedPath = (Vec<(f32, f32, f32)>, Vec<VoxelKey>);
@@ -191,7 +196,9 @@ pub fn plan(
 
 /// Re-validate a cached cell path against the current surface, returning the
 /// route ahead of the robot up to the first segment no longer traversable.
-/// Empty when nothing ahead is safe, which the follower reads as a stop.
+/// When the route is cut by a blockage, it holds a BEST_EFFORT_DISTANCE_M
+/// standoff short of it. Empty when nothing ahead is safe, which the follower
+/// reads as a stop.
 pub fn truncate_to_safe(
     plg: &PlannerGraph,
     cached: &[VoxelKey],
@@ -232,7 +239,44 @@ pub fn truncate_to_safe(
     for &(ix, iy, iz) in &cached[resume + 1..=safe_end] {
         waypoints.push(surface_point_xyz(ix, iy, iz, voxel_size));
     }
+
+    // A break short of the goal end means the route runs into a blockage, so
+    // hold the standoff. A run to the goal end has no blockage to stand off.
+    if safe_end + 1 < cached.len() {
+        return back_off_tail(&waypoints, BEST_EFFORT_DISTANCE_M);
+    }
     waypoints
+}
+
+/// Drop `distance` meters off the goal end of the path, measured in the ground
+/// plane. Empty when trimming consumes the whole path, which is the robot
+/// already sitting inside the standoff.
+fn back_off_tail(waypoints: &[(f32, f32, f32)], distance: f32) -> Vec<(f32, f32, f32)> {
+    let mut remaining = distance;
+    for i in (1..waypoints.len()).rev() {
+        let (b, a) = (waypoints[i], waypoints[i - 1]);
+        let seg = (b.0 - a.0).hypot(b.1 - a.1);
+        if seg < remaining {
+            remaining -= seg;
+            continue;
+        }
+        let t = if seg == 0.0 {
+            0.0
+        } else {
+            (seg - remaining) / seg
+        };
+        let cut = (
+            a.0 + (b.0 - a.0) * t,
+            a.1 + (b.1 - a.1) * t,
+            a.2 + (b.2 - a.2) * t,
+        );
+        let mut out = waypoints[..i].to_vec();
+        if out.last() != Some(&cut) {
+            out.push(cut);
+        }
+        return if out.len() >= 2 { out } else { Vec::new() };
+    }
+    Vec::new()
 }
 
 /// Index of the cached segment the robot is on, by nearest-point projection in
@@ -769,64 +813,88 @@ mod tests {
     }
 
     #[test]
-    fn truncate_resumes_ahead_of_robot_and_cuts_at_break() {
+    fn truncate_keeps_the_full_clear_route_ahead() {
         let cfg = truncate_config();
-        // Cached path runs start (x=0) -> goal (x=9) along the strip.
-        let cached: Vec<VoxelKey> = (0..10).map(|x| (x, 0, 0)).collect();
+        // Cached route 0 -> 39 (cells), still fully traversable, robot at start.
+        let cached: Vec<VoxelKey> = (0..40).map(|x| (x, 0, 0)).collect();
         let start = surface_point_xyz(0, 0, 0, VOXEL);
 
-        // Intact surface, robot at the start: keep the whole route ahead, which
-        // is the start pose plus cells 1..=9 (the robot's own cell is dropped).
+        // No blockage, so no standoff: start pose plus every cell ahead, where
+        // the robot's own cell 0 is dropped.
         let full = truncate_to_safe(&surface_graph(&cached), &cached, start, &cfg);
-        assert_eq!(full.len(), cached.len(), "start pose + cells ahead");
+        assert_eq!(full.len(), cached.len(), "start pose + cells 1..=39");
         assert_eq!(full[1], surface_point_xyz(1, 0, 0, VOXEL));
-        assert_eq!(*full.last().unwrap(), surface_point_xyz(9, 0, 0, VOXEL));
+        assert_eq!(*full.last().unwrap(), surface_point_xyz(39, 0, 0, VOXEL));
+    }
 
-        // Surface gone at x=5: cut before the gap, keep cells 1..=4 ahead.
-        let gap: Vec<VoxelKey> = (0..10).filter(|&x| x != 5).map(|x| (x, 0, 0)).collect();
-        let cut = truncate_to_safe(&surface_graph(&gap), &cached, start, &cfg);
-        assert_eq!(cut.len(), 5, "start pose + cells 1..=4");
-        assert_eq!(*cut.last().unwrap(), surface_point_xyz(4, 0, 0, VOXEL));
+    #[test]
+    fn truncate_holds_standoff_ahead_of_advanced_robot() {
+        let cfg = truncate_config();
+        // Robot has advanced to x=20 along a 0 -> 39 route, and the surface is
+        // now gone at x=35 (a door closed ahead).
+        let cached: Vec<VoxelKey> = (0..40).map(|x| (x, 0, 0)).collect();
+        let robot = surface_point_xyz(20, 0, 0, VOXEL);
+        let blocked: Vec<VoxelKey> = (0..40).filter(|&x| x != 35).map(|x| (x, 0, 0)).collect();
 
-        // Surface gone at x=1: the first step ahead is blocked, so nothing is
-        // safe and the result is empty (a stop).
-        let early: Vec<VoxelKey> = (0..10).filter(|&x| x != 1).map(|x| (x, 0, 0)).collect();
+        let wp = truncate_to_safe(&surface_graph(&blocked), &cached, robot, &cfg);
+        assert_eq!(wp[0], robot);
+
+        // Never behind the robot, always forward toward the goal.
+        let xs: Vec<f32> = wp.iter().map(|w| w.0).collect();
         assert!(
-            truncate_to_safe(&surface_graph(&early), &cached, start, &cfg).is_empty(),
-            "first step blocked -> empty (stop)"
+            xs.iter().all(|&x| x >= robot.0 - 1e-4),
+            "backtracked: {xs:?}"
+        );
+        assert!(xs.windows(2).all(|p| p[1] >= p[0]), "not forward: {xs:?}");
+
+        // Stops a standoff short of the last traversable cell (x=34).
+        let last_safe = surface_point_xyz(34, 0, 0, VOXEL);
+        let last = *wp.last().unwrap();
+        let gap = (last_safe.0 - last.0).hypot(last_safe.1 - last.1);
+        assert!(
+            (gap - BEST_EFFORT_DISTANCE_M).abs() < VOXEL,
+            "standoff is {gap} m, expected ~{BEST_EFFORT_DISTANCE_M}"
         );
     }
 
     #[test]
-    fn truncate_does_not_backtrack_when_robot_has_advanced() {
+    fn truncate_stops_inside_standoff_or_at_blockage() {
         let cfg = truncate_config();
-        // Cached route start (x=0) -> goal (x=9). The robot has already walked
-        // to x=5, and the surface is now gone at x=8 (a door closed ahead).
-        let cached: Vec<VoxelKey> = (0..10).map(|x| (x, 0, 0)).collect();
-        let robot = surface_point_xyz(5, 0, 0, VOXEL);
-        let blocked: Vec<VoxelKey> = (0..10).filter(|&x| x != 8).map(|x| (x, 0, 0)).collect();
+        let cached: Vec<VoxelKey> = (0..40).map(|x| (x, 0, 0)).collect();
+        let robot = surface_point_xyz(0, 0, 0, VOXEL);
 
-        let wp = truncate_to_safe(&surface_graph(&blocked), &cached, robot, &cfg);
+        // Blockage at the next step: nothing safe ahead, stop.
+        let at_robot: Vec<VoxelKey> = (0..40).filter(|&x| x != 1).map(|x| (x, 0, 0)).collect();
+        assert!(
+            truncate_to_safe(&surface_graph(&at_robot), &cached, robot, &cfg).is_empty(),
+            "blockage at the next step -> stop"
+        );
 
-        // Resumes ahead of the robot: no cell behind x=5, up to the x=8 break.
-        assert_eq!(wp[0], robot);
-        let xs: Vec<i32> = wp[1..]
-            .iter()
-            .map(|w| (w.0 / VOXEL).floor() as i32)
-            .collect();
+        // Blockage only ~0.4 m ahead, inside the standoff: the best-effort point
+        // is behind the robot, so stop.
+        let near: Vec<VoxelKey> = (0..40).filter(|&x| x != 5).map(|x| (x, 0, 0)).collect();
         assert!(
-            xs.iter().all(|&x| x >= 5),
-            "path backtracked behind the robot: {xs:?}"
+            truncate_to_safe(&surface_graph(&near), &cached, robot, &cfg).is_empty(),
+            "inside the standoff -> stop"
         );
-        assert_eq!(
-            *xs.last().unwrap(),
-            7,
-            "should stop just before the x=8 break"
-        );
-        assert!(
-            xs.windows(2).all(|p| p[1] > p[0]),
-            "path not monotonic forward: {xs:?}"
-        );
+    }
+
+    #[test]
+    fn back_off_tail_trims_from_the_goal_end() {
+        let path = vec![
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (2.0, 0.0, 0.0),
+            (3.0, 0.0, 0.0),
+        ];
+        // Trim within the last segment.
+        assert_eq!(*back_off_tail(&path, 0.5).last().unwrap(), (2.5, 0.0, 0.0));
+        // Trim exactly to a vertex without leaving a duplicate point.
+        let to_vertex = back_off_tail(&path, 1.0);
+        assert_eq!(*to_vertex.last().unwrap(), (2.0, 0.0, 0.0));
+        assert_eq!(to_vertex.len(), 3);
+        // Trimming more than the path length stops (empty).
+        assert!(back_off_tail(&path, 5.0).is_empty());
     }
 
     #[test]
