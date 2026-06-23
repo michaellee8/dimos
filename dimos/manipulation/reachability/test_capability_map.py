@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +24,11 @@ from dimos.manipulation.reachability.capability_map import (
     CapabilityMap,
     MapParams,
     canonical_values,
+    canonical_values_from_poses,
 )
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 
 _G1_MJCF = Path(__file__).parents[3] / "data" / "mujoco_sim" / "g1_gear_wbc.xml"
 
@@ -46,6 +51,13 @@ def _yaw_rotated(positions: np.ndarray, rotations: np.ndarray, alpha: float):
     c, s = np.cos(alpha), np.sin(alpha)
     rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
     return positions @ rz.T, np.einsum("ij,njk->nik", rz, rotations)
+
+
+def _pose_matrices(positions: np.ndarray, rotations: np.ndarray) -> np.ndarray:
+    poses = np.tile(np.eye(4), (len(positions), 1, 1))
+    poses[:, :3, :3] = rotations
+    poses[:, :3, 3] = positions
+    return poses
 
 
 def test_canonical_values_are_yaw_gauge_invariant() -> None:
@@ -83,6 +95,36 @@ def test_record_query_roundtrip() -> None:
     assert np.all(cap.scores(*rotated) >= 1)
 
 
+def test_pose_api_matches_vectorized_components() -> None:
+    rng = np.random.default_rng(5)
+    positions, rotations = _random_poses(100, rng)
+    ee_poses = _pose_matrices(positions, rotations)
+
+    component_values = canonical_values(positions, rotations)
+    pose_values = canonical_values_from_poses(ee_poses)
+    for from_components, from_poses in zip(component_values, pose_values, strict=True):
+        assert np.allclose(from_components, from_poses)
+
+    cap = CapabilityMap(MapParams())
+    assert cap.record_poses(ee_poses) == cap.record_batch(positions, rotations)
+    assert np.array_equal(cap.score_poses(ee_poses), cap.scores(positions, rotations))
+    assert np.array_equal(cap.score_poses_4d(ee_poses), cap.scores_4d(positions, rotations))
+    assert cap.score_pose(ee_poses[0]) >= 1
+    assert cap.reachable_pose(ee_poses[0])
+
+
+def test_pose_stamped_api() -> None:
+    cap = CapabilityMap(MapParams())
+    pose = PoseStamped(
+        position=Vector3(0.3, 0.0, 0.9),
+        orientation=Quaternion(0.0, 0.0, 0.0, 1.0),
+    )
+
+    assert cap.record_poses(pose) == 1
+    assert cap.score_pose(pose) >= 1
+    assert cap.reachable_pose(pose)
+
+
 def test_out_of_bounds_scores_zero() -> None:
     cap = CapabilityMap(MapParams())
     positions = np.array([[5.0, 0.0, 0.5]])  # far outside r_xy
@@ -100,40 +142,49 @@ def test_counts_saturate_not_wrap() -> None:
     assert cap.scores(positions[:1], rotations[:1])[0] == 255
 
 
-def test_mirror_identity() -> None:
-    """A pose recorded in the left map is reachable in the right map at the
-    reflected pose (y → -y reflection of position and orientation)."""
-    rng = np.random.default_rng(5)
-    cap = CapabilityMap(MapParams(), side="left")
-    positions, rotations = _random_poses(300, rng)
-    cap.record_batch(positions, rotations)
-    mirrored = cap.mirrored()
-    assert mirrored.side == "right"
-
-    flip = np.diag([1.0, -1.0, 1.0])
-    positions_m = positions @ flip
-    # Proper reflection of a frame: conjugate then fix handedness by
-    # negating the x and z axes' y components... equivalently R' = F R F
-    # with det(F R F) = det(R) = 1 only if we re-orthogonalize handedness:
-    rotations_m = np.einsum("ij,njk,kl->nil", flip, rotations, flip)
-    # F R F has det = +1 (two reflections) — still a rotation.
-    scores = mirrored.scores(positions_m, rotations_m)
-    assert np.all(scores >= 1)
-
-
 def test_save_load_roundtrip(tmp_path: Path) -> None:
     rng = np.random.default_rng(6)
-    cap = CapabilityMap(MapParams(), side="left", model_id="abc123")
+    cap = CapabilityMap(MapParams(), robot="g1-left", model_id="abc123")
     positions, rotations = _random_poses(100, rng)
     cap.record_batch(positions, rotations)
     path = cap.save(tmp_path / "map.npz")
 
     loaded = CapabilityMap.load(path)
     assert loaded.params == cap.params
-    assert loaded.side == "left"
+    assert loaded.robot == "g1-left"
     assert loaded.model_id == "abc123"
     assert np.array_equal(loaded.counts, cap.counts)
     assert np.array_equal(loaded.heading_hint, cap.heading_hint)
+
+
+def test_load_legacy_pelvis_height_and_side_metadata(tmp_path: Path) -> None:
+    params_dict = {
+        "r_xy": 1.0,
+        "z_min": 0.0,
+        "z_max": 1.8,
+        "cell": 0.05,
+        "n_theta": 36,
+        "n_inplane": 12,
+        "n_heading": 8,
+        "pelvis_height": 1.23,
+    }
+    params = MapParams.from_json_dict(params_dict)
+    shape5 = (params.n_z, params.n_theta, params.n_xy, params.n_xy, params.n_inplane)
+    path = tmp_path / "legacy_map.npz"
+    np.savez_compressed(
+        path,
+        counts=np.zeros(shape5, dtype=np.uint8),
+        heading_hint=np.zeros(shape5[:4], dtype=np.uint8),
+        params=np.frombuffer(json.dumps(params_dict).encode(), dtype=np.uint8),
+        meta=np.frombuffer(
+            json.dumps({"side": "right", "model_id": "legacy"}).encode(), dtype=np.uint8
+        ),
+    )
+
+    loaded = CapabilityMap.load(path)
+    assert loaded.robot == "g1-right"
+    assert loaded.model_id == "legacy"
+    assert loaded.params.base_link_pose.position.z == pytest.approx(1.23)
 
 
 @pytest.mark.skipif(not _G1_MJCF.exists(), reason="G1 MJCF assets not present")
@@ -141,9 +192,9 @@ def test_g1_construction_smoke() -> None:
     """Tiny construction run: sampled FK poses must query reachable, and an
     absurd pose must not."""
     pytest.importorskip("mujoco")
-    from dimos.manipulation.reachability.construct import construct, g1_spec
+    from dimos.manipulation.reachability.construct import arm_spec, construct
 
-    spec = g1_spec("left")
+    spec = arm_spec("g1-left")
     cap = construct(spec, n_samples=3000, workers=1, seed=7)
     assert cap.n_marked > 100
     assert cap.model_id
@@ -164,7 +215,7 @@ def test_g1_construction_smoke() -> None:
 
 
 def test_viewer_cloud_functions() -> None:
-    from dimos.manipulation.reachability.viewer import body_point_cloud, score_colors
+    from dimos.manipulation.reachability.demo_viewer import body_point_cloud, score_colors
 
     rng = np.random.default_rng(9)
     cap = CapabilityMap(MapParams())
@@ -200,18 +251,11 @@ def test_body_frame_volume() -> None:
     assert np.all(dexterity[iz, ix, iy] > 0.0)
     assert dexterity.max() <= 1.0
 
-    # Mirror flips the body volume across y.
-    mirrored = cap.mirrored()
-    flipped = positions * np.array([1.0, -1.0, 1.0])
-    mz, mx, my, mvalid = mirrored.body_indices(flipped)
-    assert np.all(mvalid)
-    assert np.all(mirrored.body_counts[mz, mx, my] >= 1)
-
 
 def test_body_voxel_mesh_and_slices() -> None:
     pytest.importorskip("trimesh")
     pytest.importorskip("matplotlib")
-    from dimos.manipulation.reachability.viewer import (
+    from dimos.manipulation.reachability.demo_viewer import (
         body_voxel_mesh,
         slice_image_height,
         slice_image_yaw,
@@ -242,10 +286,10 @@ def test_body_voxel_mesh_and_slices() -> None:
 def test_arm_ik_reaches_fk_pose() -> None:
     pytest.importorskip("mink")
     pytest.importorskip("mujoco")
-    from dimos.manipulation.reachability.construct import _ArmSampler, g1_spec
-    from dimos.manipulation.reachability.viewer import ArmIK
+    from dimos.manipulation.reachability.construct import _ArmSampler, arm_spec
+    from dimos.manipulation.reachability.demo_viewer import ArmIK
 
-    sampler = _ArmSampler(g1_spec("left"))
+    sampler = _ArmSampler(arm_spec("g1-left"))
     rng = np.random.default_rng(12)
     positions, rotations, _ = sampler.sample_chunk(5, rng)
 

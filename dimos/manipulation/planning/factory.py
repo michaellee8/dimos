@@ -23,6 +23,7 @@ from dimos.manipulation.planning.kinematics.config import (
     DrakeOptimizationKinematicsConfig,
     JacobianKinematicsConfig,
     ManipulationKinematicsConfig,
+    MinkKinematicsConfig,
     PinkKinematicsConfig,
     kinematics_config_from_name,
 )
@@ -54,14 +55,18 @@ def create_world(
     visualization: ManipulationVisualizationConfig | None = None,
     **kwargs: Any,
 ) -> WorldSpec:
-    """Create a world instance. backend='drake' only for now."""
+    """Create a world instance."""
     visualization = visualization or NoManipulationVisualizationConfig()
     if backend == "drake":
         from dimos.manipulation.planning.world.drake_world import DrakeWorld
 
         return DrakeWorld(enable_viz=visualization.requires_world_visualization, **kwargs)
+    elif backend == "mujoco":
+        from dimos.manipulation.planning.world.mujoco_world import MujocoWorld
+
+        return MujocoWorld(**kwargs)
     else:
-        raise ValueError(f"Unknown backend: {backend}. Available: ['drake']")
+        raise ValueError(f"Unknown backend: {backend}. Available: ['drake', 'mujoco']")
 
 
 def create_kinematics(
@@ -87,6 +92,10 @@ def create_kinematics(
         from dimos.manipulation.planning.kinematics.pink_ik import PinkIK
 
         return PinkIK(config, **kwargs)
+    elif isinstance(config, MinkKinematicsConfig):
+        from dimos.manipulation.planning.kinematics.mink_ik import MinkIK
+
+        return MinkIK(config, **kwargs)
     else:
         raise TypeError(f"Unsupported kinematics config: {type(config).__name__}")
 

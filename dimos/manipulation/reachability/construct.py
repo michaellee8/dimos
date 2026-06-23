@@ -43,17 +43,21 @@ from typing import Any
 
 import numpy as np
 
+from dimos.manipulation.planning.factory import create_world
+from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.reachability.capability_map import (
     CapabilityMap,
     MapParams,
     model_id_for,
 )
 from dimos.manipulation.reachability.robots import arm_model, compile_model, list_robots
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
 _CHUNK = 50_000
+_UINT8_MAX = np.iinfo(np.uint8).max
 
 
 @dataclass(frozen=True)
@@ -64,15 +68,22 @@ class ConstructionSpec:
     model_meshdir: str | None
     joint_names: list[str]  # model joint names, e.g. left_shoulder_pitch_joint
     ee_body: str
+    base_link: str
     grasp_offset: tuple[float, float, float]
     params: MapParams
     robot: str  # registry key, e.g. "g1-left", "xarm7"
+    world_backend: str = "mujoco"
     is_urdf: bool = False
     package_roots: dict[str, str] = field(default_factory=dict)
     collision_exclude: tuple[tuple[str, str], ...] = ()
 
 
-def arm_spec(robot: str = "g1-left", params: MapParams | None = None) -> ConstructionSpec:
+def arm_spec(
+    robot: str = "g1-left",
+    params: MapParams | None = None,
+    *,
+    world_backend: str = "mujoco",
+) -> ConstructionSpec:
     """Construction spec for any registered arm (see ``robots.py``).
 
     With no ``params`` the grid is taken from the registry entry, or
@@ -85,9 +96,11 @@ def arm_spec(robot: str = "g1-left", params: MapParams | None = None) -> Constru
         model_meshdir=str(am.model_meshdir) if am.model_meshdir else None,
         joint_names=list(am.joint_names),
         ee_body=am.ee_body,
+        base_link=am.base_link,
         grasp_offset=am.grasp_offset,
-        params=params or am.params or MapParams(pelvis_height=am.base_height),
+        params=params or am.params or MapParams.at_base_height(am.base_height),
         robot=robot,
+        world_backend=world_backend,
         is_urdf=am.is_urdf,
         package_roots=dict(am.package_roots),
         collision_exclude=tuple(am.collision_exclude),
@@ -97,11 +110,6 @@ def arm_spec(robot: str = "g1-left", params: MapParams | None = None) -> Constru
     return spec
 
 
-def g1_spec(side: str = "left", params: MapParams | None = None) -> ConstructionSpec:
-    """Back-compat shim: the G1 arm as a registry key."""
-    return arm_spec(f"g1-{side}", params)
-
-
 def _autosize(spec: ConstructionSpec, probe: int = 30_000, margin: float = 0.1) -> MapParams:
     """Size the grid from the arm's collision-free workspace bounding box.
 
@@ -109,7 +117,7 @@ def _autosize(spec: ConstructionSpec, probe: int = 30_000, margin: float = 0.1) 
     then snap r_xy / z to the cell. Keeps the map tight around each arm
     instead of assuming the G1's pelvis-rooted dimensions.
     """
-    sampler = _ArmSampler(spec)
+    sampler = _WorldSpecArmSampler(spec)
     rng = np.random.default_rng(0)
     chunks: list[np.ndarray] = []
     done = 0
@@ -125,13 +133,50 @@ def _autosize(spec: ConstructionSpec, probe: int = 30_000, margin: float = 0.1) 
     z_min = float(np.floor((pts[:, 2].min() - margin) / cell) * cell)
     z_max = float(np.ceil((pts[:, 2].max() + margin) / cell) * cell)
     # Don't map reach below the mounting plane: a bench/floor-mounted arm
-    # can't pass its tool under its own base. pelvis_height is where the base
-    # sits (0 for a fixed-base arm), so clamp the floor of the grid there.
-    z_min = max(z_min, spec.params.pelvis_height)
+    # can't pass its tool under its own base. The base-link pose supplies that
+    # plane in the map frame, so clamp the floor of the grid there.
+    z_min = max(z_min, spec.params.base_link_pose.position.z)
     return replace(spec.params, r_xy=r_xy, z_min=z_min, z_max=z_max)
 
 
-class _ArmSampler:
+class _WorldSpecArmSampler:
+    """FK sampler that uses the planning ``WorldSpec`` protocol only."""
+
+    def __init__(self, spec: ConstructionSpec) -> None:
+        self.spec = spec
+        self.world = create_world(backend=spec.world_backend)
+        self.robot_id = self.world.add_robot(_robot_config_from_spec(spec))
+        self.world.finalize()
+        self.lower, self.upper = self.world.get_joint_limits(self.robot_id)
+        self.joint_names = list(spec.joint_names)
+        self.grasp_offset = np.asarray(spec.grasp_offset, dtype=np.float64)
+
+    def sample_chunk(self, n: int, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, int]:
+        """FK-sample n configs through ``WorldSpec``."""
+        qs = rng.uniform(self.lower, self.upper, size=(n, len(self.joint_names)))
+        positions = np.empty((n, 3))
+        rotations = np.empty((n, 3, 3))
+        kept = 0
+        rejected = 0
+        with self.world.scratch_context() as ctx:
+            for q in qs:
+                self.world.set_joint_state(
+                    ctx,
+                    self.robot_id,
+                    JointState(name=self.joint_names, position=q.tolist()),
+                )
+                if not self.world.is_collision_free(ctx, self.robot_id):
+                    rejected += 1
+                    continue
+                transform = self.world.get_link_pose(ctx, self.robot_id, self.spec.ee_body)
+                rotation = transform[:3, :3]
+                positions[kept] = transform[:3, 3] + rotation @ self.grasp_offset
+                rotations[kept] = rotation
+                kept += 1
+        return positions[:kept], rotations[:kept], rejected
+
+
+class _DirectMujocoArmSampler:
     """One compiled model + the index tables needed for fast FK sampling."""
 
     def __init__(self, spec: ConstructionSpec) -> None:
@@ -153,8 +198,18 @@ class _ArmSampler:
         for jid in range(self.model.njnt):
             if self.model.jnt_type[jid] == mujoco.mjtJoint.mjJNT_FREE:
                 adr = self.model.jnt_qposadr[jid]
-                self._q_base[adr : adr + 3] = (0.0, 0.0, spec.params.pelvis_height)
-                self._q_base[adr + 3 : adr + 7] = (1.0, 0.0, 0.0, 0.0)
+                pose = spec.params.base_link_pose
+                self._q_base[adr : adr + 3] = (
+                    pose.position.x,
+                    pose.position.y,
+                    pose.position.z,
+                )
+                self._q_base[adr + 3 : adr + 7] = (
+                    pose.orientation.w,
+                    pose.orientation.x,
+                    pose.orientation.y,
+                    pose.orientation.z,
+                )
 
         joint_ids = []
         for name in spec.joint_names:
@@ -233,12 +288,41 @@ class _ArmSampler:
         return positions[:kept], rotations[:kept], rejected
 
 
+def _robot_config_from_spec(spec: ConstructionSpec) -> RobotModelConfig:
+    """Build a planning robot config from a reachability construction spec."""
+    return RobotModelConfig(
+        name=spec.robot,
+        model_path=_model_path_for_spec(spec),
+        base_pose=spec.params.base_link_pose,
+        joint_names=list(spec.joint_names),
+        end_effector_link=spec.ee_body,
+        base_link=spec.base_link,
+        package_paths={pkg: Path(root) for pkg, root in spec.package_roots.items()},
+        collision_exclusion_pairs=list(spec.collision_exclude),
+        auto_convert_meshes=spec.world_backend == "drake",
+    )
+
+
+def _model_path_for_spec(spec: ConstructionSpec) -> Path:
+    model_path = Path(spec.model_path)
+    if spec.world_backend == "drake":
+        arm = arm_model(spec.robot)
+        if arm.viewer_urdf is not None:
+            return Path(str(arm.viewer_urdf))
+    return model_path
+
+
+# Backward-compatible alias for tests/viewer internals that need the original
+# MuJoCo model handle. New construction code uses _WorldSpecArmSampler.
+_ArmSampler = _DirectMujocoArmSampler
+
+
 def _worker(args: tuple[ConstructionSpec, int, int]) -> tuple[CapabilityMap, int]:
     spec, n_samples, seed = args
-    sampler = _ArmSampler(spec)
-    # Per-worker uint8 saturation is exact under the merge's final clip-255:
+    sampler = _WorldSpecArmSampler(spec)
+    # Per-worker uint8 saturation is exact under the merge's final uint8 max clip:
     # a cell only loses information when its per-worker count would exceed
-    # 255, and the merged value is clipped there anyway.
+    # uint8 max, and the merged value is clipped there anyway.
     cap = CapabilityMap(spec.params, robot=spec.robot)
     rng = np.random.default_rng(seed)
     rejected = 0
@@ -286,10 +370,10 @@ def construct(
     cap = CapabilityMap(
         spec.params,
         robot=spec.robot,
-        model_id=model_id_for(spec.model_path),
-        counts=np.minimum(total_counts, 255).astype(np.uint8),
+        model_id=model_id_for(_model_path_for_spec(spec)),
+        counts=np.minimum(total_counts, _UINT8_MAX).astype(np.uint8),
         heading_hint=total_hint,
-        body_counts=np.minimum(total_body, 255).astype(np.uint8),
+        body_counts=np.minimum(total_body, _UINT8_MAX).astype(np.uint8),
         body_theta_mask=total_theta_mask,
     )
     elapsed = time.time() - t0
@@ -309,7 +393,7 @@ def saturation_curve(
 ) -> list[tuple[int, int]]:
     """(samples, cumulative marked cells) at regular checkpoints — the
     paper's new-cells-per-chunk stopping diagnostic."""
-    sampler = _ArmSampler(spec)
+    sampler = _WorldSpecArmSampler(spec)
     cap = CapabilityMap(spec.params, robot=spec.robot)
     rng = np.random.default_rng(seed)
     curve: list[tuple[int, int]] = []
@@ -334,6 +418,7 @@ def cli_main() -> None:
     parser.add_argument("--samples", type=int, default=5_000_000)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--world-backend", choices=("mujoco", "drake"), default="mujoco")
     parser.add_argument("--cell", type=float, default=0.05)
     parser.add_argument("--n-theta", type=int, default=36)
     parser.add_argument("--n-inplane", type=int, default=12)
@@ -345,9 +430,9 @@ def cli_main() -> None:
     # Grid resolution comes from the CLI; extent (r_xy / z) is taken from the
     # registry or auto-sized per arm, so override only resolution here and let
     # arm_spec fill the rest.
-    base = arm_spec(args.robot)
+    base = arm_spec(args.robot, world_backend=args.world_backend)
     params = replace(base.params, cell=args.cell, n_theta=args.n_theta, n_inplane=args.n_inplane)
-    spec = arm_spec(args.robot, params)
+    spec = arm_spec(args.robot, params, world_backend=args.world_backend)
     cap = construct(spec, n_samples=args.samples, workers=args.workers, seed=args.seed)
     out = args.out or Path("data/reachability") / f"{args.robot}_capability.npz"
     cap.save(out)
@@ -358,4 +443,4 @@ if __name__ == "__main__":
     cli_main()
 
 
-__all__ = ["ConstructionSpec", "arm_spec", "construct", "g1_spec", "saturation_curve"]
+__all__ = ["ConstructionSpec", "arm_spec", "construct", "saturation_curve"]

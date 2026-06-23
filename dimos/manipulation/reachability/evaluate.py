@@ -39,16 +39,26 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import time
-from typing import Any
 
 import numpy as np
 
+from dimos.manipulation.planning.factory import create_world
+from dimos.manipulation.planning.kinematics.config import MinkKinematicsConfig
+from dimos.manipulation.planning.kinematics.mink_ik import MinkIK
 from dimos.manipulation.reachability.capability_map import (
     CapabilityMap,
     MapParams,
     canonical_values,
 )
-from dimos.manipulation.reachability.construct import ConstructionSpec, _ArmSampler, arm_spec
+from dimos.manipulation.reachability.construct import (
+    ConstructionSpec,
+    _robot_config_from_spec,
+    arm_spec,
+)
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -109,98 +119,71 @@ def _sample_eval_poses(
 
 
 class _MinkOracle:
-    """Collision-checked solve-to-convergence IK on the construction model."""
+    """Collision-checked solve-to-convergence IK via the planning Mink backend."""
 
     def __init__(self, spec: ConstructionSpec, restarts: int, seed: int) -> None:
-        import mink
-
-        self._mink = mink
-        self._sampler = _ArmSampler(spec)
+        self._world = create_world(backend=spec.world_backend)
+        self._robot_id = self._world.add_robot(_robot_config_from_spec(spec))
+        self._world.finalize()
+        self._ik = MinkIK(
+            MinkKinematicsConfig(
+                solver="daqp",
+                max_iterations=300,
+                dt=0.05,
+                position_cost=1.0,
+                orientation_cost=1.0,
+                lm_damping=1.0,
+            )
+        )
         self._rng = np.random.default_rng(seed)
         self._restarts = restarts
-
-        model = self._sampler.model
-        self._configuration = mink.Configuration(model)
-        self._frame = mink.FrameTask(
-            frame_name=spec.ee_body,
-            frame_type="body",
-            position_cost=1.0,
-            orientation_cost=1.0,
-            lm_damping=1.0,
-        )
-        self._tasks: list[Any] = [self._frame]
-        claimed_dofs = {
-            int(model.jnt_dofadr[jid])
-            for jid in range(model.njnt)
-            if int(model.jnt_qposadr[jid]) in set(self._sampler.qpos_adr.tolist())
-        }
-        # Velocity mask: only arm DOF may move. DofFreezingTask is a soft
-        # cost — relying on it alone lets the QP drift the floating base
-        # toward the target over many iterations, which makes every pose
-        # "reachable" (the pelvis flies there). Mask hard, freeze soft.
-        self._arm_velocity_mask = np.zeros(model.nv)
-        self._arm_velocity_mask[list(claimed_dofs)] = 1.0
-        frozen = [d for d in range(model.nv) if d not in claimed_dofs]
-        if frozen:
-            self._tasks.append(mink.DofFreezingTask(model, frozen))
-        self._limits = [mink.ConfigurationLimit(model)]
+        self._joint_names = list(spec.joint_names)
+        self._lower, self._upper = self._world.get_joint_limits(self._robot_id)
+        self._grasp_offset = np.asarray(spec.grasp_offset, dtype=np.float64)
 
     def reachable(self, position: np.ndarray, rotation: np.ndarray) -> bool:
-        mink = self._mink
-        sampler = self._sampler
-        # The FrameTask targets the EE body origin; shift the grasp-center
-        # target back by the grasp offset (rotation is shared).
-        body_position = position - rotation @ sampler.grasp_offset
-        wxyz = _mat_to_wxyz(rotation)
-        target = mink.SE3.from_rotation_and_translation(mink.SO3(wxyz), body_position)
-        self._frame.set_target(target)
+        target = _target_body_pose(position, rotation, self._grasp_offset)
 
         for _ in range(self._restarts):
-            q = sampler._q_base.copy()
-            q[sampler.qpos_adr] = self._rng.uniform(sampler.lower, sampler.upper)
-            self._configuration.update(q)
-            # ~×(1 − gain·dt) error decay per iteration: 300 steps reach
-            # sub-mm residuals; fewer leave a systematic offset that turns
-            # truly-reachable ground-truth poses into false negatives.
-            for _ in range(300):
-                velocity = (
-                    mink.solve_ik(
-                        self._configuration, self._tasks, 0.05, "daqp", limits=self._limits
-                    )
-                    * self._arm_velocity_mask
-                )
-                self._configuration.integrate_inplace(velocity, 0.05)
-                if float(np.linalg.norm(velocity)) < 1e-4:
-                    break
-            if self._accept(position, rotation):
+            seed = JointState(
+                name=self._joint_names,
+                position=self._rng.uniform(self._lower, self._upper).tolist(),
+            )
+            result = self._ik.solve(
+                self._world,
+                self._robot_id,
+                target,
+                seed=seed,
+                position_tolerance=_ACCEPT_COMBINED / 1000.0,
+                orientation_tolerance=np.deg2rad(_ACCEPT_COMBINED),
+                check_collision=True,
+                max_attempts=1,
+            )
+            if result.is_success() and _accept_combined(
+                result.position_error, result.orientation_error
+            ):
                 return True
         return False
 
-    def _accept(self, position: np.ndarray, rotation: np.ndarray) -> bool:
-        import mujoco
 
-        sampler = self._sampler
-        q_solution = self._configuration.q
-        data, model = sampler.data, sampler.model
-        data.qpos[:] = q_solution
-        mujoco.mj_kinematics(model, data)
-        mujoco.mj_collision(model, data)
-        if sampler.is_self_collision(data):
-            return False
-        xmat = data.xmat[sampler.ee_body_id].reshape(3, 3)
-        reached = data.xpos[sampler.ee_body_id] + xmat @ sampler.grasp_offset
-        pos_err_mm = float(np.linalg.norm(reached - position)) * 1000.0
-        cos_angle = (np.trace(rotation.T @ xmat) - 1.0) / 2.0
-        ori_err_deg = float(np.degrees(np.arccos(np.clip(cos_angle, -1.0, 1.0))))
-        return pos_err_mm + ori_err_deg <= _ACCEPT_COMBINED
+def _target_body_pose(
+    grasp_position: np.ndarray,
+    rotation: np.ndarray,
+    grasp_offset: np.ndarray,
+) -> PoseStamped:
+    """Convert a grasp-center target into the EE body-origin target Mink solves."""
+    body_position = grasp_position - rotation @ grasp_offset
+    return PoseStamped(
+        frame_id="world",
+        position=Vector3(*body_position.tolist()),
+        orientation=Quaternion.from_rotation_matrix(rotation),
+    )
 
 
-def _mat_to_wxyz(rotation: np.ndarray) -> np.ndarray:
-    import mujoco
-
-    quat = np.empty(4)
-    mujoco.mju_mat2Quat(quat, np.ascontiguousarray(rotation).reshape(9))
-    return quat
+def _accept_combined(position_error_m: float, orientation_error_rad: float) -> bool:
+    pos_err_mm = position_error_m * 1000.0
+    ori_err_deg = float(np.degrees(orientation_error_rad))
+    return pos_err_mm + ori_err_deg <= _ACCEPT_COMBINED
 
 
 def _confusion(gt: np.ndarray, pred: np.ndarray) -> dict[str, float]:
@@ -275,7 +258,7 @@ def cli_main() -> None:
     args = parser.parse_args()
 
     cap = CapabilityMap.load(args.map)
-    spec = arm_spec(cap.robot or f"g1-{cap.side}", cap.params)
+    spec = arm_spec(cap.robot, cap.params)
     report = evaluate(cap, spec, n_poses=args.poses, restarts=args.restarts, seed=args.seed)
     print(report.to_json())
     if args.out:

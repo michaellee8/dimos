@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""One-shot viser viewer for capability maps.
+"""One-shot/demo Viser viewer for capability maps.
 
 The view is the **body-frame workspace**: the arm's actual reachable
 volume in pelvis coordinates, rendered as a point cloud colored
@@ -36,7 +36,7 @@ Interactive extras:
 
 CLI::
 
-    python -m dimos.manipulation.reachability.viewer \\
+    python -m dimos.manipulation.reachability.demo_viewer \\
         --map ~/Desktop/g1_reachability/g1_left_capability.npz \\
         --map ~/Desktop/g1_reachability/g1_right_capability.npz
 """
@@ -52,7 +52,10 @@ from typing import Any
 
 import numpy as np
 
-from dimos.manipulation.reachability.capability_map import CapabilityMap
+from dimos.manipulation.planning.spec.config import RobotModelConfig
+from dimos.manipulation.reachability.capability_map import CapabilityMap, MapParams
+from dimos.manipulation.reachability.robots import arm_model, robot_model_config
+from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -360,62 +363,43 @@ class ArmIK:
 # Server
 
 
-def _add_robot(server: Any, robot: str) -> tuple[Any, list[str]]:
-    """Attach the robot's URDF under the persistent ``/robot`` frame (whose
-    position the caller sets to the arm's base height). Returns (viser_urdf |
-    None, joint names); ViserUrdf parents geometry under ``/robot`` but does
-    not own that frame, so moving the frame moves the whole arm. The overlay
-    is context only — cells render without it, and a missing/unloadable URDF
-    just yields no overlay."""
-    from dimos.manipulation.reachability.robots import arm_model
+def _viewer_robot_config(robot: str, params: MapParams) -> RobotModelConfig:
+    """Robot config for Viser display, preferring the registered viewer URDF."""
+    arm = arm_model(robot)
+    config = robot_model_config(robot, params)
+    model_path = arm.viewer_urdf or config.model_path
+    return config.model_copy(
+        update={
+            "model_path": Path(str(model_path)),
+            "package_paths": {pkg: Path(str(root)) for pkg, root in arm.package_roots.items()},
+        }
+    )
 
-    try:
-        from viser.extras import ViserUrdf
-        import yourdfpy
 
-        arm = arm_model(robot)
-        if arm.viewer_urdf is None:
-            raise FileNotFoundError(f"no viewer URDF registered for {robot!r}")
-        roots = arm.package_roots
-        urdf_dir = Path(str(arm.viewer_urdf)).parent
-
-        def resolve(fname: str) -> str:
-            for pkg, root in roots.items():
-                prefix = f"package://{pkg}/"
-                if fname.startswith(prefix):
-                    return str(Path(root) / fname[len(prefix) :])
-            path = Path(fname)
-            return fname if path.is_absolute() else str(urdf_dir / fname)
-
-        urdf = yourdfpy.URDF.load(str(arm.viewer_urdf), filename_handler=resolve)
-        viser_urdf = ViserUrdf(server, urdf, root_node_name="/robot")
-        names = list(viser_urdf.get_actuated_joint_names())
-        viser_urdf.update_cfg(np.zeros(len(names)))
-        return viser_urdf, names
-    except Exception as e:  # context only — everything else works without it
-        logger.warning(f"robot overlay unavailable ({e})")
-        return None, []
+def _zero_joint_state(config: RobotModelConfig) -> JointState:
+    return JointState(name=list(config.joint_names), position=[0.0] * len(config.joint_names))
 
 
 def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
     """Start the one-shot viewer (blocks until Ctrl-C)."""
     import viser
+    from viser.extras import ViserUrdf
+
+    from dimos.manipulation.visualization.viser.scene import ViserManipulationScene
 
     server = viser.ViserServer(host="0.0.0.0", port=port)
     first = next(iter(maps.values()))
     params = first.params
-    robot = first.robot or f"g1-{first.side}"
-    server.scene.add_grid("/ground", width=4.0, height=4.0, cell_size=0.25)
-    # Persistent frame the robot hangs under; its z is the arm's base height,
-    # updated on every dropdown switch so the overlay tracks the selected arm.
-    robot_frame = server.scene.add_frame(
-        "/robot", show_axes=False, position=(0.0, 0.0, params.pelvis_height)
-    )
-    viser_urdf, urdf_joint_names = _add_robot(server, robot)
+    robot = first.robot
+    scene = ViserManipulationScene(server, ViserUrdf, preview_fps=20.0)
+    reachability_layer = scene.create_reachability_layer()
+    current_config = _viewer_robot_config(robot, params)
+    scene.register_robot(robot, current_config)
+    scene.update_current_robot(robot, _zero_joint_state(current_config))
     current_robot = robot
 
     with server.gui.add_folder("view"):
-        side = server.gui.add_dropdown("arm", tuple(maps), initial_value=next(iter(maps)))
+        map_select = server.gui.add_dropdown("arm", tuple(maps), initial_value=next(iter(maps)))
         style = server.gui.add_dropdown("style", ("points", "voxels"), initial_value="points")
         point_size = server.gui.add_slider(
             "point size [mm]", min=0, max=60, step=1, initial_value=5
@@ -448,24 +432,21 @@ def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
     gizmo = None
 
     def current_map() -> CapabilityMap:
-        return maps[side.value]
+        return maps[map_select.value]
 
     def refresh_robot(_: Any = None) -> None:
         """Swap the URDF overlay AND re-target the IK gizmo to the selected
         map's robot (the dropdown can mix arms with different base heights and
         workspaces; each map carries its own robot key, grid, and base pose)."""
-        nonlocal viser_urdf, urdf_joint_names, current_robot
+        nonlocal current_config, current_robot
         cap = current_map()
-        want = cap.robot or f"g1-{cap.side}"
+        want = cap.robot
         if want == current_robot:
             return
-        if viser_urdf is not None:
-            viser_urdf.remove()
-        # Move the persistent frame to this arm's base height, then hang the
-        # new URDF under it — so the overlay sits at the right z, not the
-        # previous arm's.
-        robot_frame.position = (0.0, 0.0, cap.params.pelvis_height)
-        viser_urdf, urdf_joint_names = _add_robot(server, want)
+        scene.unregister_robot(current_robot)
+        current_config = _viewer_robot_config(want, cap.params)
+        scene.register_robot(want, current_config)
+        scene.update_current_robot(want, _zero_joint_state(current_config))
         current_robot = want
         # Move the IK target into the newly selected arm's workspace so the
         # commanded point stays attached to the arm you're looking at.
@@ -477,63 +458,44 @@ def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
 
     def refresh_volume(_: Any = None) -> None:
         cap = current_map()
-        for name in ("/reachability/core", "/reachability/points"):
-            try:
-                server.scene.remove_by_name(name)
-            except Exception:
-                pass
         n = 0
         if style.value == "voxels":
             core, n = body_voxel_mesh(cap, dexterity_pct.value / 100.0)
-            if core is not None:
-                server.scene.add_mesh_trimesh("/reachability/core", core)
+            reachability_layer.show_voxel_mesh(core)
         else:
             points, dexterity = body_point_cloud(cap, dexterity_pct.value / 100.0)
             n = len(points)
-            if n and point_size.value > 0:
-                server.scene.add_point_cloud(
-                    "/reachability/points",
-                    points=points.astype(np.float32),
-                    colors=score_colors(dexterity, vmax=max(float(dexterity.max()), 1e-9)),
-                    point_size=point_size.value / 1000.0,
-                    point_shape="circle",
-                )
+            colors = score_colors(dexterity, vmax=max(float(dexterity.max(initial=0.0)), 1e-9))
+            reachability_layer.show_points(points, colors, point_size=point_size.value / 1000.0)
         logger.info(f"workspace view: {n} cells at ≥{dexterity_pct.value}% dexterity")
 
     def refresh_slices(_: Any = None) -> None:
         cap = current_map()
-        try:
-            server.scene.remove_by_name("/slice/yaw")
-        except Exception:
-            pass
-        try:
-            server.scene.remove_by_name("/slice/z")
-        except Exception:
-            pass
         # viser's add_image uses the camera convention: image rows run along
         # the node's local +y (row 0 at -y). The slice images are standard
         # row-0-on-top, so flip rows to land top-of-image at +local-y.
         if show_yaw_slice.value:
             image, width, height = slice_image_yaw(cap, yaw_slice.value)
             yaw = np.deg2rad(yaw_slice.value)
-            server.scene.add_image(
-                "/slice/yaw",
-                np.ascontiguousarray(image[::-1]),
-                render_width=width,
-                render_height=height,
-                position=(0.0, 0.0, (cap.params.z_min + cap.params.z_max) / 2),
+            reachability_layer.show_vertical_slice(
+                image,
+                width=width,
+                height=height,
+                center_z=(cap.params.z_min + cap.params.z_max) / 2,
                 wxyz=_plane_wxyz(yaw),
             )
+        else:
+            reachability_layer.clear_vertical_slice()
         if show_z_slice.value:
             image, width, height = slice_image_height(cap, z_slice.value)
-            server.scene.add_image(
-                "/slice/z",
-                np.ascontiguousarray(image[::-1]),
-                render_width=width,
-                render_height=height,
-                position=(0.0, 0.0, float(z_slice.value)),
-                wxyz=(1.0, 0.0, 0.0, 0.0),
+            reachability_layer.show_horizontal_slice(
+                image,
+                width=width,
+                height=height,
+                z=float(z_slice.value),
             )
+        else:
+            reachability_layer.clear_horizontal_slice()
 
     # IK runs on its own worker so drag events never queue behind a slow
     # search: each event just pokes the worker, which always solves for the
@@ -560,20 +522,15 @@ def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
         ik_wakeup.set()
 
     def pose_ghost(joints: dict[str, float]) -> None:
-        if viser_urdf is None or not urdf_joint_names:
-            return
-        cfg = np.zeros(len(urdf_joint_names))
-        for i, name in enumerate(urdf_joint_names):
-            if name in joints:
-                cfg[i] = joints[name]
-        viser_urdf.update_cfg(cfg)
+        values = [joints.get(name, 0.0) for name in current_config.joint_names]
+        scene.set_target_joints(current_robot, current_config.joint_names, values)
 
     def solve_current_pose() -> bool:
         """One solve at the gizmo's current pose; False if it failed."""
         if gizmo is None:
             return True
         cap = current_map()
-        cap_robot = cap.robot or f"g1-{cap.side}"
+        cap_robot = cap.robot
         if cap_robot not in solvers:
             try:
                 solvers[cap_robot] = ArmIK(cap_robot)
@@ -582,10 +539,13 @@ def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
                 logger.warning(f"IK unavailable: {e}")
         solver = solvers[cap_robot]
         if solver is None:
-            ik_status.value = "IK unavailable (pip install 'dimos[ik]')"
+            ik_status.value = "IK unavailable (pip install 'dimos[manipulation]')"
             return True
-        position = np.asarray(gizmo.position, dtype=np.float64)
-        wxyz = np.asarray(gizmo.wxyz, dtype=np.float64)
+        local_gizmo = gizmo
+        if local_gizmo is None:
+            return True
+        position = np.asarray(local_gizmo.position, dtype=np.float64)
+        wxyz = np.asarray(local_gizmo.wxyz, dtype=np.float64)
 
         def show_guess(joints: dict[str, float], error: float, attempt: int) -> bool:
             # Stream the solver's current (possibly wrong) guess so the
@@ -612,6 +572,7 @@ def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
         verdict = "reached" if reached else "FAILED"
         if collided:
             verdict += ", SELF-COLLISION"
+        scene.set_target_visual_state(current_robot, reached and not collided)
         ik_status.value = (
             f"IK {verdict} (err {error * 1000:.0f} mm) | "
             f"map score {score} | dexterity {dexterity:.0%} | rigid model (no sag)"
@@ -636,13 +597,13 @@ def serve(maps: dict[str, CapabilityMap], port: int = 8082) -> None:
 
     threading.Thread(target=ik_worker, daemon=True, name="ik-worker").start()
 
-    side.on_update(refresh_robot)
-    for control in (side, style, point_size, dexterity_pct):
+    map_select.on_update(refresh_robot)
+    for control in (map_select, style, point_size, dexterity_pct):
         control.on_update(refresh_volume)
-    for widget in (side, show_yaw_slice, yaw_slice, show_z_slice, z_slice):
+    for widget in (map_select, show_yaw_slice, yaw_slice, show_z_slice, z_slice):
         widget.on_update(refresh_slices)
     ik_enabled.on_update(refresh_ik)
-    side.on_update(lambda _: ik_wakeup.set())
+    map_select.on_update(lambda _: ik_wakeup.set())
 
     refresh_volume()
     refresh_slices()
@@ -671,7 +632,7 @@ def _plane_wxyz(yaw: float) -> tuple[float, float, float, float]:
 
 
 def cli_main() -> None:
-    parser = argparse.ArgumentParser(description="Interactive capability-map viewer (viser).")
+    parser = argparse.ArgumentParser(description="Interactive capability-map demo viewer (Viser).")
     parser.add_argument(
         "--map", type=Path, action="append", required=True, help="capability .npz (repeatable)"
     )
@@ -681,7 +642,7 @@ def cli_main() -> None:
     maps = {}
     for path in args.map:
         cap = CapabilityMap.load(path)
-        maps[f"{cap.robot or cap.side} ({path.name})"] = cap
+        maps[f"{cap.robot} ({path.name})"] = cap
     serve(maps, port=args.port)
 
 

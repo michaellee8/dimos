@@ -47,6 +47,9 @@ from dimos.manipulation.visualization.viser.state import (
 )
 from dimos.manipulation.visualization.viser.theme import _dimos_logo_data_url, apply_dimos_theme
 from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.JointState import JointState
 
 GuiCallback = Callable[[SimpleNamespace], None]
@@ -255,6 +258,29 @@ class FakeTransformServer(FakeServer):
         handle.path = path
         handle.scale = scale
         self.transform_controls.append(handle)
+        return handle
+
+
+class FakeFrameServer(FakeGridServer):
+    def __init__(self) -> None:
+        super().__init__()
+        self.frames = []
+        self.scene.add_frame = self.add_frame
+
+    def add_frame(
+        self,
+        name: str,
+        *,
+        show_axes: bool,
+        position: tuple[float, float, float],
+        wxyz: tuple[float, float, float, float],
+    ) -> FakeTransformHandle:
+        handle = FakeTransformHandle()
+        handle.name = name
+        handle.show_axes = show_axes
+        handle.position = position
+        handle.wxyz = wxyz
+        self.frames.append(handle)
         return handle
 
 
@@ -699,6 +725,37 @@ def test_viser_joint_configuration_maps_names_to_urdf_order() -> None:
     scene.register_robot("robot1", cfg)
     scene.set_urdf_joints(urdf, cfg.joint_names, [1.5, 2.5])
     assert urdf.cfg == [1.5, 2.5, 0.0]
+
+
+def test_scene_places_robot_roots_at_base_pose() -> None:
+    server = FakeFrameServer()
+    urdfs = [FakeUrdf(("joint1",)) for _ in range(3)]
+    scene = ViserManipulationScene(server, lambda *args, **kwargs: urdfs.pop(0), preview_fps=10.0)
+    scene.prepared_urdf_path = lambda config: "dummy.urdf"
+    config = SimpleNamespace(
+        name="arm",
+        model_path="/tmp/arm.urdf",
+        package_paths={},
+        xacro_args={},
+        auto_convert_meshes=False,
+        joint_names=["joint1"],
+        base_pose=PoseStamped(
+            position=Vector3(0.1, -0.2, 0.74),
+            orientation=Quaternion(0.2, 0.3, 0.4, 0.5),
+        ),
+    )
+
+    scene.register_robot("robot1", config)
+
+    roots = {frame.name: frame for frame in server.frames}
+    for name in (
+        "/robots/robot1/current",
+        "/targets/robot1/target",
+        "/previews/robot1/ghost",
+    ):
+        assert roots[name].position == (0.1, -0.2, 0.74)
+        assert roots[name].wxyz == (0.5, 0.2, 0.3, 0.4)
+        assert roots[name].show_axes is False
 
 
 def test_scene_adds_reference_grid_when_supported() -> None:

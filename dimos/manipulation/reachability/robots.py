@@ -33,6 +33,7 @@ from pathlib import Path
 import re
 from typing import TYPE_CHECKING
 
+from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.reachability.capability_map import MapParams
 from dimos.utils.data import LfsPath
 
@@ -48,6 +49,7 @@ class ArmModel:
     model_path: Path
     joint_names: tuple[str, ...]  # the arm's actuated joints, as named in the model
     ee_body: str  # body whose frame is the tool flange
+    base_link: str
     is_urdf: bool = False
     # For MJCF whose <compiler meshdir> is unset/relative (e.g. the G1 keeps
     # its STLs in data/g1_urdf/meshes). Ignored for URDF.
@@ -93,6 +95,7 @@ def _g1(side: str) -> ArmModel:
         model_meshdir=LfsPath("g1_urdf/meshes"),
         joint_names=joints,
         ee_body=f"{side}_wrist_yaw_link",
+        base_link="pelvis",
         grasp_offset=grasp,
         base_height=0.74,
         # The validated G1 grid: pelvis at WBC height, TCP up to ~1.8 m.
@@ -115,6 +118,7 @@ _REGISTRY: dict[str, ArmModel] = {
         is_urdf=True,
         joint_names=tuple(f"joint{i}" for i in range(1, 8)),
         ee_body="link7",
+        base_link="link_base",
         # xarm gripper fingertips sit at link7-local [0, ±0.07, 0.10] — grasp
         # center is one finger-length out along the flange normal (+z).
         grasp_offset=(0.0, 0.0, 0.10),
@@ -126,6 +130,7 @@ _REGISTRY: dict[str, ArmModel] = {
         model_path=LfsPath("piper_description/mujoco_model/piper_no_gripper_description.xml"),
         joint_names=tuple(f"joint{i}" for i in range(1, 7)),
         ee_body="link6",
+        base_link="link1",
         # Grasp center one gripper-length out along link6's flange normal (+z).
         grasp_offset=(0.0, 0.0, 0.10),
         # link1's collision mesh is seated in the base; constant overlap.
@@ -140,6 +145,7 @@ _REGISTRY: dict[str, ArmModel] = {
         package_roots={"a750_description": LfsPath("a750_description")},
         joint_names=tuple(f"joint{i}" for i in range(1, 7)),
         ee_body="link6",
+        base_link="base_link",
         # a750 gripper fingers sit at link6-local [0.076, 0, 0] — its flange
         # normal is +x (not +z), so the grasp center is one length out along x.
         grasp_offset=(0.10, 0.0, 0.0),
@@ -152,6 +158,7 @@ _REGISTRY: dict[str, ArmModel] = {
         package_roots={"openarm_description": LfsPath("openarm_description")},
         joint_names=tuple(f"openarm_left_joint{i}" for i in range(1, 8)),
         ee_body="openarm_left_link7",
+        base_link="openarm_body_link0",
         # No hand in the arm-only model; grasp center one hand-length out along
         # the wrist flange normal (+z).
         grasp_offset=(0.0, 0.0, 0.10),
@@ -174,6 +181,22 @@ def arm_model(key: str) -> ArmModel:
     return _REGISTRY[key]
 
 
+def robot_model_config(key: str, params: MapParams | None = None) -> RobotModelConfig:
+    """Return a planning ``RobotModelConfig`` for a registered reachability arm."""
+    arm = arm_model(key)
+    map_params = params or arm.params or MapParams.at_base_height(arm.base_height)
+    return RobotModelConfig(
+        name=key,
+        model_path=arm.model_path,
+        base_pose=map_params.base_link_pose,
+        joint_names=list(arm.joint_names),
+        end_effector_link=arm.ee_body,
+        base_link=arm.base_link,
+        package_paths={pkg: Path(str(root)) for pkg, root in arm.package_roots.items()},
+        collision_exclusion_pairs=list(arm.collision_exclude),
+    )
+
+
 def compile_model(
     model_path: str | Path,
     *,
@@ -194,12 +217,13 @@ def compile_model(
         text = Path(str(model_path)).read_text()
         for pkg, root in (package_roots or {}).items():
             text = text.replace(f"package://{pkg}/", f"{root}/")
-        text = re.sub(
-            r"(<robot\b[^>]*>)",
-            r'\1<mujoco><compiler strippath="false" discardvisual="true"/></mujoco>',
-            text,
-            count=1,
-        )
+        if "<mujoco>" not in text:
+            text = re.sub(
+                r"(<robot\b[^>]*>)",
+                r'\1<mujoco><compiler strippath="false" discardvisual="true"/></mujoco>',
+                text,
+                count=1,
+            )
         spec = mujoco.MjSpec.from_string(text)
     else:
         spec = mujoco.MjSpec.from_file(str(model_path))
@@ -210,4 +234,4 @@ def compile_model(
     return spec.compile()
 
 
-__all__ = ["ArmModel", "arm_model", "compile_model", "list_robots"]
+__all__ = ["ArmModel", "arm_model", "compile_model", "list_robots", "robot_model_config"]

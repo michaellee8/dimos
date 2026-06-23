@@ -56,14 +56,17 @@ harness quantifies the cost.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, field
 import hashlib
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 import numpy as np
 
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:
@@ -71,7 +74,19 @@ if TYPE_CHECKING:
 
 logger = setup_logger()
 
+PoseInput: TypeAlias = "PoseStamped | NDArray[np.float64]"
+
 _EPS = 1e-9
+_UINT8_MAX = np.iinfo(np.uint8).max
+_BODY_THETA_MASK_BITS = 64
+
+
+def _base_link_pose_at_height(height: float) -> PoseStamped:
+    return PoseStamped(
+        frame_id="world",
+        position=Vector3(0.0, 0.0, height),
+        orientation=Quaternion(0.0, 0.0, 0.0, 1.0),
+    )
 
 
 @dataclass(frozen=True)
@@ -90,7 +105,7 @@ class MapParams:
     n_theta: int = 36
     n_inplane: int = 12
     n_heading: int = 8  # ψ bins for the heading-hint bitmask (≤ 8 for uint8)
-    pelvis_height: float = 0.74
+    base_link_pose: PoseStamped = field(default_factory=lambda: _base_link_pose_at_height(0.74))
 
     @property
     def n_z(self) -> int:
@@ -99,6 +114,61 @@ class MapParams:
     @property
     def n_xy(self) -> int:
         return int(np.ceil(2.0 * self.r_xy / self.cell))
+
+    @property
+    def pelvis_height(self) -> float:
+        """Deprecated z-only alias for old call sites and map files."""
+        return float(self.base_link_pose.position.z)
+
+    @classmethod
+    def at_base_height(cls, height: float, **kwargs: Any) -> MapParams:
+        """Create map params with an identity-orientation base link at height z."""
+        return cls(base_link_pose=_base_link_pose_at_height(height), **kwargs)
+
+    @classmethod
+    def from_json_dict(cls, values: dict[str, Any]) -> MapParams:
+        """Load params from current or legacy serialized map metadata."""
+        values = dict(values)
+        legacy_height = values.pop("pelvis_height", None)
+        if "base_link_pose" in values:
+            values["base_link_pose"] = _pose_from_json(values["base_link_pose"])
+        elif legacy_height is not None:
+            values["base_link_pose"] = _base_link_pose_at_height(float(legacy_height))
+        return cls(**values)
+
+    def to_json_dict(self) -> dict[str, Any]:
+        """Serialize params using JSON-native values."""
+        return {
+            "r_xy": self.r_xy,
+            "z_min": self.z_min,
+            "z_max": self.z_max,
+            "cell": self.cell,
+            "n_theta": self.n_theta,
+            "n_inplane": self.n_inplane,
+            "n_heading": self.n_heading,
+            "base_link_pose": _pose_to_json(self.base_link_pose),
+        }
+
+
+def _pose_to_json(pose: PoseStamped) -> dict[str, Any]:
+    return {
+        "frame_id": pose.frame_id,
+        "position": [pose.position.x, pose.position.y, pose.position.z],
+        "orientation": [
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w,
+        ],
+    }
+
+
+def _pose_from_json(values: dict[str, Any]) -> PoseStamped:
+    return PoseStamped(
+        frame_id=str(values.get("frame_id", "world")),
+        position=Vector3(values.get("position", [0.0, 0.0, 0.0])),
+        orientation=Quaternion(values.get("orientation", [0.0, 0.0, 0.0, 1.0])),
+    )
 
 
 def canonical_values(
@@ -164,12 +234,75 @@ def canonical_values(
     return p_z, theta, x_star, y_star, gamma, psi
 
 
-def _side_of(robot: str) -> str:
-    """Left/right for a G1 arm key; the key itself otherwise; "left" if unset
-    (back-compat: maps predate the robot key and were all G1-left)."""
-    if robot.startswith("g1-"):
-        return robot[len("g1-") :]
-    return robot or "left"
+def pose_arrays(ee_poses: PoseInput) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return vectorized ``(positions, rotations)`` arrays for EE/TCP pose input.
+
+    Args:
+        ee_poses: A single :class:`PoseStamped`, one homogeneous ``(4, 4)``
+            transform, or a batch of homogeneous ``(N, 4, 4)`` transforms.
+
+    Returns:
+        ``positions`` with shape ``(N, 3)`` and ``rotations`` with shape
+        ``(N, 3, 3)``.
+    """
+    poses = _pose_matrix_batch(ee_poses)
+    return poses[:, :3, 3], poses[:, :3, :3]
+
+
+def canonical_values_from_poses(
+    ee_poses: PoseInput,
+) -> tuple[
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+    NDArray[np.float64],
+]:
+    """Vectorized f(T) for EE/TCP poses represented as homogeneous transforms."""
+    return canonical_values(*pose_arrays(ee_poses))
+
+
+def _pose_matrix_batch(ee_poses: PoseInput) -> NDArray[np.float64]:
+    if isinstance(ee_poses, PoseStamped):
+        return _pose_stamped_matrix(ee_poses)[None]
+    poses = np.asarray(ee_poses, dtype=np.float64)
+    if poses.shape == (4, 4):
+        return poses[None]
+    if poses.ndim == 3 and poses.shape[1:] == (4, 4):
+        return poses
+    raise ValueError(
+        "EE pose input must be a PoseStamped, a homogeneous (4, 4) transform, "
+        f"or a homogeneous (N, 4, 4) transform batch; got shape {poses.shape}"
+    )
+
+
+def _pose_stamped_matrix(pose: PoseStamped) -> NDArray[np.float64]:
+    matrix = np.eye(4, dtype=np.float64)
+    matrix[:3, :3] = _quat_xyzw_to_matrix(
+        pose.orientation.x,
+        pose.orientation.y,
+        pose.orientation.z,
+        pose.orientation.w,
+    )
+    matrix[:3, 3] = (pose.position.x, pose.position.y, pose.position.z)
+    return matrix
+
+
+def _quat_xyzw_to_matrix(x: float, y: float, z: float, w: float) -> NDArray[np.float64]:
+    quat = np.asarray((x, y, z, w), dtype=np.float64)
+    norm = np.linalg.norm(quat)
+    if norm < _EPS:
+        raise ValueError("PoseStamped orientation quaternion has zero length")
+    x, y, z, w = quat / norm
+    return np.array(
+        [
+            [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+            [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+            [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
 
 
 class CapabilityMap:
@@ -179,7 +312,6 @@ class CapabilityMap:
         self,
         params: MapParams,
         robot: str = "",
-        side: str = "",
         model_id: str = "",
         counts: NDArray[np.uint8] | None = None,
         heading_hint: NDArray[np.uint8] | None = None,
@@ -187,10 +319,8 @@ class CapabilityMap:
         body_theta_mask: NDArray[np.uint64] | None = None,
     ) -> None:
         self.params = params
-        # ``robot`` is the registry key (e.g. "g1-left", "xarm7"); ``side`` is
-        # kept for the G1 left/right mirror and defaults from the key.
+        # ``robot`` is the registry key (e.g. "g1-left", "xarm7").
         self.robot = robot
-        self.side = side or _side_of(robot)
         self.model_id = model_id
         shape5 = (params.n_z, params.n_theta, params.n_xy, params.n_xy, params.n_inplane)
         shape_body = (params.n_z, params.n_xy, params.n_xy)
@@ -213,8 +343,10 @@ class CapabilityMap:
         )
         if self.counts.shape != shape5:
             raise ValueError(f"counts shape {self.counts.shape} != params shape {shape5}")
-        if params.n_theta > 64:
-            raise ValueError("n_theta > 64 does not fit the body theta bitmask")
+        if params.n_theta > _BODY_THETA_MASK_BITS:
+            raise ValueError(
+                f"n_theta > {_BODY_THETA_MASK_BITS} does not fit the body theta bitmask"
+            )
 
     # Indexing
 
@@ -282,7 +414,12 @@ class CapabilityMap:
         return iz, ix, iy, valid
 
     def record_batch(self, positions: NDArray[np.float64], rotations: NDArray[np.float64]) -> int:
-        """Mark a batch of reachable TCP poses (map-frame). Returns in-bounds count."""
+        """Mark a vectorized batch of reachable TCP pose components.
+
+        This is the construction hot path: callers that already have arrays can
+        avoid allocating pose objects. Use :meth:`record_poses` at API boundaries
+        where EE/TCP poses are naturally represented as transforms.
+        """
         p_z, theta, x_star, y_star, gamma, psi = canonical_values(positions, rotations)
         iz, it, ix, iy, ig, valid = self.indices(p_z, theta, x_star, y_star, gamma)
         iz, it_v, ix, iy, ig = (a[valid] for a in (iz, it, ix, iy, ig))
@@ -291,7 +428,7 @@ class CapabilityMap:
         flat = np.ravel_multi_index((iz, it_v, ix, iy, ig), self.counts.shape)
         unique, add = np.unique(flat, return_counts=True)
         current = self.counts.reshape(-1)[unique].astype(np.uint32)
-        self.counts.reshape(-1)[unique] = np.minimum(current + add, 255).astype(np.uint8)
+        self.counts.reshape(-1)[unique] = np.minimum(current + add, _UINT8_MAX).astype(np.uint8)
 
         np.bitwise_or.at(self.heading_hint, (iz, it_v, ix, iy), self.heading_bins(psi[valid]))
 
@@ -301,10 +438,18 @@ class CapabilityMap:
         bflat = np.ravel_multi_index((bz, bx, by), self.body_counts.shape)
         bunique, badd = np.unique(bflat, return_counts=True)
         bcur = self.body_counts.reshape(-1)[bunique].astype(np.uint32)
-        self.body_counts.reshape(-1)[bunique] = np.minimum(bcur + badd, 255).astype(np.uint8)
+        self.body_counts.reshape(-1)[bunique] = np.minimum(bcur + badd, _UINT8_MAX).astype(np.uint8)
         theta_bits = (np.uint64(1) << it[bvalid].astype(np.uint64)).astype(np.uint64)
         np.bitwise_or.at(self.body_theta_mask, (bz, bx, by), theta_bits)
         return int(valid.sum())
+
+    def record_poses(self, ee_poses: PoseInput) -> int:
+        """Mark reachable EE/TCP poses from homogeneous pose input.
+
+        ``ee_poses`` may be a single :class:`PoseStamped`, one ``(4, 4)``
+        transform, or a batch of ``(N, 4, 4)`` transforms.
+        """
+        return self.record_batch(*pose_arrays(ee_poses))
 
     def body_dexterity(self) -> NDArray[np.float64]:
         """Fraction of approach-angle bins observed per body-frame cell —
@@ -316,13 +461,26 @@ class CapabilityMap:
     def scores(
         self, positions: NDArray[np.float64], rotations: NDArray[np.float64]
     ) -> NDArray[np.uint8]:
-        """Per-pose scores (0 = unreachable/unknown). Out-of-bounds poses score 0."""
+        """Scores for vectorized TCP pose components.
+
+        This low-level form is kept for bulk construction/evaluation. Use
+        :meth:`score_poses` or :meth:`score_pose` when the caller has EE/TCP
+        poses as homogeneous transforms.
+        """
         p_z, theta, x_star, y_star, gamma, _ = canonical_values(positions, rotations)
         iz, it, ix, iy, ig, valid = self.indices(p_z, theta, x_star, y_star, gamma)
         out = np.zeros(len(iz), dtype=np.uint8)
         v = valid
         out[v] = self.counts[iz[v], it[v], ix[v], iy[v], ig[v]]
         return out
+
+    def score_poses(self, ee_poses: PoseInput) -> NDArray[np.uint8]:
+        """Scores for EE/TCP poses (0 = unreachable/unknown)."""
+        return self.scores(*pose_arrays(ee_poses))
+
+    def score_pose(self, ee_pose: PoseInput) -> int:
+        """Score one EE/TCP pose."""
+        return int(self.score_poses(ee_pose)[0])
 
     def scores_4d(
         self, positions: NDArray[np.float64], rotations: NDArray[np.float64]
@@ -335,11 +493,17 @@ class CapabilityMap:
         out[v] = self.counts[iz[v], it[v], ix[v], iy[v], :].max(axis=-1)
         return out
 
-    def reachable(self, pose: NDArray[np.float64], min_count: int = 1) -> bool:
-        """Single 4x4 map-frame pose → heading-free reachability."""
-        pose = np.asarray(pose, dtype=np.float64)
-        score = self.scores(pose[None, :3, 3], pose[None, :3, :3])[0]
-        return bool(score >= min_count)
+    def score_poses_4d(self, ee_poses: PoseInput) -> NDArray[np.uint8]:
+        """Gamma-marginal scores for EE/TCP poses."""
+        return self.scores_4d(*pose_arrays(ee_poses))
+
+    def reachable_pose(self, ee_pose: PoseInput, min_count: int = 1) -> bool:
+        """Single EE/TCP pose → heading-free reachability."""
+        return self.score_pose(ee_pose) >= min_count
+
+    def reachable(self, pose: PoseInput, min_count: int = 1) -> bool:
+        """Backward-compatible alias for :meth:`reachable_pose`."""
+        return self.reachable_pose(pose, min_count=min_count)
 
     def position_scores(self) -> NDArray[np.uint8]:
         """Max-over-orientation score on an (n_z, n_r) radial grid.
@@ -382,34 +546,6 @@ class CapabilityMap:
                 out[:, r] = flat_best[:, mask].max(axis=1)
         return out
 
-    # Derived maps
-
-    def mirrored(self, side: str | None = None) -> CapabilityMap:
-        """The other arm's map by reflection across the pelvis xz-plane.
-
-        Under y → -y: θ and p_z invariant, y* → -y*, gamma → -gamma, ψ → -ψ.
-        """
-        counts = self.counts[:, :, :, ::-1, ::-1].copy()
-        hint = self.heading_hint[:, :, :, ::-1].copy()
-        # ψ bins reverse: bit b → bit (n_heading - 1 - b).
-        reversed_hint = np.zeros_like(hint)
-        for b in range(self.params.n_heading):
-            bit = ((hint >> b) & 1).astype(np.uint8)
-            reversed_hint |= bit << (self.params.n_heading - 1 - b)
-        other = {"left": "right", "right": "left"}.get(self.side, self.side)
-        other_side = side or other
-        other_robot = f"g1-{other_side}" if self.robot.startswith("g1-") else self.robot
-        return CapabilityMap(
-            params=self.params,
-            robot=other_robot,
-            side=other_side,
-            model_id=self.model_id,
-            counts=counts,
-            heading_hint=reversed_hint,
-            body_counts=self.body_counts[:, :, ::-1].copy(),
-            body_theta_mask=self.body_theta_mask[:, :, ::-1].copy(),
-        )
-
     # Persistence
 
     def save(self, path: str | Path) -> Path:
@@ -421,11 +557,9 @@ class CapabilityMap:
             heading_hint=self.heading_hint,
             body_counts=self.body_counts,
             body_theta_mask=self.body_theta_mask,
-            params=np.frombuffer(json.dumps(asdict(self.params)).encode(), dtype=np.uint8),
+            params=np.frombuffer(json.dumps(self.params.to_json_dict()).encode(), dtype=np.uint8),
             meta=np.frombuffer(
-                json.dumps(
-                    {"robot": self.robot, "side": self.side, "model_id": self.model_id}
-                ).encode(),
+                json.dumps({"robot": self.robot, "model_id": self.model_id}).encode(),
                 dtype=np.uint8,
             ),
         )
@@ -435,12 +569,16 @@ class CapabilityMap:
     @classmethod
     def load(cls, path: str | Path) -> CapabilityMap:
         data = np.load(Path(path))
-        params = MapParams(**json.loads(bytes(data["params"]).decode()))
+        params = MapParams.from_json_dict(json.loads(bytes(data["params"]).decode()))
         meta = json.loads(bytes(data["meta"]).decode())
+        robot = meta.get("robot", "")
+        if not robot and meta.get("side") in {"left", "right"}:
+            robot = f"g1-{meta['side']}"
+        elif not robot:
+            robot = "g1-left"
         return cls(
             params=params,
-            robot=meta.get("robot", ""),
-            side=meta.get("side", ""),
+            robot=robot,
             model_id=meta.get("model_id", ""),
             counts=data["counts"],
             heading_hint=data["heading_hint"],
@@ -469,4 +607,11 @@ def model_id_for(path: str | Path) -> str:
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]
 
 
-__all__ = ["CapabilityMap", "MapParams", "canonical_values", "model_id_for"]
+__all__ = [
+    "CapabilityMap",
+    "MapParams",
+    "canonical_values",
+    "canonical_values_from_poses",
+    "model_id_for",
+    "pose_arrays",
+]
