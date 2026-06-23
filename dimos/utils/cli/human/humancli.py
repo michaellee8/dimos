@@ -34,7 +34,6 @@ from textual.containers import Container
 from textual.geometry import Size
 from textual.strip import Strip
 from textual.widgets import Input, RichLog, Static
-from textual_serve.server import Server  # type: ignore[import-not-found]
 
 from dimos.agents.mcp import tool_stream
 from dimos.core.transport_factory import apply_transport_arg, make_transport
@@ -661,6 +660,8 @@ def main() -> None:
     apply_transport_arg(sys.argv)
 
     if len(sys.argv) > 1 and sys.argv[1] == "web":
+        from textual_serve.server import Server  # type: ignore[import-not-found]
+
         server = Server(f"python {os.path.abspath(__file__)}")
         server.serve()
     else:

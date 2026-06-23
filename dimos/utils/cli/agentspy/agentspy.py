@@ -30,7 +30,6 @@ from langchain_core.messages import (
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.widgets import Footer, RichLog
-from textual_serve.server import Server  # type: ignore[import-not-found]
 
 from dimos.core.transport_factory import apply_transport_arg, make_transport
 from dimos.utils.cli import theme
@@ -224,6 +223,8 @@ def main() -> None:
     apply_transport_arg(sys.argv)
 
     if len(sys.argv) > 1 and sys.argv[1] == "web":
+        from textual_serve.server import Server  # type: ignore[import-not-found]
+
         server = Server(f"python {os.path.abspath(__file__)}")
         server.serve()
     else:
