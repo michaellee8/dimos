@@ -140,6 +140,9 @@ export function startKeyboardLoop() {
         // Always update key visuals; only send/readout when channel is up.
         updateKeyVisuals();
         if (!state.cmdChannel || state.cmdChannel.readyState !== 'open') return;
+        // Cockpit gates drive on posture: WASD moves only after Stand/Drive.
+        // Standalone keyboard view leaves driveEnabled=true, so unaffected.
+        if (!state.driveEnabled) return;
         const t = buildTwist();
         // Stamp in the robot's clock frame (clockOffsetMs is 0 until the first
         // pong lands; falls back gracefully on old brokers).

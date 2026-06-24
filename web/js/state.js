@@ -49,6 +49,7 @@ export const state = {
         iceType: null,      // selected ICE path: 'direct' | 'stun' | 'turn' | null
     },
     onCmdAck: null,         // optional view hook: (msg) => void for {type:cmd_ack,nonce,ok}
+    driveEnabled: true,     // gates WASD; go2 cockpit sets false until Stand/Drive
     cmdSendCount: 0,        // rolling counter; sampled into cmdHz once/sec
     hudTimer: null,
 

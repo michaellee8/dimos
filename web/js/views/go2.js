@@ -18,7 +18,7 @@ import { startKeyboardLoop, stopKeyboardLoop } from './keyboard.js';
 // StandReady = standup + balance_stand (drive-ready); they always go together,
 // so there's no separate Stand Up / Balance.
 const POSTURE = [
-    { name: 'StandReady', label: 'Stand / Drive-ready' },
+    { name: 'StandReady', label: 'Stand / Drive' },
     { name: 'StandDown', label: 'Sit' },
     { name: 'RecoveryStand', label: 'Recovery' },
 ];
@@ -368,9 +368,15 @@ function refreshControls() {
     document.getElementById('estop').classList.toggle('latched', ui.estopped);
     document.getElementById('rearm').classList.toggle('hidden', !ui.estopped);
 
+    // Drive is live only in Stand/Drive (StandReady) and not e-stopped. Other
+    // postures (Recovery/Sit/StandDown) change pose but don't accept WASD —
+    // press Stand/Drive to start moving. Gates the keyboard loop's send.
+    state.driveEnabled = ui.posture === 'StandReady' && !ui.estopped;
+
     const kb = document.getElementById('kb-live');
-    kb.className = 'pill ' + (ui.estopped ? 'pill-bad' : 'pill-good');
-    kb.querySelector('.dot').nextSibling.textContent = ui.estopped ? 'KEYBOARD OFF' : 'KEYBOARD LIVE';
+    kb.className = 'pill ' + (state.driveEnabled ? 'pill-good' : 'pill-bad');
+    kb.querySelector('.dot').nextSibling.textContent =
+        state.driveEnabled ? 'DRIVE LIVE' : 'DRIVE OFF — press Stand/Drive';
 
     document.getElementById('posture-chip').textContent =
         ({ StandReady: 'STANDING', StandDown: 'SITTING', RecoveryStand: 'RECOVERY', Damp: 'STOPPED' }[ui.posture]) ||
@@ -432,10 +438,18 @@ function startTick() {
         document.getElementById('hud-summary').textContent = hudSummaryLine();
         renderTelemetryGrid();
 
-        // Health pill (good/warn/bad) + transport label.
+        // Health pills (good/warn/bad) + transport label. Both the telemetry
+        // header pill and the video-overlay LINK pill track signal health.
+        const health = statsHealth();
         const pill = document.getElementById('hud-health');
-        pill.className = 'pill pill-' + statsHealth();
+        pill.className = 'pill pill-' + health;
         document.getElementById('hud-transport').textContent = transportLabel();
+        const linkPill = document.getElementById('link-pill');
+        if (linkPill) {
+            linkPill.className = 'pill pill-' + health;
+            linkPill.querySelector('span:last-child').textContent =
+                { good: 'LINK OK', warn: 'LINK WEAK', bad: 'LINK BAD' }[health];
+        }
 
         renderBattery();
     }, 1000);
