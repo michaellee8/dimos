@@ -1,32 +1,36 @@
 # Manipulation Planning Groups
 
 Planning groups are named, selectable kinematic chains used by manipulation
-planning. They separate the hardware robot identity from the part of the robot
-being planned.
+planning. They let APIs target a specific part of a robot, such as an arm or
+torso, without confusing that group with the robot's hardware identity.
 
 ## Concepts
 
 | Concept | Meaning |
 |---------|---------|
-| Planning group | A named serial chain of controllable robot joints. |
+| Robot name | The configured robot ID in `RobotModelConfig.name`. |
+| Planning group | A named serial chain of controllable joints on one robot. |
 | Planning group ID | Stable API ID in the form `{robot_name}/{group_name}`. |
+| Local joint name | Joint name inside a robot model, such as `joint1`. |
 | Global joint name | Boundary-level joint name in the form `{robot_name}/{local_joint_name}`. |
-| Generated plan | Minimal planning artifact containing selected group IDs and one synchronized global-joint path. |
-| Auxiliary group | A group selected for a pose request without receiving its own pose target. |
+| Generated plan | Planning artifact containing selected group IDs and one synchronized global-joint path. |
+| Auxiliary group | A selected group that contributes free DOFs to a pose plan without receiving its own pose target. |
 
-Local URDF/SRDF joint names stay inside robot-scoped APIs, model parsing, and
-backend internals. Flat planning states and generated plan paths require global
-joint names so two robots can safely have the same local joint names.
+Local URDF/SRDF joint names stay inside robot-scoped configuration, model
+parsing, and backend internals. Flat planning states and generated plan paths
+use global joint names so multiple robots can safely share local names such as
+`joint1`.
 
-## Planning group sources
+## Discovering planning groups
 
-DimOS discovers planning groups in this order:
+DimOS discovers planning groups for each `RobotModelConfig` in this order:
 
-1. Explicit `srdf_path` on `RobotConfig` / `RobotModelConfig`.
-2. Conservative SRDF auto-discovery near the model path, with a visible warning.
-3. Fallback generation of one `{robot_name}/manipulator` group if the configured
-   controllable joints form exactly one unambiguous serial chain.
-4. Error if no SRDF exists and fallback cannot infer a single chain.
+1. Explicit `planning_groups` on the robot model config.
+2. Explicit `srdf_path` on the robot model config.
+3. Conservative SRDF auto-discovery near the model path, with a warning.
+4. Fallback generation of one `{robot_name}/manipulator` group when the
+   configured controllable joints form exactly one unambiguous serial chain.
+5. Error if no SRDF or fallback chain can provide a single valid group.
 
 Supported SRDF group forms:
 
@@ -45,51 +49,76 @@ Supported SRDF group forms:
 ```
 
 Unsupported SRDF forms are skipped with warnings: link groups, nested group
-references, mixed group declarations, branching/non-serial groups, and SRDF
-`<end_effector>` metadata. A chain group's `tip_link` is the pose target frame.
-An ordered joint-list group may be pose-targeted only when DimOS can validate a
+references, mixed group declarations, branching or non-serial groups, and SRDF
+`<end_effector>` metadata. A chain group's `tip_link` is its pose target frame.
+An ordered joint-list group can be pose-targeted only when DimOS can validate a
 unique serial target frame.
 
 ## Fallback behavior
 
-When no SRDF is available, fallback uses `RobotModelConfig.joint_names` as the
-candidate controllable set. This field is the robot's ordered local model joint
-set, not an implicit planning group.
+When no SRDF or explicit group config is available, fallback uses
+`RobotModelConfig.joint_names` as the candidate controllable set. This field is
+the robot's ordered local model joint set, not an implicit planning group.
 
 Fallback succeeds only when those joints form one unambiguous serial chain. It
-allows prismatic joints in the middle of the chain and strips only terminal/tip
+allows prismatic joints in the middle of the chain and strips only terminal tip
 prismatic joints, which usually represent gripper fingers. The generated group
 name is always `manipulator`.
 
-## Planning APIs
+## Current APIs
 
-Planning APIs select groups explicitly. Descriptors returned by
-`WorldSpec.list_planning_groups()` can be passed where a group ID is accepted;
-the API normalizes them back to IDs and re-resolves current world state.
+Use `list_planning_groups()` to discover group IDs and capabilities before
+planning:
 
 ```python skip
-# Joint-space planning for one group.
-manip.plan_to_joint_targets({
-    "left_arm/manipulator": JointState(
-        name=["joint1", "joint2"],
-        position=[0.2, -0.1],
-    )
-})
+groups = manip.list_planning_groups()
+pose_groups = [group for group in groups if group.has_pose_target]
+group_id = pose_groups[0].id
+```
 
-# Pose planning for an arm while a torso/waist group participates as free DOFs.
-manip.plan_to_poses(
-    {"robot/arm": target_pose},
-    auxiliary_groups=["robot/torso"],
+Joint-space planning targets group IDs and uses local joint names inside each
+target `JointState`:
+
+```python skip
+ok = manip.plan_to_joint_targets(
+    {
+        "left_arm/manipulator": JointState(
+            name=["joint1", "joint2", "joint3", "joint4", "joint5", "joint6"],
+            position=[0.0, -0.4, 0.2, 0.0, 0.3, 0.0],
+        )
+    }
 )
+```
 
-plan = manip._last_plan
+Pose planning targets pose-capable group IDs. Add auxiliary groups when another
+chain should participate as free DOFs but does not have its own pose target:
+
+```python skip
+ok = manip.plan_to_pose_targets(
+    {"left_arm/manipulator": target_pose},
+    auxiliary_groups=["torso/manipulator"],
+)
+```
+
+After a successful planning call, preview and execution use the module's current
+stored plan:
+
+```python skip
+manip.preview_plan()
+manip.execute_plan()
+```
+
+Callers that already hold a `GeneratedPlan` may pass it explicitly:
+
+```python skip
 manip.preview_plan(plan)
 manip.execute_plan(plan)
 ```
 
-For robot-scoped joint-space planning, unnamed vectors are interpreted in robot
-model joint order. If names are provided, they must be local model joint names:
-no global names, missing joints, extra joints, or partial joint sets.
+For robot-scoped compatibility APIs, unnamed joint vectors are interpreted in
+the robot model's configured joint order. If names are provided, they must be
+local model joint names: no global names, missing joints, extra joints, or
+partial joint sets.
 
 ## Generated plans and execution
 
@@ -106,18 +135,17 @@ task, orders each trajectory by the robot's configured local joint order, writes
 global joint names at the coordinator boundary, and invokes each trajectory
 controller. Controllers remain planning-group agnostic.
 
-Multi-task dispatch is not atomic in this change: if one trajectory task accepts
-and a later task rejects, DimOS reports the rejection but does not roll back the
-accepted task.
+Multi-task dispatch is not atomic: if one trajectory task accepts and a later
+task rejects, DimOS reports the rejection but does not roll back the accepted
+task.
 
-## Compatibility planning config fields
+## Compatibility config fields
 
-`RobotConfig.base_link`, `RobotConfig.base_pose`,
 `RobotModelConfig.base_link`, `RobotModelConfig.base_pose`, and
-`RobotModelConfig.end_effector_link` remain as compatibility fields for the
-current Drake weld/placement behavior and robot-scoped compatibility helpers.
-New planning logic should use model/SRDF structure and planning group base/tip
-links instead.
+`RobotModelConfig.end_effector_link` remain compatibility fields for the current
+Drake weld/placement behavior and older robot-scoped helpers. New planning logic
+should prefer model/SRDF structure and planning group base/tip links.
 
-Robot placement should be encoded in URDF/xacro/MJCF. `joint_names` remains
-supported and should describe the ordered controllable local model joint set.
+Robot placement can be encoded either in model assets or in `base_pose`,
+depending on the blueprint. `joint_names` remains supported and should describe
+the ordered controllable local model joint set.

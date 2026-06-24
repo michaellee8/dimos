@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, TypeAlias, cast
 from dimos.manipulation.planning.groups.models import PlanningGroup
 from dimos.manipulation.planning.spec.models import PlanningGroupID, RobotName
 from dimos.manipulation.visualization.types import (
-    RobotInfo,
     TargetEvaluation,
     TargetSetEvaluation,
 )
@@ -197,9 +196,6 @@ class ViserPanelGui:
     def _list_planning_groups(self) -> list[PlanningGroup]:
         return self.manipulation_module.list_planning_groups()
 
-    def _get_robot_info(self, robot_name: RobotName) -> RobotInfo | None:
-        return self.manipulation_module.get_robot_info(robot_name)
-
     def _get_init_joints(self, robot_name: RobotName) -> JointState | None:
         return copy_joint_state(self.manipulation_module.get_init_joints(robot_name))
 
@@ -321,12 +317,10 @@ class ViserPanelGui:
     def _refresh_selected_robot_state(self) -> None:
         robot_name = self.state.selected_robot
         if robot_name is None:
-            self.state.robot_info = None
             self.state.current_joints = None
             self.state.current_ee_pose = None
             self.state.manipulation_state = self._get_module_state()
             return
-        self.state.robot_info = self._get_robot_info(robot_name)
         current = self._get_current_joint_state(robot_name)
         self.state.current_joints = list(current.position) if current is not None else None
         self.state.current_ee_pose = self._get_ee_pose(robot_name)

@@ -79,7 +79,6 @@ from dimos.manipulation.visualization.config import (
     NoManipulationVisualizationConfig,
 )
 from dimos.manipulation.visualization.factory import create_manipulation_visualization
-from dimos.manipulation.visualization.types import RobotInfo
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -100,6 +99,12 @@ RobotEntry: TypeAlias = tuple[WorldRobotID, RobotModelConfig, JointTrajectoryGen
 
 RobotRegistry: TypeAlias = dict[RobotName, RobotEntry]
 """Maps robot_name -> RobotEntry"""
+
+RobotInfoValue: TypeAlias = (
+    RobotName | WorldRobotID | list[str] | list[float] | float | None | list[PlanningGroup]
+)
+RobotInfoPayload: TypeAlias = dict[str, RobotInfoValue]
+"""Legacy RPC payload derived from RobotModelConfig and planning-group registry."""
 
 
 class ManipulationState(Enum):
@@ -997,7 +1002,7 @@ class ManipulationModule(Module):
         return list(self._robots.keys())
 
     @rpc
-    def get_robot_info(self, robot_name: RobotName | None = None) -> RobotInfo | None:
+    def get_robot_info(self, robot_name: RobotName | None = None) -> RobotInfoPayload | None:
         """Get information about a robot.
 
         Args:
@@ -1017,7 +1022,7 @@ class ManipulationModule(Module):
             else []
         )
 
-        info: RobotInfo = {
+        info: RobotInfoPayload = {
             "name": config.name,
             "world_robot_id": robot_id,
             "joint_names": config.joint_names,

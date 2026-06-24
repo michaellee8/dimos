@@ -50,7 +50,6 @@ SELF_HOSTED_BLUEPRINTS = frozenset(
         "coordinator-xarm6",
         "coordinator-xarm7",
         "dual-xarm6-planner-coordinator",
-        "dual-xarm7-planner-coordinator",
         "teleop-hosted-go2",
         "teleop-hosted-xarm7",
         "teleop-quest-dual",

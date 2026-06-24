@@ -22,7 +22,7 @@ import threading
 from typing import Literal
 
 from dimos.manipulation.planning.spec.models import PlanningGroupID
-from dimos.manipulation.visualization.types import RobotInfo, TargetEvaluation, TargetSetEvaluation
+from dimos.manipulation.visualization.types import TargetEvaluation, TargetSetEvaluation
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.utils.logging_config import setup_logger
@@ -117,7 +117,6 @@ class PanelState:
     target_status: TargetStatus = TargetStatus.EMPTY
     action_status: ActionStatus = ActionStatus.IDLE
     manipulation_state: str = "DISCONNECTED"
-    robot_info: RobotInfo | None = None
     current_joints: list[float] | None = None
     current_ee_pose: Pose | None = None
     cartesian_target: Pose | None = None

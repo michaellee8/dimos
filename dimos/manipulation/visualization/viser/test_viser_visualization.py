@@ -32,7 +32,6 @@ from dimos.manipulation.planning.spec.models import (
     ForwardKinematicsResult,
     IKResult,
 )
-from dimos.manipulation.visualization.types import RobotInfo
 from dimos.manipulation.visualization.viser import scene as scene_module
 from dimos.manipulation.visualization.viser.animation import (
     GroupPreviewAnimation,
@@ -429,40 +428,14 @@ class FakeManipulationModule(SimpleNamespace):
         entry = getattr(self, "_robots", {}).get(robot_name)
         return entry[1] if entry is not None else None
 
-    def get_robot_info(self, robot_name: str) -> RobotInfo | None:
-        config = self.get_robot_config(robot_name)
-        if config is None:
-            return None
-        init = self.get_init_joints(robot_name)
-        home_joints = config.home_joints if hasattr(config, "home_joints") else None
-        planning_groups = getattr(self, "_planning_groups", None)
-        if planning_groups is None:
-            planning_groups = [make_planning_group_info(robot_name, config)]
-        else:
-            planning_groups = [group for group in planning_groups if group.robot_name == robot_name]
-        return {
-            "name": config.name,
-            "world_robot_id": self.robot_id_for_name(robot_name) or robot_name,
-            "joint_names": list(config.joint_names),
-            "planning_groups": planning_groups,
-            "end_effector_link": config.end_effector_link,
-            "base_link": config.base_link,
-            "max_velocity": 1.0,
-            "max_acceleration": 1.0,
-            "has_joint_name_mapping": False,
-            "coordinator_task_name": None,
-            "home_joints": list(home_joints) if home_joints is not None else None,
-            "pre_grasp_offset": 0.0,
-            "init_joints": list(init.position) if init is not None else None,
-        }
-
     def list_planning_groups(self) -> list[PlanningGroup]:
-        groups: list[PlanningGroup] = []
-        for robot_name in self.list_robots():
-            info = self.get_robot_info(robot_name)
-            if info is not None:
-                groups.extend(info.get("planning_groups", []))
-        return groups
+        planning_groups = getattr(self, "_planning_groups", None)
+        if planning_groups is not None:
+            return list(planning_groups)
+        return [
+            make_planning_group_info(robot_name, config)
+            for robot_name, (_, config, _) in getattr(self, "_robots", {}).items()
+        ]
 
     def get_init_joints(self, robot_name: str) -> JointState | None:
         return getattr(self, "_init_joints", {}).get(robot_name)

@@ -16,11 +16,11 @@
 
 import pytest
 
-from dimos.control.blueprints.dual import coordinator_dual_xarm
 from dimos.control.coordinator import ControlCoordinator
 from dimos.core.coordination.blueprints import Blueprint
 from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.manipulation.planning.groups.identifiers import make_global_joint_names
+from dimos.robot.manipulators.xarm.blueprints.basic import coordinator_dual_xarm
 
 
 def _dual_xarm6_planner_coordinator() -> Blueprint:
@@ -77,8 +77,8 @@ def test_dual_xarm6_integrated_tasks_match_planner_robots() -> None:
         assert task.joint_names == make_global_joint_names(robot.name, robot.joint_names)
 
 
-def test_dual_coordinator_xarm_task_names_match_manipulation_robot_defaults() -> None:
+def test_dual_coordinator_xarm_task_names_match_split_blueprint() -> None:
     assert _coordinator_task_names(coordinator_dual_xarm) == [
-        "traj_left_arm",
-        "traj_right_arm",
+        "traj_left",
+        "traj_right",
     ]
