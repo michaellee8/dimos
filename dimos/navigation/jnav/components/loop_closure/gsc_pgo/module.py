@@ -200,11 +200,11 @@ class PGO(NativeModule):
     landmarks: In[Landmark]
     corrected_odometry: Out[Odometry]
     correction: Out[Transform]
+    pose_graph: Out[Graph3D]
+    loop_closure_event: Out[GraphDelta3D]
     # Internal/debug only (off by default) — see global_map_publish_rate. Named
     # with a leading underscore so autoconnect won't wire it to `global_map` Ins.
     _global_map: Out[PointCloud2]
-    pose_graph: Out[Graph3D]
-    loop_closure_event: Out[GraphDelta3D]
 
     @rpc
     def start(self) -> None:
