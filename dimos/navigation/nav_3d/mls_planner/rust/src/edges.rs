@@ -128,7 +128,9 @@ pub fn build_node_edges_region(
     }
 
     let win_cells: Vec<CellId> = window.iter().copied().collect();
-    merge_min(&mut merged, boundary_edge_map(cells, state, &win_cells));
+    let mut new_edges = boundary_edge_map(cells, state, &win_cells);
+    new_edges.retain(|_, e| live_node.contains(&e.a) && live_node.contains(&e.b));
+    merge_min(&mut merged, new_edges);
 
     out_edges.clear();
     out_edges.extend(merged.into_values());
