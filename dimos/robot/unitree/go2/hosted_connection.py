@@ -165,6 +165,8 @@ class Go2HostedConnection(GO2Connection):
             self._handle_set_mode(msg)
         elif kind == "camera_select":
             self._set_cam_selection(msg.get("cams", []))
+        elif kind == "obstacle_avoidance":
+            self._handle_obstacle_avoidance(msg)
         elif kind == "video_stats":
             self.video_stats.publish(VideoStats.from_dict(msg))
         elif kind == "clock_report":
@@ -245,6 +247,23 @@ class Go2HostedConnection(GO2Connection):
             self._send_ack(nonce, ok)
 
         threading.Thread(target=runner, daemon=True, name="Go2SetMode").start()
+
+    def _handle_obstacle_avoidance(self, msg: dict[str, Any]) -> None:
+        """Toggle the Go2's onboard obstacle avoidance on/off."""
+        enabled = bool(msg.get("enabled"))
+        nonce = msg.get("nonce")
+
+        def runner() -> None:
+            ok = False
+            try:
+                self.connection.set_obstacle_avoidance(enabled)
+                ok = True
+                logger.info("obstacle_avoidance: enabled=%s", enabled)
+            except Exception:
+                logger.exception("obstacle_avoidance enabled=%s failed", enabled)
+            self._send_ack(nonce, ok)
+
+        threading.Thread(target=runner, daemon=True, name="Go2ObstacleAvoid").start()
 
     def _send_ack(self, nonce: Any, ok: bool) -> None:
         try:
