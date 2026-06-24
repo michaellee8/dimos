@@ -45,13 +45,13 @@ class PointlioRecorder(Recorder):
     _last_odom_pose: Pose | None = None
 
     @pose_setter_for("pointlio_odometry")
-    def _odom_pose(self, msg: Odometry) -> Pose | None:
+    async def _odom_pose(self, msg: Odometry) -> Pose | None:
         pose = getattr(msg, "pose", None)
         self._last_odom_pose = getattr(pose, "pose", None) if pose is not None else None
         return self._last_odom_pose
 
     @pose_setter_for("pointlio_lidar")
-    def _lidar_pose(self, msg: PointCloud2) -> Pose | None:
+    async def _lidar_pose(self, msg: PointCloud2) -> Pose | None:
         # Most-recent odometry pose, stamped directly (no tf). None before the
         # first odometry -> frame stored unposed, map-skipped.
         return self._last_odom_pose
