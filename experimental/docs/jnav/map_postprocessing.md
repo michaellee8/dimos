@@ -19,7 +19,7 @@ The tags are the whole trick. Drift accumulates, but a tag you saw at minute 1 a
 
 ## The three steps
 
-The scripts live in `dimos/navigation/jnav/components/loop_closure/gsc_pgo/`.
+The scripts live in `dimos/navigation/jnav/components/loop_closure/gsc_pgo/scripts/`.
 
 **1. Detect the tags.** Run the camera frames through detection and write both the raw and the gated tag streams in one step:
 
