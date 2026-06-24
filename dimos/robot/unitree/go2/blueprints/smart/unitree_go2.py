@@ -68,8 +68,9 @@ class Go2Memory(Recorder):
 
     @pose_setter_for("lidar")
     async def _lidar_pose(self, msg: PointCloud2) -> Pose | None:
-        # Yes, it doesn't make sense to register lidar at the odom pose because the
-        # go2 lidar is in the world frame, but map.py (for now) needs this.
+        # go2 lidar (currently) is in world-frame
+        # so it doesn't make sense to register lidar at the odom pose
+        # but we do it anyways because map.py (for now) requires it
         # TODO: fix map.py to use a transform frame
         return getattr(self, "_last_odom_pose", None)
 
