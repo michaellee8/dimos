@@ -33,6 +33,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from dimos.memory2.store.sqlite import SqliteStoreConfig
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
@@ -139,7 +140,10 @@ def write_tf_tree(
 
     Returns the number of tf observations written.
     """
-    db_path = store.config.path
+    config = store.config
+    if not isinstance(config, SqliteStoreConfig):
+        raise TypeError("write_tf_tree reads the db directly and needs a SqliteStore")
+    db_path = config.path
     connection = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True)
     odom = np.array(
         list(
@@ -189,8 +193,8 @@ def write_tf_tree(
         )
         return links
 
-    for ts in np.arange(t0, t1 + static_period, static_period):
-        tf_stream.append(TFMessage(*statics_at(float(ts))), ts=float(ts))
+    for static_ts in np.arange(t0, t1 + static_period, static_period):
+        tf_stream.append(TFMessage(*statics_at(float(static_ts))), ts=float(static_ts))
         written += 1
 
     return written
