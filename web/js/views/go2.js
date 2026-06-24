@@ -60,6 +60,7 @@ const ui = {
     estopped: false,
     speedMode: 'normal',      // speed bar selection
     selectedCams: ['cam1'],   // active camera tabs (default Go2)
+    obstacleAvoid: true,      // onboard obstacle avoidance on/off (robot boots ON)
     nonce: 0,                 // monotonic command id for ack matching
     pending: new Map(),       // nonce -> {el, timer}
 };
@@ -134,6 +135,12 @@ export function renderGo2(c) {
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-xl p-4 shrink-0 flex items-center justify-between">
                     <span class="text-sm text-gray-400">🔋 Battery</span>
                     <span id="batt-pct" class="text-sm font-semibold text-dim-400">—%</span>
+                </section>
+
+                <!-- Obstacle avoidance toggle -->
+                <section class="bg-bg-950 border border-[#2a2a2a] rounded-xl p-4 shrink-0 flex items-center justify-between">
+                    <span class="text-sm text-gray-400">Obstacle avoidance</span>
+                    <button id="obstacle-toggle" class="px-3 py-1 text-xs term-caps rounded border border-dim-700 text-dim-400">ON</button>
                 </section>
 
                 <!-- Telemetry: summary always; click to expand full detail. -->
@@ -227,6 +234,9 @@ function wireGo2() {
     bar.querySelectorAll('[data-speed]').forEach((b) =>
         b.addEventListener('click', () => selectSpeed(b.dataset.speed)));
 
+    document.getElementById('obstacle-toggle').addEventListener('click', toggleObstacleAvoid);
+    renderObstacleToggle();
+
     // Video: webrtc.js sets srcObject + display:block on ontrack, but doesn't
     // know about our placeholder. Hide the dog+status overlay once frames flow
     // ('playing'); show it again if the stream drops.
@@ -312,6 +322,24 @@ function selectSpeed(mode, sendToRobot = true) {
     if (sendToRobot && state.stateChannel && state.stateChannel.readyState === 'open') {
         state.stateChannel.send(JSON.stringify({ type: 'set_mode', mode, nonce: ++ui.nonce }));
     }
+}
+
+function toggleObstacleAvoid() {
+    if (!state.stateChannel || state.stateChannel.readyState !== 'open') return;
+    ui.obstacleAvoid = !ui.obstacleAvoid;
+    renderObstacleToggle();
+    state.stateChannel.send(JSON.stringify(
+        { type: 'obstacle_avoidance', enabled: ui.obstacleAvoid, nonce: ++ui.nonce }));
+}
+
+function renderObstacleToggle() {
+    const b = document.getElementById('obstacle-toggle');
+    if (!b) return;
+    const on = ui.obstacleAvoid;
+    b.textContent = on ? 'ON' : 'OFF';
+    b.classList.toggle('text-dim-400', on);
+    b.classList.toggle('border-dim-700', on);
+    b.classList.toggle('text-gray-500', !on);
 }
 
 // ── command ack (state_reliable_back) — shared by all nonce'd commands ──
