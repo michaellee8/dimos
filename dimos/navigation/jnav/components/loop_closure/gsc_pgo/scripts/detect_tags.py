@@ -22,7 +22,7 @@ gate tuning in post_process.py needs no re-detection.
 
 Prints the raw per-marker histogram + visit structure (visit = sightings >30s apart).
 
-Usage: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/detect_tags.py --rec=PATH
+Usage: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/scripts/detect_tags.py --rec=PATH
        [--camera=color_image] [--tag-size=0.10]
        [--dict=DICT_APRILTAG_36h11] [--intrinsics=PATH] [--out=raw_april_tags]
 """
@@ -56,7 +56,7 @@ def arg(flag, default=None):
 REC_ARG = arg("--rec")
 if not REC_ARG:
     sys.exit(
-        "usage: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/detect_tags.py --rec=PATH [--camera=...] [--tag-size=...] "
+        "usage: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/scripts/detect_tags.py --rec=PATH [--camera=...] [--tag-size=...] "
         "[--dict=...] [--intrinsics=PATH] [--out=...]   (--rec is required)"
     )
 REC = Path(REC_ARG).expanduser()

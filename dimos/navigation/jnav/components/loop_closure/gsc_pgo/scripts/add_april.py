@@ -16,7 +16,7 @@
 record the outcome in summary.json. --summary recomputes only the result section.
 
 Usage:
-  python dimos/navigation/jnav/components/loop_closure/gsc_pgo/add_april.py --rec PATH
+  python dimos/navigation/jnav/components/loop_closure/gsc_pgo/scripts/add_april.py --rec PATH
       [--summary] [--output PATH] [--camera color_image] [--intrinsics PATH]
       [--tag-size 0.10] [--dict DICT_APRILTAG_36h11] [--dynamic 17]
 """

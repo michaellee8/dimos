@@ -19,7 +19,7 @@ its own colored entity, plus AprilTag landmarks + trajectories. Re-run after add
 and it picks the new stream up automatically.
 
 Importable: `build(...)` writes the rrd and returns its path (used by post_process.py).
-Standalone: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/make_rrd.py --rec=PATH [--lidar=...] [--odom=...] [--tags=...] [--out=...]
+Standalone: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/scripts/make_rrd.py --rec=PATH [--lidar=...] [--odom=...] [--tags=...] [--out=...]
 """
 
 import json
@@ -172,7 +172,7 @@ if __name__ == "__main__":
     rec_arg = _arg("--rec")
     if not rec_arg:
         sys.exit(
-            "usage: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/make_rrd.py --rec=PATH [--lidar=...] [--odom=...] "
+            "usage: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/scripts/make_rrd.py --rec=PATH [--lidar=...] [--odom=...] "
             "[--tags=...] [--out=...]   (--rec is required)"
         )
     build(

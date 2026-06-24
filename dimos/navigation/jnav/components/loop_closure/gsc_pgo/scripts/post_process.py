@@ -27,7 +27,7 @@ anchor gravity, loose yaw) + quality-weighted AprilTag landmark factors fix macr
 geometry. Writes <out>_odometry / <out>_lidar back into the recording db, optionally a .pc2.lcm
 log of the corrected cloud, and opens a comparison rrd.
 
-Usage: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/post_process.py [odom|lidar|both] --rec=PATH
+Usage: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/scripts/post_process.py [odom|lidar|both] --rec=PATH
        [--lidar=pointlio_lidar] [--odom=pointlio_odometry] [--tags=raw_april_tags]
        [--out=gt_pointlio] [--suffix=...] [--ignore-tags=17] [--no-icp] [--no-lcm] [--no-rrd]
 """
@@ -112,7 +112,7 @@ GATE = dict(
 
 if not REC_ARG:
     sys.exit(
-        "usage: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/post_process.py [odom|lidar|both] --rec=PATH "
+        "usage: python dimos/navigation/jnav/components/loop_closure/gsc_pgo/scripts/post_process.py [odom|lidar|both] --rec=PATH "
         "[--lidar=...] [--odom=...] [--tags=...] [--out=...] [--suffix=...] "
         "[--no-icp] [--no-lcm] [--no-rrd]   (--rec is required: path to the recording dir)"
     )
