@@ -10,7 +10,7 @@
 // Preview with no broker:  window._teleopDev.previewGo2()
 
 import { disconnect } from '../disconnect.js';
-import { hudDetailLines, hudSummaryLine, statsHealth, transportLabel } from '../hud.js';
+import { hudDetailRows, hudSummaryLine, statsHealth, transportLabel } from '../hud.js';
 import { escHtml, state } from '../state.js';
 import { startKeyboardLoop, stopKeyboardLoop } from './keyboard.js';
 
@@ -143,7 +143,7 @@ export function renderGo2(c) {
                         <span id="hud-health" class="pill pill-good"><span class="dot"></span><span id="hud-transport">Cloudflare</span></span>
                     </button>
                     <pre id="hud-summary" class="text-xs text-dim-400 leading-relaxed">—</pre>
-                    <pre id="hud-detail" class="hidden text-xs text-gray-400 leading-relaxed mt-2 pt-2 border-t border-[#2a2a2a]">—</pre>
+                    <div id="hud-detail" class="hidden mt-2 pt-2 border-t border-[#2a2a2a] space-y-2.5"></div>
                 </section>
 
                 <!-- Posture -->
@@ -164,10 +164,19 @@ export function renderGo2(c) {
                     <div class="grid grid-cols-3 gap-2" id="speed-bar"></div>
                 </section>
 
-                <!-- Body height: SHELVED for v1 — the api_id (1013) is rejected
-                     with status 3203 "unknown api" on firmware >=V1.1.6, which
-                     renumbered the sport-command IDs. Re-add once the new
-                     BodyHeight mechanism is found. -->
+                <!-- WASD drive indicator: lights up keys as they're pressed
+                     (updateKeyVisuals() in keyboard.js toggles .pressed by id). -->
+                <section class="bg-bg-950 border border-[#2a2a2a] rounded-xl p-4 shrink-0">
+                    <div class="term-caps text-xs text-gray-500 mb-3">Drive</div>
+                    <div class="flex flex-col items-center gap-2">
+                        <div id="key-w" class="kb-key">W</div>
+                        <div class="flex gap-2">
+                            <div id="key-a" class="kb-key">A</div>
+                            <div id="key-s" class="kb-key">S</div>
+                            <div id="key-d" class="kb-key">D</div>
+                        </div>
+                    </div>
+                </section>
 
                 <!-- E-STOP -->
                 <section class="mt-auto bg-bg-950 border border-[#2a2a2a] rounded-xl p-4 shrink-0">
@@ -184,8 +193,8 @@ export function renderGo2(c) {
     refreshControls();
     startTick();
     // Drive: reuse the proven keyboard loop verbatim — WASD → TwistStamped on
-    // state.cmdChannel (same as views/keyboard.js). Writes #twist-readout; the
-    // #key-* visual updates no-op here (elements absent, guarded).
+    // state.cmdChannel (same as views/keyboard.js). The loop's updateKeyVisuals()
+    // lights up the #key-w/a/s/d Drive panel as keys are pressed.
     startKeyboardLoop();
 }
 
@@ -193,11 +202,12 @@ export function renderGo2(c) {
 function wireGo2() {
     document.getElementById('disconnectBtn').onclick = disconnect;
 
-    // Telemetry expand/collapse — summary always, full detail on click.
+    // Telemetry expand/collapse — summary always, full detail grid on click.
     document.getElementById('hud-toggle').addEventListener('click', () => {
         const detail = document.getElementById('hud-detail');
-        const open = detail.classList.toggle('hidden');
-        document.getElementById('hud-caret').textContent = open ? '▸' : '▾';
+        const collapsed = detail.classList.toggle('hidden');
+        document.getElementById('hud-caret').textContent = collapsed ? '▸' : '▾';
+        if (!collapsed) renderTelemetryGrid();  // populate immediately on expand
     });
 
     // Camera tabs: render toggles, wire selection.
@@ -388,6 +398,24 @@ function renderBattery() {
 // renders the summary + full detail from the shared hud.js formatters, drives
 // the health pill, and updates battery. Reuses hud.js so the cockpit and the
 // keyboard HUD stay in sync.
+// Telemetry value tint by per-metric health (matches the .pill palette).
+const HEALTH_TINT = { good: 'text-[#b0e1f0]', warn: 'text-[#eab308]', bad: 'text-[#f3b4b4]' };
+
+function renderTelemetryGrid() {
+    const el = document.getElementById('hud-detail');
+    if (!el || el.classList.contains('hidden')) return;  // skip work when collapsed
+    el.innerHTML = hudDetailRows().map((g) => `
+        <div>
+            <div class="term-caps text-[10px] text-gray-600 mb-1">${g.group}</div>
+            <div class="grid grid-cols-2 gap-x-3 gap-y-1">
+                ${g.rows.map((r) => `
+                    <span class="text-xs text-gray-500">${r.label}</span>
+                    <span class="text-xs text-right font-mono ${HEALTH_TINT[r.health] || 'text-gray-300'}">${r.value}</span>
+                `).join('')}
+            </div>
+        </div>`).join('');
+}
+
 let _lastHudSample = 0;
 function startTick() {
     stopTick();
@@ -400,9 +428,9 @@ function startTick() {
         state.cmdSendCount = 0;
         _lastHudSample = now;
 
-        // Summary always; detail rendered (hidden until expanded).
+        // Summary always; detail grid rendered (hidden until expanded).
         document.getElementById('hud-summary').textContent = hudSummaryLine();
-        document.getElementById('hud-detail').textContent = hudDetailLines().join('\n');
+        renderTelemetryGrid();
 
         // Health pill (good/warn/bad) + transport label.
         const pill = document.getElementById('hud-health');

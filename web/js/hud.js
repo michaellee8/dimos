@@ -67,6 +67,45 @@ export function hudDetailLines() {
     ];
 }
 
+// Structured telemetry for the cockpit grid: groups of {label, value, health}.
+// health ∈ 'good'|'warn'|'bad'|null — drives per-value tint; null = neutral.
+export function hudDetailRows() {
+    const v = state.liveStats.video || {};
+    const c = state.liveStats.cmd;
+    const rtt = state.liveStats.rttMs;
+    const fps = v.fps ?? 0;
+    const fmt = (n, d = 0) => (n == null ? '—' : n.toFixed(d));
+    // Threshold helpers (mirror statsHealth axes).
+    const band = (x, warn, bad, invert = false) =>
+        x == null ? null : invert
+            ? (x < bad ? 'bad' : x < warn ? 'warn' : 'good')
+            : (x > bad ? 'bad' : x > warn ? 'warn' : 'good');
+    return [
+        { group: 'Link', rows: [
+            { label: 'Transport', value: transportLabel(), health: null },
+            { label: 'Path', value: iceTypeLabel() || '—',
+              health: state.liveStats.iceType === 'turn' ? 'warn' : null },
+            { label: 'RTT', value: `${fmt(rtt)} ms`, health: band(rtt, 100, 200) },
+        ]},
+        { group: 'Video', rows: [
+            { label: 'FPS', value: fmt(fps), health: band(fps, 18, 8, true) },
+            { label: 'Bitrate', value: `${fmt((v.kbps ?? 0) / 1000, 1)} mbps`, health: null },
+            { label: 'Resolution', value: `${v.width ?? '—'}×${v.height ?? '—'}`, health: null },
+            { label: 'Loss', value: `${fmt(v.loss_pct, 1)} %`, health: band(v.loss_pct, 1, 3) },
+            { label: 'Jitter buf', value: `${fmt(v.jitter_buffer_ms)} ms`, health: null },
+            { label: 'Decode', value: `${fmt(v.decode_ms)} ms`, health: null },
+            { label: 'Freezes', value: `${v.freezes ?? 0}`, health: band(v.freezes, 0, 3) },
+        ]},
+        { group: 'Command', rows: [
+            { label: 'Latency', value: c ? `${fmt(c.latency_ms)} ms` : '—',
+              health: c ? band(c.latency_ms, 100, 200) : null },
+            { label: 'Jitter', value: c ? `${fmt(c.jitter_ms)} ms` : '—', health: null },
+            { label: 'Send rate', value: `${fmt(state.liveStats.cmdHz)} Hz`, health: null },
+            { label: 'Recv rate', value: c ? `${fmt(c.rate_hz)} Hz` : '—', health: null },
+        ]},
+    ];
+}
+
 // ─── Browser HUD (DOM) ───────────────────────────────────────────────────
 // Corner pill (click to expand). Mounted on connect, 1Hz refresh.
 export function mountHud() {
