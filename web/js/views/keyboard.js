@@ -24,9 +24,8 @@ export function renderKeyboard(c) {
                     <div class="text-sm text-gray-300 space-y-1">
                         <div><kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">W</kbd> / <kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">S</kbd> — forward / back</div>
                         <div><kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">A</kbd> / <kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">D</kbd> — turn left / right</div>
-                        <div><kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">Shift</kbd> — 2× faster (any)</div>
-                        <div><kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">Ctrl</kbd>+<kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">W</kbd>/<kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">S</kbd> — slow (½×)</div>
-                        <div><kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">Ctrl</kbd>+<kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">A</kbd>/<kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">D</kbd> — strafe</div>
+                        <div><kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">Q</kbd> / <kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">E</kbd> — strafe left / right</div>
+                        <div><kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">Shift</kbd> — 2× faster · <kbd class="px-2 py-0.5 bg-[#1f1f1f] rounded font-mono">Ctrl</kbd> — ½× slow</div>
                     </div>
                 </div>
                 <div class="bg-bg-950 border border-[#2a2a2a] rounded-lg p-4">
@@ -42,9 +41,11 @@ angular.z = 0</pre>
                 <div class="flex flex-col items-center gap-2">
                     <div id="key-w" class="kb-key">W</div>
                     <div class="flex gap-2">
+                        <div id="key-q" class="kb-key">Q</div>
                         <div id="key-a" class="kb-key">A</div>
                         <div id="key-s" class="kb-key">S</div>
                         <div id="key-d" class="kb-key">D</div>
+                        <div id="key-e" class="kb-key">E</div>
                     </div>
                     <div class="flex gap-2 mt-3">
                         <div id="key-shift" class="kb-key wide">Shift</div>
@@ -64,8 +65,8 @@ angular.z = 0</pre>
 function trackedKey(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return null;
     const k = e.key.toLowerCase();
-    if (k === 'w' || k === 'a' || k === 's' || k === 'd') return k;
-    if (e.key === 'Shift' || e.key === 'Control') return e.key;
+    if ('wasdqe'.includes(k)) return k;  // drive: WASD + Q/E strafe
+    if (e.key === 'Shift' || e.key === 'Control') return e.key;  // 2× / 0.5×
     return null;
 }
 function onKeyDown(e) {
@@ -84,6 +85,7 @@ function onKeyUp(e) {
 // buildTwist() is unchanged. Press-and-hold to move; release/leave to stop.
 const TOUCH_KEYS = {
     'key-w': 'w', 'key-a': 'a', 'key-s': 's', 'key-d': 'd',
+    'key-q': 'q', 'key-e': 'e',
     'key-shift': 'Shift', 'key-ctrl': 'Control',
 };
 function bindTouchKeys() {
@@ -102,29 +104,29 @@ function bindTouchKeys() {
 }
 
 function buildTwist() {
-    // Shift = 2×, Ctrl + W/S = ½×, Ctrl + A/D = strafe; both held = neither.
+    // W/S forward-back, A/D turn, Q/E strafe. Shift = 2×, Ctrl = 0.5× (slow).
     const kb = state.kbKeys;
     const shift = kb.has('Shift') && !kb.has('Control');
     const ctrl  = kb.has('Control') && !kb.has('Shift');
-    const fwd = (kb.has('w') ? 1 : 0) - (kb.has('s') ? 1 : 0);
-    const lr  = (kb.has('a') ? 1 : 0) - (kb.has('d') ? 1 : 0);
+    const fwd    = (kb.has('w') ? 1 : 0) - (kb.has('s') ? 1 : 0);
+    const turn   = (kb.has('a') ? 1 : 0) - (kb.has('d') ? 1 : 0);
+    const strafe = (kb.has('q') ? 1 : 0) - (kb.has('e') ? 1 : 0);
 
-    const fwdScale = shift ? 2.0 : (ctrl ? 0.5 : 1.0);
-    const lrScale  = shift ? 2.0 : 1.0;
+    const scale = shift ? 2.0 : (ctrl ? 0.5 : 1.0);
     // Speed-bar multiplier (go2 cockpit): Normal 0.5 / High 1.0 / Rage 1.0.
     // Linear scaled by lin, angular by ang. Defaults to 1 for the keyboard view.
     const sp = state.speedScale || { lin: 1.0, ang: 1.0 };
     return {
-        linear_x:  fwd * fwdScale * sp.lin,
-        linear_y:  (ctrl ? lr : 0) * sp.lin,
+        linear_x:  fwd * scale * sp.lin,
+        linear_y:  strafe * scale * sp.lin,
         linear_z:  0,
-        angular_z: (ctrl ? 0 : lr * lrScale) * sp.ang,
+        angular_z: turn * scale * sp.ang,
     };
 }
 
 function updateKeyVisuals() {
     const map = { 'w': 'key-w', 's': 'key-s', 'a': 'key-a', 'd': 'key-d',
-                  'Shift': 'key-shift', 'Control': 'key-ctrl' };
+                  'q': 'key-q', 'e': 'key-e', 'Shift': 'key-shift', 'Control': 'key-ctrl' };
     for (const [k, id] of Object.entries(map)) {
         const el = document.getElementById(id);
         if (el) el.classList.toggle('pressed', state.kbKeys.has(k));

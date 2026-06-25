@@ -178,10 +178,16 @@ export function renderGo2(c) {
                     <div class="flex flex-col items-center gap-2">
                         <div id="key-w" class="kb-key">W</div>
                         <div class="flex gap-2">
+                            <div id="key-q" class="kb-key">Q</div>
                             <div id="key-a" class="kb-key">A</div>
                             <div id="key-s" class="kb-key">S</div>
                             <div id="key-d" class="kb-key">D</div>
+                            <div id="key-e" class="kb-key">E</div>
                         </div>
+                    </div>
+                    <div class="mt-3 text-[11px] text-gray-500 leading-relaxed">
+                        <div><span class="text-gray-300">W/S</span> forward · back &nbsp; <span class="text-gray-300">A/D</span> turn left · right</div>
+                        <div><span class="text-gray-300">Q/E</span> strafe left · right</div>
                     </div>
                 </section>
 
