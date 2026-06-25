@@ -121,6 +121,7 @@ class ManipulationModuleConfig(ModuleConfig):
     """Configuration for ManipulationModule."""
 
     robots: list[RobotModelConfig] = Field(default_factory=list)
+    world_backend: str = "drake"
     planning_timeout: float = 10.0
     visualization: ManipulationVisualizationConfig = Field(
         default_factory=NoManipulationVisualizationConfig
@@ -203,9 +204,12 @@ class ManipulationModule(Module):
             logger.warning("No robots configured, planning disabled")
             return
 
-        world = create_world(visualization=self.config.visualization)
+        world = create_world(
+            backend=self.config.world_backend, visualization=self.config.visualization
+        )
         planning_specs = create_planning_specs(
             world=world,
+            world_backend=self.config.world_backend,
             planner_name=self.config.planner_name,
             kinematics_name=self.config.kinematics_name,
             kinematics=self.config.kinematics,

@@ -181,6 +181,21 @@ visualization backend.
 | `xarm-perception-agent` | XArm7 perception + LLM agent |
 | `xarm-perception-sim` | XArm7 simulation perception stack |
 
+### Dual XArm6 RoboPlan + Viser QA
+
+Run the coupled dual-arm RoboPlan backend with Viser using:
+
+```bash
+uv run dimos run dual-xarm6-planner-coordinator \
+  -o manipulationmodule.world_backend=roboplan \
+  -o manipulationmodule.planner_name=roboplan \
+  -o manipulationmodule.visualization.backend=viser
+```
+
+RoboPlan builds one generated Composite RoboPlan model for the registered arms,
+keeps DimOS public joint names in `robot/joint` form, and returns planned paths in
+the caller's selected planning-group order.
+
 ## Supported Robots
 
 | Robot | DOF | Teleop | Planning | Perception |

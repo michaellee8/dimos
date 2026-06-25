@@ -592,6 +592,7 @@ ignore = [
     "dimos/web/dimos_interface/themes.json",
     "dimos/manipulation/manipulation_module.py",
     "dimos/manipulation/planning/world/drake_world.py",
+    "dimos/manipulation/planning/world/roboplan_world.py",
     "dimos/manipulation/visualization/viser/test_viser_visualization.py",
     "dimos/navigation/cmu_nav/modules/*/main.cpp",
     "dimos/navigation/cmu_nav/common/*.hpp",

@@ -17,7 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from dimos.manipulation.planning.kinematics.config import (
     DrakeOptimizationKinematicsConfig,
@@ -49,19 +49,54 @@ class PlanningSpecs:
     planner: PlannerSpec
 
 
+SUPPORTED_WORLD_BACKENDS = ("drake", "roboplan")
+SUPPORTED_PLANNERS = ("rrt_connect", "roboplan")
+SUPPORTED_KINEMATICS = ("jacobian", "drake_optimization", "pink")
+
+
+def validate_backend_combination(
+    *,
+    world_backend: str = "drake",
+    planner_name: str = "rrt_connect",
+    kinematics_name: str = "jacobian",
+) -> None:
+    """Validate manipulation backend choices before constructing the stack."""
+    if world_backend not in SUPPORTED_WORLD_BACKENDS:
+        raise ValueError(
+            f"Unknown backend: {world_backend}. Available: {list(SUPPORTED_WORLD_BACKENDS)}"
+        )
+    if planner_name not in SUPPORTED_PLANNERS:
+        raise ValueError(f"Unknown planner: {planner_name}. Available: {list(SUPPORTED_PLANNERS)}")
+    if kinematics_name not in SUPPORTED_KINEMATICS:
+        raise ValueError(
+            f"Unknown kinematics solver: {kinematics_name}. Available: {list(SUPPORTED_KINEMATICS)}"
+        )
+
+    if planner_name == "roboplan" and world_backend != "roboplan":
+        raise ValueError('planner_name="roboplan" requires world_backend="roboplan"')
+    if kinematics_name == "drake_optimization" and world_backend != "drake":
+        raise ValueError('kinematics_name="drake_optimization" requires world_backend="drake"')
+
+
 def create_world(
     backend: str = "drake",
     visualization: ManipulationVisualizationConfig | None = None,
     **kwargs: Any,
 ) -> WorldSpec:
-    """Create a world instance. backend='drake' only for now."""
+    """Create a world instance for the selected planning backend."""
     visualization = visualization or NoManipulationVisualizationConfig()
+    enable_viz = visualization.requires_world_visualization
+
     if backend == "drake":
         from dimos.manipulation.planning.world.drake_world import DrakeWorld
 
-        return DrakeWorld(enable_viz=visualization.requires_world_visualization, **kwargs)
-    else:
-        raise ValueError(f"Unknown backend: {backend}. Available: ['drake']")
+        return DrakeWorld(enable_viz=enable_viz, **kwargs)
+    if backend == "roboplan":
+        from dimos.manipulation.planning.world.roboplan_world import RoboPlanWorld
+
+        return cast("WorldSpec", RoboPlanWorld(enable_viz=enable_viz, **kwargs))
+
+    raise ValueError(f"Unknown backend: {backend}. Available: {list(SUPPORTED_WORLD_BACKENDS)}")
 
 
 def create_kinematics(
@@ -93,19 +128,34 @@ def create_kinematics(
 
 def create_planner(
     name: str = "rrt_connect",
+    world: WorldSpec | None = None,
+    world_backend: str | None = None,
     **kwargs: Any,
 ) -> PlannerSpec:
-    """Create motion planner. name='rrt_connect'."""
+    """Create motion planner. name='rrt_connect'|'roboplan'.
+
+    RoboPlan-native planning is scene/backend-coupled, so `name='roboplan'`
+    returns the RoboPlan world object itself as the planner.
+    """
     if name == "rrt_connect":
         from dimos.manipulation.planning.planners.rrt_planner import RRTConnectPlanner
 
         return RRTConnectPlanner(**kwargs)
-    else:
-        raise ValueError(f"Unknown planner: {name}. Available: ['rrt_connect']")
+    if name == "roboplan":
+        if world_backend != "roboplan" or world is None:
+            raise ValueError('planner_name="roboplan" requires world_backend="roboplan"')
+        if not hasattr(world, "plan_selected_joint_path"):
+            raise ValueError(
+                "RoboPlan-native planner requires a group-native RoboPlan world planner object"
+            )
+        return cast("PlannerSpec", world)
+
+    raise ValueError(f"Unknown planner: {name}. Available: {list(SUPPORTED_PLANNERS)}")
 
 
 def create_planning_specs(
     world: WorldSpec,
+    world_backend: str = "drake",
     planner_name: str = "rrt_connect",
     kinematics_name: str | None = None,
     kinematics: ManipulationKinematicsConfig | None = None,
@@ -115,25 +165,35 @@ def create_planning_specs(
 
     if kinematics_name is not None:
         kinematics = kinematics_config_from_name(kinematics_name)
+    if kinematics is None:
+        kinematics = kinematics_config_from_name("pink")
+
+    validate_backend_combination(
+        world_backend=world_backend,
+        planner_name=planner_name,
+        kinematics_name=kinematics.backend,
+    )
 
     return PlanningSpecs(
         world_monitor=WorldMonitor(world=world),
         kinematics=create_kinematics(config=kinematics),
-        planner=create_planner(name=planner_name),
+        planner=create_planner(name=planner_name, world=world, world_backend=world_backend),
     )
 
 
 def create_planning_stack(
     robot_config: Any,
+    world_backend: str = "drake",
     visualization: ManipulationVisualizationConfig | None = None,
     planner_name: str = "rrt_connect",
     kinematics_name: str | None = None,
     kinematics: ManipulationKinematicsConfig | None = None,
 ) -> tuple[WorldSpec, KinematicsSpec, PlannerSpec, str]:
     """Create complete planning stack. Returns (world, kinematics, planner, robot_id)."""
-    world = create_world(visualization=visualization)
+    world = create_world(backend=world_backend, visualization=visualization)
     planning_specs = create_planning_specs(
         world=world,
+        world_backend=world_backend,
         planner_name=planner_name,
         kinematics_name=kinematics_name,
         kinematics=kinematics,

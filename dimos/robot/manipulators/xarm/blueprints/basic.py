@@ -34,6 +34,9 @@ from dimos.robot.manipulators.xarm.config import (
     xarm7_hardware,
 )
 
+_DUAL_XARM6_LEFT_Y_OFFSET = 0.3
+_DUAL_XARM6_RIGHT_Y_OFFSET = -0.3
+
 xarm6_planner_only = ManipulationModule.blueprint(
     robots=[make_xarm6_model_config(name="arm")],
     planning_timeout=10.0,
@@ -42,8 +45,8 @@ xarm6_planner_only = ManipulationModule.blueprint(
 
 dual_xarm6_planner = ManipulationModule.blueprint(
     robots=[
-        make_xarm6_model_config(name="left_arm", y_offset=0.5),
-        make_xarm6_model_config(name="right_arm", y_offset=-0.5),
+        make_xarm6_model_config(name="left_arm", y_offset=_DUAL_XARM6_LEFT_Y_OFFSET),
+        make_xarm6_model_config(name="right_arm", y_offset=_DUAL_XARM6_RIGHT_Y_OFFSET),
     ],
     planning_timeout=10.0,
     visualization={"backend": "meshcat"},
@@ -65,8 +68,8 @@ _right_xarm6_hw = make_xarm_hardware(
 dual_xarm6_planner_coordinator = autoconnect(
     planner(
         robots=[
-            make_xarm6_model_config(name="left_arm", y_offset=0.5),
-            make_xarm6_model_config(name="right_arm", y_offset=-0.5),
+            make_xarm6_model_config(name="left_arm", y_offset=_DUAL_XARM6_LEFT_Y_OFFSET),
+            make_xarm6_model_config(name="right_arm", y_offset=_DUAL_XARM6_RIGHT_Y_OFFSET),
         ],
         planning_timeout=10.0,
         visualization={"backend": "viser", "allow_plan_execute": True},
