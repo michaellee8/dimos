@@ -33,8 +33,8 @@ A depth image interpreted with its camera calibration and the pose of its camera
 _Avoid_: depth point cloud, raw 3D points
 
 **SHM runtime data plane**:
-A shared-memory command/state channel between a simulated hardware adapter and a simulator runtime, used when high-rate control must cross process boundaries without RPC.
-_Avoid_: public simulator API, benchmark control plane, module object sharing
+A local shared-memory command/state channel between a ControlCoordinator-facing hardware adapter and a DimOS simulator client module, used when high-rate motor control must cross local process boundaries without RPC.
+_Avoid_: remote sidecar protocol, public simulator API, benchmark control plane, module object sharing
 
 **Motor state projection**:
 The hardware-facing subset of simulator state that resembles what a raw robot driver exposes: actuator positions, velocities, efforts, commands, enable state, and errors.
@@ -43,6 +43,30 @@ _Avoid_: task observation, scene observation, evaluator state
 **Whole-body motor surface**:
 A hardware control surface that treats a robot as an ordered set of motors with per-motor state and commands, independent of whether the robot is a manipulator, mobile base, or humanoid.
 _Avoid_: manipulator-only adapter, end-effector API, task action API
+
+**Benchmark episode config**:
+A backend-facing declaration of benchmark intent that names the task, robot, runtime constraints, and evaluation setup before any DimOS blueprint is launched.
+_Avoid_: hardware config, simulator config, blueprint config
+
+**Resolved runtime plan**:
+The concrete DimOS launch material derived from a benchmark episode config, including hardware components, simulator connection config, observation streams, evaluator setup, and artifact routing.
+_Avoid_: benchmark intent, user-authored task config
+
+**Runtime prelaunch orchestration**:
+The phase that starts and coordinates the simulator sidecar environment and the DimOS blueprint environment before a benchmark episode begins.
+_Avoid_: config parsing, blueprint launch, single-process startup
+
+**Remote runtime boundary**:
+The network-facing protocol boundary between a DimOS simulator client and a benchmark backend process that may run in another environment or on another machine.
+_Avoid_: shared memory boundary, hardware adapter boundary, in-process simulator object
+
+**Runtime protocol schema**:
+The shared, backend-neutral message contract used on the remote runtime boundary to describe episodes, robot motor surfaces, actions, observations, scores, and artifacts.
+_Avoid_: backend SDK type, DimOS hardware adapter type, simulator object
+
+**Runtime protocol package**:
+A lightweight installable package in the monorepo that contains only remote runtime protocol schemas, codecs, and compatibility tests so sidecars can depend on it without installing DimOS.
+_Avoid_: DimOS submodule, simulator backend package, hardware adapter package
 
 **Damiao-based Robot**:
 A robot whose joints are actuated by one or more Damiao motors, possibly spread across multiple CAN buses and physical limbs.

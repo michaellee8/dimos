@@ -3,6 +3,10 @@
 Status: exploratory draft, not an active OpenSpec change
 Date: 2026-06-24
 
+Related concrete change:
+
+- `openspec/changes/framework-robosuite-integration/` defines the first implementation slice for the benchmark runtime framework plus Robosuite integration. That change intentionally focuses on protocol, prelaunch orchestration, sidecar isolation, local motor bridging, and two plumbing demos; it does not attempt the full agentic benchmark roadmap described in this draft.
+
 ## Goal
 
 Build a DimOS-native benchmark harness for evaluating agents that solve robotics tasks by calling existing skills.
@@ -339,6 +343,28 @@ Purpose:
 - validates agent recovery behavior and skill-result interpretation.
 
 ## Implementation Phases
+
+### Concrete Slice: `framework-robosuite-integration`
+
+Purpose: establish the simulator runtime substrate needed before agentic skill benchmarks can be reliable.
+
+Scope:
+
+- lightweight shared runtime protocol package outside the main `dimos` package
+- network boundary between DimOS and simulator sidecars
+- local SHM-only bridge between the DimOS runtime client and ControlCoordinator-facing WholeBodyAdapter
+- prelaunch orchestration that starts the sidecar first, derives a resolved runtime plan, then launches a DimOS blueprint
+- Robosuite Panda Lift as the first real backend plumbing demo
+- fake sidecar smoke demo for dependency-light validation
+
+Explicitly out of scope for this slice:
+
+- new `dimos benchmark` CLI command
+- LLM/agent task-success demo
+- broad benchmark taxonomy
+- code-as-policy execution
+
+This slice should be completed before the roadmap moves into repeatable agent skill profiles and task scoring.
 
 ### Phase 0: Harness Design Spike
 
