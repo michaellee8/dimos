@@ -22,6 +22,7 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
 from dimos.hardware.sensors.lidar.pointlio.hack import PointLioHack
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
+from dimos.hardware.sensors.lidar.pointlio.recorder import PointlioRecorder
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.navigation.basic_path_follower.module import BasicPathFollower
 from dimos.navigation.movement_manager.movement_manager import MovementManager
@@ -146,6 +147,14 @@ unitree_go2_nav_3d = autoconnect(
         ]
     ),
     PointLioHack.blueprint(rotated_urdf=_rotated_urdf, normal_urdf=_normal_urdf),
+    # Record the hack's faked (normal-mount) cloud + odometry, not PointLio's raw
+    # tilted output, so a replay reproduces what the nav stack actually consumed.
+    PointlioRecorder.blueprint().remappings(
+        [
+            (PointlioRecorder, "pointlio_lidar", "lidar"),
+            (PointlioRecorder, "pointlio_odometry", "odometry"),
+        ]
+    ),
     RayTracingVoxelMap.blueprint(
         voxel_size=voxel_size,
         emit_every=1,
