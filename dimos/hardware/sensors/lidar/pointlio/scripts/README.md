@@ -1,10 +1,9 @@
-# Point-LIO + VirtualMid360
+# How to Optimize Point-LIO Configs
 
-Adds **VirtualMid360** (replay a recorded Livox Mid-360 `.pcap` over the Livox
-wire protocol) and **Point-LIO** (an alternative LIO backend to FastLIO).
+1. Record mid360 with PCAP enabled, see go2_mid360.md
+2. Use `pcap_to_db.py` to generate alternative lidar/odom outcomes - renders to rerun
 
-`pcap_to_db.py` wires three autoconnected modules and stops once the pcap has
-drained:
+# Modules
 
 - **`VirtualMid360`** — replays the pcap (aliasing the host/lidar IPs onto a
   dummy interface on Linux, or `lo0` on macOS).
@@ -20,27 +19,23 @@ drained:
 ```bash
 # A missing --pcap path is fetched via get_data, so you can pass the LFS-relative
 # path directly (here: the sample shake-stairs capture).
-PCAP="mid360_shake_stairs/mid360_shake_stairs.pcap"
+PCAP_EXAMPLE="mid360_shake_stairs/mid360_shake_stairs.pcap"
 
 # gen .db from pcap (defaults to <pcap>.db next to the pcap)
-python -m dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db --pcap "$PCAP"
+python -m dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db --pcap "$PCAP_EXAMPLE"
 
-# ...with config overrides (any PointLioConfig field; see "Example config" below)
+# ...tuning any PointLioConfig field straight from the CLI (see "Tuning flags")
 python -m dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db \
-    --config overrides.yaml --pcap "$PCAP"
+    --pcap "$PCAP_EXAMPLE" --filter-size-surf 0.15 --filter-size-map 0.5 --no-imu-en
 
 # ...or append into an existing .db
 DB="mem2.db"
-python -m dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db --db "$DB" --pcap "$PCAP"
+python -m dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db --db "$DB" --pcap "$PCAP_EXAMPLE"
 
 # a quick-look <db>.rrd (aggregated world lidar + pose path) is written next to the db
 dimos-viewer "${DB%.db}.rrd"
 # dimos map global --lidar pointlio_lidar --pgo-tol=0 --no-carve
 ```
-
-`--config` is optional — omit it to use the `PointLioConfig` defaults
-(`dimos/hardware/sensors/lidar/pointlio/module.py`). There is no shipped default
-yaml; the YAML you pass is a sparse override doc.
 
 #### Options
 
@@ -48,7 +43,6 @@ yaml; the YAML you pass is a sparse override doc.
 |------|---------|---------|
 | `--pcap` | *(required)* | Livox Mid-360 pcap (a missing path is fetched via `get_data`) |
 | `--db` | `<pcap>.db` | Target memory2 db. Existing → append/align; missing → built from scratch (or fetched via `get_data`) |
-| `--config` | `""` | YAML/JSON of `PointLioConfig` field overrides |
 | `--rate` | `1.0` | Replay-speed multiplier |
 | `--odom-freq` | `30.0` | Point-LIO odometry rate (Hz) |
 | `--max-sensor-sec` | `0` (whole pcap) | Stop after N sensor seconds |
@@ -59,6 +53,65 @@ yaml; the YAML you pass is a sparse override doc.
 | `--lidar-ip` | `192.168.1.155` | Synthetic lidar IP |
 | `--alias-iface` | `dimos-mid360` | Dummy iface the host/lidar IPs live on |
 | `--no-network-setup` | off | Don't let the module alias the NIC via sudo — you've set up the IPs + routes yourself |
+
+#### Tuning flags
+
+Every `PointLioConfig` field is also a CLI flag — omit one to keep its default.
+Bool fields take the `--flag / --no-flag` form. Vector fields take
+space-separated floats (e.g. `--gravity 0 0 -9.81`). For bulk edits there is a
+hidden `--config <yaml/json>` of the same fields (the flags win over it).
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--con-frame` | off | Accumulate multiple sweeps into one frame |
+| `--con-frame-num` | `1` | Sweeps per accumulated frame (`con_frame`) |
+| `--cut-frame` | off | Split each sweep into time sub-frames |
+| `--cut-frame-time-interval` | `0.1` | Sub-frame interval (s) when `cut_frame` |
+| `--time-lag-imu-to-lidar` | `0.0` | IMU→lidar clock offset (s) |
+| `--lidar-type` | `avia` | Driver branch: `avia` (Livox Mid-360) / `velodyne` / `ouster` / `hesai` / `unilidar` |
+| `--scan-line` | `4` | Number of scan lines |
+| `--scan-rate` | `10` | Scan rate (Hz) |
+| `--timestamp-unit` | `nanosecond` | Per-point timestamp unit: `second` / `millisecond` / `microsecond` / `nanosecond` |
+| `--blind` | `0.5` | Spherical min range (m); nearer points dropped |
+| `--point-filter-num` | `3` | Keep every Nth raw point (1 = all) |
+| `--use-imu-as-input` | off | IMU-as-input model (default robust IMU-as-output) |
+| `--prop-at-freq-of-imu` | on | Propagate state at IMU frequency |
+| `--check-satu` | on | Zero residuals on saturated IMU samples |
+| `--init-map-size` | `10` | Initial iVox map size |
+| `--space-down-sample` | on | Voxel-downsample each scan (leaf = `--filter-size-surf`) |
+| `--satu-acc` | `3.0` | Accel saturation threshold (g) |
+| `--satu-gyro` | `35.0` | Gyro saturation threshold (deg/s) |
+| `--acc-norm` | `1.0` | IMU accel unit (1 = g, 9.81 = m/s²) |
+| `--plane-thr` | `0.1` | Plane-fit residual threshold (m) |
+| `--filter-size-surf` | `0.2` | Pre-KF scan downsample leaf (m) |
+| `--filter-size-map` | `0.5` | Persistent map voxel leaf (m) |
+| `--ivox-grid-resolution` | `2.0` | iVox local-map grid (m) |
+| `--ivox-nearby-type` | `nearby6` | iVox neighbour stencil: `center` / `nearby6` / `nearby18` / `nearby26` |
+| `--cube-side-length` | `1000.0` | Map cube side length (m) |
+| `--det-range` | `100.0` | Max detection range (m) |
+| `--fov-degree` | `360.0` | Horizontal FOV (deg) |
+| `--imu-en` | on | Use the IMU |
+| `--start-in-aggressive-motion` | off | Skip the static IMU-init assumption |
+| `--extrinsic-est-en` | off | Online-estimate the IMU→lidar extrinsic |
+| `--imu-time-inte` | `0.005` | IMU integration step (s) |
+| `--lidar-meas-cov` | `0.01` | Lidar measurement covariance |
+| `--acc-cov-input` | `0.1` | Accel process cov (input model) |
+| `--vel-cov` | `20.0` | Velocity process covariance |
+| `--gyr-cov-input` | `0.01` | Gyro process cov (input model) |
+| `--gyr-cov-output` | `1000.0` | Gyro process cov (output model) |
+| `--acc-cov-output` | `500.0` | Accel process cov (output model) |
+| `--b-gyr-cov` | `0.0001` | Gyro-bias random-walk covariance |
+| `--b-acc-cov` | `0.0001` | Accel-bias random-walk covariance |
+| `--imu-meas-acc-cov` | `0.01` | Accel measurement covariance |
+| `--imu-meas-omg-cov` | `0.01` | Gyro measurement covariance |
+| `--match-s` | `81.0` | Point-to-plane match scale |
+| `--gravity-align` | on | Align initial gravity to −Z |
+| `--gravity` | `0 0 -9.81` | Gravity vector: `x y z` (m/s²) |
+| `--gravity-init` | `0 0 -9.81` | Initial gravity estimate: `x y z` (m/s²) |
+| `--extrinsic-t` | `-0.011 -0.02329 0.04412` | IMU→lidar translation: `x y z` (m) |
+| `--extrinsic-r` | identity | IMU→lidar rotation: 9 values row-major |
+| `--publish-odometry-without-downsample` | off | Publish odom per scan, no downsample |
+| `--odom-only` | off | Odometry only, skip map publishing |
 
 #### macOS
 
@@ -126,80 +179,77 @@ replay = autoconnect(
 ModuleCoordinator.build(replay).loop()
 ```
 
-## Example config
+## Example config (hidden `--config`)
 
-Every field is a `PointLioConfig` override. Mid-360-specific values to retune for
-a different sensor: `preprocess.lidar_type` (Livox), `blind`/`scan_line`,
-`mapping.extrinsic_T`/`extrinsic_R` (Mid-360 IMU→lidar mount), `det_range`,
-`fov_degree`.
+For bulk edits, the hidden `--config <yaml/json>` takes the same `PointLioConfig`
+fields as the tuning flags above. The doc is a **flat** mapping of field names (no
+nesting) — every key is a top-level `PointLioConfig` field. Per-field `--tuning`
+flags take precedence over anything set here. Mid-360-specific values to retune
+for a different sensor: `lidar_type`, `blind`/`scan_line`,
+`extrinsic_t`/`extrinsic_r` (Mid-360 IMU→lidar mount), `det_range`, `fov_degree`.
 
 ```yaml
-common:
-    con_frame: false
-    con_frame_num: 1
-    cut_frame: false
-    cut_frame_time_interval: 0.1
-    time_lag_imu_to_lidar: 0.0
+# common
+con_frame: false
+con_frame_num: 1
+cut_frame: false
+cut_frame_time_interval: 0.1
+time_lag_imu_to_lidar: 0.0
 
-preprocess:
-    # LID_TYPE enum (Point-LIO src/preprocess.h):
-    #   1 = AVIA (Livox), 2 = VELO16, 3 = OUST64, 4 = HESAIxt32, 5 = UNILIDAR
-    # 1 selects the Livox branch (preprocess.cpp avia_handler), which expects the
-    # Livox CustomMsg point layout the Mid-360 emits:
-    #   https://github.com/Livox-SDK/livox_ros_driver2/blob/master/msg/CustomMsg.msg
-    lidar_type: 1
-    scan_line: 4
-    scan_rate: 10
-    timestamp_unit: 3        # 3 = nanosecond
-    blind: 0.5
-    # Pre-KF input decimation: keep every Nth raw point. 1 = keep all (disable).
-    point_filter_num: 3
+# preprocess
+# lidar_type selects the driver branch: avia (Livox, the Mid-360 branch),
+# velodyne, ouster, hesai, unilidar. avia expects the Livox CustomMsg layout:
+#   https://github.com/Livox-SDK/livox_ros_driver2/blob/master/msg/CustomMsg.msg
+lidar_type: avia
+scan_line: 4
+scan_rate: 10
+timestamp_unit: nanosecond   # second / millisecond / microsecond / nanosecond
+blind: 0.5
+point_filter_num: 3          # keep every Nth raw point; 1 = keep all
 
-mapping:
-    use_imu_as_input: false  # false = IMU-as-output model (Point-LIO's robust path)
-    prop_at_freq_of_imu: true
-    check_satu: true
-    init_map_size: 10
-    # Pre-KF voxel downsample of each scan before the filter. false = feed the
-    # full scan (disable). Leaf size is filter_size_surf below.
-    space_down_sample: true
-    satu_acc: 3.0            # g; accel >= this is treated as saturated (residual zeroed) to bound velocity
-    satu_gyro: 35.0
-    acc_norm: 1.0           # IMU accel unit: g
-    plane_thr: 0.1
-    filter_size_surf: 0.2   # pre-KF scan downsample leaf size (m), used iff space_down_sample
-    filter_size_map: 0.5
-    ivox_grid_resolution: 2.0   # iVox local-map grid (m)
-    ivox_nearby_type: 6         # NEARBY6
-    cube_side_length: 1000.0
-    det_range: 100.0
-    fov_degree: 360.0
-    imu_en: true
-    start_in_aggressive_motion: false
-    extrinsic_est_en: false
-    imu_time_inte: 0.005
-    lidar_meas_cov: 0.01
-    acc_cov_input: 0.1
-    vel_cov: 20.0
-    gyr_cov_input: 0.01
-    gyr_cov_output: 1000.0
-    acc_cov_output: 500.0
-    b_gyr_cov: 0.0001
-    b_acc_cov: 0.0001
-    imu_meas_acc_cov: 0.01
-    imu_meas_omg_cov: 0.01
-    match_s: 81.0
-    gravity_align: true
-    gravity: [0.0, 0.0, -9.810]
-    gravity_init: [0.0, 0.0, -9.810]
-    extrinsic_T: [-0.011, -0.02329, 0.04412]   # Mid-360 IMU->lidar offset (m)
-    extrinsic_R: [1.0, 0.0, 0.0,
-                  0.0, 1.0, 0.0,
-                  0.0, 0.0, 1.0]
+# mapping
+use_imu_as_input: false      # false = IMU-as-output model (Point-LIO's robust path)
+prop_at_freq_of_imu: true
+check_satu: true
+init_map_size: 10
+space_down_sample: true      # pre-KF voxel downsample (leaf = filter_size_surf)
+satu_acc: 3.0                # g; accel >= this is saturated (residual zeroed)
+satu_gyro: 35.0
+acc_norm: 1.0                # IMU accel unit: g
+plane_thr: 0.1
+filter_size_surf: 0.2        # pre-KF scan downsample leaf (m), iff space_down_sample
+filter_size_map: 0.5
+ivox_grid_resolution: 2.0    # iVox local-map grid (m)
+ivox_nearby_type: nearby6    # center / nearby6 / nearby18 / nearby26
+cube_side_length: 1000.0
+det_range: 100.0
+fov_degree: 360.0
+imu_en: true
+start_in_aggressive_motion: false
+extrinsic_est_en: false
+imu_time_inte: 0.005
+lidar_meas_cov: 0.01
+acc_cov_input: 0.1
+vel_cov: 20.0
+gyr_cov_input: 0.01
+gyr_cov_output: 1000.0
+acc_cov_output: 500.0
+b_gyr_cov: 0.0001
+b_acc_cov: 0.0001
+imu_meas_acc_cov: 0.01
+imu_meas_omg_cov: 0.01
+match_s: 81.0
+gravity_align: true
+gravity: [0.0, 0.0, -9.810]
+gravity_init: [0.0, 0.0, -9.810]
+extrinsic_t: [-0.011, -0.02329, 0.04412]   # Mid-360 IMU->lidar offset (m)
+extrinsic_r: [1.0, 0.0, 0.0,
+              0.0, 1.0, 0.0,
+              0.0, 0.0, 1.0]
 
-odometry:
-    publish_odometry_without_downsample: false
-    odom_only: false
+# odometry
+publish_odometry_without_downsample: false
+odom_only: false
 ```
 
 ## Notes

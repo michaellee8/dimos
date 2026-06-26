@@ -21,10 +21,6 @@ Usage:
     # gen .db from pcap (defaults to <pcap>.db next to the pcap)
     python -m dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db --pcap "$PCAP_PATH"
 
-    # override any PointLioConfig field via a small YAML/JSON doc, e.g. {acc_cov_input: 0.3}
-    python -m dimos.hardware.sensors.lidar.pointlio.scripts.pcap_to_db \
-        --pcap "$PCAP_PATH" --config overrides.yaml
-
     # add to existing .db (a missing --db is fetched via get_data before falling
     # back to building from scratch; a missing --pcap is likewise fetched)
     DB="mem2.db"
@@ -70,6 +66,116 @@ _LIDAR_STREAM = "pointlio_lidar"
 # Extra seconds past the pcap's own duration before auto-stopping, when no
 # explicit --max-sensor-sec is given.
 _DRAIN_MARGIN_SEC = 4.0
+
+# Per-field PointLioConfig tuning, exposed as --flags. Each entry is
+# (field, kind, help); kind is "float"/"int"/"bool"/"vec" or a tuple of choices.
+# A flag's value defaults to None (= leave the config default) so only the ones
+# passed end up in the override dict. dashes in the flag map to the field name.
+_TUNING_FIELDS: tuple[tuple[str, Any, str], ...] = (
+    # common
+    ("con_frame", "bool", "accumulate multiple sweeps into one frame"),
+    ("con_frame_num", "int", "sweeps per accumulated frame (con_frame)"),
+    ("cut_frame", "bool", "split each sweep into time sub-frames"),
+    ("cut_frame_time_interval", "float", "sub-frame interval (s) when cut_frame"),
+    ("time_lag_imu_to_lidar", "float", "IMU->lidar clock offset (s)"),
+    # preprocess
+    (
+        "lidar_type",
+        ("avia", "velodyne", "ouster", "hesai", "unilidar"),
+        "lidar driver branch (avia = Livox Mid-360)",
+    ),
+    ("scan_line", "int", "number of scan lines"),
+    ("scan_rate", "int", "scan rate (Hz)"),
+    (
+        "timestamp_unit",
+        ("second", "millisecond", "microsecond", "nanosecond"),
+        "per-point timestamp unit",
+    ),
+    ("blind", "float", "spherical min range (m); nearer points dropped"),
+    ("point_filter_num", "int", "keep every Nth raw point (1 = all)"),
+    # mapping
+    ("use_imu_as_input", "bool", "IMU-as-input model (default robust IMU-as-output)"),
+    ("prop_at_freq_of_imu", "bool", "propagate state at IMU frequency"),
+    ("check_satu", "bool", "zero residuals on saturated IMU samples"),
+    ("init_map_size", "int", "initial iVox map size"),
+    ("space_down_sample", "bool", "voxel-downsample each scan (leaf = filter_size_surf)"),
+    ("satu_acc", "float", "accel saturation threshold (g)"),
+    ("satu_gyro", "float", "gyro saturation threshold (deg/s)"),
+    ("acc_norm", "float", "IMU accel unit (1 = g, 9.81 = m/s^2)"),
+    ("plane_thr", "float", "plane-fit residual threshold (m)"),
+    ("filter_size_surf", "float", "pre-KF scan downsample leaf (m)"),
+    ("filter_size_map", "float", "persistent map voxel leaf (m)"),
+    ("ivox_grid_resolution", "float", "iVox local-map grid (m)"),
+    (
+        "ivox_nearby_type",
+        ("center", "nearby6", "nearby18", "nearby26"),
+        "iVox neighbour stencil",
+    ),
+    ("cube_side_length", "float", "map cube side length (m)"),
+    ("det_range", "float", "max detection range (m)"),
+    ("fov_degree", "float", "horizontal FOV (deg)"),
+    ("imu_en", "bool", "use the IMU"),
+    ("start_in_aggressive_motion", "bool", "skip the static IMU-init assumption"),
+    ("extrinsic_est_en", "bool", "online-estimate the IMU->lidar extrinsic"),
+    ("imu_time_inte", "float", "IMU integration step (s)"),
+    ("lidar_meas_cov", "float", "lidar measurement covariance"),
+    ("acc_cov_input", "float", "accel process cov (input model)"),
+    ("vel_cov", "float", "velocity process covariance"),
+    ("gyr_cov_input", "float", "gyro process cov (input model)"),
+    ("gyr_cov_output", "float", "gyro process cov (output model)"),
+    ("acc_cov_output", "float", "accel process cov (output model)"),
+    ("b_gyr_cov", "float", "gyro-bias random-walk covariance"),
+    ("b_acc_cov", "float", "accel-bias random-walk covariance"),
+    ("imu_meas_acc_cov", "float", "accel measurement covariance"),
+    ("imu_meas_omg_cov", "float", "gyro measurement covariance"),
+    ("match_s", "float", "point-to-plane match scale"),
+    ("gravity_align", "bool", "align initial gravity to -Z"),
+    ("gravity", "vec", "gravity vector: x y z (m/s^2)"),
+    ("gravity_init", "vec", "initial gravity estimate: x y z (m/s^2)"),
+    ("extrinsic_t", "vec", "IMU->lidar translation: x y z (m)"),
+    ("extrinsic_r", "vec", "IMU->lidar rotation: 9 values row-major"),
+    # odometry
+    ("publish_odometry_without_downsample", "bool", "publish odom per scan, no downsample"),
+    ("odom_only", "bool", "odometry only, skip map publishing"),
+)
+
+
+def _add_tuning_args(parser: argparse.ArgumentParser) -> None:
+    """Add a --flag per PointLioConfig tuning field (see _TUNING_FIELDS)."""
+    group = parser.add_argument_group(
+        "PointLio tuning",
+        "Per-field PointLioConfig overrides; omit to keep the config default. "
+        "These win over --config.",
+    )
+    for field, kind, help_text in _TUNING_FIELDS:
+        flag = "--" + field.replace("_", "-")
+        if kind == "bool":
+            group.add_argument(
+                flag,
+                dest=field,
+                default=None,
+                action=argparse.BooleanOptionalAction,
+                help=help_text,
+            )
+        elif kind == "int":
+            group.add_argument(flag, dest=field, default=None, type=int, help=help_text)
+        elif kind == "float":
+            group.add_argument(flag, dest=field, default=None, type=float, help=help_text)
+        elif kind == "vec":
+            group.add_argument(
+                flag, dest=field, default=None, type=float, nargs="+", help=help_text
+            )
+        else:
+            group.add_argument(flag, dest=field, default=None, choices=kind, help=help_text)
+
+
+def _cli_overrides(args: argparse.Namespace) -> dict[str, Any]:
+    """Collect the explicitly-passed --tuning flags into a PointLioConfig override dict."""
+    return {
+        field: getattr(args, field)
+        for field, _kind, _help in _TUNING_FIELDS
+        if getattr(args, field, None) is not None
+    }
 
 
 def _pcap_sensor_span(pcap_path: Path) -> float:
@@ -242,8 +348,8 @@ def _build_blueprint(
         )
         .remappings(
             [
-                (PointlioRecorder, "pointlio_odometry", "odometry"),
-                (PointlioRecorder, "pointlio_lidar", "lidar"),
+                (PointlioRecorder, _ODOM_STREAM, "odometry"),
+                (PointlioRecorder, _LIDAR_STREAM, "lidar"),
             ]
         )
         .global_config(n_workers=4, robot_model="mid360_pointlio_pcap_to_db")
@@ -357,6 +463,7 @@ def _run(args: argparse.Namespace) -> int:
     db_path = _resolve_db_path(args, pcap_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     overrides = _load_overrides(args.config)
+    overrides.update(_cli_overrides(args))  # --tuning flags win over --config
 
     # Default the stop bound to the pcap's own duration: Point-LIO keeps
     # dead-reckoning (publishing at full rate) after the pcap drains, so the
@@ -436,11 +543,10 @@ def main(argv: list[str]) -> int:
         default=4.0,
         help="seconds the fake lidar waits before streaming (lets Point-LIO come up first)",
     )
-    parser.add_argument(
-        "--config",
-        default="",
-        help="YAML/JSON doc of PointLioConfig field overrides (e.g. {acc_cov_input: 0.3})",
-    )
+    # Hidden: a YAML/JSON doc of PointLioConfig overrides. The per-field --tuning
+    # flags below cover the same surface and take precedence; this stays for bulk
+    # overrides (e.g. extrinsics) without a wall of flags.
+    parser.add_argument("--config", default="", help=argparse.SUPPRESS)
     # Addressing knobs (override to run two replays at once).
     parser.add_argument("--host-ip", default="192.168.1.5")
     parser.add_argument("--lidar-ip", default="192.168.1.155")
@@ -453,6 +559,8 @@ def main(argv: list[str]) -> int:
         help="don't let the module alias the NIC via sudo — you've set up host/lidar IPs "
         "+ multicast routes yourself (e.g. on macOS where worker-side sudo can't prompt)",
     )
+
+    _add_tuning_args(parser)
 
     args = parser.parse_args(argv)
     if not args.pcap:
