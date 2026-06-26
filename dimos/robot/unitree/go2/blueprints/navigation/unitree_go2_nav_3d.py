@@ -101,8 +101,10 @@ _nav_rerun_config = {
     "memory_limit": "256MB",
     # base_link tf comes from the go2 internal odometry, which is not the map
     # frame. Anchor the robot box to pointlio's body frame instead and hide the
-    # camera frustum that rides base_link.
-    "static": {"world/tf/body": _static_robot_body},
+    # camera frustum that rides base_link. Use a dedicated entity path (not
+    # world/tf/body) so the box's Transform3D doesn't collide with the live
+    # odom->body TF that PointLioHack logs onto world/tf/body.
+    "static": {"world/robot_body": _static_robot_body},
     "visual_override": {
         **rerun_config["visual_override"],
         "world/global_map": _render_global_map,
