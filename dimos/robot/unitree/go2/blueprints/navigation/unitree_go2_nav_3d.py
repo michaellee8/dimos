@@ -135,7 +135,11 @@ unitree_go2_nav_3d = autoconnect(
     # gravity_align is off (no_gravity_align.yaml) so pointlio leaves both the cloud
     # and the odometry in the raw mount frame. The hack rewrites both into the normal
     # mount, so everything downstream sees a normally-mounted sensor.
-    PointLio.blueprint(body_frame_id="body", config="no_gravity_align.yaml").remappings(
+    PointLio.blueprint(
+        body_frame_id="body",
+        config="no_gravity_align.yaml",
+        space_down_sample=False,
+    ).remappings(
         [
             (PointLio, "lidar", "rotated_lidar"),
             (PointLio, "odometry", "rotated_odometry"),
