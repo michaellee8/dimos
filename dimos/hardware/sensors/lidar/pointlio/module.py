@@ -34,8 +34,9 @@ from typing import TYPE_CHECKING, Annotated
 
 from pydantic import Field
 from pydantic.experimental.pipeline import validate_as
-from reactivex.disposable import Disposable
 
+# HACK(kronk-nav): re-enable with the _on_odom_for_tf subscription in start().
+# from reactivex.disposable import Disposable
 from dimos.core.core import rpc
 from dimos.core.native_module import NativeModule, NativeModuleConfig
 from dimos.core.stream import Out
@@ -129,9 +130,12 @@ class PointLio(NativeModule, perception.Lidar, perception.Odometry):
     def start(self) -> None:
         self._validate_network()
         super().start()
-        self.register_disposable(
-            Disposable(self.odometry.transport.subscribe(self._on_odom_for_tf, self.odometry))
-        )
+        # HACK(kronk-nav): odom->body TF is published by PointLioHack from the
+        # faked odometry instead, so the TF tree matches the shimmed map. Leaving
+        # this on would broadcast the raw tilted pose and fight the hack.
+        # self.register_disposable(
+        #     Disposable(self.odometry.transport.subscribe(self._on_odom_for_tf, self.odometry))
+        # )
 
     def _on_odom_for_tf(self, msg: Odometry) -> None:
         self.tf.publish(

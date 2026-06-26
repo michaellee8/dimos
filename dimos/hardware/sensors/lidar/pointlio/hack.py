@@ -55,6 +55,10 @@ class PointLioHackConfig(ModuleConfig):
     rotated_urdf: Path
     normal_urdf: Path
     sensor_frame: str = "mid360_link"
+    # odom->body TF, faked here instead of by PointLio so the TF tree matches the
+    # shimmed cloud/odometry. Must match PointLio's body_start_frame_id/body_frame_id.
+    odom_frame: str = "odom"
+    body_frame: str = "body"
 
 
 def _transform_to_matrix(transform: Transform) -> np.ndarray:
@@ -131,19 +135,29 @@ class PointLioHack(Module, perception.Lidar, perception.Odometry):
         linear = rotation @ _vector_to_numpy(value.linear_velocity)
         angular = rotation @ _vector_to_numpy(value.angular_velocity)
 
+        faked_position = Vector3(*(float(component) for component in faked[:3, 3]))
+        faked_orientation = Quaternion.from_rotation_matrix(faked[:3, :3])
+
         self.odometry.publish(
             Odometry(
                 ts=value.ts,
                 frame_id=value.frame_id,
                 child_frame_id=value.child_frame_id,
-                pose=Pose(
-                    Vector3(*(float(component) for component in faked[:3, 3])),
-                    Quaternion.from_rotation_matrix(faked[:3, :3]),
-                ),
+                pose=Pose(faked_position, faked_orientation),
                 twist=Twist(
                     Vector3(*(float(component) for component in linear)),
                     Vector3(*(float(component) for component in angular)),
                 ),
+            )
+        )
+
+        self.tf.publish(
+            Transform(
+                frame_id=self.config.odom_frame,
+                child_frame_id=self.config.body_frame,
+                translation=faked_position,
+                rotation=faked_orientation,
+                ts=value.ts,
             )
         )
 
