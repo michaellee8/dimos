@@ -544,8 +544,6 @@ def main(argv: list[str]) -> int:
         help="seconds the fake lidar waits before streaming (lets Point-LIO come up first)",
     )
     # Hidden: a YAML/JSON doc of PointLioConfig overrides. The per-field --tuning
-    # flags below cover the same surface and take precedence; this stays for bulk
-    # overrides (e.g. extrinsics) without a wall of flags.
     parser.add_argument("--config", default="", help=argparse.SUPPRESS)
     # Addressing knobs (override to run two replays at once).
     parser.add_argument("--host-ip", default="192.168.1.5")
