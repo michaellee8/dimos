@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import importlib
 from pathlib import Path
 import sys
@@ -30,8 +31,9 @@ from dimos.manipulation.planning.groups.models import (
     PlanningGroupDefinition,
     PlanningGroupSelection,
 )
+from dimos.manipulation.planning.kinematics.config import RoboPlanKinematicsConfig
 from dimos.manipulation.planning.spec.config import RobotModelConfig
-from dimos.manipulation.planning.spec.enums import ObstacleType, PlanningStatus
+from dimos.manipulation.planning.spec.enums import IKStatus, ObstacleType, PlanningStatus
 from dimos.manipulation.planning.spec.models import Obstacle
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -174,12 +176,85 @@ class FakeRRT:
         )
 
 
+class FakeCartesianConfiguration:
+    def __init__(self) -> None:
+        self.base_frame = ""
+        self.tip_frame = ""
+        self.tform = np.eye(4)
+
+
+class FakeFrameTaskOptions:
+    def __init__(self, **kwargs: float) -> None:
+        for name, value in kwargs.items():
+            setattr(self, name, value)
+
+
+class FakeFrameTask:
+    instances: ClassVar[list[FakeFrameTask]] = []
+
+    def __init__(
+        self,
+        oink: FakeOink,
+        scene: FakeScene,
+        target: FakeCartesianConfiguration,
+        options: FakeFrameTaskOptions,
+    ) -> None:
+        self.oink = oink
+        self.scene = scene
+        self.target = target
+        self.options = options
+        self.instances.append(self)
+
+
+class FakePositionLimit:
+    def __init__(self, oink: FakeOink, gain: float) -> None:
+        self.oink = oink
+        self.gain = gain
+
+
+class FakeVelocityLimit:
+    instances: ClassVar[list[FakeVelocityLimit]] = []
+
+    def __init__(self, oink: FakeOink, dt: float, v_max: np.ndarray) -> None:
+        self.oink = oink
+        self.dt = dt
+        self.v_max = v_max
+        self.instances.append(self)
+
+
+class FakeOink:
+    last_instance: ClassVar[FakeOink | None] = None
+
+    def __init__(self, scene: FakeScene, group_name: str) -> None:
+        self.scene = scene
+        self.group_name = group_name
+        self.v_indices = tuple(
+            range(len(scene.joint_group_joint_names or next(iter(scene.joint_groups.values()))))
+        )
+        self.solve_calls: list[tuple[list[FakeFrameTask], list[Any], float]] = []
+        FakeOink.last_instance = self
+
+    def solveIk(
+        self,
+        scene: FakeScene,
+        tasks: list[FakeFrameTask],
+        constraints: list[Any],
+        barriers: list[Any],
+        delta_q: np.ndarray,
+        regularization: float,
+    ) -> None:
+        _ = (scene, barriers)
+        self.solve_calls.append((tasks, constraints, regularization))
+        delta_q[:] = 0.25
+
+
 def _install_fake_roboplan(monkeypatch: pytest.MonkeyPatch) -> None:
     roboplan_pkg = ModuleType("roboplan")
     roboplan_pkg.__path__ = []  # type: ignore[attr-defined]
     core = ModuleType("roboplan.core")
     core.Scene = FakeScene  # type: ignore[attr-defined]
     core.JointConfiguration = FakeJointConfiguration  # type: ignore[attr-defined]
+    core.CartesianConfiguration = FakeCartesianConfiguration  # type: ignore[attr-defined]
 
     def has_collisions_along_path(
         scene: FakeScene,
@@ -201,9 +276,21 @@ def _install_fake_roboplan(monkeypatch: pytest.MonkeyPatch) -> None:
     rrt.RRTOptions = FakeRRTOptions  # type: ignore[attr-defined]
     rrt.RRT = FakeRRT  # type: ignore[attr-defined]
 
+    optimal_ik = ModuleType("roboplan.optimal_ik")
+    optimal_ik.Oink = FakeOink  # type: ignore[attr-defined]
+    optimal_ik.FrameTaskOptions = FakeFrameTaskOptions  # type: ignore[attr-defined]
+    optimal_ik.FrameTask = FakeFrameTask  # type: ignore[attr-defined]
+    optimal_ik.PositionLimit = FakePositionLimit  # type: ignore[attr-defined]
+    optimal_ik.VelocityLimit = FakeVelocityLimit  # type: ignore[attr-defined]
+
+    FakeFrameTask.instances = []
+    FakeVelocityLimit.instances = []
+    FakeOink.last_instance = None
+
     monkeypatch.setitem(sys.modules, "roboplan", roboplan_pkg)
     monkeypatch.setitem(sys.modules, "roboplan.core", core)
     monkeypatch.setitem(sys.modules, "roboplan.rrt", rrt)
+    monkeypatch.setitem(sys.modules, "roboplan.optimal_ik", optimal_ik)
 
 
 @pytest.fixture
@@ -879,6 +966,217 @@ def test_selected_native_planner_rejects_non_matching_selection(
 
     assert result.status == PlanningStatus.UNSUPPORTED
     assert "exactly match" in result.message
+
+
+def test_roboplan_oink_builds_tasks_and_solves_with_seed_order(
+    fake_roboplan: None, robot_config: RobotModelConfig
+) -> None:
+    world, robot_id = _make_world(fake_roboplan, robot_config)
+    world.configure_kinematics(
+        RoboPlanKinematicsConfig(
+            max_iterations=2,
+            position_cost=3.0,
+            orientation_cost=4.0,
+            task_gain=0.75,
+            lm_damping=1e-5,
+            velocity_limit=0.5,
+            collision_check=False,
+        )
+    )
+    world.finalize()
+    world.sync_from_joint_state(
+        robot_id, JointState(name=["joint1", "joint2"], position=[0.1, 0.2])
+    )
+    target = PoseStamped(position=Vector3(x=1.7), orientation=Quaternion())  # type: ignore[call-arg]
+
+    result = world.solve(
+        world,
+        robot_id,
+        target,
+        seed=JointState(name=["arm/joint2", "arm/joint1"], position=[0.4, 0.3]),
+        position_tolerance=0.01,
+        orientation_tolerance=0.02,
+    )
+
+    assert result.status == IKStatus.SUCCESS
+    assert result.joint_state is not None
+    assert result.joint_state.name == ["arm/joint1", "arm/joint2"]
+    assert result.joint_state.position == pytest.approx([0.8, 0.9])
+    assert len(FakeFrameTask.instances) == 1
+    task = FakeFrameTask.instances[0]
+    assert task.target.base_frame == "base_link"
+    assert task.target.tip_frame == "tcp"
+    np.testing.assert_allclose(task.target.tform, pose_to_matrix(target))
+    assert task.options.position_cost == pytest.approx(3.0)
+    assert task.options.orientation_cost == pytest.approx(4.0)
+    assert task.options.task_gain == pytest.approx(0.75)
+    assert task.options.lm_damping == pytest.approx(1e-5)
+    assert task.options.max_position_error == pytest.approx(0.01)
+    assert task.options.max_rotation_error == pytest.approx(0.02)
+    assert FakeOink.last_instance is not None
+    assert FakeOink.last_instance.group_name == "manipulator"
+    assert len(FakeVelocityLimit.instances) == 1
+    assert FakeVelocityLimit.instances[0].dt == pytest.approx(0.05)
+    np.testing.assert_allclose(FakeVelocityLimit.instances[0].v_max, [0.5, 0.5])
+
+
+def test_roboplan_oink_multi_target_retains_auxiliary_group(
+    fake_roboplan: None, robot_config: RobotModelConfig
+) -> None:
+    from dimos.manipulation.planning.world.roboplan_world import RoboPlanWorld
+
+    second_model = Path(robot_config.model_path).with_name("robot2.urdf")
+    second_model.write_text(Path(robot_config.model_path).read_text())
+    right_config = robot_config.model_copy(update={"name": "right_arm", "model_path": second_model})
+    world = RoboPlanWorld()
+    left_id = world.add_robot(robot_config)
+    right_id = world.add_robot(right_config)
+    world.configure_kinematics(max_iterations=2, collision_check=False)
+    world.finalize()
+    world.sync_from_joint_state(left_id, JointState(name=[], position=[0.1, 0.2]))
+    world.sync_from_joint_state(right_id, JointState(name=[], position=[0.3, 0.4]))
+    left_group = world._planning_groups.get("arm/manipulator")
+    right_group = world._planning_groups.get("right_arm/manipulator")
+    target_left = PoseStamped(position=Vector3(x=3.0), orientation=Quaternion())  # type: ignore[call-arg]
+    target_right = PoseStamped(position=Vector3(x=3.0), orientation=Quaternion())  # type: ignore[call-arg]
+
+    result = world.solve_pose_targets(
+        world,
+        {left_group: target_left, right_group: target_right},
+        seed=JointState(
+            name=["right_arm/joint1", "right_arm/joint2", "arm/joint1", "arm/joint2"],
+            position=[0.3, 0.4, 0.1, 0.2],
+        ),
+    )
+
+    assert result.status == IKStatus.NO_SOLUTION
+    assert "did not converge" in result.message
+    assert len(FakeFrameTask.instances) == 2
+    assert FakeOink.last_instance is not None
+    assert (
+        FakeOink.last_instance.group_name
+        == "_dimos_composite__arm_manipulator__right_arm_manipulator"
+    )
+
+
+def test_roboplan_oink_uses_current_state_when_seed_omits_selected_joints(
+    fake_roboplan: None, robot_config: RobotModelConfig
+) -> None:
+    world, robot_id = _make_world(fake_roboplan, robot_config)
+    world.configure_kinematics(max_iterations=1, collision_check=False)
+    world.finalize()
+    world.sync_from_joint_state(robot_id, JointState(name=[], position=[0.2, 0.3]))
+    group = world._planning_groups.get("arm/manipulator")
+    target = PoseStamped(position=Vector3(x=1.3), orientation=Quaternion())  # type: ignore[call-arg]
+
+    result = world.solve_pose_targets(
+        world,
+        {group: target},
+        seed=JointState(name=["arm/joint1"], position=[0.5]),
+    )
+
+    assert result.status == IKStatus.SUCCESS
+    assert result.joint_state is not None
+    assert result.joint_state.position == pytest.approx([0.75, 0.55])
+
+
+@pytest.mark.parametrize(
+    ("call", "message"),
+    [
+        ("empty", "At least one pose target"),
+        ("missing_frame", "has no pose target frame"),
+        ("overlap", "overlap"),
+    ],
+)
+def test_roboplan_oink_rejects_invalid_targets(
+    fake_roboplan: None, robot_config: RobotModelConfig, call: str, message: str
+) -> None:
+    world, _robot_id = _make_world(fake_roboplan, robot_config)
+    world.finalize()
+    group = world._planning_groups.get("arm/manipulator")
+    target = PoseStamped(position=Vector3(), orientation=Quaternion())  # type: ignore[call-arg]
+
+    if call == "empty":
+        result = world.solve_pose_targets(world, {})
+    elif call == "missing_frame":
+        no_tip = replace(group, tip_link=None)
+        result = world.solve_pose_targets(world, {no_tip: target})
+    else:
+        result = world.solve_pose_targets(world, {group: target}, auxiliary_groups=(group,))
+
+    assert result.status == IKStatus.NO_SOLUTION
+    assert message in result.message
+
+
+def test_roboplan_oink_rejects_unsupported_composite_selection(
+    fake_roboplan: None, robot_config: RobotModelConfig
+) -> None:
+    config = robot_config.model_copy(
+        update={
+            "planning_groups": [
+                PlanningGroupDefinition(
+                    name="arm", joint_names=("joint1",), base_link="base", tip_link="tcp"
+                ),
+                PlanningGroupDefinition(
+                    name="wrist", joint_names=("joint2",), base_link="link1", tip_link="tcp"
+                ),
+            ]
+        }
+    )
+    world, _robot_id = _make_world(fake_roboplan, config)
+    world.finalize()
+    arm = world._planning_groups.get("arm/arm")
+    missing_group = replace(world._planning_groups.get("arm/wrist"), id="arm/missing")
+    target = PoseStamped(position=Vector3(), orientation=Quaternion())  # type: ignore[call-arg]
+
+    result = world.solve_pose_targets(world, {arm: target, missing_group: target})
+
+    assert result.status == IKStatus.NO_SOLUTION
+    assert "arm/missing" in result.message
+
+
+def test_roboplan_oink_reports_missing_optimal_ik(
+    fake_roboplan: None, robot_config: RobotModelConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delitem(sys.modules, "roboplan.optimal_ik")
+    world, robot_id = _make_world(fake_roboplan, robot_config)
+    world.finalize()
+    target = PoseStamped(position=Vector3(), orientation=Quaternion())  # type: ignore[call-arg]
+
+    result = world.solve(world, robot_id, target)
+
+    assert result.status == IKStatus.NO_SOLUTION
+    assert "requires roboplan.optimal_ik" in result.message
+
+
+def test_roboplan_oink_reports_non_convergence(
+    fake_roboplan: None, robot_config: RobotModelConfig
+) -> None:
+    world, robot_id = _make_world(fake_roboplan, robot_config)
+    world.configure_kinematics(max_iterations=1, collision_check=False)
+    world.finalize()
+    world.sync_from_joint_state(robot_id, JointState(name=[], position=[0.0, 0.0]))
+    target = PoseStamped(position=Vector3(x=10.0), orientation=Quaternion())  # type: ignore[call-arg]
+
+    result = world.solve(world, robot_id, target, position_tolerance=0.001)
+
+    assert result.status == IKStatus.NO_SOLUTION
+    assert "did not converge" in result.message
+
+
+def test_roboplan_oink_reports_colliding_final_candidate(
+    fake_roboplan: None, robot_config: RobotModelConfig
+) -> None:
+    world, robot_id = _make_world(fake_roboplan, robot_config)
+    world.configure_kinematics(max_iterations=1, collision_check=True)
+    world.finalize()
+    world.sync_from_joint_state(robot_id, JointState(name=[], position=[0.85, 0.0]))
+    target = PoseStamped(position=Vector3(x=1.25), orientation=Quaternion())  # type: ignore[call-arg]
+
+    result = world.solve(world, robot_id, target, position_tolerance=0.01)
+
+    assert result.status == IKStatus.COLLISION
+    assert "colliding configuration" in result.message
 
 
 def test_provided_srdf_path_is_passed_directly(
