@@ -98,6 +98,33 @@ class BenchmarkRuntimeWholeBodyAdapter(WholeBodyAdapter):
             return False
         return self._client.write_commands(commands)
 
+    def read_gripper_position(self) -> float | None:
+        """Expose the final runtime motor as a gripper position for demos."""
+
+        if not self._last_states:
+            return None
+        if self._client is not None:
+            try:
+                _, self._last_states = self._client.read_states()
+            except Exception:
+                pass
+        return self._last_states[-1].q
+
+    def write_gripper_position(self, position: float) -> bool:
+        """Command the final runtime motor as a gripper through the SHM bridge."""
+
+        if self._client is None:
+            return False
+        _, states = self._client.read_states()
+        if len(states) != self.dof:
+            return False
+        commands = [MotorCommand(q=state.q, dq=0.0, kp=40.0, kd=3.0, tau=0.0) for state in states]
+        commands[-1] = MotorCommand(q=position, dq=0.0, kp=40.0, kd=3.0, tau=0.0)
+        ok = self._client.write_commands(commands)
+        if ok:
+            self._last_states = states
+        return ok
+
 
 def register(registry: WholeBodyAdapterRegistry) -> None:
     """Register benchmark runtime adapter."""

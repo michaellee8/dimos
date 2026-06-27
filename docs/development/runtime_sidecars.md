@@ -39,7 +39,9 @@ Expected output includes `"ok": true` and artifacts under
 
 Run this from an environment that can import Robosuite 1.5.x and this monorepo.
 The DimOS process still does not import Robosuite; the sidecar subprocess owns
-Robosuite environment construction and stepping.
+Robosuite environment construction and stepping. Include the `manipulation` extra
+when running demos that build `ManipulationModule`, because that module's default
+planning backend uses Drake.
 
 ```bash
 uv run --with robosuite python scripts/benchmarks/demo_robosuite_panda_lift.py
@@ -137,3 +139,69 @@ writes artifacts under `artifacts/benchmark/robosuite-panda-lift/`.
 
 If Robosuite is not installed, the script exits with an explicit sidecar health
 failure and writes `robosuite_sidecar.log` with the import error.
+
+## Agentic manipulation Robosuite validation
+
+The agentic manipulation demo is a manual, script-hosted layer-2 validation. It
+is not part of the default unit-test suite because it requires Robosuite and a
+runtime sidecar process. The DimOS process still does not import Robosuite: the
+script launches the Robosuite sidecar, resolves the runtime motor surface, builds
+the local SHM bridge, then starts an in-script DimOS stack containing
+`ControlCoordinator`, `ManipulationModule`, and `AgenticManipulationModule`.
+
+```bash
+uv run --extra manipulation --with robosuite python scripts/benchmarks/demo_agentic_manipulation_robosuite.py
+```
+
+This command opens the Robosuite viewer by default so a human can watch the
+primitive validation run. The visual defaults keep stepping long enough to make
+the gripper open/close commands and joint motion observable. Use `--headless`
+only for CI or non-GUI environments:
+
+```bash
+uv run --extra manipulation --with robosuite python scripts/benchmarks/demo_agentic_manipulation_robosuite.py --headless
+```
+
+For a slightly longer manual check, run:
+
+```bash
+uv run --extra manipulation --with robosuite python scripts/benchmarks/demo_agentic_manipulation_robosuite.py --ticks 600 --horizon 700
+```
+
+The demo calls the universal agent-facing module API directly and fails hard if
+`get_robot_state`, `open_gripper`, `close_gripper`, or a small safe
+`move_to_joints` command does not report success. A background SHM-to-sidecar
+stepping loop keeps simulator state moving while those blocking manipulation
+calls execute.
+
+The direct RPC calls are synchronous. `move_to_joints` returns only after the
+trajectory task reports completion, while `open_gripper` and `close_gripper`
+return after the command has been accepted by the coordinator/adapter. The demo
+therefore keeps the sidecar stepping for `--primitive-pause-s` seconds after each
+gripper command and `--post-demo-s` seconds after the joint move so the viewer
+does not close before those actions are visible. If you override `--ticks`, make
+it large enough for those pauses or reduce the pause durations.
+
+Artifacts are written under the configured runtime artifact directory
+(`artifacts/benchmark/robosuite-panda-lift/` by default), including the episode
+config, runtime description, resolved runtime plan, derived runtime robot config,
+stack summary, API call summary, motor trace, score when available, sidecar log,
+and cleanup status. The script writes every artifact available even when the demo
+fails partway through startup or API validation, so `api_call_summary.json`,
+`motor_trace.json`, `failure.json`, and `cleanup_status.json` can be used to
+diagnose partial runs.
+
+The stack summary also records two script-local fallbacks. First, the
+`HardwareComponent` is constructed directly as `WHOLE_BODY` because
+`RobotConfig.to_hardware_component()` derives manipulator hardware, while the
+benchmark runtime adapter exposes a whole-body SHM motor plane. The task and
+robot model still derive from `RobotConfig`. Second, the script writes a minimal
+runtime URDF with conservative joint limits because the current Robosuite sidecar
+description does not yet provide authoritative planning model metadata.
+
+`AgenticManipulationModule` itself is simulator-independent and imports only the
+universal manipulation-control spec plus DimOS module/skill primitives. Robosuite
+startup, runtime-plan resolution, SHM stepping, and artifact writing stay in this
+script-hosted validation layer. MCP tool filtering, full LLM-agent execution,
+Cartesian motion, and higher-level semantic manipulation skills remain future
+work above this universal primitive facade.
