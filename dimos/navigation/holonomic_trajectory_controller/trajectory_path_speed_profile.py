@@ -15,7 +15,7 @@
 """Speed vs arc length for planar polylines.
 
 Builds a scalar speed profile along a polyline using per-sample geometry caps
-and a forward-backward pass on arc length (``v^2 <= v_0^2 + 2 a \\Delta s``).
+and a forward-backward pass on arc length (``v^2 <= v_0^2 + 2 a Delta s``).
 
 - **Straight segments:** cap is ``limits.max_speed_m_s``.
 - **Corners:** cap is ``min(max_speed_m_s, sqrt(max_normal_accel_m_s2 * |R|))``
