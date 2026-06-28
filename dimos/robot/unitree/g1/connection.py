@@ -22,7 +22,8 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In
 from dimos.msgs.geometry_msgs.Twist import Twist
-from dimos.robot.unitree.connection import UnitreeWebRTCConnection
+from dimos.robot.unitree.g1.g1_webrtc import G1WebRTCConnection
+from dimos.spec.control import LocalPlanner
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -67,7 +68,7 @@ class G1ConnectionBase(Module, ABC):
 class G1Connection(G1ConnectionBase):
     config: G1Config
     cmd_vel: In[Twist]
-    connection: UnitreeWebRTCConnection | None = None
+    connection: G1WebRTCConnection | None = None
 
     @rpc
     def start(self) -> None:
@@ -75,7 +76,7 @@ class G1Connection(G1ConnectionBase):
 
         match self.config.connection_type:
             case "webrtc":
-                self.connection = UnitreeWebRTCConnection(
+                self.connection = G1WebRTCConnection(
                     self.config.ip, aes_128_key=self.config.aes_128_key
                 )
             case "replay":
