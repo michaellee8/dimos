@@ -14,7 +14,7 @@
 
 from typing import Protocol
 
-from dimos.core.stream import Out
+from dimos.core.stream import In, Out
 from dimos.msgs.nav_msgs.Odometry import Odometry as OdometryMsg
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.Odometry import Odometry
