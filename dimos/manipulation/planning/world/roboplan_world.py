@@ -27,7 +27,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 import importlib
 from itertools import combinations, pairwise
-from math import atan2, sqrt
+from math import atan2, ceil, sqrt
 from pathlib import Path
 import tempfile
 import time
@@ -36,7 +36,7 @@ import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 import numpy as np
-from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as R, Slerp
 
 try:
     import roboplan.core as roboplan_core
@@ -60,9 +60,10 @@ from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import IKStatus, ObstacleType, PlanningStatus
 from dimos.manipulation.planning.spec.models import (
     CartesianDelta,
-    CartesianPlanningRequest,
+    CartesianPathMode,
     IKResult,
     Obstacle,
+    PlanningGroupID,
     PlanningResult,
     WorldRobotID,
 )
@@ -88,6 +89,8 @@ _NATIVE_NAME_SEPARATOR = "__"
 _COMPOSITE_GROUP_PREFIX = "_dimos_composite"
 _CARTESIAN_POSITION_TOLERANCE = 1e-3
 _CARTESIAN_ORIENTATION_TOLERANCE = 1e-2
+_LINEAR_CARTESIAN_TRANSLATION_STEP = 0.01
+_LINEAR_CARTESIAN_ROTATION_STEP = 0.05
 
 
 @dataclass
@@ -740,9 +743,15 @@ class RoboPlanWorld:
     def plan_cartesian_path(
         self,
         world: WorldSpec,
-        request: CartesianPlanningRequest,
+        selection: PlanningGroupSelection,
+        start: JointState,
+        pose_targets: Mapping[PlanningGroupID, PoseStamped],
+        *,
+        auxiliary_groups: Sequence[PlanningGroupID] = (),
+        path_mode: CartesianPathMode = "free",
+        timeout: float = 10.0,
     ) -> PlanningResult:
-        """Plan a RoboPlan-native free Cartesian path to a selected TCP target."""
+        """Plan a RoboPlan-backed free path to absolute Cartesian TCP targets."""
         if world is not self:
             return PlanningResult(
                 status=PlanningStatus.UNSUPPORTED,
@@ -751,17 +760,30 @@ class RoboPlanWorld:
         self._require_finalized()
 
         start_time = time.time()
-        invalid = self._validate_cartesian_request(request)
+        invalid = self._validate_cartesian_request(
+            selection,
+            start,
+            pose_targets.keys(),
+            auxiliary_groups,
+            path_mode,
+            timeout,
+        )
         if invalid is not None:
             invalid.planning_time = time.time() - start_time
             return invalid
-        if request.path_mode == "linear":
-            return PlanningResult(
-                status=PlanningStatus.UNSUPPORTED,
-                planning_time=time.time() - start_time,
-                message="Linear Cartesian planning is not supported by the RoboPlan adapter yet",
+        invalid = self._validate_absolute_cartesian_targets(pose_targets)
+        if invalid is not None:
+            invalid.planning_time = time.time() - start_time
+            return invalid
+        if path_mode == "linear":
+            return self._plan_linear_cartesian_path(
+                selection,
+                start,
+                pose_targets,
+                timeout,
+                start_time,
             )
-        if roboplan_simple_ik is None:
+        if len(pose_targets) == 1 and roboplan_simple_ik is None:
             return PlanningResult(
                 status=PlanningStatus.UNSUPPORTED,
                 planning_time=time.time() - start_time,
@@ -769,42 +791,50 @@ class RoboPlanWorld:
             )
 
         try:
-            group = self._planning_groups.get(request.group_id)
-            group_data = self._group_data_for_selection_ids(request.selection.group_ids)
+            target_groups = self._target_groups_for_ids(pose_targets.keys())
+            auxiliary_group_objects = self._target_groups_for_ids(auxiliary_groups)
+            group_data = self._group_data_for_selection_ids(selection.group_ids)
             with self.scratch_context() as ctx:
-                self._set_selection_state(ctx, request.selection, request.start)
+                self._set_selection_state(ctx, selection, start)
                 self._set_scene_current_q(ctx)
-                target_pose = self._resolve_cartesian_target(ctx, request)
-                q_start = self._joint_state_to_native_selection_q(
-                    request.selection, group_data, request.start
-                )
-                q_goal = self._solve_cartesian_goal(
-                    group,
+                q_start = self._joint_state_to_native_selection_q(selection, group_data, start)
+                q_goal_state = self._solve_cartesian_goal_state(
+                    selection,
                     group_data,
                     q_start,
-                    target_pose,
-                    request.timeout,
+                    start,
+                    {
+                        target_groups[group_id]: PoseStamped(
+                            frame_id="world",
+                            position=target.position,
+                            orientation=target.orientation,
+                        )
+                        for group_id, target in pose_targets.items()
+                    },
+                    tuple(auxiliary_group_objects.values()),
+                    timeout,
+                )
+                q_goal = self._joint_state_to_native_selection_q(
+                    selection, group_data, q_goal_state
                 )
             result = self._run_native_rrt(
                 group_data.group_name,
                 group_data.native_joint_names,
                 q_start,
                 q_goal,
-                request.timeout,
+                timeout,
             )
             result_names, path_arrays = self._extract_native_path(result)
             path = self._native_path_to_public_selection_path(
-                request.selection, group_data, path_arrays, result_names
+                selection, group_data, path_arrays, result_names
             )
-            if path and not self._selection_path_collision_free(request.selection, path):
+            if path and not self._selection_path_collision_free(selection, path):
                 return PlanningResult(
                     status=PlanningStatus.NO_SOLUTION,
                     planning_time=time.time() - start_time,
                     message="RoboPlan Cartesian planning failed: returned path is in collision",
                 )
-            if path and not self._cartesian_final_pose_matches(
-                request.selection, request.group_id, path[-1], target_pose
-            ):
+            if path and not self._cartesian_final_poses_match(selection, path[-1], pose_targets):
                 return PlanningResult(
                     status=PlanningStatus.NO_SOLUTION,
                     planning_time=time.time() - start_time,
@@ -836,6 +866,57 @@ class RoboPlanWorld:
             message="RoboPlan Cartesian path found",
         )
 
+    def plan_relative_cartesian_path(
+        self,
+        world: WorldSpec,
+        selection: PlanningGroupSelection,
+        start: JointState,
+        delta_targets: Mapping[PlanningGroupID, CartesianDelta],
+        *,
+        auxiliary_groups: Sequence[PlanningGroupID] = (),
+        path_mode: CartesianPathMode = "free",
+        timeout: float = 10.0,
+    ) -> PlanningResult:
+        """Plan a RoboPlan-backed free path to relative Cartesian TCP deltas."""
+        if world is not self:
+            return PlanningResult(
+                status=PlanningStatus.UNSUPPORTED,
+                message="RoboPlan-native Cartesian planner requires its RoboPlanWorld instance",
+            )
+        self._require_finalized()
+
+        start_time = time.time()
+        invalid = self._validate_cartesian_request(
+            selection,
+            start,
+            delta_targets.keys(),
+            auxiliary_groups,
+            path_mode,
+            timeout,
+        )
+        if invalid is not None:
+            invalid.planning_time = time.time() - start_time
+            return invalid
+        invalid = self._validate_relative_cartesian_targets(delta_targets)
+        if invalid is not None:
+            invalid.planning_time = time.time() - start_time
+            return invalid
+
+        with self.scratch_context() as ctx:
+            self._set_selection_state(ctx, selection, start)
+            pose_targets = self._resolve_relative_cartesian_targets(ctx, delta_targets)
+        result = self.plan_cartesian_path(
+            world,
+            selection,
+            start,
+            pose_targets,
+            auxiliary_groups=auxiliary_groups,
+            path_mode=path_mode,
+            timeout=timeout,
+        )
+        result.planning_time = time.time() - start_time
+        return result
+
     def get_name(self) -> str:
         """Get planner name."""
         return "RoboPlan"
@@ -843,109 +924,346 @@ class RoboPlanWorld:
     # Internals
 
     def _validate_cartesian_request(
-        self, request: CartesianPlanningRequest
+        self,
+        selection: PlanningGroupSelection,
+        start: JointState,
+        target_ids_iterable: Iterable[PlanningGroupID],
+        auxiliary_groups: Sequence[PlanningGroupID],
+        path_mode: CartesianPathMode,
+        timeout: float,
     ) -> PlanningResult | None:
-        if request.target_mode not in ("absolute", "relative"):
+        target_ids = set(target_ids_iterable)
+        auxiliary_ids = set(auxiliary_groups)
+        if path_mode not in ("free", "linear"):
             return PlanningResult(
                 status=PlanningStatus.INVALID_GOAL,
-                message=f"Unsupported Cartesian target_mode: {request.target_mode}",
+                message=f"Unsupported Cartesian path_mode: {path_mode}",
             )
-        if request.path_mode not in ("free", "linear"):
-            return PlanningResult(
-                status=PlanningStatus.INVALID_GOAL,
-                message=f"Unsupported Cartesian path_mode: {request.path_mode}",
-            )
-        if request.reference_frame != "world":
-            return PlanningResult(
-                status=PlanningStatus.UNSUPPORTED,
-                message="RoboPlan Cartesian planning currently supports only world reference_frame",
-            )
-        if request.max_translation_step <= 0.0:
-            return PlanningResult(
-                status=PlanningStatus.INVALID_GOAL,
-                message="max_translation_step must be positive",
-            )
-        if request.max_rotation_step <= 0.0:
-            return PlanningResult(
-                status=PlanningStatus.INVALID_GOAL,
-                message="max_rotation_step must be positive",
-            )
-        if request.timeout <= 0.0:
+        if timeout <= 0.0:
             return PlanningResult(
                 status=PlanningStatus.INVALID_GOAL, message="timeout must be positive"
             )
-        if request.selection.group_ids != (request.group_id,):
+        if not target_ids:
             return PlanningResult(
-                status=PlanningStatus.UNSUPPORTED,
-                message="RoboPlan Cartesian planning currently supports exactly one selected TCP group",
+                status=PlanningStatus.INVALID_GOAL,
+                message="At least one Cartesian target group is required",
+            )
+        if len(auxiliary_ids) != len(auxiliary_groups):
+            return PlanningResult(
+                status=PlanningStatus.INVALID_GOAL,
+                message="auxiliary_groups must not contain duplicate group IDs",
+            )
+        overlap = target_ids & auxiliary_ids
+        if overlap:
+            return PlanningResult(
+                status=PlanningStatus.INVALID_GOAL,
+                message=f"Cartesian target groups overlap auxiliary groups: {sorted(overlap)}",
+            )
+        selected_ids = set(selection.group_ids)
+        coverage = target_ids | auxiliary_ids
+        if coverage != selected_ids:
+            missing = sorted(selected_ids - coverage)
+            extra = sorted(coverage - selected_ids)
+            return PlanningResult(
+                status=PlanningStatus.INVALID_GOAL,
+                message=(
+                    "Cartesian target groups plus auxiliary_groups must exactly cover "
+                    f"selection.group_ids; missing={missing}, extra={extra}"
+                ),
             )
 
         try:
-            group = self._planning_groups.get(request.group_id)
+            groups_by_id = self._target_groups_for_ids(target_ids | auxiliary_ids)
         except KeyError as exc:
             return PlanningResult(status=PlanningStatus.UNSUPPORTED, message=str(exc))
-        if group.tip_link is None:
-            return PlanningResult(
-                status=PlanningStatus.INVALID_GOAL,
-                message=f"Planning group '{request.group_id}' has no pose target frame",
-            )
-        unsupported = self._validate_supported_selection(request.selection)
+        for group_id in target_ids:
+            if groups_by_id[group_id].tip_link is None:
+                return PlanningResult(
+                    status=PlanningStatus.INVALID_GOAL,
+                    message=f"Planning group '{group_id}' has no pose target frame",
+                )
+        unsupported = self._validate_supported_selection(selection)
         if unsupported is not None:
             return unsupported
         try:
-            self._selection_positions_by_global(request.selection, request.start)
+            self._selection_positions_by_global(selection, start)
         except ValueError as exc:
             return PlanningResult(status=PlanningStatus.INVALID_START, message=str(exc))
+        if path_mode == "linear" and len(target_ids) > 1:
+            return PlanningResult(
+                status=PlanningStatus.UNSUPPORTED,
+                message="Linear Cartesian planning currently supports at most one target group",
+            )
+        return None
 
-        if request.target_mode == "absolute":
-            if not isinstance(request.target, PoseStamped):
+    def _validate_absolute_cartesian_targets(
+        self, pose_targets: Mapping[PlanningGroupID, PoseStamped]
+    ) -> PlanningResult | None:
+        for group_id, target in pose_targets.items():
+            if not isinstance(target, PoseStamped):
                 return PlanningResult(
                     status=PlanningStatus.INVALID_GOAL,
-                    message="absolute Cartesian target_mode requires a PoseStamped target",
+                    message=f"Absolute Cartesian target for '{group_id}' must be a PoseStamped",
                 )
-            if request.target.frame_id not in ("", "world"):
+            if target.frame_id not in ("", "world"):
                 return PlanningResult(
                     status=PlanningStatus.UNSUPPORTED,
                     message="RoboPlan Cartesian planning currently supports only world-frame poses",
                 )
-            return None
-
-        if not isinstance(request.target, CartesianDelta):
-            return PlanningResult(
-                status=PlanningStatus.INVALID_GOAL,
-                message="relative Cartesian target_mode requires a CartesianDelta target",
-            )
-        if request.target.frame_id != "world":
-            return PlanningResult(
-                status=PlanningStatus.UNSUPPORTED,
-                message="RoboPlan Cartesian planning currently supports only world-frame deltas",
-            )
         return None
 
-    def _resolve_cartesian_target(
-        self, ctx: RoboPlanContext, request: CartesianPlanningRequest
-    ) -> PoseStamped:
-        if request.target_mode == "absolute":
-            if not isinstance(request.target, PoseStamped):
-                raise ValueError("absolute Cartesian target_mode requires a PoseStamped target")
-            return PoseStamped(
-                frame_id="world",
-                position=request.target.position,
-                orientation=request.target.orientation,
-            )
+    def _validate_relative_cartesian_targets(
+        self, delta_targets: Mapping[PlanningGroupID, CartesianDelta]
+    ) -> PlanningResult | None:
+        for group_id, target in delta_targets.items():
+            if not isinstance(target, CartesianDelta):
+                return PlanningResult(
+                    status=PlanningStatus.INVALID_GOAL,
+                    message=f"Relative Cartesian target for '{group_id}' must be a CartesianDelta",
+                )
+            if target.frame_id != "world":
+                return PlanningResult(
+                    status=PlanningStatus.UNSUPPORTED,
+                    message="RoboPlan Cartesian planning currently supports only world-frame deltas",
+                )
+        return None
 
-        if not isinstance(request.target, CartesianDelta):
-            raise ValueError("relative Cartesian target_mode requires a CartesianDelta target")
-        start_pose = self.get_group_ee_pose(ctx, request.group_id)
+    def _target_groups_for_ids(
+        self, group_ids: Iterable[PlanningGroupID]
+    ) -> dict[PlanningGroupID, PlanningGroup]:
+        return {group_id: self._planning_groups.get(group_id) for group_id in group_ids}
+
+    def _resolve_relative_cartesian_targets(
+        self,
+        ctx: RoboPlanContext,
+        delta_targets: Mapping[PlanningGroupID, CartesianDelta],
+    ) -> dict[PlanningGroupID, PoseStamped]:
+        return {
+            group_id: self._resolve_relative_cartesian_target(ctx, group_id, delta)
+            for group_id, delta in delta_targets.items()
+        }
+
+    def _resolve_relative_cartesian_target(
+        self, ctx: RoboPlanContext, group_id: PlanningGroupID, delta: CartesianDelta
+    ) -> PoseStamped:
+        start_pose = self.get_group_ee_pose(ctx, group_id)
         start_matrix = pose_to_matrix(start_pose)
         target_matrix = start_matrix.copy()
-        target_matrix[:3, 3] = start_matrix[:3, 3] + np.asarray(
-            request.target.translation, dtype=np.float64
-        )
-        delta_rotation = R.from_euler("xyz", request.target.rotation_rpy).as_matrix()
+        target_matrix[:3, 3] = start_matrix[:3, 3] + np.asarray(delta.translation, dtype=np.float64)
+        delta_rotation = R.from_euler("xyz", delta.rotation_rpy).as_matrix()
         target_matrix[:3, :3] = delta_rotation @ start_matrix[:3, :3]
         pose = matrix_to_pose(target_matrix)
         return PoseStamped(frame_id="world", position=pose.position, orientation=pose.orientation)
+
+    def _plan_linear_cartesian_path(
+        self,
+        selection: PlanningGroupSelection,
+        start: JointState,
+        pose_targets: Mapping[PlanningGroupID, PoseStamped],
+        timeout: float,
+        start_time: float,
+    ) -> PlanningResult:
+        if len(pose_targets) != 1:
+            return PlanningResult(
+                status=PlanningStatus.UNSUPPORTED,
+                planning_time=time.time() - start_time,
+                message="Linear Cartesian planning currently supports at most one target group",
+            )
+        try:
+            optimal_ik = self._load_optimal_ik()
+        except ImportError as exc:
+            return PlanningResult(
+                status=PlanningStatus.UNSUPPORTED,
+                planning_time=time.time() - start_time,
+                message=f"RoboPlan linear Cartesian planning requires Oink IK: {exc}",
+            )
+
+        group_id, target_pose = next(iter(pose_targets.items()))
+        try:
+            group = self._target_groups_for_ids((group_id,))[group_id]
+            group_data = self._group_data_for_selection_ids(selection.group_ids)
+            with self.scratch_context() as ctx:
+                self._set_selection_state(ctx, selection, start)
+                start_pose = self.get_group_ee_pose(ctx, group_id)
+                waypoints = self._linear_cartesian_waypoints(start_pose, target_pose)
+                q_current = self._joint_state_to_native_selection_q(selection, group_data, start)
+                path_arrays = [q_current.copy()]
+                for waypoint in waypoints[1:]:
+                    q_current = self._solve_linear_oink_waypoint(
+                        optimal_ik,
+                        selection,
+                        group,
+                        group_data,
+                        q_current,
+                        waypoint,
+                    )
+                    path_arrays.append(q_current.copy())
+                path = self._native_path_to_public_selection_path(
+                    selection, group_data, path_arrays, None
+                )
+        except ValueError as exc:
+            return PlanningResult(
+                status=PlanningStatus.NO_SOLUTION,
+                planning_time=time.time() - start_time,
+                message=f"RoboPlan linear Cartesian planning failed: {exc}",
+            )
+        except Exception as exc:
+            return PlanningResult(
+                status=PlanningStatus.NO_SOLUTION,
+                planning_time=time.time() - start_time,
+                message=f"RoboPlan linear Cartesian planning failed: {exc}",
+            )
+        if not path:
+            return PlanningResult(
+                status=PlanningStatus.NO_SOLUTION,
+                planning_time=time.time() - start_time,
+                message="RoboPlan linear Cartesian planning failed: returned an empty path",
+            )
+        if not self._selection_path_collision_free(selection, path):
+            return PlanningResult(
+                status=PlanningStatus.NO_SOLUTION,
+                planning_time=time.time() - start_time,
+                message="RoboPlan linear Cartesian planning failed: returned path is in collision",
+            )
+        if not self._cartesian_final_poses_match(selection, path[-1], pose_targets):
+            return PlanningResult(
+                status=PlanningStatus.NO_SOLUTION,
+                planning_time=time.time() - start_time,
+                message="RoboPlan linear Cartesian planning failed: final TCP pose missed target",
+            )
+        return PlanningResult(
+            status=PlanningStatus.SUCCESS,
+            path=path,
+            planning_time=time.time() - start_time,
+            path_length=compute_path_length(path),
+            message="RoboPlan linear Cartesian path found",
+        )
+
+    def _solve_linear_oink_waypoint(
+        self,
+        optimal_ik: Any,
+        selection: PlanningGroupSelection,
+        group: PlanningGroup,
+        group_data: _RoboPlanGroupData,
+        q_seed: NDArray[np.float64],
+        target_pose: PoseStamped,
+    ) -> NDArray[np.float64]:
+        scene = self._require_scene()
+        oink = optimal_ik.Oink(scene, group_name=group_data.group_name)
+        tasks = self._make_oink_frame_tasks(
+            optimal_ik,
+            oink,
+            scene,
+            {group: target_pose},
+            _CARTESIAN_POSITION_TOLERANCE,
+            _CARTESIAN_ORIENTATION_TOLERANCE,
+        )
+        constraints = self._make_oink_constraints(optimal_ik, oink, group_data)
+        lower_limits, upper_limits = self._selection_native_limits(selection, group_data)
+        q_candidate = np.asarray(q_seed, dtype=np.float64).copy()
+        iteration_limit = max(1, self._kinematics_config.max_iterations)
+        with self.scratch_context() as ctx:
+            for iteration in range(iteration_limit):
+                result = self._maybe_return_converged_oink_result(
+                    ctx,
+                    selection,
+                    group_data,
+                    q_candidate,
+                    {group: target_pose},
+                    _CARTESIAN_POSITION_TOLERANCE,
+                    _CARTESIAN_ORIENTATION_TOLERANCE,
+                    iteration,
+                )
+                if result.is_success():
+                    return q_candidate
+                if result.status == IKStatus.COLLISION:
+                    raise ValueError(result.message)
+
+                self._set_scene_group_joint_positions(scene, group_data.group_name, q_candidate)
+                delta_q = self._solve_oink_delta(oink, group_data, scene, tasks, constraints)
+                q_candidate = self._integrate_native_selection_q(
+                    oink, group_data, q_candidate, delta_q
+                )
+                q_candidate = np.clip(q_candidate, lower_limits, upper_limits)
+
+            result = self._maybe_return_converged_oink_result(
+                ctx,
+                selection,
+                group_data,
+                q_candidate,
+                {group: target_pose},
+                _CARTESIAN_POSITION_TOLERANCE,
+                _CARTESIAN_ORIENTATION_TOLERANCE,
+                iteration_limit,
+            )
+            if result.is_success():
+                return q_candidate
+            raise ValueError(result.message)
+
+    def _linear_cartesian_waypoints(
+        self, start_pose: PoseStamped, target_pose: PoseStamped
+    ) -> list[PoseStamped]:
+        start_matrix = pose_to_matrix(start_pose)
+        target_matrix = pose_to_matrix(target_pose)
+        translation_delta = target_matrix[:3, 3] - start_matrix[:3, 3]
+        translation_distance = float(np.linalg.norm(translation_delta))
+        start_rotation = R.from_matrix(start_matrix[:3, :3])
+        target_rotation = R.from_matrix(target_matrix[:3, :3])
+        rotation_distance = float((target_rotation * start_rotation.inv()).magnitude())
+        step_count = max(
+            1,
+            ceil(translation_distance / _LINEAR_CARTESIAN_TRANSLATION_STEP),
+            ceil(rotation_distance / _LINEAR_CARTESIAN_ROTATION_STEP),
+        )
+        slerp = Slerp([0.0, 1.0], R.from_matrix([start_matrix[:3, :3], target_matrix[:3, :3]]))
+        waypoints: list[PoseStamped] = []
+        for step in range(step_count + 1):
+            alpha = step / step_count
+            matrix = np.eye(4, dtype=np.float64)
+            matrix[:3, 3] = start_matrix[:3, 3] + alpha * translation_delta
+            matrix[:3, :3] = slerp([alpha]).as_matrix()[0]
+            pose = matrix_to_pose(matrix)
+            waypoints.append(
+                PoseStamped(frame_id="world", position=pose.position, orientation=pose.orientation)
+            )
+        return waypoints
+
+    def _solve_cartesian_goal_state(
+        self,
+        selection: PlanningGroupSelection,
+        group_data: _RoboPlanGroupData,
+        q_start: NDArray[np.float64],
+        start: JointState,
+        pose_targets: Mapping[PlanningGroup, PoseStamped],
+        auxiliary_groups: Sequence[PlanningGroup],
+        timeout: float,
+    ) -> JointState:
+        if len(pose_targets) == 1:
+            group, target_pose = next(iter(pose_targets.items()))
+            q_goal = self._solve_cartesian_goal(group, group_data, q_start, target_pose, timeout)
+            return self._native_selection_q_to_joint_state(selection, group_data, q_goal)
+
+        ordered_pose_targets = {
+            group: pose_targets[group] for group in selection.groups if group in pose_targets
+        }
+        ordered_auxiliary_groups = tuple(
+            group for group in selection.groups if group in set(auxiliary_groups)
+        )
+        ik_result = self.solve_pose_targets(
+            self,
+            ordered_pose_targets,
+            auxiliary_groups=ordered_auxiliary_groups,
+            seed=start,
+            position_tolerance=_CARTESIAN_POSITION_TOLERANCE,
+            orientation_tolerance=_CARTESIAN_ORIENTATION_TOLERANCE,
+        )
+        if not ik_result.is_success() or ik_result.joint_state is None:
+            raise ValueError(f"RoboPlan Cartesian IK failed: {ik_result.message}")
+        positions_by_global = self._selection_positions_by_global(selection, ik_result.joint_state)
+        return JointState(
+            name=list(selection.joint_names),
+            position=[positions_by_global[name] for name in selection.joint_names],
+        )
 
     def _solve_cartesian_goal(
         self,
@@ -963,7 +1281,7 @@ class RoboPlanWorld:
             raise ValueError("roboplan.simple_ik does not expose SimpleIk and SimpleIkOptions")
 
         options = options_cls()
-        self._configure_simple_ik_options(options, timeout)
+        self._configure_simple_ik_options(options, timeout, group_data.group_name)
         solver = solver_cls(self._require_scene(), options)
         goal = self._to_native_cartesian_configuration(group, target_pose)
         start_config = self._to_native_joint_configuration(group_data.native_joint_names, q_start)
@@ -981,8 +1299,11 @@ class RoboPlanWorld:
             solution_config = result
         return self._native_joint_configuration_to_q(group_data.native_joint_names, solution_config)
 
-    def _configure_simple_ik_options(self, options: Any, timeout: float) -> None:
+    def _configure_simple_ik_options(
+        self, options: Any, timeout: float, group_name: str | None = None
+    ) -> None:
         for name, value in (
+            *((("group_name", group_name),) if group_name is not None else ()),
             ("max_time", timeout),
             ("timeout", timeout),
             ("max_solve_time", timeout),
@@ -1005,7 +1326,7 @@ class RoboPlanWorld:
             self._get_robot(self._robot_ids_by_name[group.robot_name]).config, group.tip_link
         )
         matrix = pose_to_matrix(target_pose)
-        for args in ((frame_name, matrix), (matrix, frame_name)):
+        for args in (("", frame_name, matrix), (frame_name, matrix), (matrix, frame_name)):
             try:
                 return config_cls(*args)
             except TypeError:
@@ -1014,9 +1335,12 @@ class RoboPlanWorld:
         for name, value in (
             ("frame_name", frame_name),
             ("frame", frame_name),
+            ("tip_frame", frame_name),
+            ("base_frame", ""),
             ("matrix", matrix),
             ("pose", matrix),
             ("transform", matrix),
+            ("tform", matrix),
         ):
             try:
                 setattr(config, name, value)
@@ -1068,6 +1392,17 @@ class RoboPlanWorld:
             and rotation_error <= _CARTESIAN_ORIENTATION_TOLERANCE
         )
 
+    def _cartesian_final_poses_match(
+        self,
+        selection: PlanningGroupSelection,
+        final_state: JointState,
+        target_poses: Mapping[PlanningGroupID, PoseStamped],
+    ) -> bool:
+        return all(
+            self._cartesian_final_pose_matches(selection, group_id, final_state, target_pose)
+            for group_id, target_pose in target_poses.items()
+        )
+
     def _ik_failure(
         self,
         status: IKStatus,
@@ -1109,7 +1444,10 @@ class RoboPlanWorld:
                 raise ValueError(f"Planning group '{group.id}' has no pose target frame")
             native_map = self._native_names_by_robot[group.robot_name]
             target = roboplan_core.CartesianConfiguration()
-            target.base_frame = native_map.link(group.base_link)
+            # DimOS public Cartesian pose targets are absolute world-frame PoseStamped
+            # values. Oink interprets an empty base frame as world, matching the
+            # target.tform matrix below even for robot-scoped groups in composite scenes.
+            target.base_frame = ""
             target.tip_frame = native_map.link(group.tip_link)
             target.tform = pose_to_matrix(target_pose)
             options = self._make_oink_frame_task_options(
@@ -1354,6 +1692,33 @@ class RoboPlanWorld:
         if setter is not None:
             setter(np.asarray(q, dtype=np.float64))
 
+    def _set_scene_group_joint_positions(
+        self, scene: Any, group_name: str, q: NDArray[np.float64]
+    ) -> None:
+        setter = getattr(scene, "setJointPositions", None)
+        if setter is None:
+            raise ValueError("RoboPlan Scene does not expose setJointPositions")
+        q_array = np.asarray(q, dtype=np.float64)
+        try:
+            setter(group_name, q_array)
+            return
+        except TypeError:
+            pass
+        try:
+            setter(q_array, group_name)
+            return
+        except TypeError:
+            pass
+
+        to_full = getattr(scene, "toFullJointPositions", None)
+        if to_full is None:
+            raise ValueError(
+                "RoboPlan Scene does not expose a group-aware joint state setter "
+                "or toFullJointPositions"
+            )
+        full_q = np.asarray(to_full(group_name, q_array), dtype=np.float64)
+        setter(full_q)
+
     def _solve_oink_delta(
         self,
         oink: Any,
@@ -1398,6 +1763,17 @@ class RoboPlanWorld:
         for native_name, value in zip(group_data.native_joint_names, delta, strict=True):
             delta_full[index_by_native[native_name]] = float(value)
         return delta_full
+
+    def _integrate_native_selection_q(
+        self,
+        oink: Any,
+        group_data: _RoboPlanGroupData,
+        native_q: NDArray[np.float64],
+        delta_q: NDArray[np.float64],
+    ) -> NDArray[np.float64]:
+        delta_full_q = self._scatter_oink_delta(oink, group_data, delta_q)
+        delta_native_q = self._native_selection_q_from_full_q(group_data, delta_full_q)
+        return np.asarray(native_q, dtype=np.float64) + delta_native_q
 
     def _integrate_scene_q(
         self, scene: Any, q: NDArray[np.float64], delta_q: NDArray[np.float64]

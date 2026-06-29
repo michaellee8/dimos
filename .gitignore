@@ -108,3 +108,5 @@ recording*.db
 
 # Benchmark demo output artifacts
 artifacts/
+
+.codegraph/

@@ -20,69 +20,27 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from dimos.manipulation.planning.groups.models import PlanningGroup, PlanningGroupSelection
-from dimos.manipulation.planning.spec.models import CartesianDelta, CartesianPlanningRequest
-from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-from dimos.msgs.sensor_msgs.JointState import JointState
-
-GROUP = PlanningGroup(
-    id="arm/manipulator",
-    robot_name="arm",
-    group_name="manipulator",
-    joint_names=("arm/joint1", "arm/joint2"),
-    local_joint_names=("joint1", "joint2"),
-    base_link="base",
-    tip_link="tcp",
-)
-SELECTION = PlanningGroupSelection.from_groups((GROUP,))
-START = JointState({"name": ["arm/joint1", "arm/joint2"], "position": [0.0, 0.0]})
+from dimos.manipulation.planning.spec.models import CartesianDelta
 
 
-def test_cartesian_planning_request_carries_absolute_pose_target() -> None:
-    target = PoseStamped(frame_id="world", position=[0.1, 0.2, 0.3])
+def test_cartesian_delta_defaults_to_world_identity_delta() -> None:
+    delta = CartesianDelta()
 
-    request = CartesianPlanningRequest(
-        selection=SELECTION,
-        group_id="arm/manipulator",
-        start=START,
-        target=target,
-        target_mode="absolute",
-    )
-
-    assert request.target is target
-    assert request.target_mode == "absolute"
-    assert request.path_mode == "free"
-    assert request.reference_frame == "world"
+    assert delta.translation == (0.0, 0.0, 0.0)
+    assert delta.rotation_rpy == (0.0, 0.0, 0.0)
+    assert delta.frame_id == "world"
 
 
-def test_cartesian_planning_request_carries_relative_delta_target() -> None:
+def test_cartesian_delta_carries_relative_target_values() -> None:
     delta = CartesianDelta(translation=(0.1, 0.0, 0.0), rotation_rpy=(0.0, 0.0, 0.2))
 
-    request = CartesianPlanningRequest(
-        selection=SELECTION,
-        group_id="arm/manipulator",
-        start=START,
-        target=delta,
-        target_mode="relative",
-        path_mode="linear",
-    )
-
-    assert request.target is delta
-    assert request.target_mode == "relative"
-    assert request.path_mode == "linear"
+    assert delta.translation == (0.1, 0.0, 0.0)
+    assert delta.rotation_rpy == (0.0, 0.0, 0.2)
+    assert delta.frame_id == "world"
 
 
-def test_cartesian_models_are_frozen() -> None:
+def test_cartesian_delta_is_frozen() -> None:
     delta = CartesianDelta()
-    request = CartesianPlanningRequest(
-        selection=SELECTION,
-        group_id="arm/manipulator",
-        start=START,
-        target=delta,
-        target_mode="relative",
-    )
 
     with pytest.raises(FrozenInstanceError):
         delta.frame_id = "tool"  # type: ignore[misc]
-    with pytest.raises(FrozenInstanceError):
-        request.path_mode = "linear"  # type: ignore[misc]

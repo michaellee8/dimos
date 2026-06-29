@@ -13,8 +13,12 @@ A planning group that represents coordinated motion across multiple selected pla
 _Avoid_: group combination, combined groups, multi-group plan
 
 **Auxiliary planning group**:
-A selected planning group that may move as part of a plan but does not have its own task-space target in that plan.
+A planning group included in a planning request that may move as part of the plan but does not have its own task-space target in that plan.
 _Avoid_: extra group, passive target group, unconstrained target
+
+**Linear TCP path**:
+A motion recipe where the tool center point follows a straight Cartesian segment from its start pose to its target pose.
+_Avoid_: linear joint motion, linear motion
 
 **Composite RoboPlan model**:
 A RoboPlan-facing robot model that represents multiple registered robot models as one planning scene.
