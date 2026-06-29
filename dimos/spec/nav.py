@@ -32,6 +32,9 @@ class TrajectoryController(Protocol):
     stop_movement: In[bool]
 
 
+# this can take a radius of a robot
+# or even better some more precise shape of the robot (e.g. a polygon) to avoid collisions
+# probably force based repelling (like native go2 obstacle avoidance is better than just stopping the robot)
 class ObstacleAvoidance(Protocol):
     # LoGlo/terrainmap perception within some radius
     lidar: In[PointCloud2]
