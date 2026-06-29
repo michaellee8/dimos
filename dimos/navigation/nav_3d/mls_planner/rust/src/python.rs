@@ -268,6 +268,13 @@ impl MLSPlanner {
 
 #[pymodule]
 fn dimos_mls_planner(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Log planner tracing to stderr. Defaults to warn, override with RUST_LOG.
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("dimos_mls_planner=warn"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
     m.add_class::<MLSPlanner>()?;
     Ok(())
 }

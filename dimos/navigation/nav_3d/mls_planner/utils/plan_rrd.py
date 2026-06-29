@@ -107,13 +107,21 @@ def _log_path_wp(waypoints: NDArray[np.float32] | None, entity: str, color: list
     rr.log(entity, rr.LineStrips3D([points], colors=[color], radii=0.05))
 
 
-def _clearance_colors(clearance: NDArray[np.float32], clamp_m: float) -> NDArray[np.uint8]:
-    """Map per-cell wall clearance to a blue ramp, clamped so it resolves near walls."""
+def _clearance_colors(
+    clearance: NDArray[np.float32], clamp_m: float, hard_clearance: float
+) -> NDArray[np.uint8]:
+    """Color surface cells by wall clearance.
+
+    Cells inside the hard clearance are impassable, so paint them red. The rest
+    follow a blue ramp clamped so it resolves near walls.
+    """
     norm = np.clip(np.nan_to_num(clearance / clamp_m, nan=1.0, posinf=1.0), 0.0, 1.0)
     blocked = np.array([4.0, 8.0, 48.0], dtype=np.float64)
     clear = np.array([150.0, 200.0, 255.0], dtype=np.float64)
     rgb: NDArray[np.float64] = blocked + norm[:, None] * (clear - blocked)
-    return rgb.astype(np.uint8)
+    out = rgb.astype(np.uint8)
+    out[clearance < hard_clearance] = (255, 0, 0)
+    return out
 
 
 def _log_shared(
@@ -121,6 +129,7 @@ def _log_shared(
     planner: MLSPlanner,
     render_voxel: float,
     clearance_clamp: float,
+    hard_clearance: float,
 ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
     """Log the map artifacts shared by every config from a reference planner.
 
@@ -141,7 +150,7 @@ def _log_shared(
             "world/surface_map",
             rr.Points3D(
                 surface[:, :3],
-                colors=_clearance_colors(surface[:, 3], clearance_clamp),
+                colors=_clearance_colors(surface[:, 3], clearance_clamp, hard_clearance),
                 radii=render_voxel / 2,
             ),
         )
@@ -204,6 +213,7 @@ def _process_frame(
     robot_height: float,
     render_voxel: float,
     clearance_clamp: float,
+    hard_clearance: float,
 ) -> dict[str, float]:
     """Plan every config for one frame, log paths/map/metrics, return the ref timing."""
     assert ray_obs.pose_tuple is not None
@@ -229,7 +239,9 @@ def _process_frame(
                 "plan_ms": (t2 - t1) * 1000,
                 "total_ms": (t2 - t0) * 1000,
             }
-            surface, nodes, edges = _log_shared(start, planner, render_voxel, clearance_clamp)
+            surface, nodes, edges = _log_shared(
+                start, planner, render_voxel, clearance_clamp, hard_clearance
+            )
 
     for key, value in ref_timing.items():
         rr.log(f"metrics/timing/{key}", rr.Scalars(value))
@@ -352,7 +364,13 @@ def main(
                 if ray_obs.pose_tuple is None:
                     continue
                 ref_timing = _process_frame(
-                    ray_obs, planners, goal, robot_height, render_voxel, clearance_clamp
+                    ray_obs,
+                    planners,
+                    goal,
+                    robot_height,
+                    render_voxel,
+                    clearance_clamp,
+                    configs[0][0],
                 )
                 frame += 1
                 print(

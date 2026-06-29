@@ -176,6 +176,7 @@ dependencies = [
  "serde",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "validator",
 ]
 
