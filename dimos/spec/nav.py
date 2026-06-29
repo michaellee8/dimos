@@ -35,9 +35,9 @@ class TrajectoryController(Protocol):
 # this can take a radius of a robot
 # or even better some more precise shape of the robot (e.g. a polygon) to avoid collisions
 # probably force based repelling (like native go2 obstacle avoidance is better than just stopping the robot)
-class ObstacleAvoidance(Protocol):
+class LocalPlanner(Protocol):
     # LoGlo/terrainmap perception within some radius
-    lidar: In[PointCloud2]
+    lidar: In[PointCloud2]  # or occupancygrid?
     odometry: In[Odometry]
     path: In[Path]
     safe_path: Out[Path]
