@@ -122,6 +122,18 @@ async def get_robot_id(api_key: str | None = Security(api_key_header)) -> str:
         async with async_session() as db:
             key_record = await validate_api_key(db, api_key)
             if key_record:
+                if not key_record.robot_id:
+                    # Multiple robots whose API keys both lack robot_id will
+                    # share the owner_id as identity (TURN credentials,
+                    # get_operator_or_robot's "sub"). create_session's
+                    # reconnect-dedup is already gated on non-empty robot_id
+                    # so distinct robots don't disconnect each other there,
+                    # but the identity collapse is still worth surfacing so
+                    # ops can fix the key.
+                    log.warning(
+                        "API key %s... has no robot_id; using owner_id as identity",
+                        api_key[:12],
+                    )
                 return key_record.robot_id or key_record.owner_id
 
     raise HTTPException(status_code=401, detail="Invalid robot credentials")
