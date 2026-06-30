@@ -614,12 +614,26 @@ async def bridge_datachannel(
             session.cf_session_id, [session.state_back_channel_id]
         )
         session.state_back_channel_id = None
+    # Track every local push we successfully created so far. If a later step
+    # (next add_datachannels, parsing, or the missing-name check) fails, close
+    # them — otherwise the next reconnect re-pushes under the same names and
+    # hits repeated_local_track_error. Remote subscriptions are not tracked:
+    # they're cheap and don't block reconnects.
+    created_pushes: list[tuple[str, list[int]]] = []
+
+    async def _rollback_pushes() -> None:
+        for sid, ids in created_pushes:
+            await cf_client.close_datachannels(sid, ids)
+
     try:
         # operator → robot: cmd + state. Operator publishes, robot subscribes.
         op_pub = await cf_client.add_datachannels(
             session.operator_cf_session_id,
             [{"location": "local", "dataChannelName": name} for name in forward_names],
         )
+        op_pub_ids = {e["dataChannelName"]: int(e["id"]) for e in op_pub}
+        created_pushes.append((session.operator_cf_session_id, list(op_pub_ids.values())))
+
         robot_sub = await cf_client.add_datachannels(
             session.cf_session_id,
             [
@@ -631,12 +645,17 @@ async def bridge_datachannel(
                 for name in forward_names
             ],
         )
-        # robot → operator: state_back. Fresh push each connect (stale one closed
-        # above); operator subscribes to it.
+        robot_sub_ids = {e["dataChannelName"]: int(e["id"]) for e in robot_sub}
+
+        # robot → operator: state_back. Fresh push each connect (stale one
+        # closed above); operator subscribes to it.
         robot_pub = await cf_client.add_datachannels(
             session.cf_session_id,
             [{"location": "local", "dataChannelName": STATE_BACK_CHANNEL_NAME}],
         )
+        robot_pub_ids = {e["dataChannelName"]: int(e["id"]) for e in robot_pub}
+        created_pushes.append((session.cf_session_id, list(robot_pub_ids.values())))
+
         op_sub = await cf_client.add_datachannels(
             session.operator_cf_session_id,
             [
@@ -647,34 +666,31 @@ async def bridge_datachannel(
                 }
             ],
         )
+        op_sub_ids = {e["dataChannelName"]: int(e["id"]) for e in op_sub}
     except CloudflareRealtimeError as e:
+        await _rollback_pushes()
         raise HTTPException(
             status_code=502,
             detail=f"Cloudflare datachannel bridge failed: {e.detail}",
         )
-    except Exception as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Datachannel bridge failed ({type(e).__name__}): {e}",
-        )
-
-    # Index by dataChannelName from the response, not by request position —
-    # don't assume CF preserves order across the array.
-    try:
-        op_pub_ids = {entry["dataChannelName"]: int(entry["id"]) for entry in op_pub}
-        robot_sub_ids = {entry["dataChannelName"]: int(entry["id"]) for entry in robot_sub}
-        op_sub_ids = {entry["dataChannelName"]: int(entry["id"]) for entry in op_sub}
-        robot_pub_ids = {entry["dataChannelName"]: int(entry["id"]) for entry in robot_pub}
     except (KeyError, TypeError, ValueError) as e:
+        await _rollback_pushes()
         raise HTTPException(
             status_code=502,
             detail=f"Cloudflare returned malformed DataChannel entry: {e}",
+        )
+    except Exception as e:
+        await _rollback_pushes()
+        raise HTTPException(
+            status_code=502,
+            detail=f"Datachannel bridge failed ({type(e).__name__}): {e}",
         )
 
     missing = [n for n in forward_names if n not in op_pub_ids or n not in robot_sub_ids]
     if STATE_BACK_CHANNEL_NAME not in robot_pub_ids or STATE_BACK_CHANNEL_NAME not in op_sub_ids:
         missing.append(STATE_BACK_CHANNEL_NAME)
     if missing:
+        await _rollback_pushes()
         raise HTTPException(
             status_code=502,
             detail=f"Cloudflare missing DataChannel id for: {', '.join(missing)}",
