@@ -341,8 +341,9 @@ class M20Connection(Module, VideoSource):
             )
             for cam in cameras
         ]
-        # for t in self._video_threads:
-        #    t.start()
+
+        for t in self._video_threads:
+            t.start()
 
         self._control_thread = threading.Thread(target=self._control_loop, daemon=True)
         self._control_thread.start()
