@@ -55,6 +55,7 @@ async fn main() {
 - `#[input(decode = fn, handler = fn)]`: on a field of type `Input<T>`. `decode` is required; `handler` defaults to `handle_<field_name>`.
 - `#[output(encode = fn)]`: on a field of type `Output<T>`. `encode` is required.
 - `#[config]`: on one field. The type must be defined with `#[native_config]` (see [Config](#config)). At most one per struct. If absent, `Config` defaults to `dimos_module::NoConfig`.
+- `#[tf]`: on a field of type `Tf`. Subscribes to the `tf` topic and answers transform queries (see [Transforms](#transforms)). No arguments.
 - Unattributed fields are initialized via `Default::default()` and treated as module state.
 
 ## Config
@@ -96,6 +97,31 @@ fn validate_health_range(cfg: &Config) -> Result<(), ValidationError> {
 At runtime `run()` enforces the mapping on the Python payload: deserialization rejects an unknown field, and a key-set check rejects any field whose JSON key is absent, even an `Option` or a type alias to `Option` that serde would otherwise accept as `None`.
 
 Field name = port name. Ports map to topics via the stdin JSON; unmapped ports fall back to `/{port}`.
+
+## Transforms
+
+A `#[tf]` field gives a module a consumer-side view of the transform graph, the Rust counterpart to Python's `tf.get()`. It subscribes to the `tf` topic (mapped like any other port, default `/tf`), buffers each `parent -> child` edge it sees, and answers queries by composing transforms along the shortest path through the graph.
+
+```rust
+#[derive(Module)]
+struct VoxelMap {
+    #[input(decode = PointCloud2::decode)]
+    lidar: Input<PointCloud2>,
+    #[tf]
+    tf: Tf,
+}
+
+impl VoxelMap {
+    async fn handle_lidar(&mut self, cloud: PointCloud2) {
+        // De-rotate a scan from the lidar's mount frame into the robot base frame.
+        if let Some(t) = self.tf.get_latest("base_link", "mid360_link") {
+            let point_in_base = t.isometry() * point_in_lidar;
+        }
+    }
+}
+```
+
+`Tf` is a cheap-to-clone handle; the graph fills in the background as `tf` messages arrive. `get(parent, child, time, tolerance)` selects the sample nearest `time` (latest when `None`) and returns `None` when no path connects the frames or no sample falls within `tolerance` seconds. `get_latest` is the no-time shorthand. The result exposes an `nalgebra` `Isometry3<f64>` via `isometry()`, ready to apply to a point. Lookups are nearest-in-time, not interpolated. This is consumer-only; modules do not publish transforms.
 
 ## What `#[derive(Module)]` generates
 

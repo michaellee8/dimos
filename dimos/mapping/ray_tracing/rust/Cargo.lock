@@ -145,6 +145,8 @@ version = "0.1.0"
 dependencies = [
  "dimos-lcm",
  "dimos-module-macros",
+ "lcm-msgs",
+ "nalgebra",
  "serde",
  "serde_json",
  "tokio",

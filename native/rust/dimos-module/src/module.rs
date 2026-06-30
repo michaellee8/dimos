@@ -266,6 +266,7 @@ pub struct Builder {
     topics: HashMap<String, String>,
     routes: HashMap<String, Vec<Box<dyn Route>>>,
     publish_tx: mpsc::Sender<(String, Vec<u8>)>,
+    tf: Option<crate::tf::Tf>,
 }
 
 impl Builder {
@@ -277,6 +278,7 @@ impl Builder {
             topics,
             routes: HashMap::new(),
             publish_tx,
+            tf: None,
         }
     }
 
@@ -316,6 +318,22 @@ impl Builder {
             encode,
             sender: self.publish_tx.clone(),
         }
+    }
+
+    /// A handle that answers transform queries from the `/tf` topic.
+    ///
+    /// The first call subscribes to the resolved `tf` topic and starts filling
+    /// the transform graph in the background. Repeated calls share one graph.
+    pub fn tf(&mut self) -> crate::tf::Tf {
+        if let Some(tf) = &self.tf {
+            return tf.clone();
+        }
+        let topic = self.topic_for("tf");
+        let (tf, route) =
+            crate::tf::tf_subscription(topic.clone(), crate::tf::DEFAULT_TF_BUFFER_SIZE);
+        self.routes.entry(topic).or_default().push(route);
+        self.tf = Some(tf.clone());
+        tf
     }
 }
 
