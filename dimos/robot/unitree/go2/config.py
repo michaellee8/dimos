@@ -34,9 +34,14 @@ def camera_info_static() -> CameraInfo:
         return CameraInfo.from_yaml(str(yaml_path))
 
 
+go2_dir = Path(__file__).parent
+mid360_urdf_path = go2_dir / "go2_mid360_normal.urdf"
+mid360_rotated_urdf_path = go2_dir / "go2_mid360_rotated.urdf"
+
+
 Go2Config = UrdfLoader(
     name="unitree_go2",
-    model_path=Path(__file__).parent / "go2.urdf",
+    model_path=go2_dir / "go2.urdf",
 )
 
 

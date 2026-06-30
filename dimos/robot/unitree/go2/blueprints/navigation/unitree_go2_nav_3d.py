@@ -15,34 +15,32 @@
 
 """3d navigation on Go2 with ray tracing and MLS planning"""
 
-from pathlib import Path
 from typing import Any
 
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
-from dimos.hardware.sensors.lidar.pointlio.hack import PointLioHack
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
+from dimos.hardware.sensors.lidar.pointlio.mount_correction import mount_correction_matrix
 from dimos.hardware.sensors.lidar.pointlio.recorder import PointlioRecorder
+from dimos.hardware.sensors.lidar.virtual_mid360.recorder import Mid360PcapRecorder
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
 from dimos.navigation.basic_path_follower.module import BasicPathFollower
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay
 from dimos.navigation.nav_3d.mls_planner.mls_planner_native import MLSPlannerNative
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic import rerun_config
+from dimos.robot.unitree.go2.config import mid360_rotated_urdf_path, mid360_urdf_path
 from dimos.robot.unitree.go2.connection import GO2Connection
 from dimos.robot.urdf_loader import UrdfLoader
 from dimos.visualization.vis_module import vis_module
 
-_navigation_dir = Path(__file__).parent
-# The physical mid-360 mount (rotated_urdf) and the "forward = forward" mount the
-# rest of the stack pretends it has (normal_urdf). PointLioHack rewrites the cloud
-# from the first into the second, so everything downstream uses the normal mount.
-_rotated_urdf = _navigation_dir / "go2_mid360_rotated.urdf"
-_normal_urdf = _navigation_dir / "go2_mid360_normal.urdf"
+_mount_correction = mount_correction_matrix(
+    original_static_tf=mid360_rotated_urdf_path, new_static_tf=mid360_urdf_path
+)
 
 # GO2Connection is a TfModule; feeding it the normal mount publishes those frames
 # on its static interval, matching the cloud the hack emits.
-go2_mid360_model = UrdfLoader(name="go2_mid360", model_path=_normal_urdf)
+go2_mid360_model = UrdfLoader(name="go2_mid360", model_path=mid360_urdf_path)
 
 voxel_size = 0.08
 # Height of the head-mounted lidar above the ground while standing.
@@ -104,7 +102,7 @@ _nav_rerun_config = {
     # frame. Anchor the robot box to pointlio's body frame instead and hide the
     # camera frustum that rides base_link. Use a dedicated entity path (not
     # world/tf/body) so the box's Transform3D doesn't collide with the live
-    # odom->body TF that PointLioHack logs onto world/tf/body.
+    # odom->body TF that PointLio logs onto world/tf/body.
     "static": {"world/robot_body": _static_robot_body},
     "visual_override": {
         **rerun_config["visual_override"],
@@ -133,28 +131,28 @@ unitree_go2_nav_3d = autoconnect(
             (GO2Connection, "odom", "odom_go2"),
         ]
     ),
-    # gravity_align is off (no_gravity_align.yaml) so pointlio leaves both the cloud
-    # and the odometry in the raw mount frame. The hack rewrites both into the normal
-    # mount, so everything downstream sees a normally-mounted sensor.
+    # gravity_align is off (no_gravity_align.yaml) so pointlio runs in the raw mount
+    # frame; the transform rewrites its cloud + odometry (and odom->body TF) into the
+    # normal mount before publishing.
     PointLio.blueprint(
-        body_frame_id="body",
         config="no_gravity_align.yaml",
         space_down_sample=False,
-    ).remappings(
-        [
-            (PointLio, "lidar", "rotated_lidar"),
-            (PointLio, "odometry", "rotated_odometry"),
-        ]
+        transform=_mount_correction,
     ),
-    PointLioHack.blueprint(rotated_urdf=_rotated_urdf, normal_urdf=_normal_urdf),
-    # Record the hack's faked (normal-mount) cloud + odometry, not PointLio's raw
+    # Record the corrected (normal-mount) cloud + odometry, not PointLio's raw
     # tilted output, so a replay reproduces what the nav stack actually consumed.
+    # The remap only renames the wire topics to PointLio's lidar/odometry; the
+    # recorder's ports stay pointlio_lidar/pointlio_odometry, so that's what the
+    # db streams are named.
     PointlioRecorder.blueprint().remappings(
         [
             (PointlioRecorder, "pointlio_lidar", "lidar"),
             (PointlioRecorder, "pointlio_odometry", "odometry"),
         ]
     ),
+    # Raw Livox UDP capture (tcpdump). Pulls the lidar IP + iface from env
+    # (DIMOS_MID360_LIDAR_IP / DIMOS_MID360_PCAP_IFACE); pcap lands in recordings/.
+    Mid360PcapRecorder.blueprint(),
     RayTracingVoxelMap.blueprint(
         voxel_size=voxel_size,
         emit_every=1,
