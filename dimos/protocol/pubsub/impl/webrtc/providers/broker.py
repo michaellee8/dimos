@@ -300,10 +300,12 @@ class BrokerProvider(AsyncProviderBase):
             logger.warning("Heartbeat failed: %d %s", r.status_code, r.text[:200])
             return r.status_code
         ack = r.json()
+        # state_reliable_back first so the state_reliable ping handler can
+        # find it in _dcs if a ping arrives during channel bring-up.
         ids = {
             "cmd_unreliable": ack.get("cmd_channel_subscriber_id"),
-            "state_reliable": ack.get("state_channel_subscriber_id"),
             "state_reliable_back": ack.get("state_back_channel_publisher_id"),
+            "state_reliable": ack.get("state_channel_subscriber_id"),
         }
         # Track the broker's view: open on join, close on leave, re-open on
         # rejoin (the broker assigns fresh SCTP ids per operator session).
