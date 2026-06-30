@@ -24,8 +24,12 @@ import sqlite3
 import threading
 from typing import TYPE_CHECKING, Any, cast
 
+import numpy as np
+
 from dimos.memory2.store.sqlite import SqliteStoreConfig
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
+from dimos.msgs.nav_msgs.DeformationNode import DeformationNode, tf_id_for
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.protocol.tf.tf import MultiTBuffer
 from dimos.utils.logging_config import setup_logger
@@ -39,6 +43,11 @@ logger = setup_logger()
 DEFAULT_TF_STREAM = "tf"
 # The topology change-log is a single companion stream (like tf_static).
 GRAPH_STREAM = "tf_graph"
+# Per-keyframe pose-graph nodes from a loop-closure backend (e.g. gsc_pgo). Each row
+# is one DeformationNode, tagged by tf_id (which edge it corrects) and id (the
+# keyframe). A query corrects matching edges using how far the optimizer has moved
+# the bracketing keyframes since they were first recorded.
+DEFORMATION_STREAM = "tf_deformation_nodes"
 # Streams the RAM fallback (non-sqlite stores) reads.
 TF_STREAMS = ("tf", "tf_static")
 # Cache the whole change-log in RAM when there are at most this many topology
@@ -82,6 +91,9 @@ class DbTf:
         self._graph_loaded = False
         self._static_cache: dict[str, Transform] = {}
         self._buffer: MultiTBuffer | None = None  # RAM fallback (non-sqlite)
+        # The set of tf_ids present on the deformation stream (the edges loop closure
+        # corrects). Cached once so a recording with no deformation nodes pays nothing.
+        self._deformation_tf_ids: set[int] | None = None
         self.rows_fetched = 0
         self.graph_queries = 0
 
@@ -331,6 +343,110 @@ class DbTf:
             self.rows_fetched += 1
         return rows
 
+    # --- loop-closure deformation (sqlite) -------------------------------------
+
+    def _load_deformation_ids(self) -> set[int]:
+        """The distinct tf_ids present on the deformation stream, cached once. Empty
+        when there's no such stream — so the correction path is skipped at zero cost
+        for recordings without loop closure."""
+        if self._deformation_tf_ids is not None:
+            return self._deformation_tf_ids
+        ids: set[int] = set()
+        if self._is_sqlite and DEFORMATION_STREAM in set(self._store.list_streams()):
+            for (tf_id,) in self._connection().execute(
+                f"SELECT DISTINCT json_extract(tags, '$.tf_id') FROM \"{DEFORMATION_STREAM}\""
+            ):
+                if tf_id is not None:
+                    ids.add(int(tf_id))
+        self._deformation_tf_ids = ids
+        return ids
+
+    def _deformation_codec(self) -> Any:
+        source = self._store.stream(DEFORMATION_STREAM, DeformationNode)._source
+        return cast("Any", source).codec
+
+    def _node_pose_matrix(self, order: str, tf_id: int, node_id: str) -> np.ndarray | None:
+        """The 4x4 pose of one keyframe's first (``ASC``) or latest (``DESC``) recorded
+        version. Versions of a node share the keyframe ts, so they're ordered by row id
+        (insertion order), not ts."""
+        stream, blob = f'"{DEFORMATION_STREAM}"', f'"{DEFORMATION_STREAM}_blob"'
+        row = (
+            self._connection()
+            .execute(
+                f"SELECT b.data FROM {stream} s JOIN {blob} b ON b.id = s.id "
+                f"WHERE json_extract(s.tags, '$.tf_id') = ? AND json_extract(s.tags, '$.id') = ? "
+                f"ORDER BY s.id {order} LIMIT 1",
+                (str(tf_id), node_id),
+            )
+            .fetchone()
+        )
+        if row is None:
+            return None
+        node = cast("DeformationNode", self._deformation_codec().decode(row[0]))
+        return Transform.from_pose(node.pose.frame_id, node.pose).to_matrix()
+
+    def _node_delta(self, tf_id: int, node_id: str) -> np.ndarray | None:
+        """How far the optimizer has moved a keyframe since it was first recorded:
+        ``current ∘ inv(original)`` — the SE(3) correction this node contributes."""
+        original = self._node_pose_matrix("ASC", tf_id, node_id)
+        current = self._node_pose_matrix("DESC", tf_id, node_id)
+        if original is None or current is None:
+            return None
+        return current @ np.linalg.inv(original)
+
+    def _edge_delta(self, tf_id: int, query_time: float) -> np.ndarray | None:
+        """The blended correction for an edge at ``query_time``: take the keyframes
+        bracketing the time (latest at-or-before, earliest at-or-after), each node's
+        ``current ∘ inv(original)`` delta, and linear-blend-skin between them."""
+        stream = f'"{DEFORMATION_STREAM}"'
+        id_tag = "json_extract(tags, '$.id')"
+        tf_tag = "json_extract(tags, '$.tf_id')"
+        conn = self._connection()
+        lo = conn.execute(
+            f"SELECT {id_tag}, ts FROM {stream} WHERE {tf_tag} = ? AND ts <= ? "
+            "ORDER BY ts DESC, id DESC LIMIT 1",
+            (str(tf_id), query_time),
+        ).fetchone()
+        hi = conn.execute(
+            f"SELECT {id_tag}, ts FROM {stream} WHERE {tf_tag} = ? AND ts >= ? "
+            "ORDER BY ts ASC, id ASC LIMIT 1",
+            (str(tf_id), query_time),
+        ).fetchone()
+        samples: list[tuple[float, np.ndarray]] = []
+        seen_ids: set[str] = set()
+        for node_id, ts in (row for row in (lo, hi) if row is not None):
+            if node_id in seen_ids:
+                continue
+            seen_ids.add(node_id)
+            delta = self._node_delta(tf_id, node_id)
+            if delta is not None:
+                samples.append((ts, delta))
+        if not samples:
+            return None
+        if len(samples) == 1:
+            return samples[0][1]
+        (ts_lo, mat_lo), (ts_hi, mat_hi) = sorted(samples, key=lambda item: item[0])
+        weight = 0.0 if ts_hi == ts_lo else (query_time - ts_lo) / (ts_hi - ts_lo)
+        return _blend_se3(mat_lo, mat_hi, weight)
+
+    def _edge_corrections(
+        self, graph: dict[str, Any], edges: list[str], query_time: float
+    ) -> dict[str, np.ndarray]:
+        """For each edge whose tf_id matches the deformation stream, its blended SE(3)
+        correction (applied on the parent side of the edge). Empty when nothing matches."""
+        tf_ids = self._load_deformation_ids()
+        if not tf_ids:
+            return {}
+        corrections: dict[str, np.ndarray] = {}
+        for frame in edges:
+            tf_id = tf_id_for(graph[frame]["parent"], frame)
+            if tf_id not in tf_ids:
+                continue
+            delta = self._edge_delta(tf_id, query_time)
+            if delta is not None:
+                corrections[frame] = delta
+        return corrections
+
     def get(
         self,
         target_frame: str,
@@ -360,6 +476,8 @@ class DbTf:
         uncached_static = [f for f in static if f not in self._static_cache]
 
         rows = self._fetch_rows(dynamic, uncached_static, query_time)  # ONE detail query
+        # Per-edge loop-closure corrections (empty unless a deformation stream matches).
+        corrections = self._edge_corrections(graph, edges, query_time)
 
         buffer = MultiTBuffer(buffer_size=_NO_PRUNE)
         for frame in static:
@@ -372,18 +490,53 @@ class DbTf:
                 self._static_cache[frame] = transform
             # restamp the constant to query_time so the buffer's tolerance never
             # rejects a static that was recorded long ago (latched once).
-            buffer.receive_transform(_restamp(transform, query_time))
+            transform = _restamp(transform, query_time)
+            if frame in corrections:
+                transform = _apply_delta(corrections[frame], transform, query_time)
+            buffer.receive_transform(transform)
         for frame in dynamic:
             lo = rows.get((frame, "lo"))
             hi = rows.get((frame, "hi"))
             chosen = lo if lo is not None else hi
             if chosen is None:
                 return None
+            if frame in corrections:
+                # Resolve the raw edge at query_time, then deform it. The correction
+                # already carries the time blend, so a single corrected sample suffices.
+                raw = self._interpolate_dynamic(
+                    frame, graph[frame]["parent"], lo, hi, query_time, time_tolerance
+                )
+                if raw is None:
+                    return None
+                buffer.receive_transform(_apply_delta(corrections[frame], raw, query_time))
+                continue
             buffer.receive_transform(self._decode_blob(chosen, frame))
             other = hi if hi is not None else lo
             if other is not None and other is not chosen:
                 buffer.receive_transform(self._decode_blob(other, frame))
         return buffer.lookup(target_frame, source_frame, time_point, time_tolerance)
+
+    def _interpolate_dynamic(
+        self,
+        frame: str,
+        parent: str,
+        lo: bytes | None,
+        hi: bytes | None,
+        query_time: float,
+        time_tolerance: float | None,
+    ) -> Transform | None:
+        """The raw ``parent <- frame`` transform at ``query_time``, interpolated from
+        the bracketing rows (its own small buffer so the chain buffer only ever sees
+        the corrected result)."""
+        edge_buffer = MultiTBuffer(buffer_size=_NO_PRUNE)
+        chosen = lo if lo is not None else hi
+        if chosen is None:
+            return None
+        edge_buffer.receive_transform(self._decode_blob(chosen, frame))
+        other = hi if hi is not None else lo
+        if other is not None and other is not chosen:
+            edge_buffer.receive_transform(self._decode_blob(other, frame))
+        return edge_buffer.lookup(parent, frame, query_time, time_tolerance)
 
 
 class TfGraph:
@@ -416,6 +569,50 @@ def _restamp(transform: Transform, ts: float) -> Transform:
         child_frame_id=transform.child_frame_id,
         ts=ts,
     )
+
+
+def _apply_delta(delta: np.ndarray, transform: Transform, ts: float) -> Transform:
+    """Deform ``transform`` by the SE(3) correction ``delta``, applied on the parent
+    (frame_id) side: ``corrected = delta @ raw``. Keeps the edge's frame names."""
+    corrected = delta @ transform.to_matrix()
+    return Transform.from_matrix(
+        corrected,
+        ts=ts,
+        frame_id=transform.frame_id,
+        child_frame_id=transform.child_frame_id,
+    )
+
+
+def _quat_slerp(q_lo: np.ndarray, q_hi: np.ndarray, weight: float) -> np.ndarray:
+    """Spherical-linear interpolation between two quaternions ``[x, y, z, w]``."""
+    dot = float(np.dot(q_lo, q_hi))
+    if dot < 0.0:  # take the shorter arc
+        q_hi = -q_hi
+        dot = -dot
+    if dot > 0.9995:  # nearly parallel: lerp + renormalize avoids a divide-by-~0
+        result = q_lo + weight * (q_hi - q_lo)
+        return cast("np.ndarray", result / np.linalg.norm(result))
+    theta_0 = np.arccos(np.clip(dot, -1.0, 1.0))
+    sin_0 = np.sin(theta_0)
+    scale_lo = np.sin((1.0 - weight) * theta_0) / sin_0
+    scale_hi = np.sin(weight * theta_0) / sin_0
+    return cast("np.ndarray", scale_lo * q_lo + scale_hi * q_hi)
+
+
+def _blend_se3(mat_lo: np.ndarray, mat_hi: np.ndarray, weight: float) -> np.ndarray:
+    """Linear-blend-skin two SE(3) deltas by ``weight`` in [0, 1] (0 -> lo, 1 -> hi):
+    lerp the translation, slerp the rotation."""
+    quat_lo = Quaternion.from_rotation_matrix(mat_lo[:3, :3])
+    quat_hi = Quaternion.from_rotation_matrix(mat_hi[:3, :3])
+    blended = _quat_slerp(
+        np.array([quat_lo.x, quat_lo.y, quat_lo.z, quat_lo.w]),
+        np.array([quat_hi.x, quat_hi.y, quat_hi.z, quat_hi.w]),
+        weight,
+    )
+    out = np.eye(4)
+    out[:3, :3] = Quaternion(blended).to_rotation_matrix()
+    out[:3, 3] = (1.0 - weight) * mat_lo[:3, 3] + weight * mat_hi[:3, 3]
+    return out
 
 
 def _safe_table(name: str) -> str:
