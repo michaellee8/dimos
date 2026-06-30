@@ -124,6 +124,14 @@ _Avoid_: full optional dependency set, application module package, public remote
 A lightweight coordinator-visible DimOS Module class that declares the streams, module references, RPC surface, and config expectations used for blueprint wiring.
 _Avoid_: heavy implementation module, connection-only shim, runtime sidecar
 
+**Module IO contract**:
+The coordinator-visible set of typed stream inputs and outputs a DimOS Module exposes for blueprint wiring.
+_Avoid_: stream schema, port list, dynamic ports
+
+**Configuration-resolved module IO**:
+A module IO contract whose streams are determined from the module's final configuration before blueprint wiring.
+_Avoid_: runtime dynamic IO, late-bound ports, generated subclass IO
+
 **Module implementation descriptor**:
 A portable identity for the concrete Module implementation class that a venv module worker imports and instantiates for a module contract.
 _Avoid_: coordinator-imported heavy class, pickled module class, alternate stream contract
