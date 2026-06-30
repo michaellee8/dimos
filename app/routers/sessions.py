@@ -276,8 +276,21 @@ async def create_session(
         published_video_track_name=published_track_name,
     )
     db.add(session)
-    await db.commit()
-    await db.refresh(session)
+    try:
+        await db.commit()
+        await db.refresh(session)
+    except Exception:
+        # The CF session is already minted; commit failed (constraint, disk,
+        # ...). CF has no "delete session" — sessions GC only when all tracks
+        # close. The robot's PC will tear down on the 502, which kills the
+        # transport, but the SFU may keep session metadata for a while. Log
+        # so the leak is auditable.
+        log.exception(
+            "DB commit failed after CF session create — leaking cf_session=%s "
+            "robot=%s owner=%s",
+            cf_result["cf_session_id"], robot_id, owner_id,
+        )
+        raise HTTPException(status_code=502, detail="Session persist failed")
 
     return CreateSessionResponse(
         session_id=session.id,
@@ -501,7 +514,19 @@ async def join_session(
 
     if body.role == "operator":
         session.operator_cf_session_id = operator_cf_id
-        await db.commit()
+        try:
+            await db.commit()
+        except Exception:
+            # The operator's CF session is already minted; commit failed. Log
+            # so the leak is auditable, then release the operator slot and
+            # surface a 502 — the client will retry from scratch.
+            log.exception(
+                "DB commit failed after operator CF session create — leaking "
+                "cf_session=%s session=%s operator=%s",
+                operator_cf_id, session_id, user_id,
+            )
+            await _release_operator_slot(db, session_id, user_id)
+            raise HTTPException(status_code=502, detail="Join persist failed")
 
     return JoinSessionResponse(
         cf_session_id=operator_cf_id,
