@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 import sys
 from threading import Thread
-from typing import cast
+from typing import Literal, cast
 from urllib.request import Request, urlopen
 
 import numpy as np
@@ -35,12 +35,19 @@ sys.path.insert(0, str(PROTOCOL_SRC))
 sys.path.insert(0, str(LIBERO_PRO_SIDECAR_SRC))
 
 from dimos_libero_pro_sidecar.server import (
+    NATIVE_ACTION_SPACE_ID,
     LiberoProRuntimeConfig,
     LiberoProRuntimeState,
+    ensure_libero_config,
     make_server,
     validate_assets,
 )
-from dimos_runtime_protocol import EpisodeResetRequest, MotorActionFrame, StepRequest
+from dimos_runtime_protocol import (
+    EpisodeResetRequest,
+    MotorActionFrame,
+    RuntimeActionFrame,
+    StepRequest,
+)
 
 
 class _FakeLiberoBackend:
@@ -72,6 +79,25 @@ class _RenderCountingBackend(_FakeLiberoBackend):
 
 class _BadActionBackend(_FakeLiberoBackend):
     action_low = [-1.0] * 7
+    action_high = [1.0] * 7
+
+
+class _FakeNativeBackend(_FakeLiberoBackend):
+    action_low = [-1.0] * 7
+    action_high = [1.0] * 7
+
+    def __init__(self) -> None:
+        self.last_action: list[float] = []
+
+    def step(
+        self, action: Sequence[float]
+    ) -> tuple[dict[str, object], float, bool, dict[str, object]]:
+        self.last_action = [float(item) for item in action]
+        return _fake_obs(self.last_action[:7], [0.0]), 0.5, False, {"success": False}
+
+
+class _BadNativeBoundsBackend(_FakeNativeBackend):
+    action_low = [-0.5] * 7
     action_high = [1.0] * 7
 
 
@@ -124,6 +150,98 @@ def test_libero_pro_rejects_incompatible_action_dimension(tmp_path: Path) -> Non
         LiberoProRuntimeState(_config(tmp_path), backend=_BadActionBackend())
 
 
+def test_libero_pro_native_mode_description_advertises_runtime_action_surface(
+    tmp_path: Path,
+) -> None:
+    state = LiberoProRuntimeState(
+        _config(tmp_path, action_mode="native"), backend=_FakeNativeBackend()
+    )
+
+    description = state.describe()
+
+    assert "runtime-action" in description.capabilities
+    assert description.metadata["action_mode"] == "native"
+    assert description.metadata["native_action_space_id"] == NATIVE_ACTION_SPACE_ID
+    assert description.metadata["action_shape"] == [7]
+    assert description.metadata["action_low"] == [-1.0] * 7
+    assert description.metadata["action_high"] == [1.0] * 7
+    assert description.metadata["task_metadata"] == {
+        "benchmark_name": "libero_pro",
+        "task_order_index": 0,
+        "task_index": 0,
+        "task_name": "pick_up_the_black_bowl",
+        "init_state_index": 2,
+    }
+    assert description.metadata["language"] == "pick up the black bowl"
+    assert description.metadata["horizon"] == 1000
+    assert description.metadata["camera_config"] == {
+        "names": ["agentview"],
+        "height": 128,
+        "width": 128,
+    }
+
+
+def test_libero_pro_native_mode_rejects_bad_action_spec(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="bounds compatible"):
+        LiberoProRuntimeState(
+            _config(tmp_path, action_mode="native"), backend=_BadNativeBoundsBackend()
+        )
+
+
+def test_libero_pro_native_mode_steps_runtime_action_directly(tmp_path: Path) -> None:
+    backend = _FakeNativeBackend()
+    state = LiberoProRuntimeState(_config(tmp_path, action_mode="native"), backend=backend)
+
+    response = state.step(
+        StepRequest(
+            episode_id="episode",
+            tick_id=1,
+            action=RuntimeActionFrame(
+                frame_type="runtime_action",
+                space_id=NATIVE_ACTION_SPACE_ID,
+                values=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+                tick_id=1,
+            ),
+        )
+    )
+
+    assert backend.last_action == [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+    assert response.reward == 0.5
+
+
+def test_libero_pro_native_mode_rejects_motor_frame(tmp_path: Path) -> None:
+    state = LiberoProRuntimeState(
+        _config(tmp_path, action_mode="native"), backend=_FakeNativeBackend()
+    )
+
+    with pytest.raises(ValueError, match="native action mode requires RuntimeActionFrame"):
+        state.step(
+            StepRequest(
+                episode_id="episode",
+                tick_id=1,
+                action=MotorActionFrame(robot_id="panda", names=state.motor_names, q=[0.1] * 8),
+            )
+        )
+
+
+def test_libero_pro_motor_mode_rejects_runtime_frame(tmp_path: Path) -> None:
+    state = LiberoProRuntimeState(_config(tmp_path), backend=_FakeLiberoBackend())
+
+    with pytest.raises(ValueError, match="motor action mode requires MotorActionFrame"):
+        state.step(
+            StepRequest(
+                episode_id="episode",
+                tick_id=1,
+                action=RuntimeActionFrame(
+                    frame_type="runtime_action",
+                    space_id=NATIVE_ACTION_SPACE_ID,
+                    values=[0.1] * 7,
+                    tick_id=1,
+                ),
+            )
+        )
+
+
 def test_libero_pro_rejects_unsupported_controller(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="unsupported LIBERO-PRO controller"):
         LiberoProRuntimeState(
@@ -158,6 +276,21 @@ def test_libero_pro_asset_validation_does_not_bootstrap_by_default(tmp_path: Pat
 
     with pytest.raises(FileNotFoundError, match="BDDL root"):
         validate_assets(config)
+
+
+def test_libero_config_is_created_noninteractively(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_root = tmp_path / "libero-config"
+    bddl_root = tmp_path / "libero" / "bddl_files"
+    init_states_root = tmp_path / "libero" / "init_files"
+    monkeypatch.setenv("LIBERO_CONFIG_PATH", str(config_root))
+
+    ensure_libero_config(bddl_root, init_states_root)
+
+    config_text = (config_root / "config.yaml").read_text()
+    assert f"bddl_files: {bddl_root}" in config_text
+    assert f"init_states: {init_states_root}" in config_text
 
 
 def test_libero_pro_http_endpoints_with_stubbed_backend(tmp_path: Path) -> None:
@@ -204,7 +337,11 @@ def test_libero_pro_http_endpoints_with_stubbed_backend(tmp_path: Path) -> None:
 
 
 def _config(
-    tmp_path: Path, *, controller: str = "JOINT_POSITION", visualize: bool = False
+    tmp_path: Path,
+    *,
+    action_mode: str = "motor",
+    controller: str = "JOINT_POSITION",
+    visualize: bool = False,
 ) -> LiberoProRuntimeConfig:
     bddl_root = tmp_path / "bddl"
     init_states_root = tmp_path / "init_states"
@@ -218,6 +355,7 @@ def _config(
         benchmark_name="libero_pro",
         bddl_root=bddl_root,
         init_states_root=init_states_root,
+        action_mode=cast("Literal['motor', 'native']", action_mode),
         controller=controller,
         camera_names=("agentview",),
         init_state_index=2,

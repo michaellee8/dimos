@@ -21,11 +21,13 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
+import importlib.util
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 import time
-from typing import ClassVar, Protocol, cast
+from typing import ClassVar, Literal, Protocol, cast
 from urllib.parse import unquote, urlparse
 
 from dimos_runtime_protocol import (
@@ -33,17 +35,23 @@ from dimos_runtime_protocol import (
     EpisodeResetRequest,
     EpisodeResetResponse,
     HealthResponse,
+    MotorActionFrame,
     MotorDescription,
     MotorStateFrame,
     ObservationFrame,
     ObservationKind,
     ProtocolVersion,
     RobotMotorSurface,
+    RuntimeActionFrame,
     RuntimeDescription,
     ScoreOutput,
     StepRequest,
     StepResponse,
 )
+
+ActionMode = Literal["motor", "native"]
+NATIVE_ACTION_SPACE_ID = "libero.ee_delta_6d_gripper.normalized.v1"
+NATIVE_LIBERO_CONTROLLER = "OSC_POSE"
 
 
 def require_libero(*, visualize: bool = False) -> tuple[object, LiberoEnvFactory]:
@@ -91,6 +99,7 @@ class LiberoProRuntimeConfig:
     task_order_index: int = 0
     task_index: int = 0
     init_state_index: int = 0
+    action_mode: ActionMode = "motor"
     controller: str = "JOINT_POSITION"
     camera_names: tuple[str, ...] = ("agentview",)
     control_freq: int = 20
@@ -146,6 +155,7 @@ class LiberoBackend(Protocol):
 
 class RealLiberoBackend:
     def __init__(self, config: LiberoProRuntimeConfig) -> None:
+        ensure_libero_config(config.bddl_root, config.init_states_root)
         libero_benchmark, env_cls = require_libero(visualize=config.visualize)
         benchmark_factory = libero_benchmark.get_benchmark(config.benchmark_name)
         benchmark = benchmark_factory(config.task_order_index)
@@ -164,7 +174,7 @@ class RealLiberoBackend:
             camera_heights=128,
             camera_widths=128,
             camera_names=list(config.camera_names),
-            controller=config.controller,
+            controller=_env_controller(config),
             control_freq=config.control_freq,
             horizon=config.horizon,
             render_camera=config.camera_names[0] if config.camera_names else None,
@@ -223,10 +233,16 @@ class LiberoProRuntimeState:
         self._validate_action_surface()
 
     def _validate_action_surface(self) -> None:
+        if self.config.action_mode == "native":
+            self._validate_native_action_surface()
+            return
+        if self.config.action_mode != "motor":
+            raise RuntimeError(f"unsupported LIBERO-PRO action mode: {self.config.action_mode}")
+        self._validate_motor_action_surface()
+
+    def _validate_motor_action_surface(self) -> None:
         if self.config.controller not in {"JOINT_POSITION", "PANDA_JOINT_POSITION"}:
-            raise RuntimeError(
-                f"unsupported LIBERO-PRO controller profile: {self.config.controller}"
-            )
+            raise RuntimeError(f"unsupported LIBERO-PRO controller: {self.config.controller}")
         if len(self._action_low) != len(self.motor_names) or len(self._action_high) != len(
             self.motor_names
         ):
@@ -235,11 +251,32 @@ class LiberoProRuntimeState:
                 f"action_dim={len(self._action_low)} motors={len(self.motor_names)}"
             )
 
+    def _validate_native_action_surface(self) -> None:
+        if len(self._action_low) != 7 or len(self._action_high) != 7:
+            raise RuntimeError(
+                f"native LIBERO action mode expects action_dim=7, got {len(self._action_low)}"
+            )
+        incompatible = [
+            (low, high)
+            for low, high in zip(self._action_low, self._action_high, strict=True)
+            if low > -1.0 or high < 1.0
+        ]
+        if incompatible:
+            raise RuntimeError(
+                "native LIBERO action mode requires action_spec bounds compatible with [-1, 1]"
+            )
+
     def describe(self) -> RuntimeDescription:
         return RuntimeDescription(
             runtime_id="libero-pro",
             backend="libero-pro",
-            capabilities=["sync-http", "whole-body-motor-position", "libero-pro"],
+            capabilities=[
+                "sync-http",
+                "libero-pro",
+                "whole-body-motor-position"
+                if self.config.action_mode == "motor"
+                else "runtime-action",
+            ],
             robot_surfaces=[
                 RobotMotorSurface(
                     robot_id=self.config.robot_id,
@@ -261,11 +298,26 @@ class LiberoProRuntimeState:
                 "init_states_root": str(self.config.init_states_root),
                 "init_state_index": self.config.init_state_index,
                 "controller": self.config.controller,
+                "action_mode": self.config.action_mode,
                 "horizon": self.config.horizon,
                 "visualize": self.config.visualize,
                 "camera_names": list(self.config.camera_names),
+                "camera_config": {
+                    "names": list(self.config.camera_names),
+                    "height": 128,
+                    "width": 128,
+                },
                 "action_low": self._action_low,
                 "action_high": self._action_high,
+                "action_shape": [len(self._action_low)],
+                "task_metadata": {
+                    "benchmark_name": self.config.benchmark_name,
+                    "task_order_index": self.config.task_order_index,
+                    "task_index": self.config.task_index,
+                    "task_name": self._backend.task_name,
+                    "init_state_index": self.config.init_state_index,
+                },
+                "native_action_space_id": NATIVE_ACTION_SPACE_ID,
             },
         )
 
@@ -285,22 +337,10 @@ class LiberoProRuntimeState:
         )
 
     def step(self, request: StepRequest) -> StepResponse:
-        if request.action.robot_id != self.config.robot_id:
-            raise ValueError(f"unexpected robot id {request.action.robot_id!r}")
-        if request.action.names != self.motor_names:
-            raise ValueError("action motor names do not match runtime surface")
-        if request.action.mode != CommandMode.POSITION:
-            raise ValueError(f"unsupported command mode {request.action.mode}")
-        if len(request.action.q) != len(self.motor_names):
-            raise ValueError(
-                f"expected {len(self.motor_names)} q targets, got {len(request.action.q)}"
-            )
-        action = [
-            min(max(float(v), low), high)
-            for v, low, high in zip(
-                request.action.q, self._action_low, self._action_high, strict=True
-            )
-        ]
+        if self.config.action_mode == "native":
+            action = self._native_step_action(request.action)
+        else:
+            action = self._motor_step_action(request.action)
         obs, reward, done, info = self._backend.step(action)
         self._sequence += 1
         self._last_obs = obs
@@ -319,6 +359,39 @@ class LiberoProRuntimeState:
             success=self._last_success,
             info={"backend_sequence": self._sequence},
         )
+
+    def _motor_step_action(
+        self, action_frame: MotorActionFrame | RuntimeActionFrame
+    ) -> list[float]:
+        if isinstance(action_frame, RuntimeActionFrame):
+            raise ValueError("motor action mode requires MotorActionFrame, got RuntimeActionFrame")
+        if action_frame.robot_id != self.config.robot_id:
+            raise ValueError(f"unexpected robot id {action_frame.robot_id!r}")
+        if action_frame.names != self.motor_names:
+            raise ValueError("action motor names do not match runtime surface")
+        if action_frame.mode != CommandMode.POSITION:
+            raise ValueError(f"unsupported command mode {action_frame.mode}")
+        if len(action_frame.q) != len(self.motor_names):
+            raise ValueError(
+                f"expected {len(self.motor_names)} q targets, got {len(action_frame.q)}"
+            )
+        return [
+            min(max(float(v), low), high)
+            for v, low, high in zip(
+                action_frame.q, self._action_low, self._action_high, strict=True
+            )
+        ]
+
+    def _native_step_action(
+        self, action_frame: MotorActionFrame | RuntimeActionFrame
+    ) -> list[float]:
+        if isinstance(action_frame, MotorActionFrame):
+            raise ValueError("native action mode requires RuntimeActionFrame, got MotorActionFrame")
+        if action_frame.space_id != NATIVE_ACTION_SPACE_ID:
+            raise ValueError(f"unexpected runtime action space_id {action_frame.space_id!r}")
+        if len(action_frame.values) != 7:
+            raise ValueError(f"expected 7 runtime action values, got {len(action_frame.values)}")
+        return [float(value) for value in action_frame.values]
 
     def _render_if_enabled(self) -> None:
         if not self.config.visualize:
@@ -378,7 +451,7 @@ class LiberoProRuntimeState:
                 stream="robot_state",
                 kind=ObservationKind.STATE,
                 inline_text=f"tick={tick_id} reward={self._last_reward}",
-                metadata={"sequence": self._sequence},
+                metadata={"sequence": self._sequence, "state": self._policy_robot_state()},
             )
         ]
         for camera_name in self.config.camera_names:
@@ -405,6 +478,14 @@ class LiberoProRuntimeState:
                 )
             )
         return frames
+
+    def _policy_robot_state(self) -> list[float]:
+        eef_pos = _padded(_float_list(self._last_obs.get("robot0_eef_pos", [])), 3)
+        eef_axis_angle = _quat_to_axis_angle(
+            _padded(_float_list(self._last_obs.get("robot0_eef_quat", [])), 4, fill=0.0)
+        )
+        gripper_qpos = _padded(_float_list(self._last_obs.get("robot0_gripper_qpos", [])), 2)
+        return [*eef_pos, *eef_axis_angle, *gripper_qpos]
 
     def _store_payload(self, stream: str, tick_id: int, value: object) -> tuple[str, bytes]:
         payload_id = f"{stream}-{tick_id:06d}-{self._sequence:06d}.npy"
@@ -505,8 +586,6 @@ def validate_assets(config: LiberoProRuntimeConfig) -> None:
 
 
 def bootstrap_assets(config: LiberoProRuntimeConfig) -> None:
-    import os
-
     repo_id = os.environ.get("LIBERO_PRO_HF_REPO_ID")
     if not repo_id:
         raise RuntimeError(
@@ -527,17 +606,66 @@ def bootstrap_assets(config: LiberoProRuntimeConfig) -> None:
     )
 
 
+def discover_libero_asset_roots() -> tuple[Path, Path] | None:
+    """Return standard LIBERO package bddl/init roots when LIBERO is installed."""
+
+    spec = importlib.util.find_spec("libero.libero")
+    if spec is None:
+        return None
+    locations = spec.submodule_search_locations
+    if locations:
+        package_root = Path(next(iter(locations)))
+    elif spec.origin:
+        package_root = Path(spec.origin).parent
+    else:
+        return None
+    bddl_root = package_root / "bddl_files"
+    init_states_root = package_root / "init_files"
+    if bddl_root.exists() and init_states_root.exists():
+        return bddl_root, init_states_root
+    return None
+
+
+def ensure_libero_config(bddl_root: Path, init_states_root: Path) -> None:
+    """Create LIBERO's config.yaml noninteractively when it is missing.
+
+    The upstream LIBERO package prompts on first import if the config file is
+    absent. Sidecar runs must be noninteractive, so we create the same default
+    shape using the roots selected by the benchmark runner or CLI.
+    """
+
+    config_root = Path(os.environ.get("LIBERO_CONFIG_PATH", Path.home() / ".libero"))
+    config_file = config_root / "config.yaml"
+    if config_file.exists():
+        return
+    benchmark_root = bddl_root.parent
+    config_root.mkdir(parents=True, exist_ok=True)
+    config_file.write_text(
+        "\n".join(
+            [
+                f"assets: {benchmark_root / 'assets'}",
+                f"bddl_files: {bddl_root}",
+                f"benchmark_root: {benchmark_root}",
+                f"datasets: {benchmark_root.parent / 'datasets'}",
+                f"init_states: {init_states_root}",
+                "",
+            ]
+        )
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8767)
     parser.add_argument("--benchmark-name", required=True)
-    parser.add_argument("--bddl-root", type=Path, required=True)
-    parser.add_argument("--init-states-root", type=Path, required=True)
+    parser.add_argument("--bddl-root", type=Path, default=None)
+    parser.add_argument("--init-states-root", type=Path, default=None)
     parser.add_argument("--robot-id", default="panda")
     parser.add_argument("--task-order-index", type=int, default=0)
     parser.add_argument("--task-index", type=int, default=0)
     parser.add_argument("--init-state-index", type=int, default=0)
+    parser.add_argument("--action-mode", choices=("motor", "native"), default="motor")
     parser.add_argument("--controller", default="JOINT_POSITION")
     parser.add_argument("--control-freq", type=int, default=20)
     parser.add_argument("--horizon", type=int, default=1000)
@@ -546,16 +674,18 @@ def main() -> None:
     parser.add_argument("--allow-asset-bootstrap", action="store_true")
     parser.add_argument("--visualize", action="store_true")
     args = parser.parse_args()
+    bddl_root, init_states_root = _resolve_asset_roots(args.bddl_root, args.init_states_root)
     config = LiberoProRuntimeConfig(
         host=args.host,
         port=args.port,
         benchmark_name=args.benchmark_name,
-        bddl_root=args.bddl_root,
-        init_states_root=args.init_states_root,
+        bddl_root=bddl_root,
+        init_states_root=init_states_root,
         robot_id=args.robot_id,
         task_order_index=args.task_order_index,
         task_index=args.task_index,
         init_state_index=args.init_state_index,
+        action_mode=args.action_mode,
         controller=args.controller,
         camera_names=tuple(args.camera_names or ["agentview"]),
         control_freq=args.control_freq,
@@ -571,6 +701,24 @@ def main() -> None:
         server.server_close()
 
 
+def _resolve_asset_roots(bddl_root: Path | None, init_states_root: Path | None) -> tuple[Path, Path]:
+    if bddl_root is not None and init_states_root is not None:
+        return bddl_root, init_states_root
+    discovered = discover_libero_asset_roots()
+    if discovered is None:
+        missing = []
+        if bddl_root is None:
+            missing.append("--bddl-root")
+        if init_states_root is None:
+            missing.append("--init-states-root")
+        raise SystemExit(
+            "LIBERO asset roots were not provided and could not be discovered from an "
+            f"installed libero package; pass {' and '.join(missing)} or install libero"
+        )
+    discovered_bddl, discovered_init = discovered
+    return bddl_root or discovered_bddl, init_states_root or discovered_init
+
+
 def _task_bddl_file(config: LiberoProRuntimeConfig, benchmark: object, task: object) -> Path:
     get_path = getattr(benchmark, "get_task_bddl_file_path", None)
     if callable(get_path):
@@ -581,6 +729,12 @@ def _task_bddl_file(config: LiberoProRuntimeConfig, benchmark: object, task: obj
         path = Path(str(bddl_file))
         return path if path.is_absolute() else config.bddl_root / path
     return config.bddl_root / f"{getattr(task, 'name', f'task_{config.task_index}')}.bddl"
+
+
+def _env_controller(config: LiberoProRuntimeConfig) -> str:
+    if config.action_mode == "native":
+        return NATIVE_LIBERO_CONTROLLER
+    return config.controller
 
 
 def _load_init_states(
@@ -649,6 +803,28 @@ def _float_list(value: object) -> list[float]:
 
 def _mean_or_zero(values: Sequence[float]) -> float:
     return float(sum(values) / len(values)) if values else 0.0
+
+
+def _padded(values: Sequence[float], size: int, *, fill: float = 0.0) -> list[float]:
+    return [*values, *([fill] * size)][:size]
+
+
+def _quat_to_axis_angle(quat: Sequence[float]) -> list[float]:
+    import math
+
+    if len(quat) != 4 or not any(quat):
+        return [0.0, 0.0, 0.0]
+    x, y, z, w = quat
+    norm = math.sqrt(x * x + y * y + z * z + w * w)
+    if norm == 0.0:
+        return [0.0, 0.0, 0.0]
+    x, y, z, w = x / norm, y / norm, z / norm, w / norm
+    w = min(1.0, max(-1.0, w))
+    angle = 2.0 * math.acos(w)
+    scale = math.sqrt(max(0.0, 1.0 - w * w))
+    if scale < 1e-8:
+        return [0.0, 0.0, 0.0]
+    return [x / scale * angle, y / scale * angle, z / scale * angle]
 
 
 def _shape_list(value: object) -> list[int]:
