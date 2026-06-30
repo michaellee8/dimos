@@ -85,11 +85,14 @@ export async function setupWebRTC(sessionId) {
             `url=${e.url || ''} host=${e.address || ''}:${e.port || ''}`);
     };
 
+    // Only reject on a real ICE failure. 'disconnected' is transient — WebRTC
+    // flaps it on brief network blips (roaming, sleep/wake) and recovers to
+    // 'connected' within ~1s. Treating it as terminal aborts setup mid-flight
+    // and tears down a connection that would have come back on its own.
     const iceFailed = new Promise((_, reject) => {
         pc.oniceconnectionstatechange = () => {
-            if (pc.iceConnectionState === 'failed' ||
-                pc.iceConnectionState === 'disconnected') {
-                reject(new Error('ICE ' + pc.iceConnectionState));
+            if (pc.iceConnectionState === 'failed') {
+                reject(new Error('ICE failed'));
             }
         };
     });
