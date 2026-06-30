@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 logger = setup_logger()
 
 DEFAULT_TF_STREAM = "tf"
+# The topology change-log is a single companion stream (like tf_static).
+GRAPH_STREAM = "tf_graph"
 # Streams the RAM fallback (non-sqlite stores) reads.
 TF_STREAMS = ("tf", "tf_static")
 # Cache the whole change-log in RAM when there are at most this many topology
@@ -70,8 +72,6 @@ class DbTf:
     ) -> None:
         self._store = store
         self._stream = _safe_table(stream)
-        # The topology change-log is a single companion stream, one per tf stream.
-        self._graph_name = f"{self._stream}_graph"
         self._max_in_ram = max_graph_changes_in_ram
         self._stream_names = stream_names  # RAM fallback only
         self._lock = threading.Lock()
@@ -129,10 +129,10 @@ class DbTf:
         return bool(n_rows)
 
     def _graph_stream(self) -> Stream[TfGraph]:
-        return self._store.stream(self._graph_name, TfGraph)
+        return self._store.stream(GRAPH_STREAM, TfGraph)
 
     def _graph_count(self) -> int:
-        if self._graph_name not in set(self._store.list_streams()):
+        if GRAPH_STREAM not in set(self._store.list_streams()):
             return 0
         return self._graph_stream().count()
 
@@ -193,7 +193,7 @@ class DbTf:
         conn.commit()
 
         # build the change-log as a first-class stream: one snapshot per change
-        graph_stream = self._store.stream(self._graph_name, TfGraph)
+        graph_stream = self._store.stream(GRAPH_STREAM, TfGraph)
         structure: dict[str, dict[str, Any]] = {}
         written = 0
         for _row_id, ts, child, parent in rows:
@@ -206,7 +206,7 @@ class DbTf:
         logger.warning("tf graph built: %d topology changes for %r.", written, self._stream)
 
     def _graph_codec(self) -> Any:
-        source = self._store.stream(self._graph_name, TfGraph)._source
+        source = self._store.stream(GRAPH_STREAM, TfGraph)._source
         return cast("Any", source).codec
 
     def _load_graph_if_small(self) -> None:
@@ -237,7 +237,7 @@ class DbTf:
         # Tie-break by id (DESC) so same-timestamp changes resolve to the complete one.
         self.graph_queries += 1
         conn = self._connection()
-        graph, blob = f'"{self._graph_name}"', f'"{self._graph_name}_blob"'
+        graph, blob = f'"{GRAPH_STREAM}"', f'"{GRAPH_STREAM}_blob"'
         row = conn.execute(
             f"SELECT x.data FROM {graph} g JOIN {blob} x ON x.id = g.id "
             "WHERE g.ts <= ? ORDER BY g.ts DESC, g.id DESC LIMIT 1",
