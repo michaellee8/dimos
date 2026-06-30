@@ -34,8 +34,17 @@ from dimos.robot.unitree.go2.connection import GO2Connection
 from dimos.robot.urdf_loader import UrdfLoader
 from dimos.visualization.vis_module import vis_module
 
-_mount_correction = mount_correction_matrix(
-    original_static_tf=mid360_rotated_urdf_path, new_static_tf=mid360_urdf_path
+# Flip on only when the Mid-360 is physically mounted rotated; this un-rotates its
+# Point-LIO cloud + odometry back into the normal mount frame. Off = sensor mounted
+# normally, no correction (identity).
+USE_ROTATED_MID360_MOUNT = False
+
+_mount_correction = (
+    mount_correction_matrix(
+        original_static_tf=mid360_rotated_urdf_path, new_static_tf=mid360_urdf_path
+    )
+    if USE_ROTATED_MID360_MOUNT
+    else None
 )
 
 # GO2Connection is a TfModule; feeding it the normal mount publishes those frames
@@ -131,9 +140,10 @@ unitree_go2_nav_3d = autoconnect(
             (GO2Connection, "odom", "odom_go2"),
         ]
     ),
-    # gravity_align is off so pointlio runs in the raw mount frame; the transform
-    # rewrites its cloud + odometry (and odom->body TF) into the normal mount before
-    # publishing. auto_build recompiles the native binary for the transform support.
+    # gravity_align is off so pointlio runs in the raw mount frame. When the rotated
+    # mount is enabled, transform rewrites its cloud + odometry (and odom->body TF)
+    # into the normal mount; otherwise transform is identity. auto_build recompiles
+    # the native binary for the transform support.
     PointLio.blueprint(
         gravity_align=False,
         space_down_sample=False,
