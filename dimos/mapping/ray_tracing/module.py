@@ -42,14 +42,11 @@ class RayTracingVoxelMapConfig(NativeModuleConfig):
     # Ignore voxels within this range of points for ray tracing clearing
     grace_depth: float = 0.2
     # Bounds for the health of voxels. Positive health means voxel is occupied.
-    min_health: int = -2
+    min_health: int = -1
     max_health: int = 1
     # Don't clear a miss when abs of ray dot normal is below this, clear it when above.
     # Higher clears only on direct hits, lower clears on slight grazes too.
     graze_cos: float = 0.7
-    # Only spare a voxel whose neighborhood was hit within this many frames.
-    # A stale voxel can be cleared, even if it's a grazing hit. Large disables it.
-    recency_window: int = 15
     # Publish the accumulated local map and region bounds every Nth frame. Zero disables them.
     emit_every: int = 1
     # Publish the global map every Nth frame. Zero disables it.

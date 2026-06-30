@@ -26,10 +26,9 @@ class VoxelRayMapper:
         ray_subsample: int = 1,
         shadow_depth: float = 0.2,
         grace_depth: float = 0.2,
-        min_health: int = -2,
+        min_health: int = -1,
         max_health: int = 1,
         graze_cos: float = 0.7,
-        recency_window: int = 15,
     ) -> None: ...
     def add_frame(
         self,

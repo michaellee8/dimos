@@ -32,7 +32,7 @@ class MLSPlannerNativeConfig(NativeModuleConfig):
 
     world_frame: str = "map"
     voxel_size: float = 0.08
-    robot_height: float = 1.5
+    robot_height: float = 0.3
 
     surface_closing_radius: float = 0.8
     node_spacing_m: float = 1.0

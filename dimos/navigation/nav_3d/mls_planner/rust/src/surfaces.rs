@@ -179,8 +179,7 @@ fn close_surface_holes(
     );
 }
 
-/// Whether an occupied voxel lies near this cell at a compatible height, the
-/// evidence that lets the closing fill a sparse tread but not a genuine void.
+/// Whether an occupied voxel lies near this cell at a compatible height.
 fn has_support(by_col: &ColumnIz, ix: i32, iy: i32, iz: i32) -> bool {
     const R: i32 = 3;
     const Z_TOL: i32 = 3;

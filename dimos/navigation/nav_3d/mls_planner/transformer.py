@@ -42,8 +42,8 @@ class MLSPlan(Transformer[PointCloud2, Path]):
         self,
         *,
         goal: tuple[float, float, float],
-        voxel_size: float = 0.1,
-        robot_height: float = 1.5,
+        voxel_size: float = 0.08,
+        robot_height: float = 0.3,
         **planner_kwargs: Any,
     ) -> None:
         self.goal = goal

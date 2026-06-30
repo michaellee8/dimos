@@ -190,8 +190,10 @@ fn collect_wall_adjacent_in_window(
     }
 }
 
-/// True when a missing 4-neighbor opens onto a wall, a cliff, or a drop, rather
-/// than onto sparse data with occupied evidence of a standable step within reach.
+/// Empty columns a gap may span before it counts as a real edge, not a hole.
+const HOLE_SPAN_CELLS: i32 = 4;
+
+/// True when any missing 4-neighbor opens onto a real edge rather than a hole.
 fn real_wall_adjacent(
     cells: &SurfaceCells,
     by_col: &ColumnIz,
@@ -215,28 +217,37 @@ fn real_wall_adjacent(
         if mask & bit != 0 {
             continue; // a surface neighbor already connects this direction
         }
-        if !is_traversable_step(by_col, cx + dx, cy + dy, cz, clearance_cells, step_cells) {
+        if edge_in_direction(by_col, cx, cy, cz, dx, dy, clearance_cells, step_cells) {
             return true; // wall, cliff, or drop in this direction
         }
     }
     false
 }
 
-/// Occupied evidence of a standable surface within a step of cz in this column.
-fn is_traversable_step(
+/// True when the missing neighbor in this direction is a real edge (wall, cliff,
+/// or drop) rather than a small sensor hole that surface bridges within the span.
+#[allow(clippy::too_many_arguments)]
+fn edge_in_direction(
     by_col: &ColumnIz,
-    nx: i32,
-    ny: i32,
+    cx: i32,
+    cy: i32,
     cz: i32,
+    dx: i32,
+    dy: i32,
     clearance_cells: i32,
     step_cells: i32,
 ) -> bool {
-    let Some(zs) = by_col.get(&(nx, ny)) else {
-        return false; // empty column: a cliff/drop edge, not a step
-    };
-    zs.iter().any(|&oz| {
-        (oz - cz).abs() <= step_cells && is_standable(nx, ny, oz, by_col, clearance_cells)
-    })
+    for k in 1..=HOLE_SPAN_CELLS {
+        let (nx, ny) = (cx + dx * k, cy + dy * k);
+        let Some(zs) = by_col.get(&(nx, ny)) else {
+            continue; // empty column: keep scanning across the hole
+        };
+        let reachable = zs.iter().any(|&oz| {
+            (oz - cz).abs() <= step_cells && is_standable(nx, ny, oz, by_col, clearance_cells)
+        });
+        return !reachable;
+    }
+    true
 }
 
 /// Rescale edge costs for the window and its neighbors, whose wall distance may
@@ -519,9 +530,7 @@ fn is_clearer(cells: &SurfaceCells, dist: &[f32], a: CellId, b: CellId) -> bool 
     }
 }
 
-/// Reusable dense scratch for node placement, held across frames so the
-/// per-frame region path pays for the touched window, not the whole map. Each
-/// pass resets the slots it touched, leaving every buffer all-default.
+/// Reusable dense scratch for node placement, left all-default between calls.
 #[derive(Default)]
 pub struct NodeScratch {
     uf: UnionFind,
@@ -543,8 +552,7 @@ impl NodeScratch {
     }
 }
 
-/// Array-backed union-find indexed by CellId. Slots are NO_CELL until make()
-/// enrolls a cell, so find never leaves the domain.
+/// Array-backed union-find indexed by CellId. Unenrolled slots are NO_CELL.
 #[derive(Default)]
 struct UnionFind {
     parent: Vec<CellId>,
@@ -842,6 +850,33 @@ mod tests {
         let id = sc.id((0, 0, 0)).unwrap();
         let mut by_col = ColumnIz::default();
         by_col.insert((1, 0), vec![10]);
+        for col in [(-1, 0), (0, -1), (0, 1)] {
+            by_col.insert(col, vec![0]);
+        }
+        assert!(real_wall_adjacent(&sc, &by_col, id, 5, 2));
+    }
+
+    /// Immediate neighbor empty but surface resumes within the span at the same
+    /// height: a sensor hole to cross, not an edge.
+    #[test]
+    fn small_hole_bridged_by_surface_is_not_an_edge() {
+        let sc = build_cells(&[(0, 0, 0)], 2);
+        let id = sc.id((0, 0, 0)).unwrap();
+        let mut by_col = ColumnIz::default();
+        by_col.insert((2, 0), vec![0]);
+        for col in [(-1, 0), (0, -1), (0, 1)] {
+            by_col.insert(col, vec![0]);
+        }
+        assert!(!real_wall_adjacent(&sc, &by_col, id, 5, 2));
+    }
+
+    /// Empty for more than the span before surface resumes: a real cliff.
+    #[test]
+    fn gap_wider_than_span_still_seeds() {
+        let sc = build_cells(&[(0, 0, 0)], 2);
+        let id = sc.id((0, 0, 0)).unwrap();
+        let mut by_col = ColumnIz::default();
+        by_col.insert((10, 0), vec![0]);
         for col in [(-1, 0), (0, -1), (0, 1)] {
             by_col.insert(col, vec![0]);
         }

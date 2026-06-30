@@ -268,7 +268,7 @@ def main(
     max_range: float = typer.Option(30.0, "--max-range", help="Max ray cast distance (m)"),
     ray_subsample: int = typer.Option(1, "--ray-subsample", help="Keep every Nth ray"),
     emit_every: int = typer.Option(1, "--emit-every", help="Replan every N lidar frames"),
-    robot_height: float = typer.Option(1.0, "--robot-height", help="Robot height (m)"),
+    robot_height: float = typer.Option(0.3, "--robot-height", help="Robot height (m)"),
     surface_closing_radius: float = typer.Option(
         0.8,
         "--surface-closing-radius",

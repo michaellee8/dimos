@@ -17,9 +17,7 @@ pub struct DijkstraState {
     pub dist: Vec<f32>,
     pub pred: Vec<CellId>,
     pub source: Vec<u32>,
-    // Window membership for the regional search. Held here, not reallocated per
-    // call, and left all-false between calls so the per-frame path pays only for
-    // the window.
+    // Window membership for the regional search, left all-false between calls.
     in_window: Vec<bool>,
     heap: BinaryHeap<Scored>,
 }
@@ -124,9 +122,7 @@ pub fn dijkstra_region(
     state.ensure_capacity(n_slots);
     state.heap.clear();
 
-    // Dense membership mask: window.contains() is in the inner relax loop, so a
-    // CellId-indexed array beats a hash lookup per edge over a large window. The
-    // mask is reset to all-false at the end, so only window slots are touched.
+    // Dense membership mask, faster than a hash lookup in the relax loop.
     for &w in window {
         let i = w as usize;
         state.in_window[i] = true;

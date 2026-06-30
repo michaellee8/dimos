@@ -73,6 +73,17 @@ impl Config {
     pub fn closing_passes(&self) -> u32 {
         (self.surface_closing_radius / self.voxel_size).ceil() as u32
     }
+
+    /// Robot-height headroom in cells, the clear space a cell needs to be standable.
+    pub fn headroom_cells(&self) -> i32 {
+        (self.robot_height / self.voxel_size).ceil() as i32
+    }
+
+    /// Max traversable vertical step in cells, with a cell of headroom for the
+    /// discretization that inflates a riser at its nosing.
+    pub fn step_cells(&self) -> i32 {
+        (self.step_threshold_m / self.voxel_size).round() as i32 + 1
+    }
 }
 
 /// Cylindrical region the planner re-derives from a local map slice.
@@ -120,7 +131,7 @@ pub struct Planner {
 impl Planner {
     pub fn update_global_map(&mut self, points: &[(f32, f32, f32)], config: &Config) {
         let voxel_size = config.voxel_size;
-        let clearance = (config.robot_height / voxel_size).ceil() as i32;
+        let clearance = config.headroom_cells();
 
         self.voxel_map.clear();
         for &p in points {
@@ -149,7 +160,7 @@ impl Planner {
         config: &Config,
     ) {
         let voxel_size = config.voxel_size;
-        let clearance = (config.robot_height / voxel_size).ceil() as i32;
+        let clearance = config.headroom_cells();
         let pad = (2 * config.closing_passes()) as i32;
 
         let changed = self.replace_region_voxels(local_points, bounds, voxel_size);
@@ -176,8 +187,8 @@ impl Planner {
         removed: Vec<VoxelKey>,
         config: &Config,
     ) {
-        let step = (config.step_threshold_m / config.voxel_size).floor() as i32;
-        let clearance = (config.robot_height / config.voxel_size).ceil() as i32;
+        let step = config.step_cells();
+        let clearance = config.headroom_cells();
         for &c in &removed {
             self.graph.cells.remove(c);
         }
@@ -322,7 +333,7 @@ impl Planner {
     /// Rebuild all cells from surface_lookup, then nodes and edges.
     fn rebuild_graph(&mut self, config: &Config) {
         let voxel_size = config.voxel_size;
-        let step = (config.step_threshold_m / voxel_size).floor() as i32;
+        let step = config.step_cells();
 
         build_surface_cells(
             &mut self.graph.cells,
@@ -383,8 +394,8 @@ impl Planner {
 
     /// Full rebuild of nodes and node edges from the current cells.
     fn rebuild_nodes(&mut self, config: &Config) {
-        let clearance = (config.robot_height / config.voxel_size).ceil() as i32;
-        let step = (config.step_threshold_m / config.voxel_size).floor() as i32;
+        let clearance = config.headroom_cells();
+        let step = config.step_cells();
         place_nodes(
             &mut self.graph.cells,
             &self.by_col,
@@ -538,6 +549,18 @@ mod region_tests {
             goal_tolerance: 0.3,
             viz_publish_hz: 2.0,
         }
+    }
+
+    #[test]
+    fn step_cells_rounds_and_adds_headroom() {
+        let mut cfg = test_config();
+        cfg.voxel_size = 0.08;
+        // 0.15 / 0.08 = 1.875 rounds up to 2, plus a cell of headroom.
+        cfg.step_threshold_m = 0.15;
+        assert_eq!(cfg.step_cells(), 3);
+        // 0.10 / 0.08 = 1.25 rounds down to 1, plus headroom.
+        cfg.step_threshold_m = 0.10;
+        assert_eq!(cfg.step_cells(), 2);
     }
 
     /// Floor slab with a wall down the middle, as world-frame point centers.

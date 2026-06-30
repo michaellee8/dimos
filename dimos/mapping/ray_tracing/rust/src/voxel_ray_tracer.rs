@@ -31,9 +31,6 @@ pub struct Config {
     /// on direct hits, lower clears on slight grazes too.
     #[validate(range(min = 0.0, max = 1.0))]
     pub graze_cos: f32,
-    /// Only spare a voxel whose neighborhood was hit within this many frames.
-    /// Large disables it.
-    pub recency_window: u32,
     /// Publish the accumulated local map and region bounds every Nth frame. Zero disables them.
     #[validate(range(min = 0))]
     pub emit_every: u32,
@@ -56,7 +53,6 @@ fn validate_health_range(cfg: &Config) -> Result<(), ValidationError> {
 #[derive(Default)]
 pub struct VoxelMap {
     pub voxels: AHashMap<VoxelKey, Voxel>,
-    frame: u32,
 }
 
 impl VoxelMap {
@@ -95,7 +91,7 @@ impl VoxelMap {
             .voxels
             .keys()
             .copied()
-            .map(|k| (k, pooled_normal_and_recency(&self.voxels, k, voxel_size).0))
+            .map(|k| (k, pooled_normal(&self.voxels, k, voxel_size)))
             .collect();
         for (k, n) in updates {
             self.voxels.get_mut(&k).unwrap().normal = n;
@@ -121,9 +117,6 @@ pub struct Voxel {
     sum: Vector3<f32>,
     m2: Matrix3<f32>,
     normal: Option<Vector3<f32>>,
-    last_hit: u32,
-    // Most recent frame any voxel in this one's neighborhood was hit.
-    recency: u32,
 }
 
 impl Default for Voxel {
@@ -134,8 +127,6 @@ impl Default for Voxel {
             sum: Vector3::zeros(),
             m2: Matrix3::zeros(),
             normal: None,
-            last_hit: 0,
-            recency: 0,
         }
     }
 }
@@ -201,17 +192,15 @@ struct Neighbor {
     centroid: Vector3<f32>,
 }
 
-/// Find voxel's normal and the most recent frame any voxel in its
-/// neighborhood was hit, from one scan of the neighborhood.
-fn pooled_normal_and_recency(
+/// Fit a voxel's normal from one scan of its neighborhood.
+fn pooled_normal(
     voxels: &AHashMap<VoxelKey, Voxel>,
     key: VoxelKey,
     voxel_size: f32,
-) -> (Option<Vector3<f32>>, u32) {
+) -> Option<Vector3<f32>> {
     let r = NORMAL_NEIGHBOR_RADIUS;
     let mut nbs: ArrayVec<Neighbor, NEIGHBORHOOD_CAP> = ArrayVec::new();
     let mut n_raw: u32 = 0;
-    let mut recency = 0;
     for dx in -r..=r {
         for dy in -r..=r {
             for dz in -r..=r {
@@ -219,7 +208,6 @@ fn pooled_normal_and_recency(
                 let Some(v) = voxels.get(&nk) else {
                     continue;
                 };
-                recency = recency.max(v.last_hit);
                 if v.num_pts == 0 {
                     continue;
                 }
@@ -240,7 +228,7 @@ fn pooled_normal_and_recency(
         }
     }
     if n_raw < NORMAL_MIN_POINTS {
-        return (None, recency);
+        return None;
     }
 
     let sigma = NORMAL_PLANE_SIGMA_FRAC * voxel_size;
@@ -276,13 +264,12 @@ fn pooled_normal_and_recency(
     // Reject the plane if too many points had to be discarded to fit it.
     let kept: f32 = nbs.iter().zip(&weights).map(|(nb, &w)| w * nb.n).sum();
     if kept < NORMAL_MIN_SUPPORT * n_raw as f32 {
-        return (None, recency);
+        return None;
     }
-    (fit_normal(cov), recency)
+    fit_normal(cov)
 }
 
-/// Refit the cached normal and neighborhood recency of every voxel whose
-/// neighborhood changed this frame.
+/// Refit the cached normal of every voxel whose neighborhood changed this frame.
 fn refresh_voxels(
     map: &mut VoxelMap,
     hits: &AHashSet<VoxelKey>,
@@ -300,35 +287,23 @@ fn refresh_voxels(
             }
         }
     }
-    let updates: Vec<(VoxelKey, Option<Vector3<f32>>, u32)> = dirty
+    let updates: Vec<(VoxelKey, Option<Vector3<f32>>)> = dirty
         .par_iter()
         .filter(|k| map.voxels.contains_key(k))
-        .map(|&k| {
-            let (normal, recency) = pooled_normal_and_recency(&map.voxels, k, voxel_size);
-            (k, normal, recency)
-        })
+        .map(|&k| (k, pooled_normal(&map.voxels, k, voxel_size)))
         .collect();
-    for (k, n, rec) in updates {
+    for (k, n) in updates {
         if let Some(c) = map.voxels.get_mut(&k) {
             c.normal = n;
-            c.recency = rec;
         }
     }
 }
 
-/// Spare a clearing miss only when a grazing ray skims a recently hit planar
-/// surface. Stale voxels or those with no normal are left to the health checks.
-fn should_spare(
-    c: &Voxel,
-    ray_unit: Vector3<f32>,
-    graze_cos: f32,
-    frame: u32,
-    recency_window: u32,
-) -> bool {
+/// Spare a clearing miss when a grazing ray skims a planar surface. Voxels with
+/// no plane are left to the health checks.
+fn should_spare(c: &Voxel, ray_unit: Vector3<f32>, graze_cos: f32) -> bool {
     match c.normal {
-        Some(n) => {
-            frame.saturating_sub(c.recency) <= recency_window && ray_unit.dot(&n).abs() < graze_cos
-        }
+        Some(n) => ray_unit.dot(&n).abs() < graze_cos,
         None => false,
     }
 }
@@ -453,8 +428,6 @@ pub fn update_map(
         f32::INFINITY
     };
 
-    map.frame += 1;
-    let frame = map.frame;
     let hits = live_voxels(points, cfg.voxel_size);
 
     let origin_voxel = world_to_voxel(origin.0, origin.1, origin.2, inv);
@@ -483,8 +456,6 @@ pub fn update_map(
                 cfg.shadow_depth,
                 cfg.grace_depth,
                 cfg.graze_cos,
-                frame,
-                cfg.recency_window,
                 origin_voxel,
                 endpoint,
             );
@@ -504,7 +475,6 @@ pub fn update_map(
             ..Default::default()
         });
         c.health = (c.health + 1).min(cfg.max_health);
-        c.last_hit = frame;
     }
 
     for &p in points {
@@ -549,8 +519,6 @@ fn find_misses_along_ray(
     shadow_depth: f32,
     grace_depth: f32,
     graze_cos: f32,
-    frame: u32,
-    recency_window: u32,
     origin_voxel: VoxelKey,
     endpoint: VoxelKey,
 ) {
@@ -664,7 +632,7 @@ fn find_misses_along_ray(
         }
 
         if let Some(c) = map_voxels.get(&(x, y, z)) {
-            if !should_spare(c, ray_unit, graze_cos, frame, recency_window) {
+            if !should_spare(c, ray_unit, graze_cos) {
                 misses.insert((x, y, z));
             }
         }
@@ -685,7 +653,6 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos: 0.5,
-            recency_window: 60,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -727,8 +694,6 @@ mod tests {
             shadow_depth,
             0.0,
             0.5,
-            1,
-            60,
             origin_voxel,
             endpoint,
         );
@@ -874,7 +839,6 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos: 0.5,
-            recency_window: 60,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -1029,7 +993,6 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos: 0.5,
-            recency_window: 60,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -1103,7 +1066,6 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos: 0.5,
-            recency_window: 60,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -1165,7 +1127,6 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos,
-            recency_window: 60,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -1271,9 +1232,10 @@ mod tests {
         );
     }
 
-    /// A grazing ray spares a fresh floor but clears it once stale.
+    /// A grazing ray spares a planar floor, with no dependence on how recently it
+    /// was hit: the normal alone earns the spare.
     #[test]
-    fn stale_planar_voxel_loses_its_spare() {
+    fn grazing_ray_spares_planar_floor() {
         let voxel_size = 0.1_f32;
         let y_half = 0.3_f32;
         let ds = voxel_size / 3.0;
@@ -1286,33 +1248,28 @@ mod tests {
         let origin = (0.0_f32, 0.0_f32, 0.35_f32);
         let ray = vec![(8.0_f32, 0.0, 0.0)];
 
-        let clipped = |recency_window| {
-            let cfg = Config {
-                voxel_size,
-                max_range: 50.0,
-                ray_subsample: 1,
-                shadow_depth: 0.2,
-                grace_depth: 0.2,
-                min_health: 0,
-                max_health: 1,
-                graze_cos: 0.5,
-                recency_window,
-                emit_every: 1,
-                global_emit_every: 1,
-                region_percentile: 95.0,
-            };
-            let (mut map, _) = build_surface(&floor, voxel_size, cfg.max_health);
-            let row: Vec<VoxelKey> = map
-                .voxels
-                .keys()
-                .copied()
-                .filter(|k| k.1 == 0 && k.2 == 0)
-                .collect();
-            update_map(&mut map, origin, &ray, &cfg);
-            row.iter().filter(|k| !map.voxels.contains_key(k)).count()
+        let cfg = Config {
+            voxel_size,
+            max_range: 50.0,
+            ray_subsample: 1,
+            shadow_depth: 0.2,
+            grace_depth: 0.2,
+            min_health: 0,
+            max_health: 1,
+            graze_cos: 0.5,
+            emit_every: 1,
+            global_emit_every: 1,
+            region_percentile: 95.0,
         };
-
-        assert_eq!(clipped(60), 0, "a fresh floor keeps its grazing spare");
-        assert!(clipped(0) > 0, "a stale floor loses its spare and clips");
+        let (mut map, _) = build_surface(&floor, voxel_size, cfg.max_health);
+        let row: Vec<VoxelKey> = map
+            .voxels
+            .keys()
+            .copied()
+            .filter(|k| k.1 == 0 && k.2 == 0)
+            .collect();
+        update_map(&mut map, origin, &ray, &cfg);
+        let clipped = row.iter().filter(|k| !map.voxels.contains_key(k)).count();
+        assert_eq!(clipped, 0, "a planar floor keeps its grazing spare");
     }
 }

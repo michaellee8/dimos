@@ -55,7 +55,7 @@ impl MLSPlanner {
         wall_clearance_m = 0.3,
         wall_buffer_m = 0.75,
         wall_buffer_weight = 100.0,
-        step_threshold_m = 0.25,
+        step_threshold_m = 0.15,
         step_penalty_weight = 4.0,
     ))]
     fn new(
