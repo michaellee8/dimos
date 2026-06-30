@@ -37,6 +37,18 @@ STATE_BACK_CHANNEL_NAME = "state_reliable_back"
 # id under a role-appropriate field name.
 _robot_channel_ids: dict[str, dict[str, int]] = {}
 
+# Per-session asyncio.Lock. Serializes the bridge handler so two concurrent
+# /bridge-datachannel calls (e.g. operator double-click) can't both read
+# session.state_back_channel_id stale, both close it, then both create new
+# pushes — the second hitting repeated_local_track_error and leaving the
+# session permanently un-bridgeable. dict.setdefault is GIL-atomic; we never
+# delete entries (small memory cost vs. correctness — sessions are bounded).
+_session_locks: dict[str, asyncio.Lock] = {}
+
+
+def _session_lock(session_id: str) -> asyncio.Lock:
+    return _session_locks.setdefault(session_id, asyncio.Lock())
+
 
 # ─── Request/Response schemas ────────────────────────────────────────
 
@@ -346,9 +358,13 @@ async def delete_session(
     if not session or session.owner_id != owner_id:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    session.state = "disconnected"
-    _robot_channel_ids.pop(session_id, None)
-    await db.commit()
+    # Lock against a concurrent bridge — without it, the bridge could write
+    # _robot_channel_ids[session_id] AFTER we pop, leaving stale ids visible
+    # via heartbeat for a session that's already marked disconnected.
+    async with _session_lock(session_id):
+        session.state = "disconnected"
+        _robot_channel_ids.pop(session_id, None)
+        await db.commit()
 
 
 # ─── Operator endpoints ──────────────────────────────────────────────
@@ -624,6 +640,18 @@ async def bridge_datachannel(
     if not session.operator_cf_session_id or not session.cf_session_id:
         raise HTTPException(status_code=409, detail="CF sessions not ready")
 
+    # Serialize per-session: prevents the close-then-republish race on
+    # state_reliable_back when two bridges run concurrently for the same
+    # session (operator double-click, retry). Without it both bridges close
+    # the stale push id, both repush, the second hits repeated_local_track
+    # and leaves the session permanently un-bridgeable.
+    async with _session_lock(session_id):
+        return await _bridge_datachannel_locked(session, db)
+
+
+async def _bridge_datachannel_locked(
+    session: TeleopSession, db: AsyncSession
+) -> BridgeDatachannelResponse:
     # CF requires each /datachannels/new call to be one direction (all local OR
     # all remote) — mixing errors "Pushing and Pulling ... unsupported". Hence 4
     # separate calls below, not 2; don't re-bundle.
@@ -790,11 +818,13 @@ async def leave_session(
     user_id = user["sub"]
 
     if session.operator_id == user_id:
-        session.operator_id = None
-        session.operator_cf_session_id = None
-        session.state = "idle"
-        _robot_channel_ids.pop(session_id, None)
-        await db.commit()
+        # Same rationale as delete_session: serialize with bridges.
+        async with _session_lock(session_id):
+            session.operator_id = None
+            session.operator_cf_session_id = None
+            session.state = "idle"
+            _robot_channel_ids.pop(session_id, None)
+            await db.commit()
 
     return {"session_id": session_id, "state": session.state}
 
