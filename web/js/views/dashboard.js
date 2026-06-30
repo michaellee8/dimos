@@ -169,7 +169,15 @@ async function loadRobots() {
             listEl.innerHTML = '<p class="text-gray-500 text-sm py-4 text-center">No robots online. Start a robot with a registered API key.</p>';
             return;
         }
-        listEl.innerHTML = arr.map(s => `
+        listEl.innerHTML = arr.map(s => {
+            // "Reclaim" — same user has an active binding (likely a stale
+            // session from a tab reload that bypassed /leave). The broker's
+            // atomic operator-claim treats operator_id==me as idempotent, so
+            // hitting Connect here just re-uses the slot we already own. Other
+            // operators still see "Busy".
+            const mine = s.state === 'active' && s.operator_id === state.userEmail;
+            const busy = s.state === 'active' && !mine;
+            return `
             <div class="flex items-center justify-between p-3 bg-[#1f1f1f] rounded-lg">
                 <div class="flex items-center gap-3">
                     <div class="w-2 h-2 rounded-full ${s.state === 'active' ? 'bg-green-400' : s.state === 'idle' ? 'bg-yellow-400' : 'bg-gray-500'}"></div>
@@ -181,11 +189,12 @@ async function loadRobots() {
                 </div>
                 <button data-id="${s.session_id}" data-name="${escHtml(s.robot_name)}" data-transport="${escHtml(s.transport || 'cloudflare')}"
                     class="connect-btn px-4 py-2 bg-dim-500 hover:bg-dim-600 text-bg-950 text-sm rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                    ${s.state === 'active' ? 'disabled' : ''}>
-                    ${s.state === 'active' ? 'Busy' : 'Connect'}
+                    ${busy ? 'disabled' : ''}>
+                    ${busy ? 'Busy' : mine ? 'Reclaim' : 'Connect'}
                 </button>
             </div>
-        `).join('');
+        `;
+        }).join('');
         // Desktop → Go2 cockpit (working teleop + cockpit layout); VR → headset.
         const handler = state.xrSupported ? connectToRobot : connectGo2;
         listEl.querySelectorAll('.connect-btn').forEach(btn => {
