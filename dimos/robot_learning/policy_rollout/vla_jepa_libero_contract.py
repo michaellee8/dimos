@@ -15,17 +15,16 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import cast
+from typing import Any, cast
 
-from dimos_runtime_protocol import ObservationFrame, ObservationKind
 import numpy as np
 
-from dimos.robot_learning.policy_rollout.evaluation import RuntimeObservationSample
 from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
+    RobotLearningSample,
+    RobotPolicyAction,
     RobotPolicyContractDescription,
-    RuntimeActionOutput,
 )
 
 VLA_JEPA_LIBERO_ACTION_SPACE_ID = "libero.ee_delta_6d_gripper.normalized.v1"
@@ -45,13 +44,12 @@ class VlaJepaLiberoRobotContract:
         self._wrist_stream_candidates = tuple(wrist_stream_candidates)
         self._state_stream = state_stream
 
-    def to_backend_batch(self, sample: RuntimeObservationSample) -> BackendBatch:
-        frames = {frame.stream: frame for frame in sample.observations}
-        payloads = _payload_mapping(sample.metadata)
-        agentview = self._image_payload(frames, payloads, self._agentview_stream)
-        wrist_stream = self._select_wrist_stream(frames)
-        wrist = self._image_payload(frames, payloads, wrist_stream)
-        state = self._state_vector(frames, sample.metadata)
+    def to_backend_batch(self, sample: RobotLearningSample) -> BackendBatch:
+        observations = sample.observations
+        agentview = self._image_payload(observations, self._agentview_stream)
+        wrist_stream = self._select_wrist_stream(observations)
+        wrist = self._image_payload(observations, wrist_stream)
+        state = self._state_vector(observations)
         language = self._language(sample)
 
         return BackendBatch(
@@ -72,7 +70,7 @@ class VlaJepaLiberoRobotContract:
             },
         )
 
-    def from_backend_output(self, output: BackendOutputEnvelope) -> RuntimeActionOutput:
+    def from_backend_output(self, output: BackendOutputEnvelope) -> RobotPolicyAction:
         values = _flat_float_values(output.output)
         if len(values) != 7:
             raise ValueError(
@@ -82,7 +80,7 @@ class VlaJepaLiberoRobotContract:
             raise ValueError("VLA-JEPA LIBERO action contains non-finite values")
         if any(value < -1.0 or value > 1.0 for value in values):
             raise ValueError("VLA-JEPA LIBERO action must be within [-1, 1]")
-        return RuntimeActionOutput(
+        return RobotPolicyAction(
             space_id=VLA_JEPA_LIBERO_ACTION_SPACE_ID,
             values=tuple(values),
             metadata={"backend_metadata": dict(output.metadata)},
@@ -109,9 +107,9 @@ class VlaJepaLiberoRobotContract:
             },
         )
 
-    def _select_wrist_stream(self, frames: Mapping[str, ObservationFrame]) -> str:
+    def _select_wrist_stream(self, observations: Mapping[str, object]) -> str:
         for stream in self._wrist_stream_candidates:
-            if stream in frames:
+            if stream in observations:
                 return stream
         raise ValueError(
             "missing VLA-JEPA LIBERO wrist/eye-in-hand image stream; "
@@ -120,18 +118,12 @@ class VlaJepaLiberoRobotContract:
 
     def _image_payload(
         self,
-        frames: Mapping[str, ObservationFrame],
-        payloads: Mapping[str, object],
+        observations: Mapping[str, object],
         stream: str,
     ) -> np.ndarray:
-        frame = frames.get(stream)
-        if frame is None:
-            raise ValueError(f"missing VLA-JEPA LIBERO image stream {stream!r}")
-        if frame.kind != ObservationKind.IMAGE:
-            raise ValueError(f"observation stream {stream!r} must be an image")
-        payload = payloads.get(stream, frame.metadata.get("array"))
+        payload = observations.get(stream)
         if payload is None:
-            raise ValueError(f"missing image payload for stream {stream!r}")
+            raise ValueError(f"missing VLA-JEPA LIBERO image stream {stream!r}")
         image = np.asarray(payload)
         if image.ndim != 3 or image.shape[2] != 3:
             raise ValueError(f"image stream {stream!r} must have HWC RGB shape")
@@ -140,19 +132,10 @@ class VlaJepaLiberoRobotContract:
         flipped = np.flip(image, axis=(0, 1)).copy()
         return np.transpose(flipped, (2, 0, 1)).astype(np.float32) / 255.0
 
-    def _state_vector(
-        self, frames: Mapping[str, ObservationFrame], metadata: Mapping[str, object]
-    ) -> np.ndarray:
-        frame = frames.get(self._state_stream)
-        if frame is None:
-            raise ValueError(f"missing VLA-JEPA LIBERO state stream {self._state_stream!r}")
-        if frame.kind != ObservationKind.STATE:
-            raise ValueError(f"observation stream {self._state_stream!r} must be state")
-        state = metadata.get(
-            "robot_state", frame.metadata.get("state", frame.metadata.get("values"))
-        )
+    def _state_vector(self, observations: Mapping[str, object]) -> np.ndarray:
+        state = observations.get(self._state_stream)
         if state is None:
-            raise ValueError("missing VLA-JEPA LIBERO 8D robot state values")
+            raise ValueError(f"missing VLA-JEPA LIBERO state stream {self._state_stream!r}")
         array = np.asarray(state, dtype=np.float32)
         if array.shape != (8,):
             raise ValueError(f"VLA-JEPA LIBERO robot state must have shape (8,), got {array.shape}")
@@ -160,20 +143,11 @@ class VlaJepaLiberoRobotContract:
             raise ValueError("VLA-JEPA LIBERO robot state contains non-finite values")
         return array
 
-    def _language(self, sample: RuntimeObservationSample) -> str:
-        language = sample.metadata.get(
-            "language", sample.runtime_description.metadata.get("language")
-        )
+    def _language(self, sample: RobotLearningSample) -> str:
+        language = sample.task or sample.metadata.get("language")
         if not isinstance(language, str) or not language.strip():
             raise ValueError("missing VLA-JEPA LIBERO task language")
         return language
-
-
-def _payload_mapping(metadata: Mapping[str, object]) -> Mapping[str, object]:
-    payloads = metadata.get("payloads", {})
-    if not isinstance(payloads, Mapping):
-        raise ValueError("sample metadata payloads must be a mapping")
-    return cast("Mapping[str, object]", payloads)
 
 
 def _flat_float_values(value: object) -> list[float]:
@@ -197,3 +171,7 @@ def _as_numpy_compatible(value: object) -> object:
     if callable(numpy):
         return numpy()
     return value
+
+
+def create_contract(**params: object) -> VlaJepaLiberoRobotContract:
+    return VlaJepaLiberoRobotContract(**cast("dict[str, Any]", params))

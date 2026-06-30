@@ -6,12 +6,34 @@ checkpoint through the DimOS robot-learning seams:
 ```text
 BenchmarkPolicyEvalRunner
   -> RuntimeSidecarClient.reset(...)
-  -> RobotPolicyModule.infer_action(sample)
+  -> LiberoRobotLearningSampleBuilder.build(...)
+  -> RobotPolicyModule.infer_action(RobotLearningSample)
      -> VlaJepaLiberoRobotContract.to_backend_batch(...)
      -> LeRobotBackend.infer_batch(...)
      -> VlaJepaLiberoRobotContract.from_backend_output(...)
-  -> RuntimeSidecarClient.step(RuntimeActionFrame)
+  -> RobotPolicyAction
+  -> BenchmarkPolicyEvalRunner adapts to RuntimeActionFrame
+  -> RuntimeSidecarClient.step(...)
 ```
+
+`RobotPolicyModule` is a first-class DimOS `Module`. It owns backend lifecycle,
+policy reset, contract conversion, inference, and `RobotPolicyAction` emission.
+Benchmark evaluation owns sidecar reset/step, sample construction, action-frame
+adaptation, scoring, artifacts, videos, and the gate. `BenchmarkPolicyEvalModule`
+wraps the runner for module/blueprint-compatible lockstep evaluation.
+
+Policy backends and contracts are selected through lazy registries:
+
+```python
+RobotPolicyModule.blueprint(
+    backend_type="lerobot",
+    backend_params={"checkpoint_id": "lerobot/VLA-JEPA-LIBERO"},
+    contract_type="vla_jepa_libero",
+)
+```
+
+The helper `lerobot_libero_policy_eval_blueprint(...)` returns a blueprint-shaped
+composition of `RobotPolicyModule` and `BenchmarkPolicyEvalModule` for this gate.
 
 The v1 path intentionally bypasses `ControlCoordinator`; the sidecar runs in
 native LIBERO action mode and accepts the official relative end-effector delta +
@@ -48,7 +70,7 @@ export CMAKE_POLICY_VERSION_MINIMUM=3.5
 CMAKE_POLICY_VERSION_MINIMUM=3.5 \
 uv run \
   --with libero \
-  --with git+https://github.com/huggingface/lerobot.git \
+  --with "lerobot[vla_jepa] @ git+https://github.com/huggingface/lerobot.git" \
   python scripts/benchmarks/demo_lerobot_libero_policy_rollout.py \
   --artifact-dir artifacts/benchmark/lerobot-vla-jepa-libero
 ```
@@ -76,7 +98,7 @@ uv run --with libero \
   --no-enforce-gate
 ```
 
-This still constructs a `RobotPolicyModule` and uses the real
+This still constructs the module-backed workflow and uses the real
 `VlaJepaLiberoRobotContract`, but the backend returns a fixed 7D action.
 
 ## Artifacts

@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
 from io import BytesIO
 import json
@@ -25,6 +25,7 @@ from dimos_runtime_protocol import (
     EpisodeResetRequest,
     EpisodeResetResponse,
     ObservationFrame,
+    ObservationKind,
     RuntimeActionFrame,
     RuntimeDescription,
     StepRequest,
@@ -34,11 +35,16 @@ import imageio.v2 as imageio
 import numpy as np
 
 from dimos.benchmark.runtime.artifacts import write_json
+from dimos.core.coordination.blueprints import Blueprint, autoconnect
+from dimos.core.core import rpc
+from dimos.core.module import Module, ModuleConfig
 from dimos.robot_learning.policy_rollout.models import (
     JsonObject,
-    RuntimeActionOutput,
+    RobotLearningSample,
+    RobotPolicyAction,
 )
 from dimos.robot_learning.policy_rollout.robot_policy_module import RobotPolicyModule
+from dimos.spec.utils import Spec
 
 
 @dataclass(frozen=True)
@@ -51,23 +57,6 @@ class BenchmarkEpisodeSpec:
     init_state_index: int
     seed: int | None = None
     options: JsonObject = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class RuntimeObservationSample:
-    """Sidecar observation sample passed to a robot policy module."""
-
-    episode_id: str
-    tick_id: int
-    task_id: str
-    task_index: int
-    init_state_index: int
-    observations: tuple[ObservationFrame, ...]
-    runtime_description: RuntimeDescription
-    reward: float = 0.0
-    done: bool = False
-    success: bool | None = None
-    metadata: JsonObject = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -110,6 +99,170 @@ class RuntimeClient(Protocol):
     def payload(self, data_ref: str) -> bytes: ...
 
 
+class PolicyActionSource(Spec, Protocol):
+    def reset(self, episode_id: str | None = None) -> None: ...
+
+    def infer_action(self, sample: RobotLearningSample) -> RobotPolicyAction: ...
+
+    def close(self) -> None: ...
+
+    def describe_backend(self) -> object: ...
+
+    def describe_contract(self) -> object: ...
+
+
+class BenchmarkPolicyEvalModuleConfig(ModuleConfig):
+    """Config for module-compatible benchmark policy evaluation."""
+
+    artifact_dir: str = "artifacts/benchmark/policy-eval"
+    max_steps: int = 1000
+    success_threshold: float = 0.50
+    close_policy_on_finish: bool = False
+    video_dir: str | None = None
+    video_streams: tuple[str, ...] = ()
+    video_fps: int = 20
+
+
+class BenchmarkPolicyEvalModule(Module):
+    """DimOS module wrapper for lockstep benchmark policy evaluation.
+
+    V1 keeps runtime and policy calls RPC-style/lockstep. The demo script may
+    inject a local runtime client and policy module, while future blueprints can
+    supply remote module clients behind the same protocol surface.
+    """
+
+    config: BenchmarkPolicyEvalModuleConfig
+    robot_policy_module: PolicyActionSource | None
+
+    def __init__(
+        self,
+        runtime_client: RuntimeClient | None = None,
+        robot_policy_module: PolicyActionSource | None = None,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._runtime_client = runtime_client
+        self.robot_policy_module = robot_policy_module
+        self._last_results: tuple[BenchmarkEpisodeResult, ...] = ()
+
+    @property
+    def last_results(self) -> tuple[BenchmarkEpisodeResult, ...]:
+        return self._last_results
+
+    def configure(
+        self,
+        *,
+        runtime_client: RuntimeClient,
+        robot_policy_module: PolicyActionSource,
+    ) -> None:
+        self._runtime_client = runtime_client
+        self.robot_policy_module = robot_policy_module
+
+    @rpc
+    def run_episodes(self, episodes: list[BenchmarkEpisodeSpec]) -> BenchmarkEvaluationSummary:
+        policy_module = self.robot_policy_module
+        if self._runtime_client is None or policy_module is None:
+            raise RuntimeError("BenchmarkPolicyEvalModule requires runtime and policy clients")
+        runner = BenchmarkPolicyEvalRunner(
+            runtime_client=self._runtime_client,
+            robot_policy_module=policy_module,
+            artifact_dir=Path(self.config.artifact_dir),
+            max_steps=self.config.max_steps,
+            success_threshold=self.config.success_threshold,
+            close_policy_on_finish=self.config.close_policy_on_finish,
+            video_dir=Path(self.config.video_dir) if self.config.video_dir is not None else None,
+            video_streams=self.config.video_streams,
+            video_fps=self.config.video_fps,
+        )
+        summary = runner.run(episodes)
+        self._last_results = runner.last_results
+        return summary
+
+    def close(self) -> None:
+        self._close_module()
+
+    @rpc
+    def stop(self) -> None:
+        if self.config.close_policy_on_finish and self.robot_policy_module is not None:
+            self.robot_policy_module.close()
+        super().stop()
+
+
+def lerobot_libero_policy_eval_blueprint(
+    *,
+    checkpoint_id: str = "lerobot/VLA-JEPA-LIBERO",
+    device: str | None = None,
+    artifact_dir: str = "artifacts/benchmark/lerobot-vla-jepa-libero",
+    max_steps: int = 1000,
+    success_threshold: float = 0.50,
+) -> Blueprint:
+    """Create the module-shaped LeRobot LIBERO policy-evaluation blueprint.
+
+    The runtime sidecar is still created by the benchmark/demo orchestration per
+    episode; this blueprint captures the policy module and evaluation module
+    configuration for DimOS module composition and future runtime-client remaps.
+    """
+
+    backend_params: dict[str, object] = {"checkpoint_id": checkpoint_id}
+    if device is not None:
+        backend_params["device"] = device
+    return autoconnect(
+        RobotPolicyModule.blueprint(
+            backend_type="lerobot",
+            backend_params=backend_params,
+            contract_type="vla_jepa_libero",
+            contract_params={},
+        ),
+        BenchmarkPolicyEvalModule.blueprint(
+            artifact_dir=artifact_dir,
+            max_steps=max_steps,
+            success_threshold=success_threshold,
+        ),
+    )
+
+
+class LiberoRobotLearningSampleBuilder:
+    """Convert LIBERO runtime observations into RobotLearningSample instances."""
+
+    def build(
+        self,
+        *,
+        episode: BenchmarkEpisodeSpec,
+        tick_id: int,
+        observations: Sequence[ObservationFrame],
+        runtime_description: RuntimeDescription,
+        payloads: Mapping[str, object],
+        reward: float = 0.0,
+        done: bool = False,
+        success: bool | None = None,
+    ) -> RobotLearningSample:
+        observation_values: dict[str, object] = dict(payloads)
+        for frame in observations:
+            if frame.kind == "state" or frame.kind == ObservationKind.STATE:
+                state = frame.metadata.get("state", frame.metadata.get("values"))
+                if state is not None:
+                    observation_values[frame.stream] = state
+        language = runtime_description.metadata.get("language")
+        task = language if isinstance(language, str) else None
+        return RobotLearningSample(
+            sample_id=f"{episode.episode_id}:{tick_id}",
+            episode_id=episode.episode_id,
+            tick_id=tick_id,
+            task_id=episode.task_id,
+            task_index=episode.task_index,
+            init_state_index=episode.init_state_index,
+            observations=observation_values,
+            task=task,
+            metadata={
+                "reward": reward,
+                "done": done,
+                "success": success,
+                "observed_streams": tuple(frame.stream for frame in observations),
+                "runtime_metadata": dict(runtime_description.metadata),
+            },
+        )
+
+
 class BenchmarkPolicyEvalRunner:
     """Own benchmark lifecycle and execute robot-policy actions through runtime client.
 
@@ -122,7 +275,7 @@ class BenchmarkPolicyEvalRunner:
         self,
         *,
         runtime_client: RuntimeClient,
-        robot_policy_module: RobotPolicyModule[RuntimeObservationSample],
+        robot_policy_module: PolicyActionSource,
         artifact_dir: Path,
         max_steps: int,
         success_threshold: float = 0.50,
@@ -144,6 +297,7 @@ class BenchmarkPolicyEvalRunner:
         self._video_dir = video_dir
         self._video_streams = tuple(video_streams)
         self._video_fps = video_fps
+        self._sample_builder = LiberoRobotLearningSampleBuilder()
         self._last_results: tuple[BenchmarkEpisodeResult, ...] = ()
 
     @property
@@ -193,7 +347,7 @@ class BenchmarkPolicyEvalRunner:
         done = False
         success: bool | None = None
         failure_reason: str | None = None
-        last_action: RuntimeActionOutput | None = None
+        last_action: RobotPolicyAction | None = None
         observed_streams: tuple[str, ...] = tuple(frame.stream for frame in observations)
         video_frames: dict[str, list[np.ndarray]] = {stream: [] for stream in self._video_streams}
         steps = 0
@@ -201,18 +355,15 @@ class BenchmarkPolicyEvalRunner:
         for tick_id in range(self._max_steps):
             payloads = self._payloads(observations)
             self._append_video_frames(video_frames, payloads)
-            sample = RuntimeObservationSample(
-                episode_id=episode.episode_id,
+            sample = self._sample_builder.build(
+                episode=episode,
                 tick_id=tick_id,
-                task_id=episode.task_id,
-                task_index=episode.task_index,
-                init_state_index=episode.init_state_index,
                 observations=observations,
                 runtime_description=runtime_description,
                 reward=reward_sum,
                 done=done,
                 success=success,
-                metadata={"payloads": payloads},
+                payloads=payloads,
             )
             action = self._robot_policy_module.infer_action(sample)
             frame = _runtime_action_frame(action, tick_id=tick_id)
@@ -341,7 +492,7 @@ def libero_object_episode_matrix(
     ]
 
 
-def _runtime_action_frame(action: RuntimeActionOutput, *, tick_id: int) -> RuntimeActionFrame:
+def _runtime_action_frame(action: RobotPolicyAction, *, tick_id: int) -> RuntimeActionFrame:
     return RuntimeActionFrame(
         frame_type="runtime_action",
         space_id=action.space_id,

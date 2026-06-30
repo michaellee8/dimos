@@ -96,6 +96,10 @@ _Avoid_: task-completion dependency, signal-based rollout synchronization, specu
 The robot-learning action form a policy is trained or configured to produce before it is adapted for a DimOS control task.
 _Avoid_: assuming all policy actions are joint positions, opaque policy output
 
+**Robot policy action**:
+A runtime-independent robot-learning action emitted by a robot policy module after backend inference and contract conversion, before adaptation to benchmark runtime frames or real robot control commands.
+_Avoid_: runtime action frame, motor command, backend tensor
+
 **Native benchmark action surface**:
 A benchmark runtime action interface whose command values are defined by the benchmark environment itself rather than by a DimOS motor or joint surface.
 _Avoid_: motor command alias, hidden joint target, controller-specific shortcut
@@ -119,6 +123,10 @@ _Avoid_: joint trajectory task, motor adapter, policy bypass
 **Robot policy contract**:
 A robot-learning boundary that declares a specific robot/runtime and policy-backend input-output convention, including how aligned robot-native samples become backend-ready batches and how backend outputs become robot-native policy action chunks.
 _Avoid_: execution contract, control-task adapter, universal robot contract
+
+**Robot learning sample**:
+A runtime-independent policy observation artifact that carries semantically named observation roles, task context, timestamps, and metadata for robot-learning inference or training.
+_Avoid_: benchmark sidecar response, runtime observation frame, backend-ready batch
 
 **Backend-ready batch**:
 The policy-backend-specific inference or training input produced from an aligned robot-native sample by a robot policy contract.

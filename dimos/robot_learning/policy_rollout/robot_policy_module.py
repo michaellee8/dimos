@@ -12,18 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Generic
+from typing import Any, cast
 
+from pydantic import Field
+
+from dimos.core.core import rpc
+from dimos.core.module import Module, ModuleConfig
 from dimos.robot_learning.policy_rollout.backend import PolicyBackend
-from dimos.robot_learning.policy_rollout.contract import RobotPolicyContract, SampleT
+from dimos.robot_learning.policy_rollout.contract import RobotPolicyContract
 from dimos.robot_learning.policy_rollout.models import (
     PolicyBackendDescription,
+    RobotLearningSample,
+    RobotPolicyAction,
     RobotPolicyContractDescription,
-    RuntimeActionOutput,
+)
+from dimos.robot_learning.policy_rollout.registry import (
+    policy_backend_registry,
+    robot_policy_contract_registry,
 )
 
 
-class RobotPolicyModule(Generic[SampleT]):
+class RobotPolicyModuleConfig(ModuleConfig):
+    """Config for registry-backed robot policy inference modules."""
+
+    backend_type: str = "lerobot"
+    backend_params: dict[str, object] = Field(default_factory=dict)
+    contract_type: str = "vla_jepa_libero"
+    contract_params: dict[str, object] = Field(default_factory=dict)
+    initialize_on_start: bool = False
+
+
+class RobotPolicyModule(Module):
     """Policy inference seam for robot-learning rollouts.
 
     The module owns backend lifecycle, episode reset, contract conversion,
@@ -32,15 +51,42 @@ class RobotPolicyModule(Generic[SampleT]):
     outside this class.
     """
 
-    def __init__(self, backend: PolicyBackend, contract: RobotPolicyContract[SampleT]) -> None:
-        self._backend = backend
-        self._contract = contract
+    config: RobotPolicyModuleConfig
+
+    def __init__(
+        self,
+        backend: PolicyBackend | None = None,
+        contract: RobotPolicyContract | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._backend: PolicyBackend = backend or cast(
+            "PolicyBackend",
+            policy_backend_registry.create(self.config.backend_type, **self.config.backend_params),
+        )
+        self._contract: RobotPolicyContract = contract or cast(
+            "RobotPolicyContract",
+            robot_policy_contract_registry.create(
+                self.config.contract_type, **self.config.contract_params
+            ),
+        )
         self._initialized = False
-        self._last_action: RuntimeActionOutput | None = None
+        self._last_action: RobotPolicyAction | None = None
 
     @property
-    def last_action(self) -> RuntimeActionOutput | None:
+    def last_action(self) -> RobotPolicyAction | None:
         return self._last_action
+
+    @rpc
+    def start(self) -> None:
+        super().start()
+        if self.config.initialize_on_start:
+            self.initialize()
+
+    @rpc
+    def stop(self) -> None:
+        self.close()
+        super().stop()
 
     def initialize(self) -> None:
         if self._initialized:
@@ -48,29 +94,38 @@ class RobotPolicyModule(Generic[SampleT]):
         self._backend.initialize()
         self._initialized = True
 
-    def reset(self, episode_id: str | None = None) -> None:
+    @rpc
+    def reset_episode(self, episode_id: str | None = None) -> None:
         del episode_id
         self.initialize()
         self._backend.reset_episode()
         self._last_action = None
 
-    def infer_action(self, sample: SampleT) -> RuntimeActionOutput:
+    @rpc
+    def reset(self, episode_id: str | None = None) -> None:
+        self.reset_episode(episode_id=episode_id)
+
+    @rpc
+    def infer_action(self, sample: RobotLearningSample) -> RobotPolicyAction:
         self.initialize()
         batch = self._contract.to_backend_batch(sample)
         backend_output = self._backend.infer_batch(batch)
         action = self._contract.from_backend_output(backend_output)
         return self.emit_action(action)
 
-    def emit_action(self, action: RuntimeActionOutput) -> RuntimeActionOutput:
+    def emit_action(self, action: RobotPolicyAction) -> RobotPolicyAction:
         self._last_action = action
         return action
 
     def close(self) -> None:
         self._backend.close()
         self._initialized = False
+        self._close_module()
 
+    @rpc
     def describe_backend(self) -> PolicyBackendDescription:
         return self._backend.describe()
 
+    @rpc
     def describe_contract(self) -> RobotPolicyContractDescription:
         return self._contract.describe()

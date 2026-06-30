@@ -12,22 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Protocol
-
-from dimos.robot_learning.policy_rollout.models import (
-    BackendBatch,
-    BackendOutputEnvelope,
-    RobotLearningSample,
-    RobotPolicyAction,
-    RobotPolicyContractDescription,
-)
-
-
-class RobotPolicyContract(Protocol):
-    """Semantic boundary between runtime samples, backend batches, and actions."""
-
-    def to_backend_batch(self, sample: RobotLearningSample) -> BackendBatch: ...
-
-    def from_backend_output(self, output: BackendOutputEnvelope) -> RobotPolicyAction: ...
-
-    def describe(self) -> RobotPolicyContractDescription: ...
+ROBOT_POLICY_CONTRACTS = {
+    "vla_jepa_libero": "dimos.robot_learning.policy_rollout.vla_jepa_libero_contract:create_contract",
+}

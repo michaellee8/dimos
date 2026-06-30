@@ -12,13 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dimos_runtime_protocol import ObservationFrame, ObservationKind, RuntimeDescription
 import numpy as np
 from numpy.typing import NDArray
 import pytest
 
-from dimos.robot_learning.policy_rollout.evaluation import RuntimeObservationSample
-from dimos.robot_learning.policy_rollout.models import BackendOutputEnvelope
+from dimos.robot_learning.policy_rollout.models import BackendOutputEnvelope, RobotLearningSample
 from dimos.robot_learning.policy_rollout.vla_jepa_libero_contract import (
     VLA_JEPA_LIBERO_ACTION_SPACE_ID,
     VlaJepaLiberoRobotContract,
@@ -124,54 +122,26 @@ def _sample(
     wrist: np.ndarray | None = None,
     state: list[float] | None = None,
     language: str = "pick up the object",
-) -> RuntimeObservationSample:
+) -> RobotLearningSample:
     agentview_payload = (
         agentview if agentview is not None else np.zeros((128, 128, 3), dtype=np.uint8)
     )
     wrist_payload = wrist if wrist is not None else np.ones((128, 128, 3), dtype=np.uint8)
     state_values = state if state is not None else [0.0] * 8
-    frames = []
-    payloads: dict[str, object] = {}
+    observations: dict[str, object] = {}
     if "agentview" in streams:
-        frames.append(_image_frame("agentview"))
-        payloads["agentview"] = agentview_payload
+        observations["agentview"] = agentview_payload
     if "eye_in_hand" in streams:
-        frames.append(_image_frame("eye_in_hand"))
-        payloads["eye_in_hand"] = wrist_payload
+        observations["eye_in_hand"] = wrist_payload
     if "robot_state" in streams:
-        frames.append(
-            ObservationFrame(
-                stream="robot_state",
-                kind=ObservationKind.STATE,
-                metadata={"state": state_values},
-            )
-        )
-    return RuntimeObservationSample(
+        observations["robot_state"] = state_values
+    return RobotLearningSample(
+        sample_id="ep-0:0",
         episode_id="ep-0",
         tick_id=0,
         task_id="libero_object",
         task_index=0,
         init_state_index=0,
-        observations=tuple(frames),
-        runtime_description=RuntimeDescription(
-            runtime_id="libero-pro",
-            backend="libero-pro",
-            capabilities=["runtime-action"],
-            robot_surfaces=[],
-            control_step_hz=20,
-            observation_streams=list(streams),
-            metadata={"language": language},
-        ),
-        metadata={"payloads": payloads},
-    )
-
-
-def _image_frame(stream: str) -> ObservationFrame:
-    return ObservationFrame(
-        stream=stream,
-        kind=ObservationKind.IMAGE,
-        encoding="npy",
-        shape=[128, 128, 3],
-        dtype="uint8",
-        data_ref=f"/payloads/{stream}.npy",
+        observations=observations,
+        task=language,
     )

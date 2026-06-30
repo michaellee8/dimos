@@ -18,15 +18,14 @@ from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
     PolicyBackendDescription,
+    RobotLearningSample,
+    RobotPolicyAction,
     RobotPolicyContractDescription,
-    RuntimeActionOutput,
 )
-from dimos.robot_learning.policy_rollout.robot_policy_module import RobotPolicyModule
-
-
-@dataclass(frozen=True)
-class FakeSample:
-    observation_id: str
+from dimos.robot_learning.policy_rollout.robot_policy_module import (
+    RobotPolicyModule,
+    RobotPolicyModuleConfig,
+)
 
 
 @dataclass
@@ -55,17 +54,17 @@ class FakeBackend:
 
 @dataclass
 class FakeContract:
-    samples: list[FakeSample] = field(default_factory=list)
+    samples: list[RobotLearningSample] = field(default_factory=list)
     outputs: list[BackendOutputEnvelope] = field(default_factory=list)
 
-    def to_backend_batch(self, sample: FakeSample) -> BackendBatch:
+    def to_backend_batch(self, sample: RobotLearningSample) -> BackendBatch:
         self.samples.append(sample)
-        return BackendBatch(payload={"observation_id": sample.observation_id})
+        return BackendBatch(payload={"observation_id": sample.sample_id})
 
-    def from_backend_output(self, output: BackendOutputEnvelope) -> RuntimeActionOutput:
+    def from_backend_output(self, output: BackendOutputEnvelope) -> RobotPolicyAction:
         self.outputs.append(output)
         assert isinstance(output.output, tuple)
-        return RuntimeActionOutput(space_id="fake.action.v1", values=output.output)
+        return RobotPolicyAction(space_id="fake.action.v1", values=output.output)
 
     def describe(self) -> RobotPolicyContractDescription:
         return RobotPolicyContractDescription(contract_type="fake")
@@ -75,38 +74,54 @@ def test_infer_action_uses_contract_backend_and_emits_action() -> None:
     backend = FakeBackend()
     contract = FakeContract()
     module = RobotPolicyModule(backend=backend, contract=contract)
+    sample = RobotLearningSample(sample_id="obs-1", observations={})
 
-    action = module.infer_action(FakeSample(observation_id="obs-1"))
+    try:
+        action = module.infer_action(sample)
 
-    assert backend.initialized
-    assert contract.samples == [FakeSample(observation_id="obs-1")]
-    assert backend.batches == [BackendBatch(payload={"observation_id": "obs-1"})]
-    assert len(contract.outputs) == 1
-    assert action == RuntimeActionOutput(space_id="fake.action.v1", values=(0.1, 0.2, 0.3))
-    assert module.last_action == action
+        assert backend.initialized
+        assert contract.samples == [sample]
+        assert backend.batches == [BackendBatch(payload={"observation_id": "obs-1"})]
+        assert len(contract.outputs) == 1
+        assert action == RobotPolicyAction(space_id="fake.action.v1", values=(0.1, 0.2, 0.3))
+        assert module.last_action == action
+    finally:
+        module.close()
 
 
 def test_public_reset_resets_backend_episode_state_and_clears_last_action() -> None:
     backend = FakeBackend()
     contract = FakeContract()
     module = RobotPolicyModule(backend=backend, contract=contract)
-    module.infer_action(FakeSample(observation_id="obs-1"))
+    try:
+        module.infer_action(RobotLearningSample(sample_id="obs-1", observations={}))
 
-    module.reset(episode_id="episode-2")
+        module.reset_episode(episode_id="episode-2")
 
-    assert backend.initialized
-    assert backend.reset_count == 1
-    assert module.last_action is None
+        assert backend.initialized
+        assert backend.reset_count == 1
+        assert module.last_action is None
+    finally:
+        module.close()
 
 
 def test_descriptions_and_close_delegate_to_seams() -> None:
     backend = FakeBackend()
     contract = FakeContract()
     module = RobotPolicyModule(backend=backend, contract=contract)
+    try:
+        assert module.describe_backend().backend_type == "fake"
+        assert module.describe_contract().contract_type == "fake"
 
-    assert module.describe_backend().backend_type == "fake"
-    assert module.describe_contract().contract_type == "fake"
+        module.close()
 
-    module.close()
+        assert backend.closed
+    finally:
+        module.close()
 
-    assert backend.closed
+
+def test_module_config_defaults_are_registry_names() -> None:
+    module = RobotPolicyModuleConfig()
+
+    assert module.backend_type == "lerobot"
+    assert module.contract_type == "vla_jepa_libero"

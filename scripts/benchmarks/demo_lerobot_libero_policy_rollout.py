@@ -54,11 +54,9 @@ from dimos.robot_learning.policy_rollout.evaluation import (
     BenchmarkEpisodeResult,
     BenchmarkEpisodeSpec,
     BenchmarkEvaluationSummary,
-    BenchmarkPolicyEvalRunner,
-    RuntimeObservationSample,
+    BenchmarkPolicyEvalModule,
     libero_object_episode_matrix,
 )
-from dimos.robot_learning.policy_rollout.lerobot_backend import LeRobotBackend
 from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
@@ -152,7 +150,7 @@ def run_policy_gate(args: argparse.Namespace) -> BenchmarkEvaluationSummary:
 def _run_one_episode(
     args: argparse.Namespace,
     episode: BenchmarkEpisodeSpec,
-    policy_module: RobotPolicyModule[RuntimeObservationSample],
+    policy_module: RobotPolicyModule,
     episode_dir: Path,
     cleanup: dict[str, object],
 ) -> BenchmarkEpisodeResult:
@@ -168,21 +166,24 @@ def _run_one_episode(
         )
         health = _wait_healthy(client, sidecar, args.startup_timeout_s)
         write_json(episode_dir / "health.json", health)
-        runner = BenchmarkPolicyEvalRunner(
+        eval_module = BenchmarkPolicyEvalModule(
             runtime_client=client,
             robot_policy_module=policy_module,
-            artifact_dir=episode_dir,
+            artifact_dir=str(episode_dir),
             max_steps=args.max_steps,
             success_threshold=args.success_threshold,
             close_policy_on_finish=False,
-            video_dir=episode_dir / "videos" if args.save_videos else None,
+            video_dir=str(episode_dir / "videos") if args.save_videos else None,
             video_streams=args.camera_names if args.save_videos else (),
             video_fps=args.control_step_hz,
         )
-        runner.run([episode])
-        if not runner.last_results:
-            raise RuntimeError(f"episode {episode.episode_id} produced no result")
-        return runner.last_results[0]
+        try:
+            eval_module.run_episodes([episode])
+            if not eval_module.last_results:
+                raise RuntimeError(f"episode {episode.episode_id} produced no result")
+            return eval_module.last_results[0]
+        finally:
+            eval_module.close()
     finally:
         _stop_sidecar(sidecar, episode_dir, cleanup_entry)
 
@@ -192,13 +193,18 @@ def _selected_episodes(limit: int | None) -> list[BenchmarkEpisodeSpec]:
     return episodes if limit is None else episodes[:limit]
 
 
-def _policy_module(args: argparse.Namespace) -> RobotPolicyModule[RuntimeObservationSample]:
+def _policy_module(args: argparse.Namespace) -> RobotPolicyModule:
     backend: PolicyBackend
     if args.fake_backend:
         backend = FixedActionBackend(_fixed_action_values(args.fixed_action))
+        return RobotPolicyModule(backend=backend, contract=VlaJepaLiberoRobotContract())
     else:
-        backend = LeRobotBackend(checkpoint_id=args.checkpoint, device=args.device)
-    return RobotPolicyModule(backend, VlaJepaLiberoRobotContract())
+        return RobotPolicyModule(
+            backend_type="lerobot",
+            backend_params={"checkpoint_id": args.checkpoint, "device": args.device},
+            contract_type="vla_jepa_libero",
+            contract_params={},
+        )
 
 
 def _start_sidecar(

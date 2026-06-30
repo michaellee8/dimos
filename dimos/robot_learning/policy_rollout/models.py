@@ -21,6 +21,27 @@ BackendPayload: TypeAlias = Mapping[str, object]
 
 
 @dataclass(frozen=True)
+class RobotLearningSample:
+    """Runtime-independent robot-learning policy input sample.
+
+    Producers such as benchmark runners, simulators, replay loaders, or future
+    temporal sample assemblers populate semantically named observation roles.
+    Policy contracts then convert those roles into backend-specific batches.
+    """
+
+    sample_id: str
+    observations: BackendPayload
+    task: str | None = None
+    episode_id: str | None = None
+    tick_id: int | None = None
+    task_id: str | None = None
+    task_index: int | None = None
+    init_state_index: int | None = None
+    timestamps: Mapping[str, float] = field(default_factory=dict)
+    metadata: JsonObject = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class BackendBatch:
     """Backend-ready policy inference batch produced by a robot contract."""
 
@@ -60,14 +81,21 @@ class RobotPolicyContractDescription:
 
 
 @dataclass(frozen=True)
-class RuntimeActionOutput:
-    """Generic runtime action frame until the runtime protocol model lands."""
+class RobotPolicyAction:
+    """Runtime-independent robot-learning policy action.
+
+    Runtime adapters convert this action into benchmark runtime frames, control
+    task commands, or other execution-specific command surfaces.
+    """
 
     space_id: str
     values: tuple[float, ...]
     sequence: int | None = None
     metadata: JsonObject = field(default_factory=dict)
-    kind: str = "runtime_action"
+    kind: str = "robot_policy_action"
+
+
+RuntimeActionOutput: TypeAlias = RobotPolicyAction
 
 
 @dataclass(frozen=True)

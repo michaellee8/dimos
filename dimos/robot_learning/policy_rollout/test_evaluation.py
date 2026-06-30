@@ -33,14 +33,17 @@ from pytest_mock import MockerFixture
 
 from dimos.robot_learning.policy_rollout.evaluation import (
     BenchmarkEpisodeSpec,
+    BenchmarkPolicyEvalModule,
     BenchmarkPolicyEvalRunner,
-    RuntimeObservationSample,
+    lerobot_libero_policy_eval_blueprint,
 )
 from dimos.robot_learning.policy_rollout.models import (
     PolicyBackendDescription,
+    RobotLearningSample,
+    RobotPolicyAction,
     RobotPolicyContractDescription,
-    RuntimeActionOutput,
 )
+from dimos.robot_learning.policy_rollout.robot_policy_module import RobotPolicyModule
 
 
 @dataclass
@@ -81,17 +84,17 @@ class FakeRuntimeClient:
 class FakeRobotPolicyModule:
     fail_on_infer: bool = False
     reset_episode_ids: list[str | None] = field(default_factory=list)
-    samples: list[RuntimeObservationSample] = field(default_factory=list)
+    samples: list[RobotLearningSample] = field(default_factory=list)
     closed: bool = False
 
     def reset(self, episode_id: str | None = None) -> None:
         self.reset_episode_ids.append(episode_id)
 
-    def infer_action(self, sample: RuntimeObservationSample) -> RuntimeActionOutput:
+    def infer_action(self, sample: RobotLearningSample) -> RobotPolicyAction:
         if self.fail_on_infer:
             raise ValueError("contract mismatch")
         self.samples.append(sample)
-        return RuntimeActionOutput(
+        return RobotPolicyAction(
             space_id="libero.ee_delta_6d_gripper.normalized.v1",
             values=(0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0),
         )
@@ -142,7 +145,7 @@ def test_runner_owns_runtime_reset_step_policy_reset_and_artifacts(tmp_path: Pat
     assert action.frame_type == "runtime_action"
     assert action.tick_id == 0
     assert action.space_id == "libero.ee_delta_6d_gripper.normalized.v1"
-    assert policy.samples[0].observations[0].stream == "agentview"
+    assert "agentview" in policy.samples[0].observations
 
     summary_json = json.loads((tmp_path / "summary.json").read_text())
     assert summary_json["success_rate"] == 1.0
@@ -220,6 +223,98 @@ def test_runner_writes_video_frames_when_enabled(tmp_path: Path, mocker: MockerF
     assert video_writer.call_args.args[0] == tmp_path / "videos" / "ep-0" / "agentview.mp4"
     assert len(video_writer.call_args.args[1]) == 1
     assert video_writer.call_args.kwargs["fps"] == 12
+
+
+def test_module_run_episodes_uses_injected_clients_and_writes_artifacts(
+    tmp_path: Path,
+) -> None:
+    runtime = FakeRuntimeClient(success_by_episode={"ep-0": True})
+    policy = FakeRobotPolicyModule()
+    module = BenchmarkPolicyEvalModule(
+        runtime_client=runtime,
+        robot_policy_module=policy,  # type: ignore[arg-type]
+        artifact_dir=str(tmp_path),
+        max_steps=2,
+    )
+
+    try:
+        summary = module.run_episodes([BenchmarkEpisodeSpec("ep-0", "libero_object", 0, 1, seed=7)])
+
+        assert summary.episodes == 1
+        assert summary.successes == 1
+        assert summary.passed
+        assert len(module.last_results) == 1
+        assert module.last_results[0].episode_id == "ep-0"
+        assert policy.reset_episode_ids == ["ep-0"]
+        assert not policy.closed
+        assert runtime.reset_requests[0].options["task_index"] == 0
+        assert runtime.reset_requests[0].options["init_state_index"] == 1
+        assert len(runtime.step_requests) == 1
+        assert (tmp_path / "summary.json").exists()
+        assert (tmp_path / "runtime_description.json").exists()
+        assert (tmp_path / "contract_description.json").exists()
+        assert (tmp_path / "checkpoint_metadata.json").exists()
+        episode_records = (tmp_path / "episodes.jsonl").read_text().splitlines()
+        assert len(episode_records) == 1
+        assert json.loads(episode_records[0])["success"] is True
+    finally:
+        module.stop()
+
+
+def test_module_run_episodes_uses_configured_clients(tmp_path: Path) -> None:
+    runtime = FakeRuntimeClient(success_by_episode={"ep-0": True})
+    policy = FakeRobotPolicyModule()
+    module = BenchmarkPolicyEvalModule(artifact_dir=str(tmp_path), max_steps=1)
+
+    try:
+        module.configure(
+            runtime_client=runtime,
+            robot_policy_module=policy,  # type: ignore[arg-type]
+        )
+        summary = module.run_episodes([BenchmarkEpisodeSpec("ep-0", "libero_object", 0, 0)])
+
+        assert summary.successes == 1
+        assert len(module.last_results) == 1
+        assert len(runtime.step_requests) == 1
+        assert not policy.closed
+    finally:
+        module.stop()
+
+
+def test_module_run_episodes_requires_runtime_and_policy_clients(
+    tmp_path: Path,
+) -> None:
+    module = BenchmarkPolicyEvalModule(artifact_dir=str(tmp_path))
+
+    try:
+        with pytest.raises(RuntimeError, match="requires runtime and policy clients"):
+            module.run_episodes([BenchmarkEpisodeSpec("ep-0", "libero_object", 0, 0)])
+    finally:
+        module.stop()
+
+
+def test_lerobot_libero_policy_eval_blueprint_configures_modules() -> None:
+    blueprint = lerobot_libero_policy_eval_blueprint(
+        checkpoint_id="checkpoint",
+        device="cpu",
+        artifact_dir="artifacts/out",
+        max_steps=12,
+        success_threshold=0.6,
+    )
+
+    atoms_by_module = {atom.module: atom for atom in blueprint.blueprints}
+    policy_atom = atoms_by_module[RobotPolicyModule]
+    eval_atom = atoms_by_module[BenchmarkPolicyEvalModule]
+
+    assert policy_atom.kwargs["backend_type"] == "lerobot"
+    assert policy_atom.kwargs["backend_params"] == {
+        "checkpoint_id": "checkpoint",
+        "device": "cpu",
+    }
+    assert policy_atom.kwargs["contract_type"] == "vla_jepa_libero"
+    assert eval_atom.kwargs["artifact_dir"] == "artifacts/out"
+    assert eval_atom.kwargs["max_steps"] == 12
+    assert eval_atom.kwargs["success_threshold"] == 0.6
 
 
 def _runtime_description() -> RuntimeDescription:

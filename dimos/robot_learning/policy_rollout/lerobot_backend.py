@@ -282,3 +282,7 @@ def _shape_of(value: object) -> list[int]:
             return [len(value), len(value[0])]
         return [len(value)]
     return []
+
+
+def create_backend(**params: object) -> LeRobotBackend:
+    return LeRobotBackend(**cast("dict[str, Any]", params))
