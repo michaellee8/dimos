@@ -78,6 +78,13 @@ async function _setupWebRTCInner(sessionId) {
         // one as a GL texture source. Only the keyboard one is shown.
         const existed = !!document.getElementById('robot-cam');
         const v = ensureRobotCam();
+        // Stop any prior MediaStream attached to the element so a track
+        // replacement during renegotiation doesn't leak the old track (it
+        // would keep decoding RTP into a stream nothing reads).
+        const prior = v.srcObject;
+        if (prior && prior.getTracks) {
+            for (const t of prior.getTracks()) t.stop();
+        }
         v.srcObject = e.streams[0] || new MediaStream([e.track]);
         if (existed) v.style.display = 'block';
         v.play?.().catch(() => {});  // immersive: no user-gesture; nudge autoplay
