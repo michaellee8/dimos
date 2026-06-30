@@ -177,6 +177,7 @@ impl Planner {
         config: &Config,
     ) {
         let step = (config.step_threshold_m / config.voxel_size).floor() as i32;
+        let clearance = (config.robot_height / config.voxel_size).ceil() as i32;
         for &c in &removed {
             self.graph.cells.remove(c);
         }
@@ -199,6 +200,9 @@ impl Planner {
         let window = self.node_window(&seeds, config);
         place_nodes_region(
             &mut self.graph.cells,
+            &self.by_col,
+            clearance,
+            step,
             &window,
             config.voxel_size,
             config.node_spacing_m,
@@ -207,6 +211,7 @@ impl Planner {
             config.wall_buffer_weight,
             config.step_penalty_weight,
             &mut self.graph.wall_state,
+            &mut self.graph.node_scratch,
             &mut self.graph.nodes,
         );
         build_node_edges_region(
@@ -378,8 +383,13 @@ impl Planner {
 
     /// Full rebuild of nodes and node edges from the current cells.
     fn rebuild_nodes(&mut self, config: &Config) {
+        let clearance = (config.robot_height / config.voxel_size).ceil() as i32;
+        let step = (config.step_threshold_m / config.voxel_size).floor() as i32;
         place_nodes(
             &mut self.graph.cells,
+            &self.by_col,
+            clearance,
+            step,
             config.voxel_size,
             config.node_spacing_m,
             config.wall_clearance_m,
@@ -387,6 +397,7 @@ impl Planner {
             config.wall_buffer_weight,
             config.step_penalty_weight,
             &mut self.graph.wall_state,
+            &mut self.graph.node_scratch,
             &mut self.graph.nodes,
         );
 

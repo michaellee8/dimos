@@ -50,7 +50,7 @@ impl MLSPlanner {
         *,
         voxel_size,
         robot_height,
-        surface_closing_radius = 0.3,
+        surface_closing_radius = 0.8,
         node_spacing_m = 1.0,
         wall_clearance_m = 0.3,
         wall_buffer_m = 0.75,

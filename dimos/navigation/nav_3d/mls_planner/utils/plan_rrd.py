@@ -110,11 +110,7 @@ def _log_path_wp(waypoints: NDArray[np.float32] | None, entity: str, color: list
 def _clearance_colors(
     clearance: NDArray[np.float32], clamp_m: float, hard_clearance: float
 ) -> NDArray[np.uint8]:
-    """Color surface cells by wall clearance.
-
-    Cells inside the hard clearance are impassable, so paint them red. The rest
-    follow a blue ramp clamped so it resolves near walls.
-    """
+    """Color surface cells by wall clearance, red inside the hard clearance."""
     norm = np.clip(np.nan_to_num(clearance / clamp_m, nan=1.0, posinf=1.0), 0.0, 1.0)
     blocked = np.array([4.0, 8.0, 48.0], dtype=np.float64)
     clear = np.array([150.0, 200.0, 255.0], dtype=np.float64)
@@ -268,13 +264,13 @@ def main(
         "fastlio_odometry", "--odom-stream", help="Odometry stream in the recording"
     ),
     align_tol: float = typer.Option(0.05, "--align-tol", help="Lidar/odom alignment tolerance (s)"),
-    voxel_size: float = typer.Option(0.1, "--voxel-size", help="Voxel edge length (m)"),
+    voxel_size: float = typer.Option(0.08, "--voxel-size", help="Voxel edge length (m)"),
     max_range: float = typer.Option(30.0, "--max-range", help="Max ray cast distance (m)"),
     ray_subsample: int = typer.Option(1, "--ray-subsample", help="Keep every Nth ray"),
     emit_every: int = typer.Option(1, "--emit-every", help="Replan every N lidar frames"),
     robot_height: float = typer.Option(1.0, "--robot-height", help="Robot height (m)"),
     surface_closing_radius: float = typer.Option(
-        0.3,
+        0.8,
         "--surface-closing-radius",
         help="Hole-fill radius (m); morphological closing fills holes up to twice this wide",
     ),
@@ -291,7 +287,7 @@ def main(
         100.0, "--wall-buffer-weight", help="Peak soft wall penalty at the clearance edge"
     ),
     step_height: float = typer.Option(
-        0.25,
+        0.15,
         "--step-height",
         help="Max traversable vertical step (m); taller steps are impassable",
     ),
@@ -346,6 +342,7 @@ def main(
         )
 
         configs = _parse_configs(config, wall_clearance, wall_buffer, wall_buffer_weight)
+        ref_clearance = configs[0][0]
         planners = _build_planners(
             configs,
             voxel_size,
@@ -370,7 +367,7 @@ def main(
                     robot_height,
                     render_voxel,
                     clearance_clamp,
-                    configs[0][0],
+                    ref_clearance,
                 )
                 frame += 1
                 print(
