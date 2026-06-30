@@ -25,9 +25,9 @@ a memory2 db, with the rig's mount frames published continuously onto tf. Two va
 captures a raw .pcap of the Mid-360 UDP stream).
 
 The lidar IPs come from each module's own config (``DIMOS_MID360_LIDAR_IP`` for the
-Mid-360 / pcap capture, ``DIMOS_POINTLIO_LIDAR_IP`` for Point-LIO)::
+Mid-360 / pcap capture and Point-LIO both read ``DIMOS_MID360_LIDAR_IP``)::
 
-    export DIMOS_MID360_LIDAR_IP=192.168.1.155 DIMOS_POINTLIO_LIDAR_IP=192.168.1.155
+    export DIMOS_MID360_LIDAR_IP=192.168.1.155
     dimos run mid360-realsense-record            # db only
     dimos run mid360-realsense-record-with-pcap  # db + raw pcap
 
