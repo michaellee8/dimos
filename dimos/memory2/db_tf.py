@@ -19,7 +19,6 @@ A tf class for memory2
 from __future__ import annotations
 
 import bisect
-import re
 import sqlite3
 import threading
 from typing import TYPE_CHECKING, Any, cast
@@ -40,19 +39,12 @@ if TYPE_CHECKING:
 
 logger = setup_logger()
 
-DEFAULT_TF_STREAM = "tf"
-# The topology change-log is a single companion stream (like tf_static).
-GRAPH_STREAM = "tf_graph"
-# Per-keyframe pose-graph nodes from a loop-closure backend (e.g. gsc_pgo). Each row
-# is one DeformationNode, tagged by tf_id (which edge it corrects) and id (the
-# keyframe). A query corrects matching edges using how far the optimizer has moved
-# the bracketing keyframes since they were first recorded.
-DEFORMATION_STREAM = "tf_deformation_nodes"
-# Streams the RAM fallback (non-sqlite stores) reads.
+TF_STREAM = "tf"  # the dynamic transform stream (one transform per row)
 TF_STREAMS = ("tf", "tf_static")
-# Cache the whole change-log in RAM when there are at most this many topology
-# changes (a stable tree — even a many-frame sensor rig — is a one-time setup, not
-# churn); above it, fall back to one indexed graph query per lookup (multi-robot).
+GRAPH_STREAM = "tf_graph"  # changes to the tf tree (with room for non-tree structures)
+DEFORMATION_STREAM = "tf_deformation_nodes"  # loop closure and other deformations
+# 99% of the time there are less than 10 tree changes
+# this cache allows us to avoid a DB query in the offline/map-load case
 DEFAULT_MAX_GRAPH_CHANGES_IN_RAM = 64
 # MultiTBuffer drops samples older than buffer_size seconds; we feed it exactly the
 # bracketing samples and want them all kept, so use a span no recording exceeds.
@@ -60,8 +52,6 @@ _NO_PRUNE = 1.0e15
 # A frame is "static" if its pose never changes; poses are compared rounded to this
 # many decimals (~nanometre / nanoradian) so float noise doesn't read as motion.
 POSE_EQUALITY_DECIMALS = 9
-# enforce safe identifiers for SQL
-_VAR_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class DbTf:
@@ -75,14 +65,10 @@ class DbTf:
     def __init__(
         self,
         store: Store,
-        stream: str = DEFAULT_TF_STREAM,
         max_graph_changes_in_ram: int = DEFAULT_MAX_GRAPH_CHANGES_IN_RAM,
-        stream_names: tuple[str, ...] = TF_STREAMS,
     ) -> None:
         self._store = store
-        self._stream = _safe_table(stream)
         self._max_in_ram = max_graph_changes_in_ram
-        self._stream_names = stream_names  # RAM fallback only
         self._lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
         self._built = False
@@ -120,7 +106,7 @@ class DbTf:
                 return self._buffer
             buffer = MultiTBuffer(buffer_size=_NO_PRUNE)
             available = set(self._store.list_streams())
-            for name in self._stream_names:
+            for name in TF_STREAMS:
                 if name not in available:
                     continue
                 for observation in self._store.stream(name, TFMessage):
@@ -135,9 +121,9 @@ class DbTf:
         if not self._is_sqlite:
             return bool(self._ensure_loaded().buffers)
         conn = self._connection()
-        if self._stream not in set(self._store.list_streams()):
+        if TF_STREAM not in set(self._store.list_streams()):
             return False
-        (n_rows,) = conn.execute(f'SELECT count(*) FROM "{self._stream}"').fetchone()
+        (n_rows,) = conn.execute(f'SELECT count(*) FROM "{TF_STREAM}"').fetchone()
         return bool(n_rows)
 
     def _graph_stream(self) -> Stream[TfGraph]:
@@ -155,25 +141,25 @@ class DbTf:
         if self._built:
             return
         conn = self._connection()
-        (n_rows,) = conn.execute(f'SELECT count(*) FROM "{self._stream}"').fetchone()
+        (n_rows,) = conn.execute(f'SELECT count(*) FROM "{TF_STREAM}"').fetchone()
         if n_rows and self._graph_count() == 0:
             logger.warning(
                 "\n========================================================================\n"
                 "  tf graph stream MISSING for %r. Building it (one-time): tagging tf rows\n"
                 "  with child_frame and writing the topology change-log.\n"
                 "========================================================================",
-                self._stream,
+                TF_STREAM,
             )
             self._build_graph_stream()
         if n_rows:
-            _ensure_child_index(conn, self._stream)  # tf table exists now
+            _ensure_child_index(conn)  # tf table exists now
         self._built = True
 
     def _build_graph_stream(self) -> None:
         """One-time migration: decode every tf row, tag it with its child_frame, and
         append a ``TfGraph`` snapshot whenever the topology changes. A frame counts as
         static if its pose never varies across the whole recording."""
-        safe = self._stream
+        safe = TF_STREAM
         # one decode pass: collect (id, ts, child, parent, pose-key) + per-child poses
         rows: list[tuple[int, float, str, str]] = []
         poses_per_child: dict[str, set[tuple[float, ...]]] = {}
@@ -215,7 +201,7 @@ class DbTf:
             structure[child] = entry
             graph_stream.append(TfGraph(structure), ts=ts)
             written += 1
-        logger.warning("tf graph built: %d topology changes for %r.", written, self._stream)
+        logger.warning("tf graph built: %d topology changes for %r.", written, TF_STREAM)
 
     def _graph_codec(self) -> Any:
         source = self._store.stream(GRAPH_STREAM, TfGraph)._source
@@ -291,7 +277,7 @@ class DbTf:
         return frames
 
     def _codec(self) -> Any:
-        source = self._store.stream(self._stream, TFMessage)._source
+        source = self._store.stream(TF_STREAM, TFMessage)._source
         return cast("Any", source).codec
 
     def _decode_blob(self, data: bytes, frame: str) -> Transform:
@@ -312,7 +298,7 @@ class DbTf:
         static frame its latest row ('st') — all joined to the blob data. Keyed by
         (frame, kind) -> blob bytes."""
         cf = "json_extract(tags, '$.child_frame')"
-        tf, blob = f'"{self._stream}"', f'"{self._stream}_blob"'
+        tf, blob = f'"{TF_STREAM}"', f'"{TF_STREAM}_blob"'
         # One UNION of per-frame, index-served LIMIT-1 subqueries: each is a direct
         # (child_frame, ts) range seek — far cheaper than a window-function scan, and
         # still a single round-trip.
@@ -615,31 +601,24 @@ def _blend_se3(mat_lo: np.ndarray, mat_hi: np.ndarray, weight: float) -> np.ndar
     return out
 
 
-def _safe_table(name: str) -> str:
-    if not _VAR_NAME_PATTERN.match(name):
-        raise ValueError(f"unsafe stream/table name: {name!r}")
-    return name
-
-
 def _connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
-def _ensure_child_index(conn: sqlite3.Connection, stream: str) -> None:
+def _ensure_child_index(conn: sqlite3.Connection) -> None:
     """Index the child_frame json tag on the tf rows so per-frame time queries
     seek. The live recorder gets this for free (the store auto-indexes tag keys on
     tagged appends); this is for migrated recordings and the read side. Requires
     the tf table to exist."""
-    safe = _safe_table(stream)
     # Composite (child_frame, ts) so a per-frame "latest at/before T" is a direct
     # index range seek, not a scan+sort. Index names share SQLite's global namespace
     # with tables, so the name is double-underscore-namespaced to keep it clear of any
     # real stream/table name (no stream would contain "__dbtf_").
-    index_name = f"{safe}__dbtf_child_ts_idx"
+    index_name = f"{TF_STREAM}__dbtf_child_ts_idx"
     conn.execute(
         f'CREATE INDEX IF NOT EXISTS "{index_name}" '
-        f"ON \"{safe}\"(json_extract(tags, '$.child_frame'), ts)"
+        f"ON \"{TF_STREAM}\"(json_extract(tags, '$.child_frame'), ts)"
     )
     conn.commit()
