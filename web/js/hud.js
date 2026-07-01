@@ -60,7 +60,7 @@ export function hudDetailLines() {
         `Link   ${transportLabel()}${ice ? `  ·  ${ice}` : ''}`,
         `Video  ${(v.fps ?? 0).toFixed(0)}fps  ${(((v.kbps ?? 0) / 1000)).toFixed(1)}mbps  ${v.width ?? '—'}x${v.height ?? '—'}`,
         `       loss ${(v.loss_pct ?? 0).toFixed(1)}%  jbuf ${(v.jitter_buffer_ms ?? 0).toFixed(0)}ms`,
-        `       decode ${(v.decode_ms ?? 0).toFixed(0)}ms  freezes ${v.freezes ?? 0}`,
+        `       decode ${(v.decode_ms ?? 0).toFixed(0)}ms  e2e ${v.e2e_latency_ms ? v.e2e_latency_ms.toFixed(0) + 'ms' : '—'}  freezes ${v.freezes ?? 0}`,
         `Cmd    ${cmdLine}`,
         `       ${rateLine}`,
         `Clock  RTT ${state.liveStats.rttMs != null ? state.liveStats.rttMs.toFixed(0) : '—'}ms`,
@@ -94,6 +94,8 @@ export function hudDetailRows() {
             { label: 'Loss', value: `${fmt(v.loss_pct, 1)} %`, health: band(v.loss_pct, 1, 3) },
             { label: 'Jitter buf', value: `${fmt(v.jitter_buffer_ms)} ms`, health: null },
             { label: 'Decode', value: `${fmt(v.decode_ms)} ms`, health: null },
+            { label: 'E2E', value: v.e2e_latency_ms ? `${fmt(v.e2e_latency_ms)} ms` : '—',
+              health: v.e2e_latency_ms ? band(v.e2e_latency_ms, 150, 300) : null },
             { label: 'Freezes', value: `${v.freezes ?? 0}`, health: band(v.freezes, 0, 3) },
         ]},
         { group: 'Command', rows: [
