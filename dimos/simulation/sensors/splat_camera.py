@@ -612,7 +612,7 @@ def make_backend(splat: SplatData, spec: CameraSpec) -> SplatCameraBackend:
 # Asset loading without mujoco_playground (so MLX-Metal stays alive)
 # =============================================================================
 #
-# ``dimos.simulation.mujoco.model.get_assets`` walks several directories
+# ``dimos.simulation.backend.mujoco.assets.get_assets`` walks several directories
 # and reads mesh bytes, but it does so via ``mjx_env.update_assets``.
 # Importing ``mjx_env`` pulls in ``mujoco_playground._src.wrapper_torch``
 # which imports NVIDIA Warp, which initializes Metal aggressively on
@@ -643,7 +643,7 @@ def _menagerie_path() -> FilePath | None:
 
 
 def _load_robot_assets(data_dir: FilePath, person_dir: FilePath) -> dict[str, bytes]:
-    """No-warp replacement for ``dimos.simulation.mujoco.model.get_assets``.
+    """No-warp replacement for ``dimos.simulation.backend.mujoco.assets.get_assets``.
 
     Mirrors the asset set that the original loads, but without dragging
     in ``mujoco_playground`` (and through it ``warp`` and ``torch``)
@@ -854,7 +854,7 @@ class SplatCameraModule(Module):
         splat = load_splat(self._splat_path, alignment=alignment)
         logger.info(f"SplatCamera: loaded {len(splat.centers)} Gaussians")
 
-        # IMPORTANT: do NOT use ``dimos.simulation.mujoco.model.get_assets``
+        # IMPORTANT: do NOT use ``dimos.simulation.backend.mujoco.assets.get_assets``
         # here.  That import chain pulls ``mujoco_playground._src.wrapper_torch``
         # which loads NVIDIA Warp, which grabs Metal in a way that corrupts
         # the XPC compiler connection MLX needs to render splats.  Use the

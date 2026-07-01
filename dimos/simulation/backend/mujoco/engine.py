@@ -1043,7 +1043,7 @@ def engine_main(
     assets: dict[str, bytes] | None = None
     if inject_legacy_assets:
         try:
-            from dimos.simulation.mujoco.model import get_assets
+            from dimos.simulation.backend.mujoco.assets import get_assets
 
             assets = get_assets()
         except Exception as exc:  # pragma: no cover - bare MJCFs do not need this

@@ -31,7 +31,7 @@ import open3d as o3d  # type: ignore[import-untyped]
 from dimos.core.global_config import GlobalConfig
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.simulation.backend.mujoco.depth_camera import depth_image_to_point_cloud
-from dimos.simulation.mujoco.constants import (
+from dimos.simulation.legacy.mujoco.constants import (
     DEPTH_CAMERA_FOV,
     LIDAR_FPS,
     LIDAR_RESOLUTION,
@@ -39,9 +39,9 @@ from dimos.simulation.mujoco.constants import (
     VIDEO_HEIGHT,
     VIDEO_WIDTH,
 )
-from dimos.simulation.mujoco.model import get_assets, load_model, load_scene_xml
-from dimos.simulation.mujoco.person_on_track import PersonPositionController
-from dimos.simulation.mujoco.shared_memory import ShmReader
+from dimos.simulation.legacy.mujoco.model import get_assets, load_model, load_scene_xml
+from dimos.simulation.legacy.mujoco.shared_memory import ShmReader
+from dimos.simulation.testing.person_on_track import PersonPositionController
 from dimos.utils.data import get_data
 from dimos.utils.logging_config import setup_logger
 

@@ -168,7 +168,7 @@ class MeshCameraModule(Module):
         # Robot meshes — for FK to extract camera body pose each tick.
         # Inline asset walk: avoids importing splat_camera (and through
         # it the heavy gsplat / splat-apple machinery) just to reuse one
-        # helper, and avoids dimos.simulation.mujoco.model.get_assets
+        # helper, and avoids dimos.simulation.backend.mujoco.assets.get_assets
         # which pulls mujoco_playground → warp → torch.
         from dimos.utils.data import get_data
 

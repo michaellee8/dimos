@@ -85,7 +85,7 @@ def load_robot_meshes(
 
     ``assets`` is an optional ``{filename: bytes}`` map for mesh files
     referenced by bare name in the MJCF (e.g. menagerie meshes).
-    Pass ``dimos.simulation.mujoco.model.get_assets()`` for G1.
+    Pass ``dimos.simulation.backend.mujoco.assets.get_assets()`` for G1.
     When omitted, meshes are resolved from disk relative to ``mjcf_path``
     (the MJCF's own ``meshdir`` attribute, if present, applies normally).
     """

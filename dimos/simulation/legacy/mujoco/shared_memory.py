@@ -22,7 +22,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.simulation.mujoco.constants import VIDEO_HEIGHT, VIDEO_WIDTH
+from dimos.simulation.legacy.mujoco.constants import VIDEO_HEIGHT, VIDEO_WIDTH
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()

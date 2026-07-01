@@ -16,7 +16,7 @@
 
 Layout for exchanging joint state and commands between ``MujocoSimModule``
 (which owns the physics engine) and ``ShmMujocoAdapter`` (which plugs into
-ControlCoordinator). Modeled after ``dimos.simulation.mujoco.shared_memory``
+ControlCoordinator). Modeled after ``dimos.simulation.legacy.mujoco.shared_memory``
 (the Go2 SHM pattern).
 
 Names are deterministic: both sides derive them from the resolved MJCF path,
@@ -121,7 +121,7 @@ def _buffer_name(key: str, buffer: str) -> str:
 def _unregister(shm: SharedMemory) -> SharedMemory:
     """Detach ``shm`` from ``resource_tracker`` to silence spurious warnings.
 
-    Same technique as ``dimos.simulation.mujoco.shared_memory._unregister``.
+    Same technique as ``dimos.simulation.legacy.mujoco.shared_memory._unregister``.
     """
     try:
         resource_tracker.unregister(shm._name, "shared_memory")  # type: ignore[attr-defined]

@@ -443,7 +443,7 @@ class MujocoSimModule(
         camera_configs = self._make_camera_configs()
         engine_assets: dict[str, bytes] | None = None
         if self.config.inject_legacy_assets:
-            from dimos.simulation.mujoco.model import get_assets
+            from dimos.simulation.backend.mujoco.assets import get_assets
 
             engine_assets = get_assets()
 

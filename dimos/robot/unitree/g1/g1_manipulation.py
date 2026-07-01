@@ -223,10 +223,10 @@ class G1ManipulationModule(PickAndPlaceModule):
         try:
             # The G1 MJCF references mesh STL/OBJs by bare filename
             # (Menagerie convention).  MujocoSimModule injects the
-            # bytes via dimos.simulation.mujoco.model.get_assets — do
+            # bytes via dimos.simulation.backend.mujoco.assets.get_assets — do
             # the same here so from_xml_string can find them without
             # depending on the working directory.
-            from dimos.simulation.mujoco.model import get_assets
+            from dimos.simulation.backend.mujoco.assets import get_assets
 
             assets = get_assets()
             with open(self._sim_mjcf_path) as f:

@@ -640,7 +640,7 @@ def _babylon_blueprint(viewer_mjcf_path: str | Path, cmd_vel_topic: str) -> Blue
         return None
 
     from dimos.simulation.backend.babylon.module import BabylonSceneViewerModule
-    from dimos.simulation.mujoco.model import get_assets
+    from dimos.simulation.backend.mujoco.assets import get_assets
 
     kwargs: dict[str, Any] = dict(
         mjcf_path=viewer_mjcf_path,
