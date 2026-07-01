@@ -56,6 +56,7 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path as PathMsg
+from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.JointState import JointState
@@ -493,6 +494,9 @@ def _sim_support_blueprints() -> tuple[Blueprint, ...]:
     from dimos.mapping.costmapper import CostMapper
     from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
     from dimos.mapping.voxels import VoxelGridMapper
+    from dimos.navigation.frontier_exploration.wavefront_frontier_goal_selector import (
+        WavefrontFrontierExplorer,
+    )
     from dimos.navigation.odometry_bridge import PoseStampedToOdometry
     from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 
@@ -626,6 +630,13 @@ def _sim_support_blueprints() -> tuple[Blueprint, ...]:
         *lidar_stack,
         *mapping_stack,
         ReplanningAStarPlanner.blueprint(),
+        # Frontier exploration rides the same costmap/planner chain the
+        # clicked-goal path uses; `begin_exploration` is its agent skill.
+        # goal_timeout is tuned for humanoid walking speed (~0.5 m/s to
+        # ~5 m frontiers) vs the go2-trot default of 15 s.
+        WavefrontFrontierExplorer.blueprint(
+            goal_timeout=_env_float("DIMOS_EXPLORE_GOAL_TIMEOUT", 45.0),
+        ),
     )
 
 
@@ -940,6 +951,57 @@ def _splat_workspace_camera_blueprint() -> Blueprint | None:
     )
 
 
+def _mesh_camera_blueprint() -> Blueprint | None:
+    """Textured raycast RGB-D camera from the scene package's visual.glb.
+
+    The sim's default camera: on whenever a scene package with a visual
+    mesh is active (opt out with ``DIMOS_ENABLE_MESH_CAMERA=0``). Yields
+    to the splat camera when that is enabled — both own the
+    ``("color_image", Image) -> /camera_image`` transport key. Publishes
+    aligned color+depth+camera_info (the perception RGBD contract) plus a
+    ``world -> camera_optical`` TF each frame.
+
+    Note: MujocoSimModule declares the same stream names with
+    ``enable_color=False``, so there is no publisher contention; enabling
+    ``DIMOS_ENABLE_DEPTH_CLOUD=1`` double-publishes ``depth_image``.
+    """
+    if not global_config.simulation:
+        return None
+    if _env_bool("DIMOS_ENABLE_SPLAT_CAMERA", False):
+        return None
+    if not _env_bool("DIMOS_ENABLE_MESH_CAMERA", True):
+        return None
+    scene_package = _scene_package_config()
+    if scene_package is None or scene_package.visual_path is None:
+        return None
+
+    from dimos.simulation.sensors.mesh_camera import MeshCameraModule
+    from dimos.visualization.viser.camera import g1_d435_default, g1_d435_forward
+
+    alignment = scene_package.alignment
+    camera_spec = (
+        g1_d435_forward() if _env_bool("DIMOS_MESH_CAMERA_FORWARD", True) else g1_d435_default()
+    )
+    return MeshCameraModule.blueprint(
+        camera_spec=camera_spec,
+        scene_path=str(scene_package.visual_path),
+        mjcf_path=str(_MJCF_PATH),
+        scene_scale=alignment.scale,
+        scene_translation=tuple(alignment.translation),
+        scene_rotation_zyx_deg=tuple(alignment.rotation_zyx_deg),
+        scene_y_up=alignment.y_up,
+        render_hz=_env_float("DIMOS_MESH_CAMERA_HZ", 10.0),
+    ).transports(
+        {
+            ("color_image", Image): JpegLcmTransport("/camera_image", Image),
+            ("depth_image", Image): LCMTransport("/depth_image", Image),
+            ("camera_info", CameraInfo): LCMTransport("/camera_info", CameraInfo),
+            ("joint_state", JointState): LCMTransport("/coordinator/joint_state", JointState),
+            ("odom", PoseStamped): LCMTransport("/odom", PoseStamped),
+        }
+    )
+
+
 def _camera_bridge_blueprint() -> Blueprint | None:
     """Pull the forward / head-mounted v4l2 camera into ``/camera_image``."""
     host = os.environ.get("DIMOS_ROBOT_CAMERA_HOST")
@@ -1055,8 +1117,9 @@ if global_config.simulation in ("babylon", "pimsim"):
         )
     _splat_camera = _splat_camera_blueprint()
     _splat_workspace_camera = _splat_workspace_camera_blueprint()
+    _mesh_camera = _mesh_camera_blueprint()
     _optional_pimsim = tuple(
-        bp for bp in (_splat_camera, _splat_workspace_camera) if bp is not None
+        bp for bp in (_splat_camera, _splat_workspace_camera, _mesh_camera) if bp is not None
     )
     _groot_blueprints: tuple[Blueprint, ...] = (
         _babylon,
@@ -1074,6 +1137,7 @@ else:
     _workspace_camera = _workspace_camera_bridge_blueprint()
     _splat_camera = _splat_camera_blueprint()
     _splat_workspace_camera = _splat_workspace_camera_blueprint()
+    _mesh_camera = _mesh_camera_blueprint()
     _recorder = _episode_recorder_blueprint()
     _optional = tuple(
         bp
@@ -1085,6 +1149,7 @@ else:
             _workspace_camera,
             _splat_camera,
             _splat_workspace_camera,
+            _mesh_camera,
             _recorder,
         )
         if bp is not None
@@ -1112,6 +1177,7 @@ g1_groot_wbc = autoconnect(*_groot_blueprints).transports(
         ("clicked_point", PointStamped): LCMTransport("/clicked_point", PointStamped),
         ("point_goal", PointStamped): LCMTransport("/point_goal", PointStamped),
         ("goal_request", PoseStamped): LCMTransport("/goal_request", PoseStamped),
+        ("goal_reached", Bool): LCMTransport("/goal_reached", Bool),
         ("stop_movement", Bool): LCMTransport("/stop_movement", Bool),
     }
 )
