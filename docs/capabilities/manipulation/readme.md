@@ -30,7 +30,7 @@ Keyboard controls:
 | Key | Action |
 |-----|--------|
 | W/S | +X/-X (forward/back) |
-| A/D | -Y/+Y (left/right) |
+| A/D | +Y/-Y (left/right) |
 | Q/E | +Z/-Z (up/down) |
 | R/F | +Roll/-Roll |
 | T/G | +Pitch/-Pitch |

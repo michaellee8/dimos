@@ -35,6 +35,7 @@ class FakePose:
 
 class FakeIK:
     def __init__(self) -> None:
+        self.nq = 3
         self.solve_calls: list[FakePose] = []
         self.solution = np.array([0.01, 0.02, 0.03], dtype=np.float64)
         self.converged = True
@@ -104,50 +105,49 @@ def test_first_nonzero_command_activates_seeds_from_fk_and_outputs_servo_positio
     assert fake_ik.solve_calls[0].translation[0] > 0.0
 
 
-def test_integration_uses_coordinator_time_to_advance_target(
+def test_integration_uses_current_fk_and_coordinator_dt(
     task: EEFTwistTask, fake_ik: FakeIK
 ) -> None:
     task.on_ee_twist_command(_twist(1.0), t_now=1.0)
 
     first = task.compute(_state(1.01, dt=0.01))
-    second = task.compute(_state(1.04, dt=0.01))
+    fake_ik.solution = np.array([0.51, 0.0, 0.0], dtype=np.float64)
+    second = task.compute(_state(1.04, positions=[0.5, 0.0, 0.0], dt=0.01))
 
     assert first is not None
     assert second is not None
     assert fake_ik.solve_calls[1].translation[0] > fake_ik.solve_calls[0].translation[0]
 
 
-def test_ik_rejection_returns_none_and_does_not_commit_target(
+def test_non_converged_ik_solution_is_accepted_when_joint_delta_is_safe(
     task: EEFTwistTask, fake_ik: FakeIK
 ) -> None:
-    task.on_ee_twist_command(_twist(), t_now=1.0)
-    accepted = task.compute(_state(1.01))
-    assert task._target_pose is not None
-    committed_x = task._target_pose.translation[0]
     fake_ik.converged = False
     fake_ik.final_error = 1.0
 
-    rejected = task.compute(_state(1.02))
-
-    assert accepted is not None
-    assert rejected is None
-    assert task._target_pose.translation[0] == committed_x
-
-
-def test_joint_delta_rejection_returns_none_and_does_not_commit_target(
-    task: EEFTwistTask, fake_ik: FakeIK
-) -> None:
     task.on_ee_twist_command(_twist(), t_now=1.0)
-    accepted = task.compute(_state(1.01))
-    assert task._target_pose is not None
-    committed_x = task._target_pose.translation[0]
+    output = task.compute(_state(1.01))
+
+    assert output is not None
+    assert output.positions == [0.01, 0.02, 0.03]
+
+
+def test_non_finite_ik_solution_is_rejected(task: EEFTwistTask, fake_ik: FakeIK) -> None:
+    fake_ik.solution = np.array([np.nan, 0.0, 0.0], dtype=np.float64)
+
+    task.on_ee_twist_command(_twist(), t_now=1.0)
+    output = task.compute(_state(1.01))
+
+    assert output is None
+
+
+def test_joint_delta_rejection_returns_none(task: EEFTwistTask, fake_ik: FakeIK) -> None:
+    task.on_ee_twist_command(_twist(), t_now=1.0)
     fake_ik.solution = np.array([10.0, 0.0, 0.0], dtype=np.float64)
 
-    rejected = task.compute(_state(1.02))
+    rejected = task.compute(_state(1.01))
 
-    assert accepted is not None
     assert rejected is None
-    assert task._target_pose.translation[0] == committed_x
 
 
 def test_timeout_and_zero_command_clear_then_next_nonzero_reseeds(

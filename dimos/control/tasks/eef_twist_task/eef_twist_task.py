@@ -20,6 +20,8 @@ import threading
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from numpy.typing import NDArray
+import pinocchio  # type: ignore[import-not-found]
 
 from dimos.control.task import (
     BaseControlTask,
@@ -37,12 +39,11 @@ from dimos.protocol.service.spec import BaseConfig
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:
-    from numpy.typing import NDArray
-    import pinocchio  # type: ignore[import-not-found]
-
     from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 
 logger = setup_logger()
+
+_MAX_DT = 0.05
 
 
 @dataclass
@@ -53,11 +54,6 @@ class EEFTwistTaskConfig:
     priority: int = 10
     timeout: float = 0.3
     max_joint_delta_deg: float = 15.0
-    max_dt: float = 0.05
-    max_linear_step: float = 0.02
-    max_angular_step: float = 0.2
-    max_final_error: float = 0.05
-    accept_unconverged: bool = False
 
 
 class EEFTwistTask(BaseControlTask):
@@ -73,12 +69,14 @@ class EEFTwistTask(BaseControlTask):
         self._joint_names = frozenset(config.joint_names)
         self._joint_names_list = list(config.joint_names)
         self._ik = PinocchioIK.from_model_path(config.model_path, config.ee_joint_id)
+        if self._ik.nq != len(config.joint_names):
+            logger.warning(
+                f"EEFTwistTask {name}: model DOF ({self._ik.nq}) != "
+                f"joint_names count ({len(config.joint_names)})"
+            )
         self._lock = threading.Lock()
         self._latest_twist: TwistStamped | None = None
         self._last_update_time = 0.0
-        self._last_integrate_time: float | None = None
-        self._target_pose: pinocchio.SE3 | None = None
-        self._last_q_solution: NDArray[np.floating[Any]] | None = None
 
     @property
     def name(self) -> str:
@@ -116,31 +114,22 @@ class EEFTwistTask(BaseControlTask):
             ):
                 self._clear_locked()
                 return None
-            target_pose = self._target_pose.copy() if self._target_pose is not None else None
-            last_integrate_time = self._last_integrate_time
 
         q_current = self._get_current_joints(state)
         if q_current is None or not np.all(np.isfinite(q_current)):
             return None
-        if target_pose is None:
-            target_pose = self._ik.forward_kinematics(q_current)
-            last_integrate_time = state.t_now - min(max(state.dt, 0.0), self._config.max_dt)
-        if not self._pose_is_finite(target_pose):
-            return None
-
-        dt = min(max(state.t_now - (last_integrate_time or state.t_now), 0.0), self._config.max_dt)
+        target_pose = self._ik.forward_kinematics(q_current)
+        dt = min(max(state.dt, 0.0), _MAX_DT)
         candidate = self._integrate_twist(target_pose, twist, dt)
-        if not self._pose_is_finite(candidate):
-            return None
 
         q_solution, converged, final_error = self._ik.solve(candidate, q_current)
-        if not np.all(np.isfinite(q_solution)) or not np.isfinite(final_error):
+        if not np.all(np.isfinite(q_solution)):
             return None
-        if (
-            not converged and not self._config.accept_unconverged
-        ) or final_error > self._config.max_final_error:
-            logger.debug(f"EEFTwistTask {self._name}: IK rejected error={final_error:.4f}")
-            return None
+        if not converged:
+            logger.debug(
+                f"EEFTwistTask {self._name}: IK did not converge "
+                f"(error={final_error:.4f}), using partial solution"
+            )
         if not check_joint_delta(q_solution, q_current, self._config.max_joint_delta_deg):
             worst_idx, worst_deg = get_worst_joint_delta(q_solution, q_current)
             logger.warning(
@@ -149,10 +138,6 @@ class EEFTwistTask(BaseControlTask):
             )
             return None
 
-        with self._lock:
-            self._target_pose = candidate.copy()
-            self._last_integrate_time = state.t_now
-            self._last_q_solution = q_solution.copy()
         return JointCommandOutput(
             joint_names=self._joint_names_list,
             positions=q_solution.flatten().tolist(),
@@ -174,8 +159,6 @@ class EEFTwistTask(BaseControlTask):
 
     def _clear_locked(self) -> None:
         self._latest_twist = None
-        self._target_pose = None
-        self._last_integrate_time = None
 
     def _twist_values(self, twist: TwistStamped) -> NDArray[np.float64]:
         return np.array(
@@ -194,41 +177,12 @@ class EEFTwistTask(BaseControlTask):
         self, pose: pinocchio.SE3, twist: TwistStamped, dt: float
     ) -> pinocchio.SE3:
         candidate = pose.copy()
-        linear_step = (
-            np.array([twist.linear.x, twist.linear.y, twist.linear.z], dtype=np.float64) * dt
-        )
-        angular_step = (
-            np.array([twist.angular.x, twist.angular.y, twist.angular.z], dtype=np.float64) * dt
-        )
-        linear_norm = float(np.linalg.norm(linear_step))
-        angular_norm = float(np.linalg.norm(angular_step))
-        if linear_norm > self._config.max_linear_step:
-            linear_step *= self._config.max_linear_step / linear_norm
-        if angular_norm > self._config.max_angular_step:
-            angular_step *= self._config.max_angular_step / angular_norm
-            angular_norm = self._config.max_angular_step
-        candidate.translation = candidate.translation + linear_step
-        if angular_norm > 0.0:
-            candidate.rotation = (
-                self._rotation_matrix(angular_step, angular_norm) @ candidate.rotation
-            )
+        values = self._twist_values(twist)
+        candidate.translation = candidate.translation + values[:3] * dt
+        angular_step = values[3:] * dt
+        if np.linalg.norm(angular_step) > 0.0:
+            candidate.rotation = pinocchio.exp3(angular_step) @ candidate.rotation
         return candidate
-
-    def _rotation_matrix(
-        self, axis_angle: NDArray[np.float64], angle: float
-    ) -> NDArray[np.float64]:
-        axis = axis_angle / angle
-        x, y, z = axis
-        skew = np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]], dtype=np.float64)
-        result: NDArray[np.float64] = (
-            np.eye(3, dtype=np.float64)
-            + np.sin(angle) * skew
-            + (1.0 - np.cos(angle)) * (skew @ skew)
-        )
-        return result
-
-    def _pose_is_finite(self, pose: pinocchio.SE3) -> bool:
-        return bool(np.all(np.isfinite(pose.translation)) and np.all(np.isfinite(pose.rotation)))
 
 
 class EEFTwistTaskParams(BaseConfig):
@@ -236,11 +190,6 @@ class EEFTwistTaskParams(BaseConfig):
     ee_joint_id: int = 6
     timeout: float = 0.3
     max_joint_delta_deg: float = 15.0
-    max_dt: float = 0.05
-    max_linear_step: float = 0.02
-    max_angular_step: float = 0.2
-    max_final_error: float = 0.05
-    accept_unconverged: bool = False
 
 
 def create_task(cfg: Any, hardware: Any) -> EEFTwistTask:
@@ -254,10 +203,5 @@ def create_task(cfg: Any, hardware: Any) -> EEFTwistTask:
             priority=cfg.priority,
             timeout=params.timeout,
             max_joint_delta_deg=params.max_joint_delta_deg,
-            max_dt=params.max_dt,
-            max_linear_step=params.max_linear_step,
-            max_angular_step=params.max_angular_step,
-            max_final_error=params.max_final_error,
-            accept_unconverged=params.accept_unconverged,
         ),
     )

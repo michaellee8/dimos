@@ -185,36 +185,24 @@ class KeyboardTeleopModule(Module):
 
 def _twist_from_keys(keys: KeyState) -> tuple[TwistVector, TwistVector]:
     assert pygame is not None
-    linear_x = 0.0
-    linear_y = 0.0
-    linear_z = 0.0
-    angular_x = 0.0
-    angular_y = 0.0
-    angular_z = 0.0
-    if keys[pygame.K_w]:
-        linear_x += LINEAR_SPEED
-    if keys[pygame.K_s]:
-        linear_x -= LINEAR_SPEED
-    if keys[pygame.K_a]:
-        linear_y += LINEAR_SPEED
-    if keys[pygame.K_d]:
-        linear_y -= LINEAR_SPEED
-    if keys[pygame.K_q]:
-        linear_z += LINEAR_SPEED
-    if keys[pygame.K_e]:
-        linear_z -= LINEAR_SPEED
+    linear = [0.0, 0.0, 0.0]
+    angular = [0.0, 0.0, 0.0]
+    bindings = {
+        pygame.K_w: (linear, 0, LINEAR_SPEED),
+        pygame.K_s: (linear, 0, -LINEAR_SPEED),
+        pygame.K_a: (linear, 1, LINEAR_SPEED),
+        pygame.K_d: (linear, 1, -LINEAR_SPEED),
+        pygame.K_q: (linear, 2, LINEAR_SPEED),
+        pygame.K_e: (linear, 2, -LINEAR_SPEED),
+        pygame.K_r: (angular, 0, ANGULAR_SPEED),
+        pygame.K_f: (angular, 0, -ANGULAR_SPEED),
+        pygame.K_t: (angular, 1, ANGULAR_SPEED),
+        pygame.K_g: (angular, 1, -ANGULAR_SPEED),
+        pygame.K_y: (angular, 2, ANGULAR_SPEED),
+        pygame.K_h: (angular, 2, -ANGULAR_SPEED),
+    }
+    for key, (vector, axis, delta) in bindings.items():
+        if keys[key]:
+            vector[axis] += delta
 
-    if keys[pygame.K_r]:
-        angular_x += ANGULAR_SPEED
-    if keys[pygame.K_f]:
-        angular_x -= ANGULAR_SPEED
-    if keys[pygame.K_t]:
-        angular_y += ANGULAR_SPEED
-    if keys[pygame.K_g]:
-        angular_y -= ANGULAR_SPEED
-    if keys[pygame.K_y]:
-        angular_z += ANGULAR_SPEED
-    if keys[pygame.K_h]:
-        angular_z -= ANGULAR_SPEED
-
-    return (linear_x, linear_y, linear_z), (angular_x, angular_y, angular_z)
+    return (linear[0], linear[1], linear[2]), (angular[0], angular[1], angular[2])
