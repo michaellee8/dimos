@@ -54,6 +54,10 @@ _pending_video_renegotiations: set[str] = set()
 OP_HEARTBEAT_TIMEOUT_SEC = 20
 OP_REAPER_INTERVAL_SEC = 10
 
+# Robot liveness: robot heartbeats every ~1s; disconnect after 30s silent.
+# Covers blueprint termination without graceful DELETE (process kill, crash).
+ROBOT_HEARTBEAT_TIMEOUT_SEC = 30
+
 
 # ─── Request/Response schemas ────────────────────────────────────────
 
@@ -198,6 +202,7 @@ async def _create_livekit_session(
         robot_name=body.robot_name,
         state="idle",
         transport="livekit",
+        last_heartbeat=datetime.now(timezone.utc),  # so reaper's grace window starts now
     )
     room = livekit.room_name(session.id)
 
@@ -291,6 +296,7 @@ async def create_session(
         cf_session_id=cf_result["cf_session_id"],
         published_video_mid=published_mid,
         published_video_track_name=published_track_name,
+        last_heartbeat=datetime.now(timezone.utc),  # reaper's grace window starts now
     )
     db.add(session)
     try:
@@ -923,11 +929,47 @@ async def _reap_stale_operators() -> None:
                 await db.commit()
 
 
+async def _reap_stale_robots() -> None:
+    """Disconnect robots whose last heartbeat is older than the timeout —
+    blueprint termination without a graceful DELETE leaves the row as
+    idle/active forever otherwise."""
+    threshold = datetime.now(timezone.utc) - timedelta(seconds=ROBOT_HEARTBEAT_TIMEOUT_SEC)
+    async with async_session() as db:
+        stale = (await db.execute(
+            select(TeleopSession).where(
+                TeleopSession.state != "disconnected",
+                TeleopSession.last_heartbeat.is_not(None),
+                TeleopSession.last_heartbeat < threshold,
+            )
+        )).scalars().all()
+        for s in stale:
+            async with _session_lock(s.id):
+                idle = (datetime.now(timezone.utc) - s.last_heartbeat).total_seconds()
+                log.warning(
+                    "reaping stale robot session=%s robot=%s idle_for=%.1fs",
+                    s.id, s.robot_id, idle,
+                )
+                if s.transport == "cloudflare" and s.state_back_channel_id is not None and s.cf_session_id:
+                    await cf_client.close_datachannels(
+                        s.cf_session_id, [s.state_back_channel_id]
+                    )
+                s.state = "disconnected"
+                s.operator_id = None
+                s.operator_cf_session_id = None
+                s.state_back_channel_id = None
+                s.last_operator_heartbeat = None
+                _robot_channel_ids.pop(s.id, None)
+                _pending_video_renegotiations.discard(s.id)
+                await db.commit()
+
+
 async def operator_reaper_loop() -> None:
-    """Background task; launched from main.py lifespan."""
+    """Background task: reap silent operators and stale robots.
+    Launched from main.py lifespan."""
     while True:
         try:
             await _reap_stale_operators()
+            await _reap_stale_robots()
         except Exception:
-            log.exception("operator reaper failed")
+            log.exception("session reaper failed")
         await asyncio.sleep(OP_REAPER_INTERVAL_SEC)
