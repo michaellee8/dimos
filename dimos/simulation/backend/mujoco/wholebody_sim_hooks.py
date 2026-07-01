@@ -34,12 +34,12 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from dimos.msgs.sensor_msgs.JointState import JointState
-from dimos.simulation.engines.mujoco_shm import CMD_MODE_PD_TAU
+from dimos.simulation.backend.mujoco.shm import CMD_MODE_PD_TAU
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:
-    from dimos.simulation.engines.mujoco_engine import MujocoEngine
-    from dimos.simulation.engines.mujoco_shm import ManipShmWriter
+    from dimos.simulation.backend.mujoco.engine import MujocoEngine
+    from dimos.simulation.backend.mujoco.shm import ManipShmWriter
 
 logger = setup_logger()
 

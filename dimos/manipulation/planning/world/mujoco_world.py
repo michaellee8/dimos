@@ -297,7 +297,7 @@ class MujocoWorld(WorldSpec):
 
         with self._lock:
             if self._scene_entities:
-                from dimos.simulation.mujoco.entity_scene import add_entities_to_spec
+                from dimos.simulation.backend.mujoco.entity_scene import add_entities_to_spec
 
                 add_entities_to_spec(self._spec, self._scene_entities)
 
@@ -463,7 +463,7 @@ class MujocoWorld(WorldSpec):
 
     def _resolve_entities(self) -> None:
         assert self._model is not None
-        from dimos.simulation.mujoco.entity_scene import entity_body_name
+        from dimos.simulation.backend.mujoco.entity_scene import entity_body_name
 
         for entity in self._scene_entities:
             entity_id = str(entity.get("id"))

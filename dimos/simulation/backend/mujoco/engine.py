@@ -37,15 +37,15 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.Imu import Imu
-from dimos.simulation.engines.base import SimulationEngine
-from dimos.simulation.engines.mujoco_shm import ManipShmWriter
-from dimos.simulation.engines.robot_sim_binding import (
+from dimos.simulation.backend.base import SimulationEngine
+from dimos.simulation.backend.mujoco.robot_sim_binding import (
     RobotSimBinding,
     RobotSimSpec,
     resolve_robot_sim_binding,
 )
-from dimos.simulation.engines.wholebody_sim_hooks import WholeBodySimHooks
-from dimos.simulation.utils.xml_parser import JointMapping, build_joint_mappings
+from dimos.simulation.backend.mujoco.shm import ManipShmWriter
+from dimos.simulation.backend.mujoco.wholebody_sim_hooks import WholeBodySimHooks
+from dimos.simulation.backend.mujoco.xml_parser import JointMapping, build_joint_mappings
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:
@@ -1198,7 +1198,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
         description="Standalone MuJoCo whole-body sim subprocess.",
-        prog="python -m dimos.simulation.engines.mujoco_engine",
+        prog="python -m dimos.simulation.backend.mujoco.engine",
     )
     parser.add_argument("mjcf", help="Path to MJCF XML")
     parser.add_argument("shm_key", help="SHM key matching the dimos-side adapter")

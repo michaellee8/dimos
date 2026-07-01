@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 
-from dimos.simulation.mujoco.entity_scene import add_entities_to_spec, entity_body_name
+from dimos.simulation.backend.mujoco.entity_scene import add_entities_to_spec, entity_body_name
 
 
 def _write_hull_obj(path: Path) -> None:

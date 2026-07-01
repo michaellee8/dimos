@@ -59,17 +59,17 @@ from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.simulation.engines.mujoco_engine import (
+from dimos.simulation.backend.mujoco.engine import (
     CameraConfig,
     CameraFrame,
     MujocoEngine,
 )
-from dimos.simulation.engines.mujoco_shm import (
+from dimos.simulation.backend.mujoco.robot_sim_binding import RobotSimSpec
+from dimos.simulation.backend.mujoco.shm import (
     CMD_MODE_PD_TAU,
     ManipShmWriter,
     shm_key_from_path,
 )
-from dimos.simulation.engines.robot_sim_binding import RobotSimSpec
 from dimos.simulation.scene.entity import EntityDescriptor, EntityStateBatch
 from dimos.spec import perception
 from dimos.utils.logging_config import setup_logger
@@ -293,7 +293,7 @@ class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     robot_sim_spec: RobotSimSpec | None = None
     # Scene-package entity metadata (scene.meta.json ``entities`` entries).
     # When the loaded model contains matching ``entity:<id>`` bodies (see
-    # dimos.simulation.mujoco.entity_scene), their world poses are published
+    # dimos.simulation.backend.mujoco.entity_scene), their world poses are published
     # as an EntityStateBatch — MuJoCo is the entity authority in this mode.
     scene_entities: list[dict[str, Any]] = Field(default_factory=list)
     imu_gyro_sensor_names: list[str] = Field(
@@ -501,7 +501,7 @@ class MujocoSimModule(
         body-name prefixing keyed on ``robot_id`` (empty prefix by
         default — single-robot scenes don't need renaming).
         """
-        from dimos.simulation.mujoco.entity_scene import add_entities_to_spec
+        from dimos.simulation.backend.mujoco.entity_scene import add_entities_to_spec
 
         if self.config.scene_xml:
             spec_scene = mujoco.MjSpec.from_file(str(self.config.scene_xml))
@@ -541,7 +541,7 @@ class MujocoSimModule(
         self._entity_bodies = []
         if not self.config.scene_entities or self._engine is None:
             return
-        from dimos.simulation.mujoco.entity_scene import entity_body_name
+        from dimos.simulation.backend.mujoco.entity_scene import entity_body_name
 
         model = self._engine.model
         for raw in self.config.scene_entities:
@@ -658,7 +658,7 @@ class MujocoSimModule(
 
     def _create_sim_hooks(self, dof: int) -> None:
         assert self._shm is not None
-        from dimos.simulation.engines.wholebody_sim_hooks import WholeBodySimHooks
+        from dimos.simulation.backend.mujoco.wholebody_sim_hooks import WholeBodySimHooks
 
         self._sim_hooks = WholeBodySimHooks(
             self._shm,
@@ -687,7 +687,7 @@ class MujocoSimModule(
         cmd = [
             interp,
             "-m",
-            "dimos.simulation.engines.mujoco_engine",
+            "dimos.simulation.backend.mujoco.engine",
             str(self.config.address),
             shm_key,
             str(self.config.dof),
@@ -1175,7 +1175,7 @@ class MujocoSimModule(
         if self._engine is None:
             return
         try:
-            from dimos.simulation.mujoco.depth_camera import depth_image_to_point_cloud
+            from dimos.simulation.backend.mujoco.depth_camera import depth_image_to_point_cloud
 
             all_points: list[np.ndarray] = []
             latest_ts = 0.0

@@ -35,7 +35,7 @@ from dimos.hardware.whole_body.spec import (
     MotorCommand,
     MotorState,
 )
-from dimos.simulation.engines.mujoco_shm import (
+from dimos.simulation.backend.mujoco.shm import (
     ManipShmReader,
     shm_key_from_path,
 )

@@ -333,11 +333,11 @@ def _select_backend() -> _BackendSelection:
     depth_cloud_enabled = _env_bool("DIMOS_ENABLE_DEPTH_CLOUD", False)
     native_scene_lidar_enabled = _native_scene_lidar_enabled(scene_package, lidar_disabled)
 
-    from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
-    from dimos.simulation.engines.robot_sim_binding import (
+    from dimos.simulation.backend.mujoco.robot_sim_binding import (
         RobotSimSpec,
         mjcf_joint_names_from_hardware,
     )
+    from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
 
     g1_model_joints = mjcf_joint_names_from_hardware(tuple(g1_joints))
     g1_sim_spec = RobotSimSpec(

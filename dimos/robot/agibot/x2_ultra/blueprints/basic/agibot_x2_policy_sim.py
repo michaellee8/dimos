@@ -40,11 +40,11 @@ from dimos.robot.agibot.x2_ultra.policy_constants import (
     X2_UPPER_BODY_DEFAULT_POSITIONS,
     X2_UPPER_BODY_JOINTS,
 )
-from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
-from dimos.simulation.engines.robot_sim_binding import (
+from dimos.simulation.backend.mujoco.robot_sim_binding import (
     RobotSimSpec,
     mjcf_joint_names_from_hardware,
 )
+from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
 from dimos.utils.data import LfsPath
 from dimos.visualization.babylon_scene_viewer import BabylonSceneViewerModule
 
