@@ -188,6 +188,8 @@ def _summarize_video(samples: list[VideoStats]) -> dict[str, Any] | None:
         "loss_pct": pcts(col("loss_pct")),
         "jitter_buffer_ms": pcts(col("jitter_buffer_ms")),
         "decode_ms": pcts(col("decode_ms")),
+        # 0 when the robot isn't stamping — summarize only real readings.
+        "e2e_latency_ms": pcts([v for v in col("e2e_latency_ms") if v > 0]),
         "frames_dropped": max((s.frames_dropped for s in samples), default=0),
         "freezes": max((s.freezes for s in samples), default=0),
     }

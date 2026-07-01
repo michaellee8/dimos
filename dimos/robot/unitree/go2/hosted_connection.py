@@ -57,6 +57,15 @@ ALLOWED_SPORT_CMDS: dict[str, int] = {
 class Go2HostedConnectionConfig(ConnectionConfig):
     telemetry_hz: float = 3.0  # robot → operator HUD telemetry push rate
     cmd_stale_after_sec: float = 0.5  # cmd_vel twists older than this are dropped
+    latency_stamp: bool = False  # benchmark: paint capture-time into frame corner
+
+
+# Frame-embedded capture time for glass-to-glass latency, read back by the
+# operator (webrtc.js readLatencyStamp). B/W cells, MSB-first: SYNC then time.
+_STAMP_CELL_PX = 16
+_STAMP_SYNC = (1, 0, 1, 0)  # both sides must agree
+_STAMP_TIME_BITS = 44  # ms since epoch (~41 bits) + headroom
+_STAMP_CELLS = len(_STAMP_SYNC) + _STAMP_TIME_BITS
 
 
 class Go2HostedConnection(GO2Connection):
@@ -125,7 +134,7 @@ class Go2HostedConnection(GO2Connection):
         if not imgs:
             return None
         if len(imgs) == 1:
-            return imgs[0]
+            return self._stamp(imgs[0])
         import cv2
 
         target_h = min(im.data.shape[0] for im in imgs)
@@ -135,7 +144,27 @@ class Go2HostedConnection(GO2Connection):
             tiles.append(
                 cv2.resize(im.data, (int(w * target_h / h), target_h)) if h != target_h else im.data
             )
-        return Image(data=np.hstack(tiles), format=imgs[0].format, frame_id="camera_mux")
+        return self._stamp(Image(data=np.hstack(tiles), format=imgs[0].format, frame_id="camera_mux"))
+
+    def _stamp(self, img: Image) -> Image:
+        """Paint capture time into the top-left corner as B/W cells (benchmark)."""
+        if not self.config.latency_stamp:
+            return img
+
+        ms = int(time.time() * 1000)
+        bits = list(_STAMP_SYNC) + [
+            (ms >> (_STAMP_TIME_BITS - 1 - i)) & 1 for i in range(_STAMP_TIME_BITS)
+        ]
+
+        s = _STAMP_CELL_PX
+        data = img.data
+        if data.ndim < 2 or data.shape[1] < _STAMP_CELLS * s or data.shape[0] < s:
+            return img
+
+        out = data.copy()
+        for i, bit in enumerate(bits):
+            out[0:s, i * s : (i + 1) * s] = 255 if bit else 0
+        return Image(data=out, format=img.format, frame_id=img.frame_id)
 
     def _set_cam_selection(self, cams: list[str]) -> None:
         sel = [c for c in cams if c in ("cam1", "cam2")] or ["cam1"]
