@@ -71,7 +71,7 @@ class EEFTwistTask(BaseControlTask):
         self._joint_names_list = list(config.joint_names)
         self._ik = PinocchioIK.from_model_path(config.model_path, config.ee_joint_id)
         if self._ik.nq != len(config.joint_names):
-            logger.warning(
+            raise ValueError(
                 f"EEFTwistTask {name}: model DOF ({self._ik.nq}) != "
                 f"joint_names count ({len(config.joint_names)})"
             )
