@@ -59,6 +59,15 @@ OP_REAPER_INTERVAL_SEC = 10
 ROBOT_HEARTBEAT_TIMEOUT_SEC = 30
 
 
+def _utc(dt: datetime | None) -> datetime | None:
+    """Tag naive datetimes as UTC. SQLite doesn't persist tz, so
+    DateTime(timezone=True) round-trips as naive; without this the reaper's
+    `now(utc) - naive` subtraction TypeErrors and evicts nothing."""
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=timezone.utc)
+
+
 # ─── Request/Response schemas ────────────────────────────────────────
 
 
@@ -482,11 +491,17 @@ async def join_session(
     if not session or session.state == "disconnected" or not _owns(session, user):
         raise HTTPException(status_code=404, detail="Session not found")
     # Refuse a stale robot even if the reaper hasn't caught up yet.
-    if session.last_heartbeat is None or (
-        datetime.now(timezone.utc) - session.last_heartbeat
-        > timedelta(seconds=ROBOT_HEARTBEAT_TIMEOUT_SEC)
+    last_hb = _utc(session.last_heartbeat)
+    if last_hb is None or (
+        datetime.now(timezone.utc) - last_hb > timedelta(seconds=ROBOT_HEARTBEAT_TIMEOUT_SEC)
     ):
         raise HTTPException(status_code=404, detail="Robot heartbeat stale — reconnect required")
+    # Robot's CF session id can be None while heartbeats still land (post-410
+    # invalidation, or if create_session persisted the row without one).
+    # JoinSessionResponse.robot_cf_session_id is typed str; returning None
+    # here would trip pydantic serialization → 500. Fail fast with 409.
+    if session.transport == "cloudflare" and not session.cf_session_id:
+        raise HTTPException(status_code=409, detail="Robot CF session not established")
 
     user_id = user["sub"]
 
@@ -929,7 +944,7 @@ async def _reap_stale_operators() -> None:
         )).scalars().all()
         for s in stale:
             async with _session_lock(s.id):
-                idle = (datetime.now(timezone.utc) - s.last_operator_heartbeat).total_seconds()
+                idle = (datetime.now(timezone.utc) - _utc(s.last_operator_heartbeat)).total_seconds()
                 log.warning(
                     "reaping stale operator session=%s operator=%s idle_for=%.1fs",
                     s.id, s.operator_id, idle,
@@ -958,7 +973,7 @@ async def _reap_stale_robots() -> None:
         )).scalars().all()
         for s in stale:
             async with _session_lock(s.id):
-                idle = (datetime.now(timezone.utc) - s.last_heartbeat).total_seconds()
+                idle = (datetime.now(timezone.utc) - _utc(s.last_heartbeat)).total_seconds()
                 log.warning(
                     "reaping stale robot session=%s robot=%s idle_for=%.1fs",
                     s.id, s.robot_id, idle,
