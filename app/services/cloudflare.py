@@ -22,11 +22,31 @@ def _is_session_not_ready(error_code: str, error_description: str) -> bool:
     )
 
 
+def _is_session_gone(status_code: int, error_code: str = "", error_description: str = "") -> bool:
+    """CF session permanently gone (reaped/disconnected). Distinct from
+    'not ready' (transient) so the caller re-provisions instead of retrying.
+    Signals: HTTP 410 Gone, or session_error with 'disconnected' in body."""
+    if status_code == 410:
+        return True
+    return (
+        error_code == "session_error"
+        and "disconnected" in (error_description or "").lower()
+    )
+
+
 class CloudflareRealtimeError(Exception):
     def __init__(self, status_code: int, detail: str):
         self.status_code = status_code
         self.detail = detail
         super().__init__(f"CF Realtime API error ({status_code}): {detail}")
+
+
+class CloudflareSessionGoneError(CloudflareRealtimeError):
+    """CF session is permanently gone — caller must re-provision, not retry."""
+
+    def __init__(self, status_code: int, detail: str, session_id: str):
+        super().__init__(status_code, detail)
+        self.session_id = session_id
 
 
 class CloudflareRealtime:
@@ -155,17 +175,24 @@ class CloudflareRealtime:
                 log.error("CF add_datachannels %s failed: %r", type(e).__name__, e)
                 raise
             if resp.status_code not in (200, 201):
+                # 410 = CF reaped this session; caller must re-provision, not retry.
+                if _is_session_gone(resp.status_code):
+                    raise CloudflareSessionGoneError(resp.status_code, resp.text, session_id)
                 raise CloudflareRealtimeError(resp.status_code, resp.text)
             data = resp.json()
             error_code = data.get("errorCode")
             if not error_code:
                 return data.get("dataChannels", [])
 
+            description = data.get("errorDescription", "")
+            if _is_session_gone(resp.status_code, error_code, description):
+                raise CloudflareSessionGoneError(
+                    resp.status_code, f"{error_code}: {description}", session_id
+                )
             last_err = CloudflareRealtimeError(
-                resp.status_code,
-                f"{error_code}: {data.get('errorDescription', '')}",
+                resp.status_code, f"{error_code}: {description}"
             )
-            if not _is_session_not_ready(error_code, data.get("errorDescription", "")):
+            if not _is_session_not_ready(error_code, description):
                 raise last_err
             if attempt >= attempts:
                 break

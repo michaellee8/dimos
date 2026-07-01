@@ -16,7 +16,7 @@ from models.database import get_db
 from models.session import TeleopSession
 from services import livekit
 from services.auth import get_current_user, get_operator_or_robot, get_robot_owner
-from services.cloudflare import CloudflareRealtimeError, cf_client
+from services.cloudflare import CloudflareRealtimeError, CloudflareSessionGoneError, cf_client
 from services.livekit import LiveKitError
 from services.sdp_utils import extract_video_track
 
@@ -700,6 +700,31 @@ async def _bridge_datachannel_locked(
             ],
         )
         op_sub_ids = {e["dataChannelName"]: int(e["id"]) for e in op_sub}
+    except CloudflareSessionGoneError as e:
+        # CF reaped one of the sessions (usually the robot's, after an idle
+        # timeout or its own PC drop). Clear the stale id so the next bridge
+        # short-circuits on "CF sessions not ready" instead of round-tripping
+        # to CF for another 410; return 409 so the client stops treating
+        # this as a generic backend failure.
+        await _rollback_pushes()
+        if e.session_id == session.cf_session_id:
+            session.cf_session_id = None
+            session.state_back_channel_id = None
+            await db.commit()
+            log.warning("bridge: robot CF session gone session=%s", session.id)
+            raise HTTPException(
+                status_code=409,
+                detail="Robot CF session expired — waiting for robot to reconnect",
+            )
+        if e.session_id == session.operator_cf_session_id:
+            session.operator_cf_session_id = None
+            await db.commit()
+            log.warning("bridge: operator CF session gone session=%s", session.id)
+            raise HTTPException(
+                status_code=409,
+                detail="Operator CF session expired — rejoin",
+            )
+        raise HTTPException(status_code=502, detail=f"CF session gone: {e.detail}")
     except CloudflareRealtimeError as e:
         await _rollback_pushes()
         raise HTTPException(
