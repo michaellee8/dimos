@@ -37,6 +37,7 @@ from dimos.manipulation.planning.kinematics.pinocchio_ik import (
 )
 from dimos.protocol.service.spec import BaseConfig
 from dimos.utils.logging_config import setup_logger
+from dimos.utils.transform_utils import twist_to_numpy
 
 if TYPE_CHECKING:
     from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
@@ -90,7 +91,7 @@ class EEFTwistTask(BaseControlTask):
             return self._latest_twist is not None
 
     def on_ee_twist_command(self, twist: TwistStamped, t_now: float) -> bool:
-        values = self._twist_values(twist)
+        values = twist_to_numpy(twist)
         if not np.all(np.isfinite(values)):
             logger.warning(f"EEFTwistTask {self._name}: rejecting non-finite twist")
             return False
@@ -160,24 +161,11 @@ class EEFTwistTask(BaseControlTask):
     def _clear_locked(self) -> None:
         self._latest_twist = None
 
-    def _twist_values(self, twist: TwistStamped) -> NDArray[np.float64]:
-        return np.array(
-            [
-                twist.linear.x,
-                twist.linear.y,
-                twist.linear.z,
-                twist.angular.x,
-                twist.angular.y,
-                twist.angular.z,
-            ],
-            dtype=np.float64,
-        )
-
     def _integrate_twist(
         self, pose: pinocchio.SE3, twist: TwistStamped, dt: float
     ) -> pinocchio.SE3:
         candidate = pose.copy()
-        values = self._twist_values(twist)
+        values = twist_to_numpy(twist)
         candidate.translation = candidate.translation + values[:3] * dt
         angular_step = values[3:] * dt
         if np.linalg.norm(angular_step) > 0.0:
