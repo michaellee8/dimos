@@ -39,26 +39,26 @@ import uvicorn
 from dimos.core.core import rpc
 from dimos.core.module import Module
 from dimos.core.stream import In, Out
-from dimos.experimental.pimsim.babylon.browser import STATIC_DIR, index_html
-from dimos.experimental.pimsim.babylon.config import (
+from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.sensor_msgs.JointState import JointState
+from dimos.simulation.backend.babylon.browser import STATIC_DIR, index_html
+from dimos.simulation.backend.babylon.config import (
     CoordinatorControlSpec,
     HumanoidControlSpec,
     MujocoRespawnSpec,
 )
-from dimos.experimental.pimsim.babylon.geometry import (
+from dimos.simulation.backend.babylon.geometry import (
     compose_scene_mesh_wxyz,
     dimos_joint_to_mjcf,
     media_type,
     path_contains,
 )
-from dimos.experimental.pimsim.babylon.robot_meshes import (
+from dimos.simulation.backend.babylon.robot_meshes import (
     RobotMeshes,
     apply_state,
     load_robot_meshes,
 )
-from dimos.msgs.geometry_msgs.Pose import Pose
-from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.simulation.scene.entity import (
     EntityDescriptor,
     EntityState,

@@ -141,7 +141,7 @@ def go2_babylon_blueprint() -> Blueprint | None:
     if not _babylon_enabled():
         return None
 
-    from dimos.experimental.pimsim.babylon.module import BabylonSceneViewerModule
+    from dimos.simulation.backend.babylon.module import BabylonSceneViewerModule
 
     kwargs: dict[str, Any] = dict(
         mjcf_path=_viewer_mjcf_path(),

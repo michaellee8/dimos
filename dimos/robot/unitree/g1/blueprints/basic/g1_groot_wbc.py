@@ -639,7 +639,7 @@ def _babylon_blueprint(viewer_mjcf_path: str | Path, cmd_vel_topic: str) -> Blue
     if not _babylon_enabled():
         return None
 
-    from dimos.experimental.pimsim.babylon.module import BabylonSceneViewerModule
+    from dimos.simulation.backend.babylon.module import BabylonSceneViewerModule
     from dimos.simulation.mujoco.model import get_assets
 
     kwargs: dict[str, Any] = dict(

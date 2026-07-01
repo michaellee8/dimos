@@ -21,7 +21,7 @@ same interface (`spec/protocols.py::PhysicsAuthority`):
 | Backend | Module | Profile |
 |---|---|---|
 | **MuJoCo** | `simulation/engines/mujoco_sim_module.py` | headless, deterministic — the eval/CI authority; full RGBD/lidar/IMU |
-| **Babylon + Havok** | `experimental/pimsim/babylon/module.py` | browser, interactive, high visual fidelity (splat); the human-in-the-loop authority |
+| **Babylon + Havok** | `simulation/backend/babylon/module.py` | browser, interactive, high visual fidelity (splat); the human-in-the-loop authority |
 
 Adding a third simulator = implement `PhysicsAuthority` + `SceneControl`. Nothing
 downstream changes.

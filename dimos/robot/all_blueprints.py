@@ -140,7 +140,7 @@ all_modules = {
     "arm-teleop-module": "dimos.teleop.quest.quest_extensions.ArmTeleopModule",
     "b-box-navigation-module": "dimos.navigation.bbox_navigation.BBoxNavigationModule",
     "b1-connection-module": "dimos.robot.unitree.b1.connection.B1ConnectionModule",
-    "babylon-scene-viewer-module": "dimos.experimental.pimsim.babylon.module.BabylonSceneViewerModule",
+    "babylon-scene-viewer-module": "dimos.simulation.backend.babylon.module.BabylonSceneViewerModule",
     "camera-module": "dimos.hardware.sensors.camera.module.CameraModule",
     "cartesian-motion-controller": "dimos.manipulation.control.servo_control.cartesian_motion_controller.CartesianMotionController",
     "click-start-goal-router": "dimos.navigation.nav_stack.modules.click_start_goal_router.click_start_goal_router.ClickStartGoalRouter",

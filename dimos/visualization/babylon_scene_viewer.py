@@ -14,12 +14,12 @@
 
 """Compatibility import for the experimental pimsim Babylon viewer."""
 
-from dimos.experimental.pimsim.babylon.config import (
+from dimos.simulation.backend.babylon.config import (
     CoordinatorControlSpec,
     HumanoidControlSpec,
     MujocoRespawnSpec,
 )
-from dimos.experimental.pimsim.babylon.module import BabylonSceneViewerModule
+from dimos.simulation.backend.babylon.module import BabylonSceneViewerModule
 
 __all__ = [
     "BabylonSceneViewerModule",
