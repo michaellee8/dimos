@@ -50,18 +50,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from dimos.experimental.pimsim.spec.enums import AuthorityMode
 from dimos.simulation.scene.entity import EntityDescriptor, EntityStateBatch
+from dimos.simulation.spec.enums import AuthorityMode
 
 if TYPE_CHECKING:
     # Typing-only so the spec stays import-light. ``In``/``Out`` are the dimos
     # stream ports; the geometry msgs are the wire types; ``SceneObject`` is the
     # proposed unified scene noun (see models.py / §7-A).
     from dimos.core.stream import In, Out
-    from dimos.experimental.pimsim.spec.models import SceneObject
     from dimos.msgs.geometry_msgs.Pose import Pose
     from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
     from dimos.msgs.geometry_msgs.Twist import Twist
+    from dimos.simulation.spec.models import SceneObject
 
 
 # ─────────────────────────────────────────────────────────────────────────

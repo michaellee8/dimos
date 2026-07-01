@@ -67,8 +67,8 @@ All defined in code; import them, don't reinvent:
 
 ```python
 from dimos.simulation.scene.entity import EntityDescriptor, EntityStateBatch
-from dimos.experimental.pimsim.spec.models import SceneObject       # proposed unified noun
-from dimos.experimental.pimsim.spec.enums import AuthorityMode      # OWNS | MIRROR
+from dimos.simulation.spec.models import SceneObject       # proposed unified noun
+from dimos.simulation.spec.enums import AuthorityMode      # OWNS | MIRROR
 from dimos.simulation.scene.package import ScenePackage         # the cooked package
 
 # what an entity IS (identity + how to instantiate; no pose):

@@ -29,8 +29,8 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import ClientConnection, connect
 
 from dimos.core.transport import LCMTransport
-from dimos.experimental.pimsim.spec.protocols import SceneControl
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.simulation.spec.protocols import SceneControl
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()

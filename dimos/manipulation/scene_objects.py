@@ -39,9 +39,9 @@ from dataclasses import dataclass
 import threading
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from dimos.experimental.pimsim.spec.models import SceneObject
 from dimos.msgs.geometry_msgs.Point import Point
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.simulation.spec.models import SceneObject
 
 if TYPE_CHECKING:
     from dimos.msgs.geometry_msgs.Pose import Pose

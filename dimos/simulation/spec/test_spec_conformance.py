@@ -27,7 +27,7 @@ import pytest
 
 from dimos.e2e_tests.dim_sim_client import DimSimClient
 from dimos.experimental.pimsim.client import PimSimClient
-from dimos.experimental.pimsim.spec.protocols import SceneControl
+from dimos.simulation.spec.protocols import SceneControl
 
 
 def test_scene_control_clients_conform() -> None:

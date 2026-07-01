@@ -119,7 +119,7 @@ perception under Babylon-physics authority (Phase 3).
   (see get_visualization_url). Boots clean; needs the sim alongside for /odom + visuals.
 
 **PimSim spec (the contracts doc):**
-- `dimos/experimental/pimsim/spec/` — protocols.py (`EntityAuthority`, `EntityConsumer`,
+- `dimos/simulation/spec/` — protocols.py (`EntityAuthority`, `EntityConsumer`,
   `SceneObjectWorld` PROPOSED), models.py (`SceneObject` PROPOSED), enums.py, README.md.
 - `dimos/experimental/pimsim/DESIGN.md` + `SPEC.md` (prose).
 
