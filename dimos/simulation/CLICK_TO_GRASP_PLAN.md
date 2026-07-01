@@ -67,7 +67,7 @@ perception under Babylon-physics authority (Phase 3).
   `_sync_floating_base`/`_on_odom` (pushes /odom into the world).
 
 **Babylon viewer + entity machinery (the interaction surface):**
-- `dimos/experimental/pimsim/module.py`: `BabylonSceneViewerModule`;
+- `dimos/simulation/module.py`: `BabylonSceneViewerModule`;
   `entity_state_batch: Out[EntityStateBatch]` (:130), `entity_descriptors: Out` (:127);
   emits `clicked_point` + `point_goal` over the LCM-over-WebSocket bridge (~:540, 723-724);
   RPCs `spawn_entity` (:939), `despawn_entity` (:966), `set_entity_pose` (:977),
@@ -121,7 +121,7 @@ perception under Babylon-physics authority (Phase 3).
 **PimSim spec (the contracts doc):**
 - `dimos/simulation/spec/` — protocols.py (`EntityAuthority`, `EntityConsumer`,
   `SceneObjectWorld` PROPOSED), models.py (`SceneObject` PROPOSED), enums.py, README.md.
-- `dimos/experimental/pimsim/DESIGN.md` + `SPEC.md` (prose).
+- `dimos/simulation/DESIGN.md` + `SPEC.md` (prose).
 
 ## The new abstractions to introduce (small, clean)
 
@@ -133,7 +133,7 @@ perception under Babylon-physics authority (Phase 3).
 2. **`ObjectPoseSource`** (Protocol): `resolve(query) -> SceneObject | None`, where
    `query` is an entity_id (str) OR a world `PointStamped`. Plus maybe
    `list_objects() -> list[SceneObject]`. Lives in a new small module, e.g.
-   `dimos/manipulation/scene_objects.py` (or `dimos/experimental/pimsim/` if it's
+   `dimos/manipulation/scene_objects.py` (or `dimos/simulation/` if it's
    considered pimsim-side — decide at impl time; keep it where the manipulator can
    import it without heavy deps).
    - `PrivilegedObjectSource`: caches the latest `EntityStateBatch`; `resolve(id)`

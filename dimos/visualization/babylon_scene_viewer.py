@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Compatibility import for the experimental pimsim Babylon viewer."""
+"""Compatibility import for the simulation Babylon viewer."""
 
 from dimos.simulation.backend.babylon.config import (
     CoordinatorControlSpec,

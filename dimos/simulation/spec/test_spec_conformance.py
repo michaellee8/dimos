@@ -26,7 +26,7 @@ from __future__ import annotations
 import pytest
 
 from dimos.e2e_tests.dim_sim_client import DimSimClient
-from dimos.experimental.pimsim.client import PimSimClient
+from dimos.simulation.client import PimSimClient
 from dimos.simulation.spec.protocols import SceneControl
 
 

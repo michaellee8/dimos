@@ -845,7 +845,7 @@ def _splat_camera_blueprint() -> Blueprint | None:
     Off by default; opt-in with ``DIMOS_ENABLE_SPLAT_CAMERA=1``. Only fires
     when the active scene package has ``splat/scene.ply`` next to its
     metadata (e.g. ``--scene office-splat``). The macOS MLX backend lives
-    in ``dimos/experimental/pimsim/splat_camera.py``.
+    in ``dimos/simulation/splat_camera.py``.
     """
     if not _env_bool("DIMOS_ENABLE_SPLAT_CAMERA", False):
         return None

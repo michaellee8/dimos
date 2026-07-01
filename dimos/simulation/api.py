@@ -38,9 +38,9 @@ genuinely differ is **adding a robot** (see ``add_robot`` / ``set_embodiment``).
 
 from __future__ import annotations
 
-from dimos.experimental.pimsim.client import DEFAULT_URL, PimSimClient
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.simulation.client import DEFAULT_URL, PimSimClient
 
 # Backends that own a robot at launch (the robot is welded into the model and
 # driven by the ControlCoordinator) — runtime add_robot is impossible; relaunch

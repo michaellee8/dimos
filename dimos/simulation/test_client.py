@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 
-from dimos.experimental.pimsim.client import PimSimClient
+from dimos.simulation.client import PimSimClient
 
 
 class _CapturingConnection:

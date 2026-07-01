@@ -91,7 +91,7 @@ EntityStateBatch(entries=[(descriptor, pose), ...])
 **From code/tests/evals — the `PimSim` facade** (`api.py`):
 
 ```python
-from dimos.experimental.pimsim.api import PimSim
+from dimos.simulation.api import PimSim
 sim = PimSim(backend="pimsim"); sim.start()
 sim.set_agent_position(1, 2)        # place the robot
 sim.cmd_vel(vx=0.5)                 # drive it (open-loop)        ┐ work today
@@ -200,7 +200,7 @@ That's it — consumers, blueprints, and the agent are untouched.
 ## Where things live — the structure *is* the architecture
 
 ```
-experimental/pimsim/
+simulation/
   README.md  SPEC.md                 ← this doc + the reachability spec
   api.py                             PimSim — the usage facade (add_robot/move/add_object…)
   client.py                          PimSimClient — SceneControl transport

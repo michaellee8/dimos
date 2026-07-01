@@ -59,7 +59,7 @@ class SceneLidarModule(NativeModule):
     """Raycast lidar from the cooked browser collision scene.
 
     Optionally subscribes to ``entity_states`` for dynamic obstacle
-    coverage — see ``dimos.experimental.pimsim`` for the publisher.
+    coverage — see ``dimos.simulation`` for the publisher.
     """
 
     config: SceneLidarConfig
