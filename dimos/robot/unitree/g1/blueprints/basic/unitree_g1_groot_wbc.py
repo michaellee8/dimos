@@ -77,6 +77,7 @@ from dimos.robot.unitree.g1.g1_rerun import (
     G1_RERUN_ROOT,
     g1_costmap,
     g1_urdf_joint_state,
+    g1_urdf_static_joints,
     g1_urdf_static_robot,
 )
 from dimos.simulation.scene_assets.spec import ScenePackage
@@ -358,6 +359,9 @@ _static_rerun_entities: dict[str, Any] = {
     # MujocoSimModule logs odom as a Transform3D at world/odom; the robot
     # mesh lives underneath and link transforms are driven by joint state.
     G1_RERUN_ROOT: g1_urdf_static_robot(root_path=G1_RERUN_ROOT),
+    # Fixed-joint (and rest-pose) link transforms, logged once. The per-frame
+    # animator (g1_urdf_joint_state) then only updates the movable joints.
+    f"{G1_RERUN_ROOT}/_joint_rest": g1_urdf_static_joints(root_path=G1_RERUN_ROOT),
 }
 _static_rerun_entities.update(scene_package_static_entities(global_config.scene_package))
 
