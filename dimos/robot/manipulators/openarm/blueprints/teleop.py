@@ -12,21 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenArm keyboard teleop blueprints."""
+"""OpenArm teleop blueprints."""
 
 from __future__ import annotations
 
-from dimos.control.coordinator import ControlCoordinator
+from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.robot.manipulators.common.blueprints import cartesian_ik_task
 from dimos.robot.manipulators.openarm.config import (
     LEFT_CAN,
+    OPENARM_ADAPTER_KWARGS,
     OPENARM_V10_FK_MODEL,
+    RIGHT_CAN,
+    openarm_hardware,
     openarm_single_hardware,
     openarm_single_model_config,
 )
 from dimos.teleop.keyboard.keyboard_teleop_module import KeyboardTeleopModule
+from dimos.teleop.openarm_mini.adapter import OpenArmMiniTeleopAdapter
+from dimos.teleop.runtime.teleop_module import TeleopModule
 
 _teleop_hw = openarm_single_hardware()
 
@@ -67,5 +72,39 @@ keyboard_teleop_openarm = autoconnect(
     ManipulationModule.blueprint(
         robots=[openarm_single_model_config()],
         visualization={"backend": "meshcat"},
+    ),
+)
+
+_openarm_mini_left_hw = openarm_hardware(
+    side="left",
+    address=LEFT_CAN,
+    adapter_type="openarm",
+    adapter_kwargs=OPENARM_ADAPTER_KWARGS,
+)
+_openarm_mini_right_hw = openarm_hardware(
+    side="right",
+    address=RIGHT_CAN,
+    adapter_type="openarm",
+    adapter_kwargs=OPENARM_ADAPTER_KWARGS,
+)
+
+
+def _servo_task(hw_name: str, joint_names: list[str]) -> TaskConfig:
+    return TaskConfig(
+        name=f"servo_{hw_name}",
+        type="servo",
+        joint_names=joint_names,
+        priority=10,
+    )
+
+
+openarm_mini_teleop_openarm = autoconnect(
+    TeleopModule.blueprint(adapter=OpenArmMiniTeleopAdapter()),
+    ControlCoordinator.blueprint(
+        hardware=[_openarm_mini_left_hw, _openarm_mini_right_hw],
+        tasks=[
+            _servo_task(_openarm_mini_left_hw.hardware_id, _openarm_mini_left_hw.joints),
+            _servo_task(_openarm_mini_right_hw.hardware_id, _openarm_mini_right_hw.joints),
+        ],
     ),
 )

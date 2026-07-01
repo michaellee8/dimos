@@ -14,16 +14,22 @@
 
 from typing import Any
 
+from dimos.control.coordinator import ControlCoordinator
 from dimos.core.coordination.blueprints import Blueprint
 from dimos.manipulation.manipulation_module import ManipulationModule, ManipulationModuleConfig
 from dimos.manipulation.visualization.config import NoManipulationVisualizationConfig
 from dimos.robot.manipulators.common.blueprints import planner
+from dimos.robot.manipulators.openarm.blueprints.teleop import openarm_mini_teleop_openarm
 from dimos.robot.manipulators.xarm.blueprints.basic import (
     dual_xarm6_planner,
     xarm6_planner_only,
     xarm7_planner_coordinator,
 )
 from dimos.robot.manipulators.xarm.config import make_xarm7_model_config
+from dimos.teleop.openarm_mini.adapter import OpenArmMiniTeleopAdapter
+from dimos.teleop.quest.blueprints import teleop_quest_go2, teleop_quest_xarm7
+from dimos.teleop.quest.quest_extensions import ArmTeleopModule, Go2TeleopModule
+from dimos.teleop.runtime.teleop_module import TeleopModule
 
 
 def _manipulation_kwargs(blueprint: Blueprint) -> dict[str, Any]:
@@ -58,3 +64,33 @@ def test_xarm_planner_blueprints_default_to_no_visualization() -> None:
         config = _manipulation_config(blueprint)
 
         assert isinstance(config.visualization, NoManipulationVisualizationConfig)
+
+
+def test_openarm_mini_teleop_blueprint_wires_joint_commands() -> None:
+    teleop_atom = next(
+        atom for atom in openarm_mini_teleop_openarm.blueprints if atom.module is TeleopModule
+    )
+    coordinator_atom = next(
+        atom for atom in openarm_mini_teleop_openarm.blueprints if atom.module is ControlCoordinator
+    )
+
+    assert isinstance(teleop_atom.kwargs["adapter"], OpenArmMiniTeleopAdapter)
+    assert any(
+        stream.name == "joint_command" and stream.direction == "out"
+        for stream in teleop_atom.streams
+    )
+    assert any(
+        stream.name == "joint_command" and stream.direction == "in"
+        for stream in coordinator_atom.streams
+    )
+    assert [task.type for task in coordinator_atom.kwargs["tasks"]] == ["servo", "servo"]
+    assert [hardware.hardware_id for hardware in coordinator_atom.kwargs["hardware"]] == [
+        "left_arm",
+        "right_arm",
+    ]
+
+
+def test_existing_quest_teleop_blueprints_still_use_quest_modules() -> None:
+    assert any(atom.module is ArmTeleopModule for atom in teleop_quest_xarm7.blueprints)
+    assert any(atom.module is Go2TeleopModule for atom in teleop_quest_go2.blueprints)
+    assert all(atom.module is not TeleopModule for atom in teleop_quest_xarm7.blueprints)
