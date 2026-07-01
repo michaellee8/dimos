@@ -22,6 +22,7 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.basic_path_follower.module import BasicPathFollower
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay
@@ -45,7 +46,16 @@ _sensor_mount_rotation = list(base_link_from_mid360().rotation.to_tuple())
 _axis_len = 0.5
 
 
-def _render_global_map(msg: Any) -> Any:
+# Cap map clouds sent to the viewer. Big snapshots stall the wifi link and
+# everything logged behind them lags. Planner input is unaffected.
+_viz_max_points = 150_000
+
+
+def _render_map_cloud(msg: Any) -> Any:
+    pts = msg.points_f32()
+    if len(pts) > _viz_max_points:
+        step = -(-len(pts) // _viz_max_points)
+        msg = PointCloud2.from_numpy(pts[::step], frame_id=msg.frame_id, timestamp=msg.ts)
     return msg.to_rerun()
 
 
@@ -94,14 +104,16 @@ _nav_rerun_config = {
     "memory_limit": "64MB",
     # base_link tf comes from the go2 internal odometry, which is not the map
     # frame. Anchor the robot box to pointlio's body frame instead and hide the
-    # camera frustum that rides base_link.
+    # camera frustum that rides base_link. The box lives on its own entity:
+    # a static transform on world/tf/body itself would override the live tf.
     "static": {
-        "world/tf/body": _static_robot_body,
-        "world/tf/body/axes": _static_body_axes,
+        "world/robot_body": _static_robot_body,
+        "world/robot_body/axes": _static_body_axes,
     },
     "visual_override": {
         **rerun_config["visual_override"],
-        "world/global_map": _render_global_map,
+        "world/global_map": _render_map_cloud,
+        "world/local_map": _render_map_cloud,
         "world/path": _render_path,
         "world/camera_info": None,
         "world/color_image": None,
