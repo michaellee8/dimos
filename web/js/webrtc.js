@@ -302,9 +302,54 @@ function selectedIceType(report) {
         : 'direct';  // host
 }
 
+// Glass-to-glass latency: read the robot's frame-embedded capture stamp back
+// off the rendered <video>. Constants MUST match _stamp() in hosted_connection.py.
+const STAMP_CELL_PX = 16;
+const STAMP_SYNC = [1, 0, 1, 0];
+const STAMP_TIME_BITS = 44;
+const STAMP_CELLS = STAMP_SYNC.length + STAMP_TIME_BITS;
+const _stampCanvas = document.createElement('canvas');
+
+// Latency in ms, or 0 when the stamp is missing/unreadable (robot not stamping).
+function readLatencyStamp() {
+    const v = document.getElementById('robot-cam');
+    if (!v || !v.videoWidth) return 0;
+    const s = STAMP_CELL_PX;
+    const w = STAMP_CELLS * s;
+    if (v.videoWidth < w || v.videoHeight < s) return 0;
+    _stampCanvas.width = w;
+    _stampCanvas.height = s;
+    const ctx = _stampCanvas.getContext('2d', { willReadFrequently: true });
+    let px;
+    try {
+        ctx.drawImage(v, 0, 0, w, s, 0, 0, w, s);
+        px = ctx.getImageData(0, 0, w, s).data;  // RGBA
+    } catch (_) {
+        return 0;  // tainted canvas / not ready
+    }
+    const cy = (s / 2) | 0;
+    const bitAt = (i) => {
+        const cx = (i * s + s / 2) | 0;
+        const o = (cy * w + cx) * 4;
+        const luma = 0.299 * px[o] + 0.587 * px[o + 1] + 0.114 * px[o + 2];
+        return luma >= 128 ? 1 : 0;
+    };
+    for (let i = 0; i < STAMP_SYNC.length; i++) {
+        if (bitAt(i) !== STAMP_SYNC[i]) return 0;  // no stamp → not benchmarking
+    }
+    let ms = 0;
+    for (let i = 0; i < STAMP_TIME_BITS; i++) {
+        ms = ms * 2 + bitAt(STAMP_SYNC.length + i);
+    }
+    // ms is robot-clock; offset (robot − operator) brings it into operator time.
+    const e2e = Date.now() - ms + state.clockOffsetMs;
+    if (e2e < 0 || e2e > 5000) return 0;
+    return +e2e.toFixed(1);
+}
+
 // getStats() lives only in the browser, so the operator samples the inbound
 // track and reports health to the robot (rate/bitrate/loss = deltas between
-// consecutive 1s samples). Robot folds it into report.md.
+// consecutive 1s samples). Robot folds it into report.json.
 export function startVideoStats(channel) {
     state.videoStatsPrev = null;
     // Skip overlapping ticks — if getStats() blocks >1s, two concurrent
@@ -316,12 +361,10 @@ export function startVideoStats(channel) {
         inFlight = true;
         let inbound = null;
         let report = null;
-        let remoteInbound = null;  // TEMP(video-latency-probe): media-path RTT
         try {
             report = await state.pc.getStats();
             report.forEach((r) => {
                 if (r.type === 'inbound-rtp' && r.kind === 'video') inbound = r;
-                if (r.type === 'remote-inbound-rtp' && r.kind === 'video') remoteInbound = r;
             });
             state.liveStats.iceType = selectedIceType(report);  // direct/stun/turn
         } catch (_) {
@@ -329,21 +372,6 @@ export function startVideoStats(channel) {
             return;
         }
         if (!inbound) { inFlight = false; return; }
-
-        // TEMP(video-latency-probe): dump the fields that would feed an e2e
-        // latency estimate so we can see which are actually populated on this
-        // sender/transport before designing. Remove after one live session.
-        console.log('[vlat-probe]', JSON.stringify({
-            captureTimestamp: inbound.captureTimestamp,             // NTP capture (sender SR)
-            estimatedPlayoutTimestamp: inbound.estimatedPlayoutTimestamp,
-            jitterBufferDelay: inbound.jitterBufferDelay,
-            jitterBufferEmittedCount: inbound.jitterBufferEmittedCount,
-            totalDecodeTime: inbound.totalDecodeTime,
-            framesDecoded: inbound.framesDecoded,
-            media_rtt_s: remoteInbound ? remoteInbound.roundTripTime : null,
-            media_rtt_present: remoteInbound != null,
-            dc_rtt_ms: state.bestRttMs ?? null,                     // datachannel RTT for contrast
-        }));
 
         const now = inbound.timestamp;  // ms, getStats clock
         const prev = state.videoStatsPrev;
@@ -377,6 +405,7 @@ export function startVideoStats(channel) {
                     ? +((inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000).toFixed(1)
                     : 0,
             decode_ms: decodeMs,
+            e2e_latency_ms: readLatencyStamp(),  // glass-to-glass, 0 if not stamping
         };
         try { channel.send(JSON.stringify(payload)); } catch (_) {}
         state.liveStats.video = payload;  // latest sample for the HUD/VR quad
