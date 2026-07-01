@@ -70,13 +70,15 @@ teleop_hosted_go2_transport = (
     .transports(
         {
             ("cmd_vel", Twist): CloudflareTransport.spec("cmd_unreliable", TwistStamped),
-            ("color_image", Image): CloudflareVideoTransport.spec(),
+            # mux_image (not color_image): the muxed out-frame carries the
+            # latency stamp and works for 1 cam (mux returns cam1 alone) or more.
+            ("mux_image", Image): CloudflareVideoTransport.spec(),
             ("state_json", bytes): CloudflareTransport.spec("state_reliable"),
             ("telemetry_out", bytes): CloudflareTransport.spec("state_reliable_back"),
             ("cmd_raw", bytes): CloudflareTransport.spec("cmd_unreliable"),  # stats tap
-            ("cmd_vel_stamped", TwistStamped): CloudflareTransport.spec(
-                "cmd_unreliable", TwistStamped
-            ),  # recorder tap
+            ("cmd_vel_stamped", TwistStamped): LCMTransport.spec(
+                "cmd_vel_stamped", TwistStamped
+            ),
         }
     )
     .global_config(viewer="none")

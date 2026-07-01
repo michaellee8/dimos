@@ -33,6 +33,7 @@ from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
 from dimos.core.stream import In, Out
+from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.robot.unitree.go2.connection import ConnectionConfig, GO2Connection
 from dimos.teleop.utils.stream_stats import LiveStreamStats
@@ -79,6 +80,7 @@ class Go2HostedConnection(GO2Connection):
     telemetry_out: Out[bytes]
     cam2_in: In[Image]
     mux_image: Out[Image]
+    cmd_vel_stamped: Out[TwistStamped]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -338,17 +340,17 @@ class Go2HostedConnection(GO2Connection):
         return super().move(twist, duration)
 
     def _on_cmd_raw(self, data: Any) -> None:
-        """Read the send-stamp off the header for one-way latency stats."""
+        """Decode the operator cmd: record its send-stamp for latency stats and
+        re-publish it as ``TwistStamped`` so the recorder can tap it over LCM
+        (avoids a 2nd CF session — see quest_hosted/blueprints.py)."""
         if isinstance(data, str):
             data = data.encode()
         try:
-            from dimos_lcm.geometry_msgs import TwistStamped as LCMTwistStamped
-
-            lcm = LCMTwistStamped.lcm_decode(data)
-            ts = lcm.header.stamp.sec + lcm.header.stamp.nsec / 1_000_000_000
+            cmd = TwistStamped.lcm_decode(data)
         except Exception:
             return  # foreign / undecodable frame — skip
-        self._cmd_stats.record(ts, nbytes=len(data))
+        self._cmd_stats.record(cmd.ts, nbytes=len(data))
+        self.cmd_vel_stamped.publish(cmd)
 
     def _battery_soc(self) -> int | None:
         """Battery SOC from the cached lowstate, without invoking the logged
