@@ -38,6 +38,9 @@ from dimos.utils.data import resolve_named_path
 
 TIMELINE = "ts"
 
+# Body-frame axis-triad length for the odometry transform (m).
+ODOM_AXIS_LEN = 0.5
+
 # Distinct path colors for overlaid configurations, config 0 first.
 PATH_PALETTE = [
     [0, 255, 0],
@@ -105,6 +108,23 @@ def _log_path_wp(waypoints: NDArray[np.float32] | None, entity: str, color: list
         return
     points = [(float(p[0]), float(p[1]), float(p[2])) for p in waypoints]
     rr.log(entity, rr.LineStrips3D([points], colors=[color], radii=0.05))
+
+
+def _log_odometry(
+    pose: tuple[float, ...], ts: float, trail: list[tuple[float, float, float]]
+) -> None:
+    """Log the odometry pose as a moving body-frame transform with an XYZ axis
+    triad, plus the trajectory trail growing over time. The triad is a static
+    child of world/odom, so it inherits this transform and sweeps along the path."""
+    px, py, pz, qx, qy, qz, qw = pose
+    rr.set_time(TIMELINE, timestamp=ts)
+    rr.log(
+        "world/odom",
+        rr.Transform3D(translation=[px, py, pz], quaternion=rr.Quaternion(xyzw=[qx, qy, qz, qw])),
+    )
+    trail.append((px, py, pz))
+    if len(trail) > 1:
+        rr.log("world/odom_path", rr.LineStrips3D([trail], colors=[[255, 255, 255]], radii=0.015))
 
 
 def _clearance_colors(
@@ -376,6 +396,23 @@ def main(
 
         rr.log("world/goal", rr.Points3D([goal], colors=[[255, 0, 0]], radii=0.1), static=True)
 
+        # Static XYZ axis triad in the odometry body frame (world/odom transform).
+        rr.log(
+            "world/odom/axes",
+            rr.Arrows3D(
+                origins=[[0.0, 0.0, 0.0]] * 3,
+                vectors=[
+                    [ODOM_AXIS_LEN, 0.0, 0.0],
+                    [0.0, ODOM_AXIS_LEN, 0.0],
+                    [0.0, 0.0, ODOM_AXIS_LEN],
+                ],
+                colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
+                radii=ODOM_AXIS_LEN / 25,
+            ),
+            static=True,
+        )
+        odom_trail: list[tuple[float, float, float]] = []
+
         try:
             frame = 0
             for ray_obs in ray_pipeline:
@@ -390,6 +427,7 @@ def main(
                     clearance_clamp,
                     ref_clearance,
                 )
+                _log_odometry(ray_obs.pose_tuple, ray_obs.ts, odom_trail)
                 frame += 1
                 print(
                     f"frame={frame} configs={len(planners)} "
