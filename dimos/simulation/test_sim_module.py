@@ -21,11 +21,19 @@ import pytest
 
 mujoco = pytest.importorskip("mujoco")
 
+from dimos.simulation.backend.mujoco.engine import MujocoEngine
 from dimos.simulation.sim_module import (
     MujocoSimModule,
     MujocoSimModuleConfig,
-    _find_sensor_slice,
 )
+
+
+def _find_sensor_slice(model: mujoco.MjModel, *names: str, dim: int = 3) -> slice | None:
+    """Exercise MujocoEngine.find_sensor_slice against a bare model."""
+    engine = object.__new__(MujocoEngine)
+    engine._model = model
+    return engine.find_sensor_slice(*names, dim=dim)
+
 
 pytestmark = pytest.mark.mujoco
 

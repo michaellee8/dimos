@@ -37,7 +37,7 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.Imu import Imu
-from dimos.simulation.backend.base import SimulationEngine
+from dimos.simulation.backend.base import CameraFrame, PhysicsEngine
 from dimos.simulation.backend.mujoco.robot_sim_binding import (
     RobotSimBinding,
     RobotSimSpec,
@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 logger = setup_logger()
 
 # Step hook signature: called with the engine instance inside the sim thread.
+# (Narrowed from base.StepHook so hooks can use MuJoCo-level accessors.)
 StepHook = Callable[["MujocoEngine"], None]
 _MJJNT_FREE = int(mujoco.mjtJoint.mjJNT_FREE)
 _MUJOCO_FROM_BINARY_PATH = "from_binary_path"
@@ -82,16 +83,6 @@ class CameraConfig:
 
 
 @dataclass
-class CameraFrame:
-    rgb: NDArray[np.uint8] | None
-    depth: NDArray[np.float32] | None
-    cam_pos: NDArray[np.float64]
-    cam_mat: NDArray[np.float64]
-    fovy: float
-    timestamp: float
-
-
-@dataclass
 class _CameraRendererState:
     cfg: CameraConfig
     cam_id: int
@@ -101,7 +92,7 @@ class _CameraRendererState:
     last_render_time: float = 0.0
 
 
-class MujocoEngine(SimulationEngine):
+class MujocoEngine(PhysicsEngine):
     """
     MuJoCo simulation engine.
 
@@ -543,7 +534,7 @@ class MujocoEngine(SimulationEngine):
         for i, mapping in enumerate(self._joint_mappings):
             self._joint_position_targets[i] = self._current_position(mapping)
         self._command_mode = "position"
-        root_pose = self.get_root_pose_unlocked()
+        root_pose = self._root_pose_unlocked()
         if root_pose is not None:
             position, _ = root_pose
             logger.info(
@@ -694,14 +685,23 @@ class MujocoEngine(SimulationEngine):
 
     @property
     def model(self) -> mujoco.MjModel:
+        """Raw MjModel — PRIVATE to ``dimos/simulation/backend/mujoco/``.
+
+        Code outside this package must use the ``PhysicsEngine`` surface
+        (or the named MuJoCo accessors like ``body_id``/``find_sensor_slice``)
+        instead; touching MjModel elsewhere couples that consumer to MuJoCo.
+        """
         return self._model
 
     @property
     def data(self) -> mujoco.MjData:
-        """Live MjData. In-process consumers (sensors, PD hooks) read it
-        directly; physics integration in the sim thread mutates it under
-        ``self._lock`` so reads inside the same MujocoEngine instance are
-        coherent without extra locking."""
+        """Raw MjData — PRIVATE to ``dimos/simulation/backend/mujoco/``.
+
+        Physics integration in the sim thread mutates it under ``self._lock``;
+        same-package consumers (renderer, PD hooks) read it directly. Code
+        outside this package must use ``read_sensor_data``/``read_qpos``/
+        ``get_body_world_poses`` etc. instead.
+        """
         return self._data
 
     @property
@@ -946,9 +946,9 @@ class MujocoEngine(SimulationEngine):
 
     def get_root_pose(self) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
         with self._lock:
-            return self.get_root_pose_unlocked()
+            return self._root_pose_unlocked()
 
-    def get_root_pose_unlocked(self) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+    def _root_pose_unlocked(self) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
         qpos_adr = self._root_free_qpos_adr
         if qpos_adr is None:
             return None
@@ -965,6 +965,62 @@ class MujocoEngine(SimulationEngine):
                 (self._data.xpos[body_id].copy(), self._data.xquat[body_id].copy())
                 for body_id in body_ids
             ]
+
+    def body_id(self, name: str) -> int | None:
+        """Resolve a body name to its MuJoCo id (with attach-prefix fallback)."""
+        bid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, name)
+        if bid >= 0:
+            return int(bid)
+        bid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, f"/{name.lstrip('/')}")
+        return int(bid) if bid >= 0 else None
+
+    def find_sensor_slice(self, *names: str, dim: int = 3) -> slice | None:
+        """Resolve named sensors to a sensordata slice.
+
+        Tries each name exactly, then with the MjSpec attach prefix (``/name``),
+        then as a unique ``/name`` suffix match (warning on ambiguity).
+        """
+        model = self._model
+        for name in names:
+            sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, name)
+            if sensor_id >= 0:
+                address = int(model.sensor_adr[sensor_id])
+                return slice(address, address + dim)
+            attached_name = f"/{name.lstrip('/')}"
+            sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, attached_name)
+            if sensor_id >= 0:
+                address = int(model.sensor_adr[sensor_id])
+                return slice(address, address + dim)
+
+            suffix = f"/{name.lstrip('/')}"
+            matches: list[int] = []
+            for candidate_id in range(model.nsensor):
+                candidate = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, candidate_id)
+                if candidate is not None and candidate.endswith(suffix):
+                    matches.append(candidate_id)
+            if len(matches) == 1:
+                address = int(model.sensor_adr[matches[0]])
+                return slice(address, address + dim)
+            if len(matches) > 1:
+                logger.warning(
+                    "Ambiguous attached MuJoCo sensor name",
+                    requested=name,
+                    matches=[
+                        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, match)
+                        for match in matches
+                    ],
+                )
+        return None
+
+    def read_sensor_data(self, sensor_slice: slice) -> NDArray[np.float64]:
+        """Copy a sensordata slice from the latest stepped state (thread-safe)."""
+        with self._lock:
+            return self._data.sensordata[sensor_slice].copy()
+
+    def read_qpos(self, qpos_slice: slice) -> NDArray[np.float64]:
+        """Copy a qpos slice from the latest stepped state (thread-safe)."""
+        with self._lock:
+            return self._data.qpos[qpos_slice].copy()
 
     def get_actuator_ctrl_range(self, joint_index: int) -> tuple[float, float] | None:
         mapping = self._joint_mappings[joint_index]
@@ -1056,8 +1112,8 @@ def engine_main(
         assets=assets,
     )
 
-    imu_gyro_slice = _find_sensor_slice_inline(engine.model, imu_gyro_sensor_names)
-    imu_accel_slice = _find_sensor_slice_inline(engine.model, imu_accel_sensor_names)
+    imu_gyro_slice = engine.find_sensor_slice(*imu_gyro_sensor_names)
+    imu_accel_slice = engine.find_sensor_slice(*imu_accel_sensor_names)
     has_freejoint = bool(engine.model.njnt > 0 and int(engine.model.jnt_type[0]) == _MJJNT_FREE)
     hooks = WholeBodySimHooks(shm, dof=dof)
 
@@ -1148,40 +1204,6 @@ def engine_main(
             logger.warning(f"engine_main: shm cleanup raised: {exc}")
         odom_tx.stop()
         imu_tx.stop()
-
-
-def _find_sensor_slice_inline(
-    model: mujoco.MjModel, names: tuple[str, ...], dim: int = 3
-) -> slice | None:
-    for name in names:
-        sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, name)
-        if sensor_id >= 0:
-            address = int(model.sensor_adr[sensor_id])
-            return slice(address, address + dim)
-        attached_name = f"/{name.lstrip('/')}"
-        sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, attached_name)
-        if sensor_id >= 0:
-            address = int(model.sensor_adr[sensor_id])
-            return slice(address, address + dim)
-
-        suffix = f"/{name.lstrip('/')}"
-        matches: list[int] = []
-        for candidate_id in range(model.nsensor):
-            candidate = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, candidate_id)
-            if candidate is not None and candidate.endswith(suffix):
-                matches.append(candidate_id)
-        if len(matches) == 1:
-            address = int(model.sensor_adr[matches[0]])
-            return slice(address, address + dim)
-        if len(matches) > 1:
-            logger.warning(
-                "Ambiguous attached MuJoCo sensor name",
-                requested=name,
-                matches=[
-                    mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, match) for match in matches
-                ],
-            )
-    return None
 
 
 __all__ = [

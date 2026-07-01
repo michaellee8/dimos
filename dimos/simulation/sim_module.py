@@ -37,7 +37,6 @@ from typing import Any, Literal
 
 import mujoco
 import numpy as np
-from numpy.typing import NDArray
 import open3d as o3d  # type: ignore[import-untyped]
 from pydantic import Field
 import reactivex as rx
@@ -47,7 +46,6 @@ from scipy.spatial.transform import Rotation as R
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
-from dimos.hardware.sensors.camera.spec import DepthCameraConfig, DepthCameraHardware
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
@@ -57,7 +55,6 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.Imu import Imu
-from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.simulation.backend.mujoco.engine import (
     CameraConfig,
@@ -66,7 +63,6 @@ from dimos.simulation.backend.mujoco.engine import (
 )
 from dimos.simulation.backend.mujoco.robot_sim_binding import RobotSimSpec
 from dimos.simulation.backend.mujoco.shm import (
-    CMD_MODE_PD_TAU,
     ManipShmWriter,
     shm_key_from_path,
 )
@@ -75,38 +71,6 @@ from dimos.spec import perception
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
-
-
-def _find_sensor_slice(model: mujoco.MjModel, *names: str, dim: int = 3) -> slice | None:
-    for name in names:
-        sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, name)
-        if sensor_id >= 0:
-            address = int(model.sensor_adr[sensor_id])
-            return slice(address, address + dim)
-        attached_name = f"/{name.lstrip('/')}"
-        sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, attached_name)
-        if sensor_id >= 0:
-            address = int(model.sensor_adr[sensor_id])
-            return slice(address, address + dim)
-
-        suffix = f"/{name.lstrip('/')}"
-        matches: list[int] = []
-        for candidate_id in range(model.nsensor):
-            candidate = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, candidate_id)
-            if candidate is not None and candidate.endswith(suffix):
-                matches.append(candidate_id)
-        if len(matches) == 1:
-            address = int(model.sensor_adr[matches[0]])
-            return slice(address, address + dim)
-        if len(matches) > 1:
-            logger.warning(
-                "Ambiguous attached MuJoCo sensor name",
-                requested=name,
-                matches=[
-                    mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, match) for match in matches
-                ],
-            )
-    return None
 
 
 _RX180 = R.from_euler("x", 180, degrees=True)
@@ -145,98 +109,7 @@ def _imu_from_mujoco_wxyz(
     )
 
 
-class _WholeBodySimHooks:
-    """Per-step bridge between MuJoCo actuators and whole-body SHM."""
-
-    def __init__(
-        self,
-        shm: ManipShmWriter,
-        dof: int,
-        *,
-        gripper_idx: int | None = None,
-        gripper_ctrl_range: tuple[float, float] = (0.0, 1.0),
-        gripper_joint_range: tuple[float, float] = (0.0, 1.0),
-    ) -> None:
-        self._shm = shm
-        self._dof = dof
-        self._gripper_idx = gripper_idx
-        self._gripper_ctrl_range = gripper_ctrl_range
-        self._gripper_joint_range = gripper_joint_range
-        self._latest_pd_pos_target: NDArray[np.float64] | None = None
-        self._latest_pd_kp: NDArray[np.float64] | None = None
-        self._latest_pd_kd: NDArray[np.float64] | None = None
-        self._latest_pd_tau: NDArray[np.float64] | None = None
-
-    def pre_step(self, engine: MujocoEngine) -> None:
-        shm = self._shm
-        dof = self._dof
-
-        pos_cmd = shm.read_position_command(dof)
-        if pos_cmd is not None:
-            if shm.read_command_mode() == CMD_MODE_PD_TAU:
-                self._latest_pd_pos_target = pos_cmd
-            else:
-                engine.write_joint_command(JointState(position=pos_cmd.tolist()))
-
-        vel_cmd = shm.read_velocity_command(dof)
-        if vel_cmd is not None:
-            engine.write_joint_command(JointState(velocity=vel_cmd.tolist()))
-
-        kp_cmd = shm.read_kp_command(dof)
-        if kp_cmd is not None:
-            self._latest_pd_kp = kp_cmd
-        kd_cmd = shm.read_kd_command(dof)
-        if kd_cmd is not None:
-            self._latest_pd_kd = kd_cmd
-        tau_cmd = shm.read_tau_command(dof)
-        if tau_cmd is not None:
-            self._latest_pd_tau = tau_cmd
-
-        if (
-            self._latest_pd_pos_target is not None
-            and self._latest_pd_kp is not None
-            and self._latest_pd_kd is not None
-        ):
-            q = np.asarray(engine.joint_positions[:dof], dtype=np.float64)
-            dq = np.asarray(engine.joint_velocities[:dof], dtype=np.float64)
-            tau_ff = self._latest_pd_tau if self._latest_pd_tau is not None else np.zeros(dof)
-            tau = (
-                self._latest_pd_kp * (self._latest_pd_pos_target - q)
-                + self._latest_pd_kd * (-dq)
-                + tau_ff
-            )
-            engine.write_joint_command(JointState(effort=tau.tolist()))
-
-        if self._gripper_idx is not None:
-            gripper_cmd = shm.read_gripper_command()
-            if gripper_cmd is not None:
-                engine.set_position_target(
-                    self._gripper_idx, self._gripper_joint_to_ctrl(gripper_cmd)
-                )
-
-    def post_step(self, engine: MujocoEngine) -> None:
-        shm = self._shm
-        shm.write_joint_state(
-            positions=engine.joint_positions,
-            velocities=engine.joint_velocities,
-            efforts=engine.joint_efforts,
-        )
-        if self._gripper_idx is not None:
-            positions = engine.joint_positions
-            if self._gripper_idx < len(positions):
-                shm.write_gripper_state(positions[self._gripper_idx])
-
-    def _gripper_joint_to_ctrl(self, joint_position: float) -> float:
-        jlo, jhi = self._gripper_joint_range
-        clo, chi = self._gripper_ctrl_range
-        clamped = max(jlo, min(jhi, joint_position))
-        if jhi == jlo:
-            return clo
-        t = (clamped - jlo) / (jhi - jlo)
-        return chi - t * (chi - clo)
-
-
-class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
+class MujocoSimModuleConfig(ModuleConfig):
     """Configuration for the unified MuJoCo simulation module.
 
     Two ways to specify the model:
@@ -323,7 +196,6 @@ class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
 
 
 class MujocoSimModule(
-    DepthCameraHardware,
     Module,
     perception.DepthCamera,
 ):
@@ -543,23 +415,20 @@ class MujocoSimModule(
             return
         from dimos.simulation.backend.mujoco.entity_scene import entity_body_name
 
-        model = self._engine.model
         for raw in self.config.scene_entities:
             try:
                 descriptor = EntityDescriptor.from_wire(raw["descriptor"])
             except (KeyError, TypeError, ValueError) as exc:
                 logger.warning("MujocoSimModule: bad scene entity metadata: %s", exc)
                 continue
-            body_id = mujoco.mj_name2id(
-                model, mujoco.mjtObj.mjOBJ_BODY, entity_body_name(descriptor.entity_id)
-            )
-            if body_id < 0:
+            body_id = self._engine.body_id(entity_body_name(descriptor.entity_id))
+            if body_id is None:
                 logger.warning(
                     "MujocoSimModule: entity %s not in model (compose_entity_model not used?)",
                     descriptor.entity_id,
                 )
                 continue
-            self._entity_bodies.append((descriptor, int(body_id)))
+            self._entity_bodies.append((descriptor, body_id))
         if self._entity_bodies:
             logger.info(
                 "MujocoSimModule: publishing entity states for %d scene entities",
@@ -640,19 +509,18 @@ class MujocoSimModule(
             return
 
         self._imu_quat_slice = None
-        self._imu_gyro_slice = _find_sensor_slice(
-            self._engine.model, *self.config.imu_gyro_sensor_names, dim=3
+        self._imu_gyro_slice = self._engine.find_sensor_slice(
+            *self.config.imu_gyro_sensor_names, dim=3
         )
-        self._imu_accel_slice = _find_sensor_slice(
-            self._engine.model, *self.config.imu_accel_sensor_names, dim=3
+        self._imu_accel_slice = self._engine.find_sensor_slice(
+            *self.config.imu_accel_sensor_names, dim=3
         )
-        self._imu_linvel_slice = _find_sensor_slice(
-            self._engine.model, *self.config.imu_linvel_sensor_names, dim=3
+        self._imu_linvel_slice = self._engine.find_sensor_slice(
+            *self.config.imu_linvel_sensor_names, dim=3
         )
-        if self._engine.model.njnt > 0 and int(self._engine.model.jnt_type[0]) == int(
-            mujoco.mjtJoint.mjJNT_FREE
-        ):
-            self._imu_base_qpos_slice = slice(3, 7)
+        root_qpos_adr = self._engine.root_qpos_adr
+        if root_qpos_adr is not None:
+            self._imu_base_qpos_slice = slice(root_qpos_adr + 3, root_qpos_adr + 7)
         else:
             self._imu_base_qpos_slice = None
 
@@ -947,27 +815,26 @@ class MujocoSimModule(
         ):
             return
 
-        data = engine.data
         if self._imu_quat_slice is not None:
-            q = data.sensordata[self._imu_quat_slice]
+            q = engine.read_sensor_data(self._imu_quat_slice)
             quat = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
         elif self._imu_base_qpos_slice is not None:
-            q = data.qpos[self._imu_base_qpos_slice]
+            q = engine.read_qpos(self._imu_base_qpos_slice)
             quat = (float(q[0]), float(q[1]), float(q[2]), float(q[3]))
         else:
             quat = (1.0, 0.0, 0.0, 0.0)
         if self._imu_gyro_slice is not None:
-            g = data.sensordata[self._imu_gyro_slice]
+            g = engine.read_sensor_data(self._imu_gyro_slice)
             gyro = (float(g[0]), float(g[1]), float(g[2]))
         else:
             gyro = (0.0, 0.0, 0.0)
         if self._imu_accel_slice is not None:
-            a = data.sensordata[self._imu_accel_slice]
+            a = engine.read_sensor_data(self._imu_accel_slice)
             accel = (float(a[0]), float(a[1]), float(a[2]))
         else:
             accel = (0.0, 0.0, 0.0)
         if self._imu_linvel_slice is not None:
-            v = data.sensordata[self._imu_linvel_slice]
+            v = engine.read_sensor_data(self._imu_linvel_slice)
             linvel = (float(v[0]), float(v[1]), float(v[2]))
         else:
             linvel = (0.0, 0.0, 0.0)
