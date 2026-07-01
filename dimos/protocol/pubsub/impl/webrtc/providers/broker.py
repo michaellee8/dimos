@@ -280,7 +280,8 @@ class BrokerProvider(AsyncProviderBase):
                 if terminal_streak >= 5:
                     logger.error(
                         "Heartbeat terminal: %d consecutive %d responses — stopping loop",
-                        terminal_streak, status,
+                        terminal_streak,
+                        status,
                     )
                     return
             else:
@@ -405,6 +406,7 @@ class BrokerProvider(AsyncProviderBase):
                     logger.info("Dropping %s publish: no operator connected", topic)
                 return
             self._dropped_publish_warned = False
+
             # Recheck readyState on the loop thread — channel can close
             # between here and the tick; ch.send on a closed channel raises.
             def _send_safe(c=ch, d=data) -> None:
