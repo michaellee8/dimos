@@ -152,6 +152,11 @@ class ReplayConnection(Go2WebRTCConnection, CompositeResource):
         dataset: str = "go2_china_office",
         **kwargs,
     ) -> None:
+        # Replay has no live WebRTC connection; declare the transport attrs (None) so
+        # inherited teardown, which checks `is None`, is safe.
+        self.conn = None
+        self.loop = None
+        self.thread = None
         self.dataset = dataset
         self._loop = kwargs.get("loop", False)
         self._seek = kwargs.get("seek")
@@ -172,6 +177,10 @@ class ReplayConnection(Go2WebRTCConnection, CompositeResource):
 
     def start(self) -> None:
         pass
+
+    def stop(self) -> None:
+        # Replay has no live connection; just dispose the replay store.
+        CompositeResource.stop(self)
 
     def standup(self) -> bool:
         return True

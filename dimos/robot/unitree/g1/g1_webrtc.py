@@ -12,16 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""G1 WebRTC connection — G1's own movement/posture commands.
-
-Subclasses the generic UnitreeWebRTCConnection (connection only) and owns G1's
-high-level commands. Twists go out as wireless-controller joystick axes (G1's
-high-level FSM is joystick-driven). Postures are kept G1-local even where the SPORT
-api ids currently match Go2's, since the FSMs may diverge.
-"""
+"""G1 WebRTC connection — G1's own move/posture commands (kept G1-local; FSMs may diverge)."""
 
 import asyncio
-import threading
 import time
 
 from unitree_webrtc_connect.constants import RTC_TOPIC, SPORT_CMD
@@ -37,62 +30,58 @@ class G1WebRTCConnection(UnitreeWebRTCConnection):
     """G1 high-level WebRTC connection — G1's own move + posture commands."""
 
     def __init__(self, ip: str, mode: str = "ai", aes_128_key: str | None = None) -> None:
-        self.stop_timer: threading.Timer | None = None
+        self._stop_handle: asyncio.TimerHandle | None = None
         self.cmd_vel_timeout = 0.2
         super().__init__(ip, mode=mode, aes_128_key=aes_128_key)
 
     def _publish_joystick(self, x: float, y: float, yaw: float) -> None:
-        """Wireless-controller joystick send. Axis mapping: lx = -vy, ly = vx, rx = -vyaw."""
-        self.conn.datachannel.pub_sub.publish_without_callback(
-            RTC_TOPIC["WIRELESS_CONTROLLER"],
-            data={"lx": -y, "ly": x, "rx": -yaw, "ry": 0},
-        )
+        """Wireless-controller joystick send (yaw is a joystick axis, not rad/s)."""
+        self.publish(RTC_TOPIC["WIRELESS_CONTROLLER"], {"lx": -y, "ly": x, "rx": -yaw, "ry": 0})
 
     def move(self, twist: Twist, duration: float = 0.0) -> bool:
-        """Send a movement command as wireless-controller joystick axes.
-
-        Args:
-            twist: linear & angular velocities
-            duration: how long to move (seconds). If 0, a single continuous command.
-        """
+        """Send a twist as joystick axes. duration=0 sends once; >0 resends until elapsed."""
         x, y, yaw = twist.linear.x, twist.linear.y, twist.angular.z
-
-        async def async_move() -> None:
-            self._publish_joystick(x, y, yaw)
-
-        async def async_move_duration() -> None:
-            start_time = time.time()
-            sleep_time = 0.01
-            while time.time() - start_time < duration:
-                await async_move()
-                await asyncio.sleep(sleep_time)
-
-        if self.stop_timer:
-            self.stop_timer.cancel()
-
-        # Auto-stop if no new command arrives within cmd_vel_timeout.
-        self.stop_timer = threading.Timer(self.cmd_vel_timeout, self.stop_movement)
-        self.stop_timer.daemon = True
-        self.stop_timer.start()
-
+        self._arm_auto_stop()
         try:
             if duration > 0:
-                future = asyncio.run_coroutine_threadsafe(async_move_duration(), self.loop)
-                future.result()
-                self.stop_movement()
+                start_time = time.time()
+                while time.time() - start_time < duration:
+                    self._publish_joystick(x, y, yaw)
+                    time.sleep(0.01)
+                self._publish_joystick(0.0, 0.0, 0.0)
             else:
-                future = asyncio.run_coroutine_threadsafe(async_move(), self.loop)
-                future.result()
+                self._publish_joystick(x, y, yaw)
             return True
         except Exception as e:
             logger.warning("Failed to send movement command: %s", e)
             return False
 
-    def stop_movement(self) -> None:
-        """Cancel the auto-stop timer (used by move() for continuous commands)."""
-        if self.stop_timer:
-            self.stop_timer.cancel()
-            self.stop_timer = None
+    def _arm_auto_stop(self) -> None:
+        """(Re)arm the command-timeout auto-stop on the event loop (no per-call threads)."""
+
+        def _rearm() -> None:  # runs on the loop thread
+            if self._stop_handle is not None:
+                self._stop_handle.cancel()
+            self._stop_handle = self.loop.call_later(self.cmd_vel_timeout, self._auto_stop)
+
+        self.loop.call_soon_threadsafe(_rearm)
+
+    def _auto_stop(self) -> None:
+        """Zero the robot when commands stop arriving (runs on the loop thread)."""
+        self._stop_handle = None
+        try:
+            self._publish_joystick(0.0, 0.0, 0.0)
+        except Exception as e:
+            logger.warning("Auto-stop send failed: %s", e)
+
+    def stop(self) -> None:
+        # Safety: zero the robot before the base tears down the loop. Loop teardown
+        # also drops any pending auto-stop, so nothing can fire afterwards.
+        try:
+            self._publish_joystick(0.0, 0.0, 0.0)
+        except Exception as e:
+            logger.warning("Failed to send stop on disconnect: %s", e)
+        super().stop()
 
     def standup(self) -> bool:
         return bool(self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": SPORT_CMD["StandUp"]}))

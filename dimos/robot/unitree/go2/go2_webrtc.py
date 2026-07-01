@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Go2 WebRTC connection — Go2's own movement/mode commands and sensor decoding.
-
-Subclasses the generic UnitreeWebRTCConnection (which handles connection only) and
-owns everything Go2-specific: how it moves (SPORT Move velocity / joystick / rage),
-its postures and modes, and how it decodes the Go2 sensor streams. The G1 equivalent
-lives in dimos/robot/unitree/g1/g1_webrtc.py.
-"""
+"""Go2 WebRTC connection — Go2's move/mode commands and sensor decoding (G1: g1/g1_webrtc.py)."""
 
 import asyncio
 from dataclasses import dataclass
@@ -27,10 +21,9 @@ import functools
 import json
 import threading
 import time
-from typing import TypeAlias, TypeVar
+from typing import TypeVar
 
 import numpy as np
-from numpy.typing import NDArray
 from reactivex import operators as ops
 from reactivex.observable import Observable
 from reactivex.subject import Subject
@@ -56,8 +49,6 @@ from dimos.utils.logging_config import setup_logger
 from dimos.utils.reactive import backpressure
 
 logger = setup_logger()
-
-VideoMessage: TypeAlias = NDArray[np.uint8]  # Shape: (height, width, 3)
 
 _T = TypeVar("_T", bound=Timestamped)
 
@@ -96,25 +87,14 @@ class SerializableVideoFrame:
 
 
 class TwistMode(str, Enum):
-    """How a Go2 Twist is sent over WebRTC.
-
-    VELOCITY — SPORT ``Move`` (api 1008): true m/s & rad/s. Correct, calibrated.
-    JOYSTICK — legacy wireless-controller axes ([-1, 1], uncalibrated yaw). Kept for
-               backwards compatibility, and required by Rage Mode (its FSM is
-               joystick-driven and ignores SPORT ``Move``).
-    """
+    """VELOCITY = SPORT Move (true m/s & rad/s); JOYSTICK = wireless axes (also forced in rage)."""
 
     VELOCITY = "velocity"
     JOYSTICK = "joystick"
 
 
 class Go2WebRTCConnection(UnitreeWebRTCConnection):
-    """Go2 WebRTC connection: Go2's own move/postures/modes + sensor streams.
-
-    Sends twists as calibrated SPORT ``Move`` velocities (true m/s & rad/s), falling
-    back to the joystick primitive for JOYSTICK mode or while Rage Mode is active
-    (whose FSM is joystick-driven and ignores SPORT ``Move``).
-    """
+    """Go2 WebRTC connection — move (SPORT velocity / joystick / rage), postures/modes, streams."""
 
     _SPORT_API_ID_RAGEMODE: int = 2059
 
@@ -128,100 +108,84 @@ class Go2WebRTCConnection(UnitreeWebRTCConnection):
         self.twist_mode = TwistMode(twist_mode)
         self._move_seq = 0  # monotonic request id for SPORT Move commands
         self._rage_active = False
-        self.stop_timer: threading.Timer | None = None
+        self._stop_handle: asyncio.TimerHandle | None = None
         self.cmd_vel_timeout = 0.2
         super().__init__(ip, mode=mode, aes_128_key=aes_128_key)
 
     # --- movement ---------------------------------------------------------------
 
     def _publish_velocity(self, vx: float, vy: float, vyaw: float) -> None:
-        """Publish one SPORT ``Move`` (api 1008) velocity command: true m/s & rad/s.
-
-        Body frame: vx forward, vy left, vyaw CCW. Must be called on the event-loop
-        thread (publish_without_callback talks to the datachannel directly).
-        """
+        """SPORT Move (api 1008) velocity command — true m/s & rad/s, body frame."""
         self._move_seq += 1
-        self.conn.datachannel.pub_sub.publish_without_callback(
-            RTC_TOPIC["SPORT_MOD"],  # "rt/api/sport/request"
-            data={
+        # parameter is a JSON STRING (firmware contract).
+        self.publish(
+            RTC_TOPIC["SPORT_MOD"],
+            {
                 "header": {"identity": {"id": self._move_seq, "api_id": SPORT_CMD["Move"]}},
-                # parameter is a JSON STRING (firmware contract); publish_without_callback
-                # sends ``data`` verbatim and does not stringify it.
                 "parameter": json.dumps({"x": vx, "y": vy, "z": vyaw}),
             },
-            msg_type=DATA_CHANNEL_TYPE["REQUEST"],  # "req"
+            msg_type=DATA_CHANNEL_TYPE["REQUEST"],
         )
 
     def _publish_joystick(self, x: float, y: float, yaw: float) -> None:
-        """Wireless-controller joystick send. ``yaw`` is a normalized joystick axis,
-        NOT rad/s. Axis mapping: lx = -vy, ly = vx, rx = -vyaw."""
-        self.conn.datachannel.pub_sub.publish_without_callback(
-            RTC_TOPIC["WIRELESS_CONTROLLER"],
-            data={"lx": -y, "ly": x, "rx": -yaw, "ry": 0},
-        )
+        """Wireless-controller joystick send (yaw is a joystick axis, not rad/s)."""
+        self.publish(RTC_TOPIC["WIRELESS_CONTROLLER"], {"lx": -y, "ly": x, "rx": -yaw, "ry": 0})
 
     @property
     def _effective_twist_mode(self) -> TwistMode:
-        """The mode actually used on the wire. Rage Mode's FSM only accepts joystick
-        axes (it ignores SPORT Move), so it overrides twist_mode."""
-        if self._rage_active:
-            return TwistMode.JOYSTICK
-        return self.twist_mode
+        """Rage Mode's FSM only accepts joystick axes, so it overrides twist_mode."""
+        return TwistMode.JOYSTICK if self._rage_active else self.twist_mode
 
     def _send_twist(self, x: float, y: float, yaw: float) -> None:
-        """Dispatch a twist per ``_effective_twist_mode`` (velocity vs joystick)."""
         if self._effective_twist_mode is TwistMode.VELOCITY:
             self._publish_velocity(x, y, yaw)
         else:
             self._publish_joystick(x, y, yaw)
 
     def move(self, twist: Twist, duration: float = 0.0) -> bool:
-        """Send a movement command.
-
-        Args:
-            twist: linear & angular velocities (m/s & rad/s)
-            duration: how long to move (seconds). If 0, a single continuous command.
-
-        Returns True if the command was sent.
-        """
+        """Send a twist. duration=0 sends once; >0 resends every 10ms until elapsed."""
         x, y, yaw = twist.linear.x, twist.linear.y, twist.angular.z
-
-        async def async_move() -> None:
-            self._send_twist(x, y, yaw)
-
-        async def async_move_duration() -> None:
-            start_time = time.time()
-            sleep_time = 0.01
-            while time.time() - start_time < duration:
-                await async_move()
-                await asyncio.sleep(sleep_time)
-
-        if self.stop_timer:
-            self.stop_timer.cancel()
-
-        # Auto-stop if no new command arrives within cmd_vel_timeout.
-        self.stop_timer = threading.Timer(self.cmd_vel_timeout, self.stop_movement)
-        self.stop_timer.daemon = True
-        self.stop_timer.start()
-
+        self._arm_auto_stop()
         try:
             if duration > 0:
-                future = asyncio.run_coroutine_threadsafe(async_move_duration(), self.loop)
-                future.result()
-                self.stop_movement()
+                start_time = time.time()
+                while time.time() - start_time < duration:
+                    self._send_twist(x, y, yaw)
+                    time.sleep(0.01)
+                self._send_twist(0.0, 0.0, 0.0)
             else:
-                future = asyncio.run_coroutine_threadsafe(async_move(), self.loop)
-                future.result()
+                self._send_twist(x, y, yaw)
             return True
         except Exception as e:
             logger.warning("Failed to send movement command: %s", e)
             return False
 
-    def stop_movement(self) -> None:
-        """Cancel the auto-stop timer (used by move() for continuous commands)."""
-        if self.stop_timer:
-            self.stop_timer.cancel()
-            self.stop_timer = None
+    def _arm_auto_stop(self) -> None:
+        """(Re)arm the command-timeout auto-stop on the event loop (no per-call threads)."""
+
+        def _rearm() -> None:  # runs on the loop thread
+            if self._stop_handle is not None:
+                self._stop_handle.cancel()
+            self._stop_handle = self.loop.call_later(self.cmd_vel_timeout, self._auto_stop)
+
+        self.loop.call_soon_threadsafe(_rearm)
+
+    def _auto_stop(self) -> None:
+        """Zero the robot when commands stop arriving (runs on the loop thread)."""
+        self._stop_handle = None
+        try:
+            self._send_twist(0.0, 0.0, 0.0)
+        except Exception as e:
+            logger.warning("Auto-stop send failed: %s", e)
+
+    def stop(self) -> None:
+        # Safety: zero the robot before the base tears down the loop. Loop teardown
+        # also drops any pending auto-stop, so nothing can fire afterwards.
+        try:
+            self._send_twist(0.0, 0.0, 0.0)
+        except Exception as e:
+            logger.warning("Failed to send stop on disconnect: %s", e)
+        super().stop()
 
     # --- postures / modes -------------------------------------------------------
 
@@ -250,10 +214,7 @@ class Go2WebRTCConnection(UnitreeWebRTCConnection):
         )
 
     def set_motion_mode(self, name: str) -> None:
-        """Select the top-level motion controller via the motion switcher.
-
-        mcf is the AI/sport controller that traverses stairs. normal is basic.
-        """
+        """Select the motion controller (mcf = stair-capable sport, normal = basic)."""
         # api_id 1001 = CheckMode, 1002 = SelectMode, param {"name": <mode>}.
         current = None
         try:
@@ -270,12 +231,7 @@ class Go2WebRTCConnection(UnitreeWebRTCConnection):
         time.sleep(5)
 
     def set_rage_mode(self, enable: bool) -> bool:
-        """Toggle Rage Mode (api 2059) over WebRTC, both directions.
-
-        BalanceStand → 2059 {data:enable} → SwitchJoystick(enable). When on, the
-        robot runs a joystick-driven FSM that ignores SPORT Move, so move() falls
-        back to the joystick path (see _effective_twist_mode) at the rage envelope.
-        """
+        """Toggle Rage Mode (api 2059). When on, its FSM ignores SPORT Move → move() uses joystick."""
         # Re-establish BalanceStand before toggling (notes: always BalanceStand
         # before flipping Rage).
         if not self.balance_stand():
@@ -358,7 +314,7 @@ class Go2WebRTCConnection(UnitreeWebRTCConnection):
                 ops.filter(lambda frame: frame is not None),
                 ops.map(
                     lambda frame: Image.from_numpy(
-                        frame.to_ndarray(format="rgb24"),  # type: ignore[attr-defined]
+                        frame.to_ndarray(format="rgb24"),
                         format=ImageFormat.RGB,  # Frame is RGB24, not BGR
                         frame_id="camera_optical",
                     ),
@@ -372,8 +328,8 @@ class Go2WebRTCConnection(UnitreeWebRTCConnection):
         return backpressure(self.subscribe(RTC_TOPIC["LOW_STATE"]))
 
     @simple_mcache
-    def raw_video_stream(self) -> Observable[VideoMessage]:
-        subject: Subject[VideoMessage] = Subject()
+    def raw_video_stream(self) -> Observable[SerializableVideoFrame]:
+        subject: Subject[SerializableVideoFrame] = Subject()
         stop_event = threading.Event()
 
         from aiortc import MediaStreamTrack
@@ -405,9 +361,5 @@ class Go2WebRTCConnection(UnitreeWebRTCConnection):
         return subject.pipe(ops.finally_action(stop))
 
     def get_video_stream(self, fps: int = 30) -> Observable[Image]:
-        """Get the video stream from the robot's camera.
-
-        Args:
-            fps: included for API compatibility; the real rate is camera-determined.
-        """
+        """Video stream from the robot camera (fps kept for API compatibility, ignored)."""
         return self.video_stream()
