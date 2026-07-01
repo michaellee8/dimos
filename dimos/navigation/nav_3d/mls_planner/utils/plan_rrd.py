@@ -276,6 +276,12 @@ def main(
         help="Voxel health floor; more negative needs more hits to appear and more misses to clear",
     ),
     max_health: int = typer.Option(1, "--max-health", help="Voxel health ceiling"),
+    support_min: int = typer.Option(
+        4,
+        "--support-min",
+        help="Min occupied neighbors a surface voxel needs to be emitted; "
+        "0 emits all, higher drops isolated returns",
+    ),
     robot_height: float = typer.Option(0.3, "--robot-height", help="Robot height (m)"),
     max_overhead: float = typer.Option(
         2.0, "--max-overhead", help="Ignore surface more than this far above the sensor (m)"
@@ -351,6 +357,7 @@ def main(
                 emit_every=emit_every,
                 min_health=min_health,
                 max_health=max_health,
+                support_min=support_min,
             )
         )
 

@@ -31,6 +31,10 @@ pub struct Config {
     /// on direct hits, lower clears on slight grazes too.
     #[validate(range(min = 0.0, max = 1.0))]
     pub graze_cos: f32,
+    /// Occupied neighbors a surface voxel needs to appear in the local map. Zero
+    /// emits all; higher drops isolated returns. The global map is unfiltered.
+    #[validate(range(min = 0))]
+    pub support_min: i32,
     /// Publish the accumulated local map and region bounds every Nth frame. Zero disables them.
     #[validate(range(min = 0))]
     pub emit_every: u32,
@@ -406,6 +410,54 @@ pub fn iter_global_normals(
         })
 }
 
+/// Count of a voxel's 26-neighbors that are themselves surface (health > 0).
+fn surface_support(voxels: &AHashMap<VoxelKey, Voxel>, key: VoxelKey) -> i32 {
+    let mut n = 0;
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                if (dx, dy, dz) == (0, 0, 0) {
+                    continue;
+                }
+                let nk = (key.0 + dx, key.1 + dy, key.2 + dz);
+                if voxels.get(&nk).is_some_and(|c| c.health > 0) {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
+}
+
+/// Surface points inside `bounds` with at least `support_min` occupied
+/// neighbors; zero keeps every voxel. Neighbors are counted over the whole map,
+/// so a voxel at the region edge still sees its true surroundings.
+pub fn local_surface_points(
+    map: &VoxelMap,
+    voxel_size: f32,
+    bounds: &LocalBounds,
+    support_min: i32,
+) -> Vec<(f32, f32, f32)> {
+    let half = voxel_size * 0.5;
+    map.voxels
+        .iter()
+        .filter(|(_, c)| c.health > 0)
+        .filter_map(|(&key, _)| {
+            let (kx, ky, kz) = key;
+            let x = kx as f32 * voxel_size + half;
+            let y = ky as f32 * voxel_size + half;
+            let z = kz as f32 * voxel_size + half;
+            if !bounds.contains(x, y, z) {
+                return None;
+            }
+            if support_min > 0 && surface_support(&map.voxels, key) < support_min {
+                return None;
+            }
+            Some((x, y, z))
+        })
+        .collect()
+}
+
 fn live_voxels(points: &[(f32, f32, f32)], voxel_size: f32) -> AHashSet<VoxelKey> {
     let inv = 1.0_f32 / voxel_size;
     let mut out: AHashSet<VoxelKey> = AHashSet::with_capacity(points.len());
@@ -653,6 +705,7 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos: 0.5,
+            support_min: 0,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -839,6 +892,7 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos: 0.5,
+            support_min: 0,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -993,6 +1047,7 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos: 0.5,
+            support_min: 0,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -1066,6 +1121,7 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos: 0.5,
+            support_min: 0,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -1127,6 +1183,7 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos,
+            support_min: 0,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -1257,6 +1314,7 @@ mod tests {
             min_health: 0,
             max_health: 1,
             graze_cos: 0.5,
+            support_min: 0,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -1271,5 +1329,39 @@ mod tests {
         update_map(&mut map, origin, &ray, &cfg);
         let clipped = row.iter().filter(|k| !map.voxels.contains_key(k)).count();
         assert_eq!(clipped, 0, "a planar floor keeps its grazing spare");
+    }
+
+    #[test]
+    fn support_gate_drops_isolated_voxels() {
+        let voxel_size = 1.0;
+        let mut map = VoxelMap::default();
+        // A 3x3 surface patch, plus one isolated voxel far from anything.
+        for x in 0..3 {
+            for y in 0..3 {
+                map.set((x, y, 0), 1);
+            }
+        }
+        map.set((20, 20, 0), 1);
+        let bounds = LocalBounds {
+            origin_x: 0.0,
+            origin_y: 0.0,
+            r_xy_max_sq: 1e6,
+            z_min: -10.0,
+            z_max: 10.0,
+        };
+
+        // support_min 0 emits every surface voxel.
+        assert_eq!(local_surface_points(&map, voxel_size, &bounds, 0).len(), 10);
+
+        // Every patch cell has at least 3 surface neighbors (the corners exactly
+        // 3), so support_min 3 keeps the patch and drops only the isolated voxel.
+        let gated = local_surface_points(&map, voxel_size, &bounds, 3);
+        assert_eq!(gated.len(), 9);
+        let half = voxel_size * 0.5;
+        let isolated = (20.0 + half, 20.0 + half, half);
+        assert!(
+            !gated.contains(&isolated),
+            "isolated voxel must be gated out"
+        );
     }
 }

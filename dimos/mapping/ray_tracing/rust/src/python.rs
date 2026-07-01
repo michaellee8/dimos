@@ -8,8 +8,8 @@ use pyo3::prelude::*;
 use validator::Validate;
 
 use crate::voxel_ray_tracer::{
-    batch_local_bounds, iter_global_normals, iter_global_points, update_map, Config, LocalBounds,
-    VoxelMap,
+    batch_local_bounds, iter_global_normals, iter_global_points, local_surface_points, update_map,
+    Config, LocalBounds, VoxelMap,
 };
 
 fn extract_tuples(arr: &Bound<'_, PyAny>, name: &str) -> PyResult<Vec<(f32, f32, f32)>> {
@@ -67,6 +67,7 @@ impl VoxelRayMapper {
         min_health = -1,
         max_health = 1,
         graze_cos = 0.7,
+        support_min = 4,
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -78,6 +79,7 @@ impl VoxelRayMapper {
         min_health: i32,
         max_health: i32,
         graze_cos: f32,
+        support_min: i32,
     ) -> PyResult<Self> {
         let config = Config {
             voxel_size,
@@ -88,6 +90,7 @@ impl VoxelRayMapper {
             min_health,
             max_health,
             graze_cos,
+            support_min,
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
@@ -180,13 +183,11 @@ impl VoxelRayMapper {
             z_max,
         };
         let voxel_size = self.config.voxel_size;
+        let support_min = self.config.support_min;
         let map = &self.map;
         let positions: Vec<f32> = py.allow_threads(|| {
             let mut out: Vec<f32> = Vec::new();
-            for (x, y, z) in iter_global_points(map, voxel_size) {
-                if !bounds.contains(x, y, z) {
-                    continue;
-                }
+            for (x, y, z) in local_surface_points(map, voxel_size, &bounds, support_min) {
                 out.push(x);
                 out.push(y);
                 out.push(z);
