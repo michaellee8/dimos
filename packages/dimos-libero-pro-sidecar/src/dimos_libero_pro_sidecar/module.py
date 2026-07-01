@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 
 from dimos_runtime_protocol.models import (
@@ -149,6 +150,8 @@ class LiberoProRuntimeModule(Module):
         )
         self._state: LiberoProRuntimeState | None = None
         self._runtime_stopped = False
+        self._latest_snapshot_observations: list[ObservationFrame] = []
+        self._latest_snapshot_values: dict[str, np.ndarray] = {}
 
     @rpc
     def stop(self) -> None:
@@ -206,6 +209,17 @@ class LiberoProRuntimeModule(Module):
 
         return self._owner.call(lambda: self._state_or_create().score())
 
+    @rpc
+    def observation_snapshot(self) -> tuple[list[ObservationFrame], dict[str, np.ndarray]]:
+        """Return latest observation metadata and arrays published by this module."""
+
+        return self._owner.call(
+            lambda: (
+                list(self._latest_snapshot_observations),
+                dict(self._latest_snapshot_values),
+            )
+        )
+
     def _state_or_create(self) -> LiberoProRuntimeState:
         if self._state is None:
             self._state = LiberoProRuntimeState(self._runtime_config)
@@ -214,18 +228,24 @@ class LiberoProRuntimeModule(Module):
     def _publish_observation_outputs(
         self, observations: list[ObservationFrame], event: str
     ) -> None:
+        snapshot_observations: list[ObservationFrame] = []
+        snapshot_values: dict[str, np.ndarray] = {}
+        state = self._state_or_create()
         for observation in observations:
             if observation.kind == ObservationKind.STATE:
                 publish_output(self.runtime_event, observation)
-        state = self._state_or_create()
-        for camera_name in state.config.camera_names:
-            image = state._last_obs.get(f"{camera_name}_image")
-            if image is None:
+                snapshot_observations.append(observation)
                 continue
-            array = np.asarray(image)
+            if observation.kind != ObservationKind.IMAGE:
+                continue
+            array = self._snapshot_image_value(state, observation)
+            if array is None:
+                continue
+            snapshot_values[observation.stream] = array
+            snapshot_observations.append(observation)
             publish_output(
                 self.color_image,
-                Image(data=array, format=ImageFormat.RGB, frame_id=camera_name),
+                Image(data=array, format=ImageFormat.RGB, frame_id=observation.stream),
             )
             height, width = array.shape[:2]
             publish_output(
@@ -234,15 +254,27 @@ class LiberoProRuntimeModule(Module):
                     fov_deg=45.0,
                     width=width,
                     height=height,
-                    frame_id=camera_name,
+                    frame_id=observation.stream,
                 ),
             )
-        publish_output(
-            self.runtime_event,
-            ObservationFrame(
-                stream="runtime_event",
-                kind=ObservationKind.TEXT,
-                inline_text=event,
-                metadata={"sequence": state._sequence},
-            ),
+        event_observation = ObservationFrame(
+            stream="runtime_event",
+            kind=ObservationKind.TEXT,
+            inline_text=event,
+            metadata={"sequence": state._sequence},
         )
+        snapshot_observations.append(event_observation)
+        self._latest_snapshot_observations = snapshot_observations
+        self._latest_snapshot_values = snapshot_values
+        publish_output(self.runtime_event, event_observation)
+
+    def _snapshot_image_value(
+        self, state: LiberoProRuntimeState, observation: ObservationFrame
+    ) -> np.ndarray | None:
+        if observation.data_ref is not None:
+            payload_id = observation.data_ref.removeprefix("/payloads/")
+            return np.asarray(np.load(BytesIO(state.payload_bytes(payload_id)), allow_pickle=False))
+        image = state._last_obs.get(f"{observation.stream}_image")
+        if image is None:
+            return None
+        return np.asarray(image)

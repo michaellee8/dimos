@@ -87,7 +87,7 @@ The scripted demos SHALL be launched through plain scripts and MUST NOT require 
 - **THEN** the script performs orchestration directly rather than delegating to a new DimOS CLI subcommand
 
 ### Requirement: LeRobot LIBERO policy rollout demo
-The system SHALL include a script-based or module-backed LeRobot LIBERO policy rollout demo that validates policy loading, contract conversion, native runtime actions, sidecar stepping, score collection, artifact output, and teardown through the same module-backed policy evaluation path used by DimOS workflow.
+The system SHALL include a module-backed LeRobot LIBERO policy rollout demo that validates policy loading, contract conversion, native runtime actions, placed runtime-module stepping, stream snapshot collection, score collection, artifact output, and teardown through the same module-backed policy evaluation path used by DimOS workflow.
 
 #### Scenario: Policy rollout demo starts native runtime module and policy rollout stack
 - **WHEN** a developer runs the LeRobot LIBERO policy rollout demo with compatible LeRobot dependencies and prepared LIBERO assets
@@ -95,7 +95,11 @@ The system SHALL include a script-based or module-backed LeRobot LIBERO policy r
 
 #### Scenario: Policy rollout demo bypasses ControlCoordinator
 - **WHEN** the LeRobot LIBERO policy rollout demo executes policy actions
-- **THEN** actions flow from the robot policy module through benchmark evaluation to the runtime sidecar as native runtime action frames without using ControlCoordinator, JointTrajectoryTask, EndEffectorDeltaTrajectoryTask, the SHM motor bridge, or motor action frames
+- **THEN** actions flow from the robot policy module through benchmark evaluation to the runtime module as native runtime action frames without using ControlCoordinator, JointTrajectoryTask, EndEffectorDeltaTrajectoryTask, the SHM motor bridge, or motor action frames
+
+#### Scenario: Policy rollout demo consumes runtime streams directly
+- **WHEN** the runtime module publishes configured camera images and robot-state events during reset or step
+- **THEN** the policy rollout demo captures those DimOS stream outputs as the source of policy observations and optional videos without constructing HTTP payload references
 
 #### Scenario: Policy rollout demo enforces success gate
 - **WHEN** the 50-episode policy rollout gate completes without setup or contract aborts

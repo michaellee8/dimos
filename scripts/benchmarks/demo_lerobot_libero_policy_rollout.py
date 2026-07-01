@@ -26,9 +26,8 @@ For a lightweight native-action smoke test that does not download LeRobot, pass
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict, is_dataclass
-from io import BytesIO
 import json
 from pathlib import Path
 import sys
@@ -44,12 +43,10 @@ for package_src in (PROTOCOL_SRC, LIBERO_PRO_SIDECAR_SRC):
 
 from dimos_libero_pro_sidecar.blueprint import libero_pro_runtime_blueprint
 from dimos_libero_pro_sidecar.module import LiberoProRuntimeModule
-from dimos_libero_pro_sidecar.server import discover_libero_asset_roots
 from dimos_runtime_protocol import (
     EpisodeResetRequest,
     EpisodeResetResponse,
     ObservationFrame,
-    ObservationKind,
     StepRequest,
     StepResponse,
 )
@@ -63,6 +60,8 @@ from dimos.robot_learning.policy_rollout.evaluation import (
     BenchmarkEpisodeSpec,
     BenchmarkEvaluationSummary,
     BenchmarkPolicyEvalModule,
+    PolicyEvalRuntimeSession,
+    RuntimeStreamSnapshot,
     libero_object_episode_matrix,
 )
 from dimos.robot_learning.policy_rollout.models import (
@@ -84,22 +83,12 @@ class DescribedPolicyModule(Protocol):
     def describe_backend(self) -> PolicyBackendDescription: ...
 
 
-class _Subscribable(Protocol):
-    def subscribe(self, cb: Callable[..., object]) -> object: ...
-
-
-class _ImageMessage(Protocol):
-    data: object
-    frame_id: str
-
-
 class _LiberoProRuntime(Protocol):
-    color_image: _Subscribable
-    runtime_event: _Subscribable
-
     def reset(self, request: EpisodeResetRequest) -> EpisodeResetResponse: ...
 
     def step(self, request: StepRequest) -> StepResponse: ...
+
+    def observation_snapshot(self) -> tuple[list[ObservationFrame], dict[str, np.ndarray]]: ...
 
     def stop(self) -> None: ...
 
@@ -144,65 +133,47 @@ class FixedActionBackend:
         )
 
 
-class ModuleLiberoRuntimeClient:
-    """Runtime-client surface backed by the placed LIBERO runtime module."""
+class ModuleLiberoRuntimeSession(PolicyEvalRuntimeSession):
+    """Policy-evaluation runtime session backed by the placed LIBERO runtime module."""
 
-    def __init__(self, runtime: _LiberoProRuntime, coordinator: ModuleCoordinator) -> None:
+    def __init__(
+        self,
+        runtime: _LiberoProRuntime,
+        coordinator: ModuleCoordinator,
+        expected_image_streams: Sequence[str],
+        stream_timeout_s: float = 5.0,
+    ) -> None:
         self._runtime = runtime
         self._coordinator = coordinator
-        self._images: list[_ImageMessage] = []
-        self._runtime_events: list[ObservationFrame] = []
-        self._payloads: dict[str, bytes] = {}
-        runtime.color_image.subscribe(self._images.append)
-        runtime.runtime_event.subscribe(self._record_runtime_event)
+        self._expected_image_streams = tuple(expected_image_streams)
+        self._stream_timeout_s = stream_timeout_s
+        self._last_snapshot = RuntimeStreamSnapshot()
 
     def reset(self, request: EpisodeResetRequest) -> EpisodeResetResponse:
         response = self._runtime.reset(request)
-        return response.model_copy(update={"observations": self._take_observations(0)})
+        self._last_snapshot = self._take_snapshot()
+        return response
 
     def step(self, request: StepRequest) -> StepResponse:
         response = self._runtime.step(request)
-        return response.model_copy(
-            update={"observations": self._take_observations(request.tick_id)}
-        )
+        self._last_snapshot = self._take_snapshot()
+        return response
 
-    def payload(self, data_ref: str) -> bytes:
-        return self._payloads[data_ref.removeprefix("/payloads/")]
+    def latest_observation_snapshot(self) -> RuntimeStreamSnapshot:
+        return self._last_snapshot
 
     def close(self) -> None:
         self._coordinator.stop()
 
-    def _record_runtime_event(self, event: object) -> None:
-        if isinstance(event, ObservationFrame):
-            self._runtime_events.append(event)
-
-    def _take_observations(self, tick_id: int) -> list[ObservationFrame]:
-        observations = self._runtime_events
-        self._runtime_events = []
-        images = self._images
-        self._images = []
-        for image in images:
-            frame_id = image.frame_id or "camera"
-            array = np.asarray(image.data)
-            payload_id = f"{frame_id}-{tick_id:06d}-{len(self._payloads):06d}.npy"
-            payload = _npy_bytes(array)
-            self._payloads[payload_id] = payload
-            observations.append(
-                ObservationFrame(
-                    stream=frame_id,
-                    kind=ObservationKind.IMAGE,
-                    encoding="npy",
-                    shape=[int(item) for item in array.shape],
-                    dtype=str(array.dtype),
-                    data_ref=f"/payloads/{payload_id}",
-                    metadata={
-                        "camera_name": frame_id,
-                        "image_convention": "opengl",
-                        "payload_bytes": len(payload),
-                    },
-                )
+    def _take_snapshot(self) -> RuntimeStreamSnapshot:
+        observations, stream_values = self._runtime.observation_snapshot()
+        missing = [stream for stream in self._expected_image_streams if stream not in stream_values]
+        if missing:
+            raise RuntimeError(
+                f"runtime module did not publish expected image streams {missing} "
+                f"within {self._stream_timeout_s:.1f}s"
             )
-        return observations
+        return RuntimeStreamSnapshot(observations=tuple(observations), values=stream_values)
 
 
 def run_policy_gate(args: argparse.Namespace) -> BenchmarkEvaluationSummary:
@@ -249,7 +220,7 @@ def _run_one_episode(
         cast_cleanup.append(cleanup_entry)
     try:
         eval_module = BenchmarkPolicyEvalModule(
-            runtime_client=client,
+            runtime_session=client,
             robot_policy_module=policy_module,
             artifact_dir=str(episode_dir),
             max_steps=args.max_steps,
@@ -291,7 +262,7 @@ def _policy_module(args: argparse.Namespace) -> RobotPolicyModule:
 
 def _start_runtime(
     args: argparse.Namespace, episode: BenchmarkEpisodeSpec
-) -> ModuleLiberoRuntimeClient:
+) -> ModuleLiberoRuntimeSession:
     blueprint = libero_pro_runtime_blueprint(
         bddl_root=args.bddl_root,
         init_states_root=args.init_states_root,
@@ -312,11 +283,13 @@ def _start_runtime(
     ).global_config(viewer="none", n_workers=1)
     coordinator = ModuleCoordinator.build(blueprint)
     runtime = coordinator.get_instance(LiberoProRuntimeModule)
-    return ModuleLiberoRuntimeClient(runtime, coordinator)
+    return ModuleLiberoRuntimeSession(
+        runtime, coordinator, expected_image_streams=args.camera_names
+    )
 
 
 def _stop_runtime(
-    client: ModuleLiberoRuntimeClient, episode_dir: Path, cleanup_entry: dict[str, object]
+    client: ModuleLiberoRuntimeSession, episode_dir: Path, cleanup_entry: dict[str, object]
 ) -> None:
     client.close()
     episode_dir.mkdir(parents=True, exist_ok=True)
@@ -440,14 +413,27 @@ def _resolve_asset_roots(
     explicit_init = _repo_path(init_states_root) if init_states_root is not None else None
     if explicit_bddl is not None and explicit_init is not None:
         return explicit_bddl, explicit_init
-    discovered = discover_libero_asset_roots()
+    discovered = _runtime_venv_libero_asset_roots()
     if discovered is None:
         raise SystemExit(
-            "LIBERO assets were not provided and could not be discovered. Install the "
-            "standard libero package or pass --bddl-root and --init-states-root."
+            "LIBERO assets were not provided and could not be found in the prepared "
+            "LIBERO runtime environment. Run `rtk uv sync` in "
+            "packages/dimos-libero-pro-sidecar or pass --bddl-root and --init-states-root."
         )
     discovered_bddl, discovered_init = discovered
     return explicit_bddl or discovered_bddl, explicit_init or discovered_init
+
+
+def _runtime_venv_libero_asset_roots() -> tuple[Path, Path] | None:
+    runtime_project = LIBERO_PRO_SIDECAR_SRC.parent
+    site_packages_roots = sorted((runtime_project / ".venv" / "lib").glob("python*/site-packages"))
+    for site_packages in site_packages_roots:
+        package_root = site_packages / "libero" / "libero"
+        bddl_root = package_root / "bddl_files"
+        init_states_root = package_root / "init_files"
+        if bddl_root.exists() and init_states_root.exists():
+            return bddl_root, init_states_root
+    return None
 
 
 def _write_jsonl(path: Path, rows: Sequence[object]) -> None:
@@ -460,12 +446,6 @@ def _copy_if_present(source: Path, destination: Path) -> None:
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(source.read_bytes())
-
-
-def _npy_bytes(value: object) -> bytes:
-    buffer = BytesIO()
-    np.save(buffer, np.asarray(value), allow_pickle=False)
-    return buffer.getvalue()
 
 
 def _json_ready(value: object) -> object:
@@ -486,10 +466,6 @@ def _json_ready(value: object) -> object:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact-dir", type=Path, default=DEFAULT_ARTIFACT_DIR)
-    parser.add_argument("--runtime-host", default="127.0.0.1")
-    parser.add_argument("--runtime-port", type=int, default=0)
-    parser.add_argument("--startup-timeout-s", type=float, default=20.0)
-    parser.add_argument("--timeout-s", type=float, default=30.0)
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--control-step-hz", type=int, default=20)
     parser.add_argument("--success-threshold", type=float, default=0.50)

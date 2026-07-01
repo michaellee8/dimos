@@ -14,12 +14,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
-from io import BytesIO
 import json
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol
 
 from dimos_runtime_protocol import (
     EpisodeResetRequest,
@@ -89,14 +88,39 @@ class BenchmarkEvaluationSummary:
     passed: bool
 
 
-class RuntimeClient(Protocol):
-    """Subset of RuntimeSidecarClient used by policy evaluation."""
+@dataclass(frozen=True)
+class RuntimeStreamSnapshot:
+    """Module-native stream values captured for one runtime reset or step tick."""
 
-    def reset(self, request: EpisodeResetRequest) -> EpisodeResetResponse: ...
+    observations: tuple[ObservationFrame, ...] = ()
+    values: Mapping[str, object] = field(default_factory=dict)
 
-    def step(self, request: StepRequest) -> StepResponse: ...
+    @property
+    def observed_streams(self) -> tuple[str, ...]:
+        streams: list[str] = []
+        for stream in self.values:
+            if stream not in streams:
+                streams.append(stream)
+        for frame in self.observations:
+            if frame.stream not in streams:
+                streams.append(frame.stream)
+        return tuple(streams)
 
-    def payload(self, data_ref: str) -> bytes: ...
+
+class PolicyEvalRuntimeSession:
+    """Module-native runtime seam used by policy evaluation."""
+
+    def reset(self, request: EpisodeResetRequest) -> EpisodeResetResponse:
+        raise NotImplementedError
+
+    def step(self, request: StepRequest) -> StepResponse:
+        raise NotImplementedError
+
+    def latest_observation_snapshot(self) -> RuntimeStreamSnapshot:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        pass
 
 
 class PolicyActionSource(Spec, Protocol):
@@ -134,12 +158,12 @@ class BenchmarkPolicyEvalModule(Module):
 
     def __init__(
         self,
-        runtime_client: RuntimeClient | None = None,
+        runtime_session: PolicyEvalRuntimeSession | None = None,
         robot_policy_module: PolicyActionSource | None = None,
         **kwargs: object,
     ) -> None:
         super().__init__(**kwargs)
-        self._runtime_client = runtime_client
+        self._runtime_session = runtime_session
         self.robot_policy_module = robot_policy_module
         self._last_results: tuple[BenchmarkEpisodeResult, ...] = ()
 
@@ -150,19 +174,21 @@ class BenchmarkPolicyEvalModule(Module):
     def configure(
         self,
         *,
-        runtime_client: RuntimeClient,
+        runtime_session: PolicyEvalRuntimeSession,
         robot_policy_module: PolicyActionSource,
     ) -> None:
-        self._runtime_client = runtime_client
+        self._runtime_session = runtime_session
         self.robot_policy_module = robot_policy_module
 
     @rpc
     def run_episodes(self, episodes: list[BenchmarkEpisodeSpec]) -> BenchmarkEvaluationSummary:
         policy_module = self.robot_policy_module
-        if self._runtime_client is None or policy_module is None:
-            raise RuntimeError("BenchmarkPolicyEvalModule requires runtime and policy clients")
+        if self._runtime_session is None or policy_module is None:
+            raise RuntimeError(
+                "BenchmarkPolicyEvalModule requires runtime session and policy client"
+            )
         runner = BenchmarkPolicyEvalRunner(
-            runtime_client=self._runtime_client,
+            runtime_session=self._runtime_session,
             robot_policy_module=policy_module,
             artifact_dir=Path(self.config.artifact_dir),
             max_steps=self.config.max_steps,
@@ -229,18 +255,18 @@ class LiberoRobotPolicyObservationBuilder:
         tick_id: int,
         observations: Sequence[ObservationFrame],
         runtime_description: RuntimeDescription,
-        payloads: Mapping[str, object],
+        observation_values: Mapping[str, object],
         reward: float = 0.0,
         done: bool = False,
         success: bool | None = None,
     ) -> RobotPolicyObservation:
         del episode, tick_id
-        observation_values: dict[str, object] = dict(payloads)
+        values: dict[str, object] = dict(observation_values)
         for frame in observations:
             if frame.kind == "state" or frame.kind == ObservationKind.STATE:
                 state = frame.metadata.get("state", frame.metadata.get("values"))
                 if state is not None:
-                    observation_values[frame.stream] = state
+                    values[frame.stream] = state
         language = runtime_description.metadata.get("language")
         task = language if isinstance(language, str) else None
         metadata: dict[str, object] = {
@@ -253,7 +279,7 @@ class LiberoRobotPolicyObservationBuilder:
         if task is not None:
             metadata["language"] = task
         return RobotPolicyObservation(
-            observations=observation_values,
+            observations=values,
             metadata=metadata,
         )
 
@@ -269,7 +295,7 @@ class BenchmarkPolicyEvalRunner:
     def __init__(
         self,
         *,
-        runtime_client: RuntimeClient,
+        runtime_session: PolicyEvalRuntimeSession,
         robot_policy_module: PolicyActionSource,
         artifact_dir: Path,
         max_steps: int,
@@ -283,7 +309,7 @@ class BenchmarkPolicyEvalRunner:
             raise ValueError("max_steps must be positive")
         if video_fps <= 0:
             raise ValueError("video_fps must be positive")
-        self._runtime_client = runtime_client
+        self._runtime_session = runtime_session
         self._robot_policy_module = robot_policy_module
         self._artifact_dir = artifact_dir
         self._max_steps = max_steps
@@ -322,7 +348,7 @@ class BenchmarkPolicyEvalRunner:
     def _run_episode(
         self, episode: BenchmarkEpisodeSpec
     ) -> tuple[BenchmarkEpisodeResult, RuntimeDescription]:
-        reset_response = self._runtime_client.reset(
+        reset_response = self._runtime_session.reset(
             EpisodeResetRequest(
                 episode_id=episode.episode_id,
                 task_id=episode.task_id,
@@ -337,19 +363,21 @@ class BenchmarkPolicyEvalRunner:
         self._robot_policy_module.reset(episode_id=episode.episode_id)
 
         runtime_description = reset_response.runtime_description
-        observations = tuple(reset_response.observations)
+        snapshot = self._runtime_session.latest_observation_snapshot()
+        if not snapshot.observed_streams:
+            raise RuntimeError("runtime session produced no observation streams after reset")
+        observations = snapshot.observations
         reward_sum = 0.0
         done = False
         success: bool | None = None
         failure_reason: str | None = None
         last_action: RobotPolicyAction | None = None
-        observed_streams: tuple[str, ...] = tuple(frame.stream for frame in observations)
+        observed_streams = snapshot.observed_streams
         video_frames: dict[str, list[np.ndarray]] = {stream: [] for stream in self._video_streams}
         steps = 0
 
         for tick_id in range(self._max_steps):
-            payloads = self._payloads(observations)
-            self._append_video_frames(video_frames, payloads)
+            self._append_video_frames(video_frames, snapshot.values)
             sample = self._sample_builder.build(
                 episode=episode,
                 tick_id=tick_id,
@@ -358,11 +386,11 @@ class BenchmarkPolicyEvalRunner:
                 reward=reward_sum,
                 done=done,
                 success=success,
-                payloads=payloads,
+                observation_values=snapshot.values,
             )
             action = self._robot_policy_module.infer_action(sample)
             frame = _runtime_action_frame(action, tick_id=tick_id)
-            step_response = self._runtime_client.step(
+            step_response = self._runtime_session.step(
                 StepRequest(
                     episode_id=episode.episode_id,
                     tick_id=tick_id,
@@ -374,8 +402,9 @@ class BenchmarkPolicyEvalRunner:
             reward_sum += step_response.reward
             done = step_response.done
             success = step_response.success
-            observations = tuple(step_response.observations)
-            observed_streams = tuple(frame.stream for frame in observations)
+            snapshot = self._runtime_session.latest_observation_snapshot()
+            observations = snapshot.observations
+            observed_streams = snapshot.observed_streams
             if done:
                 break
 
@@ -402,15 +431,15 @@ class BenchmarkPolicyEvalRunner:
         ), runtime_description
 
     def _append_video_frames(
-        self, video_frames: dict[str, list[np.ndarray]], payloads: dict[str, object]
+        self, video_frames: dict[str, list[np.ndarray]], stream_values: Mapping[str, object]
     ) -> None:
         for stream in self._video_streams:
-            payload = payloads.get(stream)
-            if not isinstance(payload, np.ndarray):
+            value = stream_values.get(stream)
+            if not isinstance(value, np.ndarray):
                 continue
-            if payload.ndim != 3 or payload.shape[2] != 3:
+            if value.ndim != 3 or value.shape[2] != 3:
                 continue
-            video_frames[stream].append(payload.astype(np.uint8, copy=False))
+            video_frames[stream].append(value.astype(np.uint8, copy=False))
 
     def _write_videos(self, episode_id: str, video_frames: dict[str, list[np.ndarray]]) -> None:
         if self._video_dir is None:
@@ -449,21 +478,6 @@ class BenchmarkPolicyEvalRunner:
             _json_ready(self._robot_policy_module.describe_backend()),
         )
         _write_jsonl(self._artifact_dir / "episodes.jsonl", results)
-
-    def _payloads(self, observations: Sequence[ObservationFrame]) -> dict[str, object]:
-        payload_reader = cast(
-            "Callable[[str], bytes] | None", getattr(self._runtime_client, "payload", None)
-        )
-        if payload_reader is None:
-            return {}
-        values: dict[str, object] = {}
-        for frame in observations:
-            if frame.data_ref is None:
-                continue
-            values[frame.stream] = np.load(
-                BytesIO(payload_reader(frame.data_ref)), allow_pickle=False
-            )
-        return values
 
 
 def libero_object_episode_matrix(

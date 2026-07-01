@@ -1,9 +1,4 @@
-# benchmark-policy-evaluation Specification
-
-## Purpose
-TBD - created by archiving change add-lerobot-libero-policy-rollout. Update Purpose after archive.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Benchmark policy evaluation runner
 The system SHALL provide a module-backed benchmark policy evaluation runner that owns episode matrix selection, runtime module reset and step calls, stream snapshot collection, scoring, success gates, metrics, artifacts, and cleanup for policy-driven benchmark rollouts.
@@ -19,25 +14,6 @@ The system SHALL provide a module-backed benchmark policy evaluation runner that
 #### Scenario: Evaluation runner can be launched through DimOS module composition
 - **WHEN** a developer launches the LeRobot LIBERO policy evaluation path
 - **THEN** benchmark evaluation, policy inference, and runtime module access are represented as DimOS modules or blueprint-compatible module configuration rather than only as directly wired plain Python service objects
-
-### Requirement: LIBERO policy rollout gate
-The system SHALL provide a policy-driven LIBERO gate using `lerobot/VLA-JEPA-LIBERO` over `libero_object`, all 10 task indices, and init states `[0, 1, 2, 3, 4]`, for 50 total episodes with pass condition `success_rate > 0.50`.
-
-#### Scenario: Gate evaluates the configured episode matrix
-- **WHEN** the policy rollout gate is run with prepared LIBERO assets and compatible LeRobot dependencies
-- **THEN** it evaluates 50 episodes formed from all 10 `libero_object` task indices crossed with init states `[0, 1, 2, 3, 4]`
-
-#### Scenario: Gate records pass/fail summary
-- **WHEN** all scheduled episodes complete without setup or contract aborts
-- **THEN** the gate writes a summary containing episode count, success count, success rate, threshold, and pass/fail result
-
-#### Scenario: Policy failures continue the run
-- **WHEN** an individual episode times out, reaches done without success, or reports unsuccessful completion
-- **THEN** the episode is recorded as a failed policy episode and the rollout continues with the next scheduled episode
-
-#### Scenario: Setup and contract errors abort the run
-- **WHEN** checkpoint loading, sidecar compatibility, action spec validation, observation mapping, action conversion, or protocol validation fails
-- **THEN** the rollout aborts the run and records the failure as an integration/setup error rather than counting it as a policy episode failure
 
 ### Requirement: Rollout artifacts
 The system SHALL write structured rollout artifacts that make policy, runtime, and episode behavior inspectable without storing full videos or image dumps by default.
