@@ -18,7 +18,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
-from dimos.robot_learning.policy_rollout.lerobot_backend import (
+from dimos.robot_learning.policy_rollout.backends.lerobot.backend import (
     LeRobotBackend,
     _tensorized_preprocessor_input,
 )
@@ -97,18 +97,18 @@ def test_initialize_loads_policy_sets_device_eval_and_processors(mocker) -> None
             lambda output: _record(postprocessor_calls, output),
         )
 
-    def fake_import_module(name: str) -> object:
-        if name == "lerobot.policies.vla_jepa.modeling_vla_jepa":
-            return SimpleNamespace(VLAJEPAPolicy=FakePolicyClass)
-        if name == "lerobot.policies.factory":
-            return SimpleNamespace(make_pre_post_processors=make_pre_post_processors)
-        if name == "lerobot.policies.vla_jepa.processor_vla_jepa":
-            raise AssertionError("manual VLA-JEPA processor factory should not be used")
-        if name == "torch":
-            return SimpleNamespace(no_grad=FakeNoGrad)
-        raise ImportError(name)
-
-    mocker.patch("importlib.import_module", side_effect=fake_import_module)
+    mocker.patch(
+        "dimos.robot_learning.policy_rollout.backends.lerobot.backend._load_vla_jepa_policy_class",
+        return_value=FakePolicyClass,
+    )
+    mocker.patch(
+        "dimos.robot_learning.policy_rollout.backends.lerobot.backend._make_pre_post_processors",
+        side_effect=make_pre_post_processors,
+    )
+    mocker.patch(
+        "dimos.robot_learning.policy_rollout.backends.lerobot.backend._torch_no_grad",
+        return_value=FakeNoGrad(),
+    )
     backend = LeRobotBackend(checkpoint_id="lerobot/VLA-JEPA-LIBERO", device="cpu")
 
     backend.initialize()
@@ -129,7 +129,7 @@ def test_initialize_loads_policy_sets_device_eval_and_processors(mocker) -> None
     assert policy.reset_called
     assert preprocessor_calls == [{"observation.state": "state"}]
     assert postprocessor_calls == [(0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0)]
-    assert output.output == (0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0)
+    assert output.output == pytest.approx((0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0))
     assert output.metadata["inference_method"] == "select_action"
     assert output.metadata["output_shape"] == [7]
     assert description.policy_class is not None
@@ -137,59 +137,24 @@ def test_initialize_loads_policy_sets_device_eval_and_processors(mocker) -> None
     assert description.metadata["processor_source"] == "checkpoint"
 
 
-def test_initialize_falls_back_to_manual_vla_jepa_processors(mocker) -> None:
-    policy = FakePolicy()
-    FakePolicyClass.policy = policy
-    preprocessor_calls: list[object] = []
-    manual_calls: list[object] = []
-
-    def fake_import_module(name: str) -> object:
-        if name == "lerobot.policies.vla_jepa.modeling_vla_jepa":
-            return SimpleNamespace(VLAJEPAPolicy=FakePolicyClass)
-        if name == "lerobot.policies.factory":
-            raise ImportError(name)
-        if name == "lerobot.policies.vla_jepa.processor_vla_jepa":
-
-            def manual_factory(
-                config: object, dataset_stats: object = None
-            ) -> tuple[object, object]:
-                manual_calls.append(dataset_stats)
-                return (lambda batch: _record(preprocessor_calls, batch), lambda output: output)
-
-            return SimpleNamespace(make_vla_jepa_pre_post_processors=manual_factory)
-        if name == "torch":
-            return SimpleNamespace(no_grad=FakeNoGrad)
-        raise ImportError(name)
-
-    mocker.patch("importlib.import_module", side_effect=fake_import_module)
-    backend = LeRobotBackend(dataset_stats={"stats": "fixture"})
-
-    backend.initialize()
-    backend.infer_batch(BackendBatch(payload={"observation.state": "state"}))
-
-    assert manual_calls == [{"stats": "fixture"}]
-    assert preprocessor_calls == [{"observation.state": "state"}]
-    assert backend.describe().metadata["processor_source"] == "manual_vla_jepa"
-
-
 def test_lerobot_backend_can_route_to_action_chunk(mocker) -> None:
     policy = FakePolicy()
     FakePolicyClass.policy = policy
     FakePolicyClass.checkpoint_ids = []
 
-    def fake_import_module(name: str) -> object:
-        if name == "lerobot.policies.vla_jepa.modeling_vla_jepa":
-            return SimpleNamespace(VLAJEPAPolicy=FakePolicyClass)
-        if name == "lerobot.policies.factory":
-            raise ImportError(name)
-        if name == "lerobot.policies.vla_jepa.processor_vla_jepa":
-            raise ImportError(name)
-        if name == "torch":
-            return SimpleNamespace(no_grad=FakeNoGrad)
-        raise ImportError(name)
-
-    mocker.patch("importlib.import_module", side_effect=fake_import_module)
-    backend = LeRobotBackend(use_action_chunk=True, use_processors=False)
+    mocker.patch(
+        "dimos.robot_learning.policy_rollout.backends.lerobot.backend._load_vla_jepa_policy_class",
+        return_value=FakePolicyClass,
+    )
+    mocker.patch(
+        "dimos.robot_learning.policy_rollout.backends.lerobot.backend._make_pre_post_processors",
+        return_value=(lambda batch: batch, lambda output: output),
+    )
+    mocker.patch(
+        "dimos.robot_learning.policy_rollout.backends.lerobot.backend._torch_no_grad",
+        return_value=FakeNoGrad(),
+    )
+    backend = LeRobotBackend(use_action_chunk=True)
 
     output = backend.infer_batch(BackendBatch(payload={"observation.state": "state"}))
 
@@ -197,6 +162,7 @@ def test_lerobot_backend_can_route_to_action_chunk(mocker) -> None:
     assert policy.chunk_batches == [{"observation.state": "state"}]
     assert output.metadata["inference_method"] == "predict_action_chunk"
     assert output.metadata["output_shape"] == [1, 7]
+    assert output.output == pytest.approx((0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0))
 
 
 def test_lerobot_backend_tensorizes_numpy_inputs_before_lerobot_preprocessor() -> None:
@@ -224,7 +190,10 @@ def test_lerobot_backend_tensorizes_numpy_inputs_before_lerobot_preprocessor() -
 
 
 def test_lerobot_backend_missing_dependency_error(mocker) -> None:
-    mocker.patch("importlib.import_module", side_effect=ImportError("missing"))
+    mocker.patch(
+        "dimos.robot_learning.policy_rollout.backends.lerobot.backend._load_vla_jepa_policy_class",
+        side_effect=RuntimeError("Install LeRobot"),
+    )
     backend = LeRobotBackend()
 
     with pytest.raises(RuntimeError, match="Install LeRobot"):

@@ -275,7 +275,6 @@ Top-level artifacts should include:
 summary.json
 episodes.jsonl
 runtime_description.json
-contract_description.json
 checkpoint_metadata.json
 run_config.json
 cleanup_status.json
@@ -326,7 +325,7 @@ Common likely issues:
 - missing VLA-JEPA extra deps: use GitHub main with `[vla_jepa]`
 - CUDA/device mismatch: pass `--device cuda` or the correct available device
 - long first LIBERO asset download: increase `--startup-timeout-s`
-- observation key mismatch: inspect `contract_description.json` and per-episode
+- observation key mismatch: inspect per-episode artifacts
   failure reason
 - simulator/headless rendering issue: ensure `MUJOCO_GL=egl` or equivalent is
   available on the remote machine

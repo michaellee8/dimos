@@ -18,9 +18,8 @@ from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
     PolicyBackendDescription,
-    RobotLearningSample,
     RobotPolicyAction,
-    RobotPolicyContractDescription,
+    RobotPolicyObservation,
 )
 from dimos.robot_learning.policy_rollout.robot_policy_module import (
     RobotPolicyModule,
@@ -54,34 +53,31 @@ class FakeBackend:
 
 @dataclass
 class FakeContract:
-    samples: list[RobotLearningSample] = field(default_factory=list)
+    samples: list[RobotPolicyObservation] = field(default_factory=list)
     outputs: list[BackendOutputEnvelope] = field(default_factory=list)
 
-    def to_backend_batch(self, sample: RobotLearningSample) -> BackendBatch:
+    def to_backend_batch(self, sample: RobotPolicyObservation) -> BackendBatch:
         self.samples.append(sample)
-        return BackendBatch(payload={"observation_id": sample.sample_id})
+        return BackendBatch(payload={"observations": dict(sample.observations)})
 
     def from_backend_output(self, output: BackendOutputEnvelope) -> RobotPolicyAction:
         self.outputs.append(output)
         assert isinstance(output.output, tuple)
         return RobotPolicyAction(space_id="fake.action.v1", values=output.output)
 
-    def describe(self) -> RobotPolicyContractDescription:
-        return RobotPolicyContractDescription(contract_type="fake")
-
 
 def test_infer_action_uses_contract_backend_and_emits_action() -> None:
     backend = FakeBackend()
     contract = FakeContract()
     module = RobotPolicyModule(backend=backend, contract=contract)
-    sample = RobotLearningSample(sample_id="obs-1", observations={})
+    sample = RobotPolicyObservation(observations={"id": "obs-1"})
 
     try:
         action = module.infer_action(sample)
 
         assert backend.initialized
         assert contract.samples == [sample]
-        assert backend.batches == [BackendBatch(payload={"observation_id": "obs-1"})]
+        assert backend.batches == [BackendBatch(payload={"observations": {"id": "obs-1"}})]
         assert len(contract.outputs) == 1
         assert action == RobotPolicyAction(space_id="fake.action.v1", values=(0.1, 0.2, 0.3))
         assert module.last_action == action
@@ -94,7 +90,7 @@ def test_public_reset_resets_backend_episode_state_and_clears_last_action() -> N
     contract = FakeContract()
     module = RobotPolicyModule(backend=backend, contract=contract)
     try:
-        module.infer_action(RobotLearningSample(sample_id="obs-1", observations={}))
+        module.infer_action(RobotPolicyObservation(observations={"id": "obs-1"}))
 
         module.reset_episode(episode_id="episode-2")
 
@@ -105,13 +101,12 @@ def test_public_reset_resets_backend_episode_state_and_clears_last_action() -> N
         module.close()
 
 
-def test_descriptions_and_close_delegate_to_seams() -> None:
+def test_backend_description_and_close_delegate_to_seams() -> None:
     backend = FakeBackend()
     contract = FakeContract()
     module = RobotPolicyModule(backend=backend, contract=contract)
     try:
         assert module.describe_backend().backend_type == "fake"
-        assert module.describe_contract().contract_type == "fake"
 
         module.close()
 

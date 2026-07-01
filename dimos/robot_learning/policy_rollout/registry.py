@@ -21,7 +21,7 @@ import importlib
 import os
 from typing import Generic, TypeVar, cast
 
-from dimos.robot_learning.policy_rollout.backend import PolicyBackend
+from dimos.robot_learning.policy_rollout.backends.backend import PolicyBackend
 from dimos.robot_learning.policy_rollout.contract import RobotPolicyContract
 
 FactoryT = TypeVar("FactoryT")

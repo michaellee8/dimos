@@ -6,8 +6,8 @@ checkpoint through the DimOS robot-learning seams:
 ```text
 BenchmarkPolicyEvalRunner
   -> RuntimeSidecarClient.reset(...)
-  -> LiberoRobotLearningSampleBuilder.build(...)
-  -> RobotPolicyModule.infer_action(RobotLearningSample)
+  -> LiberoRobotPolicyObservationBuilder.build(...)
+  -> RobotPolicyModule.infer_action(RobotPolicyObservation)
      -> VlaJepaLiberoRobotContract.to_backend_batch(...)
      -> LeRobotBackend.infer_batch(...)
      -> VlaJepaLiberoRobotContract.from_backend_output(...)
@@ -24,7 +24,7 @@ wraps the runner for module/blueprint-compatible lockstep evaluation.
 
 Policy backends and contracts are selected through lazy registries:
 
-```python
+```text
 RobotPolicyModule.blueprint(
     backend_type="lerobot",
     backend_params={"checkpoint_id": "lerobot/VLA-JEPA-LIBERO"},
@@ -108,7 +108,6 @@ The top-level artifact directory contains:
 - `summary.json`
 - `episodes.jsonl`
 - `runtime_description.json`
-- `contract_description.json`
 - `checkpoint_metadata.json`
 - `run_config.json`
 - `cleanup_status.json`

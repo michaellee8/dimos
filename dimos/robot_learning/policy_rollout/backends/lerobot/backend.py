@@ -15,53 +15,37 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from contextlib import nullcontext
-import importlib
-from typing import Any, Protocol, cast
+from contextlib import AbstractContextManager, nullcontext
+from typing import cast
 
 import numpy as np
 
 from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
-    JsonObject,
     PolicyBackendDescription,
 )
 
-_VLA_JEPA_POLICY_MODULE = "lerobot.policies.vla_jepa.modeling_vla_jepa"
-_VLA_JEPA_PROCESSOR_MODULE = "lerobot.policies.vla_jepa.processor_vla_jepa"
+_vla_jepa_policy_class: object | None
+_lerobot_make_pre_post_processors: object | None
+_LEROBOT_IMPORT_ERROR: ImportError | None
+
+try:
+    from lerobot.policies import (  # type: ignore[import-not-found]
+        make_pre_post_processors as _lerobot_make_pre_post_processors,
+    )
+    from lerobot.policies.vla_jepa.modeling_vla_jepa import (  # type: ignore[import-not-found]
+        VLAJEPAPolicy,
+    )
+
+    _vla_jepa_policy_class = VLAJEPAPolicy
+    _LEROBOT_IMPORT_ERROR = None
+except ImportError as exc:
+    _vla_jepa_policy_class = None
+    _lerobot_make_pre_post_processors = None
+    _LEROBOT_IMPORT_ERROR = exc
+
 _DEFAULT_CHECKPOINT = "lerobot/VLA-JEPA-LIBERO"
-
-
-class _PolicyConfig(Protocol):
-    device: str
-
-
-class _LeRobotPolicy(Protocol):
-    config: _PolicyConfig
-
-    def eval(self) -> object: ...
-
-    def reset(self) -> object: ...
-
-    def select_action(self, batch: Mapping[str, object]) -> object: ...
-
-    def predict_action_chunk(self, batch: Mapping[str, object]) -> object: ...
-
-
-class _PolicyClass(Protocol):
-    @classmethod
-    def from_pretrained(cls, pretrained_name_or_path: str) -> _LeRobotPolicy: ...
-
-
-class _NoGrad(Protocol):
-    def __enter__(self) -> object: ...
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> object: ...
-
-
-class _TorchModule(Protocol):
-    def no_grad(self) -> _NoGrad: ...
 
 
 class LeRobotBackend:
@@ -73,15 +57,11 @@ class LeRobotBackend:
         checkpoint_id: str = _DEFAULT_CHECKPOINT,
         device: str | None = None,
         use_action_chunk: bool = False,
-        use_processors: bool = True,
-        dataset_stats: JsonObject | None = None,
     ) -> None:
         self._checkpoint_id = checkpoint_id
         self._device = device
         self._use_action_chunk = use_action_chunk
-        self._use_processors = use_processors
-        self._dataset_stats = dataset_stats
-        self._policy: _LeRobotPolicy | None = None
+        self._policy: object | None = None
         self._preprocessor: Callable[[Mapping[str, object]], Mapping[str, object]] | None = None
         self._postprocessor: Callable[[object], object] | None = None
         self._policy_class_name: str | None = None
@@ -90,33 +70,37 @@ class LeRobotBackend:
     def initialize(self) -> None:
         if self._policy is not None:
             return
-        policy_cls = self._load_policy_class()
-        policy = policy_cls.from_pretrained(self._checkpoint_id)
+        policy_cls = _load_vla_jepa_policy_class()
+        from_pretrained = getattr(policy_cls, "from_pretrained", None)
+        if not callable(from_pretrained):
+            raise RuntimeError("LeRobot VLAJEPAPolicy.from_pretrained was not found")
+        policy = from_pretrained(self._checkpoint_id)
         self._policy_class_name = _qualified_name(policy)
         self._configure_device(policy)
-        policy.eval()
+        eval_policy = getattr(policy, "eval", None)
+        if callable(eval_policy):
+            eval_policy()
         self._policy = policy
         self._prepare_processors(policy)
 
     def reset_episode(self) -> None:
         policy = self._require_policy()
-        policy.reset()
+        reset_policy = getattr(policy, "reset", None)
+        if callable(reset_policy):
+            reset_policy()
 
     def infer_batch(self, batch: BackendBatch) -> BackendOutputEnvelope:
         policy = self._require_policy()
         backend_batch: Mapping[str, object] = _tensorized_preprocessor_input(batch.payload)
         if self._preprocessor is not None:
             backend_batch = self._preprocessor(backend_batch)
-        with self._no_grad():
-            output = (
-                policy.predict_action_chunk(backend_batch)
-                if self._use_action_chunk
-                else policy.select_action(backend_batch)
-            )
+        with _torch_no_grad():
+            output = self._infer(policy, backend_batch)
         if self._postprocessor is not None:
             output = self._postprocessor(output)
+        action = _flat_float_tuple(output)
         return BackendOutputEnvelope(
-            output=output,
+            output=action,
             metadata={
                 "backend_type": "lerobot",
                 "checkpoint_id": self._checkpoint_id,
@@ -143,77 +127,41 @@ class LeRobotBackend:
             metadata={
                 "policy_family": "vla_jepa",
                 "use_action_chunk": self._use_action_chunk,
-                "use_processors": self._use_processors,
                 "processor_source": self._processor_source,
             },
         )
 
-    def _load_policy_class(self) -> _PolicyClass:
-        try:
-            module = importlib.import_module(_VLA_JEPA_POLICY_MODULE)
-        except ImportError as exc:
-            raise RuntimeError(
-                "Install LeRobot from GitHub main to use LeRobotBackend for "
-                "lerobot/VLA-JEPA-LIBERO. The PyPI lerobot package may not include "
-                "the VLA-JEPA policy yet. Example: uv run --with "
-                "git+https://github.com/huggingface/lerobot.git ..."
-            ) from exc
-        policy_cls = getattr(module, "VLAJEPAPolicy", None)
-        if policy_cls is None:
-            raise RuntimeError("LeRobot VLAJEPAPolicy class was not found")
-        return cast("_PolicyClass", policy_cls)
+    def _infer(self, policy: object, batch: Mapping[str, object]) -> object:
+        method_name = "predict_action_chunk" if self._use_action_chunk else "select_action"
+        infer = getattr(policy, method_name, None)
+        if not callable(infer):
+            raise RuntimeError(f"LeRobot policy does not expose {method_name}")
+        return infer(batch)
 
-    def _configure_device(self, policy: _LeRobotPolicy) -> None:
+    def _configure_device(self, policy: object) -> None:
         if self._device is None:
             return
         config = getattr(policy, "config", None)
         if config is not None:
-            cast("_PolicyConfig", config).device = self._device
+            config.device = self._device  # type: ignore[attr-defined]
         to_device = getattr(policy, "to", None)
         if callable(to_device):
             to_device(self._device)
 
-    def _prepare_processors(self, policy: _LeRobotPolicy) -> None:
-        if not self._use_processors:
-            return
-        if self._prepare_checkpoint_processors(policy):
-            return
-        self._prepare_manual_vla_jepa_processors(policy)
-
-    def _prepare_checkpoint_processors(self, policy: _LeRobotPolicy) -> bool:
-        try:
-            module = importlib.import_module("lerobot.policies.factory")
-        except ImportError:
-            return False
-        factory = getattr(module, "make_pre_post_processors", None)
-        if not callable(factory):
-            return False
+    def _prepare_processors(self, policy: object) -> None:
+        config = getattr(policy, "config", None)
+        if config is None:
+            raise RuntimeError("LeRobot policy does not expose config for processors")
         device = self._resolved_device()
-        try:
-            processors = factory(
-                policy_cfg=policy.config,
-                pretrained_path=self._checkpoint_id,
-                preprocessor_overrides={"device_processor": {"device": str(device)}}
-                if device is not None
-                else None,
-            )
-        except (AttributeError, ImportError, TypeError, RuntimeError):
-            return False
+        processors = _make_pre_post_processors(
+            policy_cfg=config,
+            pretrained_path=self._checkpoint_id,
+            preprocessor_overrides={"device_processor": {"device": str(device)}}
+            if device is not None
+            else None,
+        )
         self._install_processors(processors)
         self._processor_source = "checkpoint"
-        return True
-
-    def _prepare_manual_vla_jepa_processors(self, policy: _LeRobotPolicy) -> None:
-        try:
-            module = importlib.import_module(_VLA_JEPA_PROCESSOR_MODULE)
-        except ImportError:
-            return
-        factory = getattr(module, "make_vla_jepa_pre_post_processors", None)
-        if not callable(factory):
-            return
-        processors = factory(policy.config, dataset_stats=self._dataset_stats)
-        self._install_processors(processors)
-        self._processor_source = "manual_vla_jepa"
 
     def _install_processors(self, processors: object) -> None:
         preprocessor, postprocessor = cast("tuple[object, object]", processors)
@@ -222,20 +170,13 @@ class LeRobotBackend:
                 "Callable[[Mapping[str, object]], Mapping[str, object]]", preprocessor
             )
         if callable(postprocessor):
-            self._postprocessor = cast("Callable[[object], object]", postprocessor)
+            self._postprocessor = postprocessor
 
-    def _require_policy(self) -> _LeRobotPolicy:
+    def _require_policy(self) -> object:
         self.initialize()
         if self._policy is None:
             raise RuntimeError("LeRobot policy did not initialize")
         return self._policy
-
-    def _no_grad(self) -> _NoGrad:
-        try:
-            torch_module = cast("_TorchModule", importlib.import_module("torch"))
-        except ImportError:
-            return cast("_NoGrad", nullcontext())
-        return torch_module.no_grad()
 
     def _resolved_device(self) -> str | None:
         if self._device is not None:
@@ -245,6 +186,32 @@ class LeRobotBackend:
         config = getattr(self._policy, "config", None)
         device = getattr(config, "device", None)
         return str(device) if device is not None else None
+
+
+def _load_vla_jepa_policy_class() -> type[object]:
+    if _vla_jepa_policy_class is None:
+        raise RuntimeError(
+            "Install LeRobot from GitHub main with the vla_jepa extra to use "
+            "LeRobotBackend for lerobot/VLA-JEPA-LIBERO. Example: uv run --with "
+            '"lerobot[vla_jepa] @ git+https://github.com/huggingface/lerobot.git" ...'
+        ) from _LEROBOT_IMPORT_ERROR
+    return cast("type[object]", _vla_jepa_policy_class)
+
+
+def _make_pre_post_processors(**kwargs: object) -> tuple[object, object]:
+    if not callable(_lerobot_make_pre_post_processors):
+        raise RuntimeError(
+            "LeRobot processor factory was not found; install LeRobot with the vla_jepa extra"
+        ) from _LEROBOT_IMPORT_ERROR
+    return cast("tuple[object, object]", _lerobot_make_pre_post_processors(**kwargs))
+
+
+def _torch_no_grad() -> AbstractContextManager[object]:
+    try:
+        import torch  # type: ignore[import-not-found]
+    except ImportError:
+        return nullcontext()
+    return cast("AbstractContextManager[object]", torch.no_grad())
 
 
 def _qualified_name(value: object) -> str:
@@ -263,14 +230,37 @@ def _tensorized_preprocessor_input(payload: Mapping[str, object]) -> dict[str, o
 
 
 def _to_torch_tensor(key: str, value: np.ndarray) -> object:
-    torch_module = cast("Any", importlib.import_module("torch"))
+    try:
+        import torch  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise RuntimeError("Install torch to tensorize LeRobot backend inputs") from exc
     array = value
     if key.startswith("observation.images.") and array.ndim == 3:
         if array.shape[-1] in (1, 3):
             array = np.transpose(array, (2, 0, 1))
         if array.dtype == np.uint8:
             array = array.astype(np.float32) / 255.0
-    return torch_module.as_tensor(array, dtype=torch_module.float32)
+    return torch.as_tensor(array, dtype=torch.float32)
+
+
+def _flat_float_tuple(value: object) -> tuple[float, ...]:
+    array = _as_numpy_array(value).reshape(-1)
+    return tuple(float(item) for item in array)
+
+
+def _as_numpy_array(value: object) -> np.ndarray:
+    if isinstance(value, np.ndarray):
+        return value.astype(np.float32, copy=False)
+    detach = getattr(value, "detach", None)
+    if callable(detach):
+        value = detach()
+    cpu = getattr(value, "cpu", None)
+    if callable(cpu):
+        value = cpu()
+    numpy = getattr(value, "numpy", None)
+    if callable(numpy):
+        return cast("np.ndarray", numpy()).astype(np.float32, copy=False)
+    return np.asarray(value, dtype=np.float32)
 
 
 def _shape_of(value: object) -> list[int]:
@@ -285,4 +275,11 @@ def _shape_of(value: object) -> list[int]:
 
 
 def create_backend(**params: object) -> LeRobotBackend:
-    return LeRobotBackend(**cast("dict[str, Any]", params))
+    checkpoint_id = params.get("checkpoint_id", _DEFAULT_CHECKPOINT)
+    device = params.get("device")
+    use_action_chunk = params.get("use_action_chunk", False)
+    return LeRobotBackend(
+        checkpoint_id=str(checkpoint_id),
+        device=cast("str | None", device),
+        use_action_chunk=bool(use_action_chunk),
+    )

@@ -40,8 +40,8 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.robot_learning.policy_rollout.models import (
     JsonObject,
-    RobotLearningSample,
     RobotPolicyAction,
+    RobotPolicyObservation,
 )
 from dimos.robot_learning.policy_rollout.robot_policy_module import RobotPolicyModule
 from dimos.spec.utils import Spec
@@ -102,13 +102,11 @@ class RuntimeClient(Protocol):
 class PolicyActionSource(Spec, Protocol):
     def reset(self, episode_id: str | None = None) -> None: ...
 
-    def infer_action(self, sample: RobotLearningSample) -> RobotPolicyAction: ...
+    def infer_action(self, sample: RobotPolicyObservation) -> RobotPolicyAction: ...
 
     def close(self) -> None: ...
 
     def describe_backend(self) -> object: ...
-
-    def describe_contract(self) -> object: ...
 
 
 class BenchmarkPolicyEvalModuleConfig(ModuleConfig):
@@ -221,8 +219,8 @@ def lerobot_libero_policy_eval_blueprint(
     )
 
 
-class LiberoRobotLearningSampleBuilder:
-    """Convert LIBERO runtime observations into RobotLearningSample instances."""
+class LiberoRobotPolicyObservationBuilder:
+    """Convert LIBERO runtime observations into RobotPolicyObservation instances."""
 
     def build(
         self,
@@ -235,7 +233,8 @@ class LiberoRobotLearningSampleBuilder:
         reward: float = 0.0,
         done: bool = False,
         success: bool | None = None,
-    ) -> RobotLearningSample:
+    ) -> RobotPolicyObservation:
+        del episode, tick_id
         observation_values: dict[str, object] = dict(payloads)
         for frame in observations:
             if frame.kind == "state" or frame.kind == ObservationKind.STATE:
@@ -244,22 +243,18 @@ class LiberoRobotLearningSampleBuilder:
                     observation_values[frame.stream] = state
         language = runtime_description.metadata.get("language")
         task = language if isinstance(language, str) else None
-        return RobotLearningSample(
-            sample_id=f"{episode.episode_id}:{tick_id}",
-            episode_id=episode.episode_id,
-            tick_id=tick_id,
-            task_id=episode.task_id,
-            task_index=episode.task_index,
-            init_state_index=episode.init_state_index,
+        metadata: dict[str, object] = {
+            "reward": reward,
+            "done": done,
+            "success": success,
+            "observed_streams": tuple(frame.stream for frame in observations),
+            "runtime_metadata": dict(runtime_description.metadata),
+        }
+        if task is not None:
+            metadata["language"] = task
+        return RobotPolicyObservation(
             observations=observation_values,
-            task=task,
-            metadata={
-                "reward": reward,
-                "done": done,
-                "success": success,
-                "observed_streams": tuple(frame.stream for frame in observations),
-                "runtime_metadata": dict(runtime_description.metadata),
-            },
+            metadata=metadata,
         )
 
 
@@ -297,7 +292,7 @@ class BenchmarkPolicyEvalRunner:
         self._video_dir = video_dir
         self._video_streams = tuple(video_streams)
         self._video_fps = video_fps
-        self._sample_builder = LiberoRobotLearningSampleBuilder()
+        self._sample_builder = LiberoRobotPolicyObservationBuilder()
         self._last_results: tuple[BenchmarkEpisodeResult, ...] = ()
 
     @property
@@ -449,10 +444,6 @@ class BenchmarkPolicyEvalRunner:
         write_json(self._artifact_dir / "summary.json", _json_ready(summary))
         if runtime_description is not None:
             write_json(self._artifact_dir / "runtime_description.json", runtime_description)
-        write_json(
-            self._artifact_dir / "contract_description.json",
-            _json_ready(self._robot_policy_module.describe_contract()),
-        )
         write_json(
             self._artifact_dir / "checkpoint_metadata.json",
             _json_ready(self._robot_policy_module.describe_backend()),

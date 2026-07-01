@@ -16,7 +16,7 @@ import sys
 
 import pytest
 
-from dimos.robot_learning.policy_rollout.lerobot_backend import LeRobotBackend
+from dimos.robot_learning.policy_rollout.backends.lerobot.backend import LeRobotBackend
 from dimos.robot_learning.policy_rollout.registry import (
     PolicyBackendRegistry,
     RobotPolicyContractRegistry,
@@ -30,7 +30,7 @@ def test_backend_registry_discovers_lerobot_without_importing_lerobot_policy() -
     registry = PolicyBackendRegistry()
 
     assert "lerobot" in registry.available()
-    assert "lerobot.policies.vla_jepa.modeling_vla_jepa" not in sys.modules
+    assert "lerobot.policies" not in sys.modules
 
 
 def test_backend_registry_creates_lerobot_backend() -> None:
@@ -47,7 +47,6 @@ def test_contract_registry_creates_vla_jepa_libero_contract() -> None:
     contract = RobotPolicyContractRegistry().create("vla_jepa_libero")
 
     assert isinstance(contract, VlaJepaLiberoRobotContract)
-    assert contract.describe().contract_type == "vla_jepa_libero"
 
 
 def test_registry_unknown_type_and_duplicate_path_errors() -> None:

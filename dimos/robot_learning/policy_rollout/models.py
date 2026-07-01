@@ -21,22 +21,15 @@ BackendPayload: TypeAlias = Mapping[str, object]
 
 
 @dataclass(frozen=True)
-class RobotLearningSample:
-    """Runtime-independent robot-learning policy input sample.
+class RobotPolicyObservation:
+    """Runtime-independent policy observation for one inference step.
 
     Producers such as benchmark runners, simulators, replay loaders, or future
-    temporal sample assemblers populate semantically named observation roles.
+    temporal observation assemblers populate semantically named observation roles.
     Policy contracts then convert those roles into backend-specific batches.
     """
 
-    sample_id: str
     observations: BackendPayload
-    task: str | None = None
-    episode_id: str | None = None
-    tick_id: int | None = None
-    task_id: str | None = None
-    task_index: int | None = None
-    init_state_index: int | None = None
     timestamps: Mapping[str, float] = field(default_factory=dict)
     metadata: JsonObject = field(default_factory=dict)
 
@@ -53,7 +46,7 @@ class BackendBatch:
 class BackendOutputEnvelope:
     """Backend-native policy output and inference metadata."""
 
-    output: object
+    output: tuple[float, ...]
     metadata: JsonObject = field(default_factory=dict)
 
 
@@ -67,16 +60,6 @@ class PolicyBackendDescription:
     device: str | None = None
     policy_class: str | None = None
     supports_episode_reset: bool = True
-    metadata: JsonObject = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class RobotPolicyContractDescription:
-    """Serializable metadata describing a robot policy IO contract."""
-
-    contract_type: str
-    input_description: JsonObject = field(default_factory=dict)
-    output_description: JsonObject = field(default_factory=dict)
     metadata: JsonObject = field(default_factory=dict)
 
 

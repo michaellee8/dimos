@@ -18,13 +18,12 @@ from pydantic import Field
 
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
-from dimos.robot_learning.policy_rollout.backend import PolicyBackend
+from dimos.robot_learning.policy_rollout.backends.backend import PolicyBackend
 from dimos.robot_learning.policy_rollout.contract import RobotPolicyContract
 from dimos.robot_learning.policy_rollout.models import (
     PolicyBackendDescription,
-    RobotLearningSample,
     RobotPolicyAction,
-    RobotPolicyContractDescription,
+    RobotPolicyObservation,
 )
 from dimos.robot_learning.policy_rollout.registry import (
     policy_backend_registry,
@@ -106,7 +105,7 @@ class RobotPolicyModule(Module):
         self.reset_episode(episode_id=episode_id)
 
     @rpc
-    def infer_action(self, sample: RobotLearningSample) -> RobotPolicyAction:
+    def infer_action(self, sample: RobotPolicyObservation) -> RobotPolicyAction:
         self.initialize()
         batch = self._contract.to_backend_batch(sample)
         backend_output = self._backend.infer_batch(batch)
@@ -125,7 +124,3 @@ class RobotPolicyModule(Module):
     @rpc
     def describe_backend(self) -> PolicyBackendDescription:
         return self._backend.describe()
-
-    @rpc
-    def describe_contract(self) -> RobotPolicyContractDescription:
-        return self._contract.describe()

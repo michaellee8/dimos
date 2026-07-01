@@ -39,9 +39,8 @@ from dimos.robot_learning.policy_rollout.evaluation import (
 )
 from dimos.robot_learning.policy_rollout.models import (
     PolicyBackendDescription,
-    RobotLearningSample,
     RobotPolicyAction,
-    RobotPolicyContractDescription,
+    RobotPolicyObservation,
 )
 from dimos.robot_learning.policy_rollout.robot_policy_module import RobotPolicyModule
 
@@ -84,13 +83,13 @@ class FakeRuntimeClient:
 class FakeRobotPolicyModule:
     fail_on_infer: bool = False
     reset_episode_ids: list[str | None] = field(default_factory=list)
-    samples: list[RobotLearningSample] = field(default_factory=list)
+    samples: list[RobotPolicyObservation] = field(default_factory=list)
     closed: bool = False
 
     def reset(self, episode_id: str | None = None) -> None:
         self.reset_episode_ids.append(episode_id)
 
-    def infer_action(self, sample: RobotLearningSample) -> RobotPolicyAction:
+    def infer_action(self, sample: RobotPolicyObservation) -> RobotPolicyAction:
         if self.fail_on_infer:
             raise ValueError("contract mismatch")
         self.samples.append(sample)
@@ -106,9 +105,6 @@ class FakeRobotPolicyModule:
         return PolicyBackendDescription(
             backend_type="fake", checkpoint_id="lerobot/VLA-JEPA-LIBERO"
         )
-
-    def describe_contract(self) -> RobotPolicyContractDescription:
-        return RobotPolicyContractDescription(contract_type="fake-contract")
 
 
 def test_runner_owns_runtime_reset_step_policy_reset_and_artifacts(tmp_path: Path) -> None:
@@ -146,11 +142,12 @@ def test_runner_owns_runtime_reset_step_policy_reset_and_artifacts(tmp_path: Pat
     assert action.tick_id == 0
     assert action.space_id == "libero.ee_delta_6d_gripper.normalized.v1"
     assert "agentview" in policy.samples[0].observations
+    assert policy.samples[0].metadata["language"] == "pick up the object"
 
     summary_json = json.loads((tmp_path / "summary.json").read_text())
     assert summary_json["success_rate"] == 1.0
     assert (tmp_path / "runtime_description.json").exists()
-    assert (tmp_path / "contract_description.json").exists()
+    assert not (tmp_path / "contract_description.json").exists()
     assert (tmp_path / "checkpoint_metadata.json").exists()
     episode_records = (tmp_path / "episodes.jsonl").read_text().splitlines()
     assert len(episode_records) == 1
@@ -252,7 +249,7 @@ def test_module_run_episodes_uses_injected_clients_and_writes_artifacts(
         assert len(runtime.step_requests) == 1
         assert (tmp_path / "summary.json").exists()
         assert (tmp_path / "runtime_description.json").exists()
-        assert (tmp_path / "contract_description.json").exists()
+        assert not (tmp_path / "contract_description.json").exists()
         assert (tmp_path / "checkpoint_metadata.json").exists()
         episode_records = (tmp_path / "episodes.jsonl").read_text().splitlines()
         assert len(episode_records) == 1

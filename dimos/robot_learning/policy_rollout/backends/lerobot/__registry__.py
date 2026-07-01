@@ -13,5 +13,5 @@
 # limitations under the License.
 
 POLICY_BACKENDS = {
-    "lerobot": "dimos.robot_learning.policy_rollout.lerobot_backend:create_backend",
+    "lerobot": "dimos.robot_learning.policy_rollout.backends.lerobot.backend:create_backend",
 }

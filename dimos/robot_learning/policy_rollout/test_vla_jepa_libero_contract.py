@@ -16,7 +16,7 @@ import numpy as np
 from numpy.typing import NDArray
 import pytest
 
-from dimos.robot_learning.policy_rollout.models import BackendOutputEnvelope, RobotLearningSample
+from dimos.robot_learning.policy_rollout.models import BackendOutputEnvelope, RobotPolicyObservation
 from dimos.robot_learning.policy_rollout.vla_jepa_libero_contract import (
     VLA_JEPA_LIBERO_ACTION_SPACE_ID,
     VlaJepaLiberoRobotContract,
@@ -88,7 +88,7 @@ def test_contract_converts_backend_output_to_runtime_action() -> None:
     contract = VlaJepaLiberoRobotContract()
 
     action = contract.from_backend_output(
-        BackendOutputEnvelope(output=np.array([[0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0]]))
+        BackendOutputEnvelope(output=(0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0))
     )
 
     assert action.space_id == VLA_JEPA_LIBERO_ACTION_SPACE_ID
@@ -98,21 +98,11 @@ def test_contract_converts_backend_output_to_runtime_action() -> None:
 def test_contract_rejects_invalid_backend_output() -> None:
     contract = VlaJepaLiberoRobotContract()
     with pytest.raises(ValueError, match="shape"):
-        contract.from_backend_output(BackendOutputEnvelope(output=[0.0] * 6))
+        contract.from_backend_output(BackendOutputEnvelope(output=(0.0,) * 6))
     with pytest.raises(ValueError, match="non-finite"):
-        contract.from_backend_output(BackendOutputEnvelope(output=[0.0] * 6 + [float("nan")]))
+        contract.from_backend_output(BackendOutputEnvelope(output=(0.0,) * 6 + (float("nan"),)))
     with pytest.raises(ValueError, match="within"):
-        contract.from_backend_output(BackendOutputEnvelope(output=[0.0] * 6 + [2.0]))
-
-
-def test_contract_description_documents_expected_io() -> None:
-    description = VlaJepaLiberoRobotContract().describe()
-
-    assert description.contract_type == "vla_jepa_libero"
-    assert description.output_description["space_id"] == VLA_JEPA_LIBERO_ACTION_SPACE_ID
-    assert description.input_description["state_shape"] == [8]
-    assert description.input_description["image_shape"] == [3, 128, 128]
-    assert description.input_description["image_dtype"] == "float32"
+        contract.from_backend_output(BackendOutputEnvelope(output=(0.0,) * 6 + (2.0,)))
 
 
 def _sample(
@@ -122,7 +112,7 @@ def _sample(
     wrist: np.ndarray | None = None,
     state: list[float] | None = None,
     language: str = "pick up the object",
-) -> RobotLearningSample:
+) -> RobotPolicyObservation:
     agentview_payload = (
         agentview if agentview is not None else np.zeros((128, 128, 3), dtype=np.uint8)
     )
@@ -135,13 +125,7 @@ def _sample(
         observations["eye_in_hand"] = wrist_payload
     if "robot_state" in streams:
         observations["robot_state"] = state_values
-    return RobotLearningSample(
-        sample_id="ep-0:0",
-        episode_id="ep-0",
-        tick_id=0,
-        task_id="libero_object",
-        task_index=0,
-        init_state_index=0,
+    return RobotPolicyObservation(
         observations=observations,
-        task=language,
+        metadata={"language": language},
     )

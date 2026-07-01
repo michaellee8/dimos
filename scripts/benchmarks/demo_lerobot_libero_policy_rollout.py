@@ -49,7 +49,7 @@ from dimos_libero_pro_sidecar.server import discover_libero_asset_roots
 from dimos_runtime_protocol import HealthResponse
 
 from dimos.benchmark.runtime.artifacts import write_json
-from dimos.robot_learning.policy_rollout.backend import PolicyBackend
+from dimos.robot_learning.policy_rollout.backends.backend import PolicyBackend
 from dimos.robot_learning.policy_rollout.evaluation import (
     BenchmarkEpisodeResult,
     BenchmarkEpisodeSpec,
@@ -61,7 +61,6 @@ from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
     PolicyBackendDescription,
-    RobotPolicyContractDescription,
 )
 from dimos.robot_learning.policy_rollout.robot_policy_module import RobotPolicyModule
 from dimos.robot_learning.policy_rollout.vla_jepa_libero_contract import (
@@ -76,8 +75,6 @@ DEFAULT_ARTIFACT_DIR = REPO_ROOT / "artifacts" / "benchmark" / "lerobot-vla-jepa
 
 class DescribedPolicyModule(Protocol):
     def describe_backend(self) -> PolicyBackendDescription: ...
-
-    def describe_contract(self) -> RobotPolicyContractDescription: ...
 
 
 class FixedActionBackend:
@@ -100,7 +97,7 @@ class FixedActionBackend:
         if not self._initialized:
             raise RuntimeError("FixedActionBackend was not initialized")
         return BackendOutputEnvelope(
-            output=list(self._action),
+            output=self._action,
             metadata={
                 "backend_type": "fixed_action",
                 "batch_metadata": dict(batch.metadata),
@@ -313,9 +310,6 @@ def _write_aggregate_artifacts(
     write_json(
         artifact_dir / "checkpoint_metadata.json", _json_ready(policy_module.describe_backend())
     )
-    write_json(
-        artifact_dir / "contract_description.json", _json_ready(policy_module.describe_contract())
-    )
     if results:
         _copy_if_present(
             artifact_dir / "episodes" / results[0].episode_id / "runtime_description.json",
@@ -363,9 +357,6 @@ def _write_setup_failure_artifacts(
     )
     write_json(
         artifact_dir / "checkpoint_metadata.json", _json_ready(policy_module.describe_backend())
-    )
-    write_json(
-        artifact_dir / "contract_description.json", _json_ready(policy_module.describe_contract())
     )
     write_json(
         artifact_dir / "run_config.json",

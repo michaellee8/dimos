@@ -17,17 +17,14 @@ from typing import Protocol
 from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
-    RobotLearningSample,
     RobotPolicyAction,
-    RobotPolicyContractDescription,
+    RobotPolicyObservation,
 )
 
 
 class RobotPolicyContract(Protocol):
     """Semantic boundary between runtime samples, backend batches, and actions."""
 
-    def to_backend_batch(self, sample: RobotLearningSample) -> BackendBatch: ...
+    def to_backend_batch(self, sample: RobotPolicyObservation) -> BackendBatch: ...
 
     def from_backend_output(self, output: BackendOutputEnvelope) -> RobotPolicyAction: ...
-
-    def describe(self) -> RobotPolicyContractDescription: ...

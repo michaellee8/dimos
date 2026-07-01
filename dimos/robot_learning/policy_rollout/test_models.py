@@ -14,25 +14,20 @@
 
 from dataclasses import asdict
 
-from dimos.robot_learning.policy_rollout.models import RobotLearningSample, RobotPolicyAction
+from dimos.robot_learning.policy_rollout.models import RobotPolicyAction, RobotPolicyObservation
 
 
-def test_robot_learning_sample_is_runtime_independent_dataclass() -> None:
-    sample = RobotLearningSample(
-        sample_id="episode:0",
+def test_robot_policy_observation_is_runtime_independent_dataclass() -> None:
+    observation = RobotPolicyObservation(
         observations={"agentview": "image", "robot_state": [0.0] * 8},
-        task="pick up the object",
-        episode_id="episode",
-        tick_id=0,
         timestamps={"agentview": 1.25},
-        metadata={"source": "test"},
+        metadata={"source": "test", "language": "pick up the object"},
     )
 
-    payload = asdict(sample)
+    payload = asdict(observation)
 
-    assert payload["sample_id"] == "episode:0"
     assert payload["observations"]["robot_state"] == [0.0] * 8
-    assert payload["task"] == "pick up the object"
+    assert payload["metadata"]["language"] == "pick up the object"
     assert payload["timestamps"] == {"agentview": 1.25}
 
 

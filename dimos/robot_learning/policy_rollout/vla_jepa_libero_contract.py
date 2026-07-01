@@ -22,9 +22,8 @@ import numpy as np
 from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
-    RobotLearningSample,
     RobotPolicyAction,
-    RobotPolicyContractDescription,
+    RobotPolicyObservation,
 )
 
 VLA_JEPA_LIBERO_ACTION_SPACE_ID = "libero.ee_delta_6d_gripper.normalized.v1"
@@ -44,7 +43,7 @@ class VlaJepaLiberoRobotContract:
         self._wrist_stream_candidates = tuple(wrist_stream_candidates)
         self._state_stream = state_stream
 
-    def to_backend_batch(self, sample: RobotLearningSample) -> BackendBatch:
+    def to_backend_batch(self, sample: RobotPolicyObservation) -> BackendBatch:
         observations = sample.observations
         agentview = self._image_payload(observations, self._agentview_stream)
         wrist_stream = self._select_wrist_stream(observations)
@@ -60,18 +59,13 @@ class VlaJepaLiberoRobotContract:
                 "task": language,
             },
             metadata={
-                "episode_id": sample.episode_id,
-                "tick_id": sample.tick_id,
-                "task_id": sample.task_id,
-                "task_index": sample.task_index,
-                "init_state_index": sample.init_state_index,
                 "agentview_stream": self._agentview_stream,
                 "wrist_stream": wrist_stream,
             },
         )
 
     def from_backend_output(self, output: BackendOutputEnvelope) -> RobotPolicyAction:
-        values = _flat_float_values(output.output)
+        values = output.output
         if len(values) != 7:
             raise ValueError(
                 f"VLA-JEPA LIBERO action must have shape (7,), got {len(values)} values"
@@ -84,27 +78,6 @@ class VlaJepaLiberoRobotContract:
             space_id=VLA_JEPA_LIBERO_ACTION_SPACE_ID,
             values=tuple(values),
             metadata={"backend_metadata": dict(output.metadata)},
-        )
-
-    def describe(self) -> RobotPolicyContractDescription:
-        return RobotPolicyContractDescription(
-            contract_type="vla_jepa_libero",
-            input_description={
-                "agentview_stream": self._agentview_stream,
-                "wrist_stream_candidates": list(self._wrist_stream_candidates),
-                "state_stream": self._state_stream,
-                "image_shape": [3, 128, 128],
-                "image_dtype": "float32",
-                "image_value_range": [0.0, 1.0],
-                "state_shape": [8],
-                "language_source": "runtime_description.metadata.language",
-            },
-            output_description={
-                "space_id": VLA_JEPA_LIBERO_ACTION_SPACE_ID,
-                "shape": [7],
-                "bounds": [-1.0, 1.0],
-                "semantics": "relative 6D end-effector delta plus gripper",
-            },
         )
 
     def _select_wrist_stream(self, observations: Mapping[str, object]) -> str:
@@ -143,34 +116,14 @@ class VlaJepaLiberoRobotContract:
             raise ValueError("VLA-JEPA LIBERO robot state contains non-finite values")
         return array
 
-    def _language(self, sample: RobotLearningSample) -> str:
-        language = sample.task or sample.metadata.get("language")
-        if not isinstance(language, str) or not language.strip():
-            raise ValueError("missing VLA-JEPA LIBERO task language")
-        return language
-
-
-def _flat_float_values(value: object) -> list[float]:
-    converted = _as_numpy_compatible(value)
-    array = np.asarray(converted, dtype=np.float32)
-    if array.ndim == 2 and array.shape[0] == 1:
-        array = array[0]
-    if array.ndim != 1:
-        raise ValueError(f"VLA-JEPA LIBERO action must be 1D or single-batch 2D, got {array.shape}")
-    return [float(item) for item in array.tolist()]
-
-
-def _as_numpy_compatible(value: object) -> object:
-    detach = getattr(value, "detach", None)
-    if callable(detach):
-        value = detach()
-    cpu = getattr(value, "cpu", None)
-    if callable(cpu):
-        value = cpu()
-    numpy = getattr(value, "numpy", None)
-    if callable(numpy):
-        return numpy()
-    return value
+    def _language(self, sample: RobotPolicyObservation) -> str:
+        language = sample.metadata.get("language")
+        if isinstance(language, str) and language.strip():
+            return language
+        observed_language = sample.observations.get("language")
+        if isinstance(observed_language, str) and observed_language.strip():
+            return observed_language
+        raise ValueError("missing VLA-JEPA LIBERO task language")
 
 
 def create_contract(**params: object) -> VlaJepaLiberoRobotContract:
