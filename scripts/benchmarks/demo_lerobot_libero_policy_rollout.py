@@ -26,15 +26,12 @@ For a lightweight native-action smoke test that does not download LeRobot, pass
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, is_dataclass
+from io import BytesIO
 import json
-import os
 from pathlib import Path
-import socket
-import subprocess
 import sys
-import time
 import traceback
 from typing import Protocol
 
@@ -45,10 +42,21 @@ LIBERO_PRO_SIDECAR_SRC = REPO_ROOT / "packages" / "dimos-libero-pro-sidecar" / "
 for package_src in (PROTOCOL_SRC, LIBERO_PRO_SIDECAR_SRC):
     sys.path.insert(0, str(package_src))
 
+from dimos_libero_pro_sidecar.blueprint import libero_pro_runtime_blueprint
+from dimos_libero_pro_sidecar.module import LiberoProRuntimeModule
 from dimos_libero_pro_sidecar.server import discover_libero_asset_roots
-from dimos_runtime_protocol import HealthResponse
+from dimos_runtime_protocol import (
+    EpisodeResetRequest,
+    EpisodeResetResponse,
+    ObservationFrame,
+    ObservationKind,
+    StepRequest,
+    StepResponse,
+)
+import numpy as np
 
 from dimos.benchmark.runtime.artifacts import write_json
+from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.robot_learning.policy_rollout.backends.backend import PolicyBackend
 from dimos.robot_learning.policy_rollout.evaluation import (
     BenchmarkEpisodeResult,
@@ -66,7 +74,6 @@ from dimos.robot_learning.policy_rollout.robot_policy_module import RobotPolicyM
 from dimos.robot_learning.policy_rollout.vla_jepa_libero_contract import (
     VlaJepaLiberoRobotContract,
 )
-from dimos.simulation.runtime_client.http_client import RuntimeSidecarClient
 
 DEFAULT_CAMERAS = ("agentview", "robot0_eye_in_hand")
 DEFAULT_CHECKPOINT = "lerobot/VLA-JEPA-LIBERO"
@@ -75,6 +82,26 @@ DEFAULT_ARTIFACT_DIR = REPO_ROOT / "artifacts" / "benchmark" / "lerobot-vla-jepa
 
 class DescribedPolicyModule(Protocol):
     def describe_backend(self) -> PolicyBackendDescription: ...
+
+
+class _Subscribable(Protocol):
+    def subscribe(self, cb: Callable[..., object]) -> object: ...
+
+
+class _ImageMessage(Protocol):
+    data: object
+    frame_id: str
+
+
+class _LiberoProRuntime(Protocol):
+    color_image: _Subscribable
+    runtime_event: _Subscribable
+
+    def reset(self, request: EpisodeResetRequest) -> EpisodeResetResponse: ...
+
+    def step(self, request: StepRequest) -> StepResponse: ...
+
+    def stop(self) -> None: ...
 
 
 class FixedActionBackend:
@@ -117,6 +144,67 @@ class FixedActionBackend:
         )
 
 
+class ModuleLiberoRuntimeClient:
+    """Runtime-client surface backed by the placed LIBERO runtime module."""
+
+    def __init__(self, runtime: _LiberoProRuntime, coordinator: ModuleCoordinator) -> None:
+        self._runtime = runtime
+        self._coordinator = coordinator
+        self._images: list[_ImageMessage] = []
+        self._runtime_events: list[ObservationFrame] = []
+        self._payloads: dict[str, bytes] = {}
+        runtime.color_image.subscribe(self._images.append)
+        runtime.runtime_event.subscribe(self._record_runtime_event)
+
+    def reset(self, request: EpisodeResetRequest) -> EpisodeResetResponse:
+        response = self._runtime.reset(request)
+        return response.model_copy(update={"observations": self._take_observations(0)})
+
+    def step(self, request: StepRequest) -> StepResponse:
+        response = self._runtime.step(request)
+        return response.model_copy(
+            update={"observations": self._take_observations(request.tick_id)}
+        )
+
+    def payload(self, data_ref: str) -> bytes:
+        return self._payloads[data_ref.removeprefix("/payloads/")]
+
+    def close(self) -> None:
+        self._coordinator.stop()
+
+    def _record_runtime_event(self, event: object) -> None:
+        if isinstance(event, ObservationFrame):
+            self._runtime_events.append(event)
+
+    def _take_observations(self, tick_id: int) -> list[ObservationFrame]:
+        observations = self._runtime_events
+        self._runtime_events = []
+        images = self._images
+        self._images = []
+        for image in images:
+            frame_id = image.frame_id or "camera"
+            array = np.asarray(image.data)
+            payload_id = f"{frame_id}-{tick_id:06d}-{len(self._payloads):06d}.npy"
+            payload = _npy_bytes(array)
+            self._payloads[payload_id] = payload
+            observations.append(
+                ObservationFrame(
+                    stream=frame_id,
+                    kind=ObservationKind.IMAGE,
+                    encoding="npy",
+                    shape=[int(item) for item in array.shape],
+                    dtype=str(array.dtype),
+                    data_ref=f"/payloads/{payload_id}",
+                    metadata={
+                        "camera_name": frame_id,
+                        "image_convention": "opengl",
+                        "payload_bytes": len(payload),
+                    },
+                )
+            )
+        return observations
+
+
 def run_policy_gate(args: argparse.Namespace) -> BenchmarkEvaluationSummary:
     artifact_dir = _repo_path(args.artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -151,18 +239,15 @@ def _run_one_episode(
     episode_dir: Path,
     cleanup: dict[str, object],
 ) -> BenchmarkEpisodeResult:
-    port = args.runtime_port if args.runtime_port > 0 else _free_tcp_port()
-    sidecar = _start_sidecar(args, episode, port)
-    cleanup_entry: dict[str, object] = {"episode_id": episode.episode_id, "port": port}
+    client = _start_runtime(args, episode)
+    cleanup_entry: dict[str, object] = {
+        "episode_id": episode.episode_id,
+        "runtime": "module-native",
+    }
     cast_cleanup = cleanup.setdefault("episodes", [])
     if isinstance(cast_cleanup, list):
         cast_cleanup.append(cleanup_entry)
     try:
-        client = RuntimeSidecarClient(
-            f"http://{args.runtime_host}:{port}", timeout_s=args.timeout_s
-        )
-        health = _wait_healthy(client, sidecar, args.startup_timeout_s)
-        write_json(episode_dir / "health.json", health)
         eval_module = BenchmarkPolicyEvalModule(
             runtime_client=client,
             robot_policy_module=policy_module,
@@ -182,7 +267,7 @@ def _run_one_episode(
         finally:
             eval_module.close()
     finally:
-        _stop_sidecar(sidecar, episode_dir, cleanup_entry)
+        _stop_runtime(client, episode_dir, cleanup_entry)
 
 
 def _selected_episodes(limit: int | None) -> list[BenchmarkEpisodeSpec]:
@@ -204,85 +289,38 @@ def _policy_module(args: argparse.Namespace) -> RobotPolicyModule:
         )
 
 
-def _start_sidecar(
-    args: argparse.Namespace, episode: BenchmarkEpisodeSpec, port: int
-) -> subprocess.Popen[str]:
-    command = [
-        _sidecar_python(),
-        "-m",
-        "dimos_libero_pro_sidecar.server",
-        "--host",
-        args.runtime_host,
-        "--port",
-        str(port),
-        "--benchmark-name",
-        "libero_object",
-        "--task-order-index",
-        "0",
-        "--task-index",
-        str(episode.task_index),
-        "--init-state-index",
-        str(episode.init_state_index),
-        "--action-mode",
-        "native",
-        "--horizon",
-        str(args.max_steps),
-        "--control-freq",
-        str(args.control_step_hz),
-        "--bddl-root",
-        str(args.bddl_root),
-        "--init-states-root",
-        str(args.init_states_root),
-        "--seed",
-        str(args.seed if args.seed is not None else 0),
-    ]
-    for camera_name in args.camera_names:
-        command.extend(["--camera-name", camera_name])
-    command.extend(["--camera-height", str(args.camera_height)])
-    command.extend(["--camera-width", str(args.camera_width)])
-    if args.allow_asset_bootstrap:
-        command.append("--allow-asset-bootstrap")
-    if args.visualize:
-        command.append("--visualize")
-    return subprocess.Popen(
-        command,
-        cwd=Path("/tmp/opencode"),
-        env=_sidecar_env(visualize=args.visualize),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
+def _start_runtime(
+    args: argparse.Namespace, episode: BenchmarkEpisodeSpec
+) -> ModuleLiberoRuntimeClient:
+    blueprint = libero_pro_runtime_blueprint(
+        bddl_root=args.bddl_root,
+        init_states_root=args.init_states_root,
+        benchmark_name="libero_object",
+        robot_id="panda",
+        task_order_index=0,
+        task_index=episode.task_index,
+        init_state_index=episode.init_state_index,
+        action_mode="native",
+        camera_names=tuple(args.camera_names),
+        camera_height=args.camera_height,
+        camera_width=args.camera_width,
+        control_freq=args.control_step_hz,
+        horizon=args.max_steps,
+        seed=args.seed,
+        allow_asset_bootstrap=args.allow_asset_bootstrap,
+        visualize=args.visualize,
+    ).global_config(viewer="none", n_workers=1)
+    coordinator = ModuleCoordinator.build(blueprint)
+    runtime = coordinator.get_instance(LiberoProRuntimeModule)
+    return ModuleLiberoRuntimeClient(runtime, coordinator)
 
 
-def _wait_healthy(
-    client: RuntimeSidecarClient, sidecar: subprocess.Popen[str], timeout_s: float
-) -> HealthResponse:
-    deadline = time.monotonic() + timeout_s
-    last_error = ""
-    while time.monotonic() < deadline:
-        if sidecar.poll() is not None:
-            raise RuntimeError("LIBERO sidecar exited before becoming healthy")
-        try:
-            return client.health()
-        except Exception as exc:
-            last_error = str(exc)
-            time.sleep(0.1)
-    raise RuntimeError(f"LIBERO sidecar did not become healthy: {last_error}")
-
-
-def _stop_sidecar(
-    sidecar: subprocess.Popen[str], episode_dir: Path, cleanup_entry: dict[str, object]
+def _stop_runtime(
+    client: ModuleLiberoRuntimeClient, episode_dir: Path, cleanup_entry: dict[str, object]
 ) -> None:
-    sidecar.terminate()
-    try:
-        sidecar_output, _ = sidecar.communicate(timeout=2.0)
-    except subprocess.TimeoutExpired:
-        sidecar.kill()
-        sidecar_output, _ = sidecar.communicate(timeout=2.0)
+    client.close()
     episode_dir.mkdir(parents=True, exist_ok=True)
-    (episode_dir / "libero_sidecar.log").write_text(sidecar_output)
-    cleanup_entry["sidecar_returncode"] = sidecar.returncode
-    cleanup_entry["sidecar_stopped"] = sidecar.returncode is not None
+    cleanup_entry["runtime_stopped"] = True
 
 
 def _summary(
@@ -391,27 +429,6 @@ def _fixed_action_values(raw: str) -> tuple[float, ...]:
     return values
 
 
-def _free_tcp_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-def _sidecar_python() -> str:
-    return os.environ.get("DIMOS_LIBERO_PRO_SIDECAR_PYTHON", sys.executable)
-
-
-def _sidecar_env(*, visualize: bool = False) -> dict[str, str]:
-    env = dict(os.environ)
-    existing = env.get("PYTHONPATH", "")
-    paths = [str(PROTOCOL_SRC), str(LIBERO_PRO_SIDECAR_SRC)]
-    if existing:
-        paths.append(existing)
-    env["PYTHONPATH"] = os.pathsep.join(paths)
-    env.setdefault("MUJOCO_GL", "glfw" if visualize else "egl")
-    return env
-
-
 def _repo_path(path: Path) -> Path:
     return path if path.is_absolute() else REPO_ROOT / path
 
@@ -443,6 +460,12 @@ def _copy_if_present(source: Path, destination: Path) -> None:
         return
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(source.read_bytes())
+
+
+def _npy_bytes(value: object) -> bytes:
+    buffer = BytesIO()
+    np.save(buffer, np.asarray(value), allow_pickle=False)
+    return buffer.getvalue()
 
 
 def _json_ready(value: object) -> object:

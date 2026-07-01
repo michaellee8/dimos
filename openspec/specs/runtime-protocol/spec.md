@@ -1,17 +1,17 @@
 ## Purpose
 
-Define the lightweight backend-neutral protocol contract shared by DimOS runtime clients and simulator sidecars.
+Define the lightweight backend-neutral protocol contract shared by DimOS and simulator runtime packages.
 ## Requirements
 ### Requirement: Shared runtime protocol package
-The system SHALL provide a lightweight installable runtime protocol package that can be used by DimOS and simulator sidecars without installing the main DimOS package or any simulator backend SDK.
+The system SHALL provide lightweight backend-neutral runtime protocol models that can be reused by DimOS and simulator runtime packages without requiring HTTP transport, the main DimOS package in schema-only contexts, or any simulator backend SDK.
 
-#### Scenario: Sidecar installs protocol without DimOS
-- **WHEN** a Robosuite sidecar environment installs the runtime protocol package
-- **THEN** it can import the protocol models and codecs without importing `dimos`, Robosuite-incompatible DimOS dependencies, or any DimOS hardware adapter modules
+#### Scenario: Runtime package imports protocol without simulator backend
+- **WHEN** a simulator runtime package imports protocol models for validation or compatibility logic
+- **THEN** it can import those models without importing Robosuite, LIBERO-PRO, OmniGibson, or backend-specific dependencies
 
-#### Scenario: DimOS imports the same protocol package
-- **WHEN** the DimOS runtime client imports protocol models
-- **THEN** it uses the same package and protocol version as the sidecar compatibility handshake
+#### Scenario: DimOS module boundary reuses protocol models
+- **WHEN** a Simulator Runtime Module exposes RPC request or response payloads based on runtime protocol models
+- **THEN** the models describe backend-neutral runtime semantics without implying HTTP JSON transport or payload-fetch endpoints
 
 ### Requirement: Protocol model validation
 The protocol package SHALL define Pydantic models for runtime description, episode reset, step requests, step responses, robot motor surfaces, motor action frames, motor state frames, observation frames, scores, artifacts, and errors.
@@ -25,26 +25,30 @@ The protocol package SHALL define Pydantic models for runtime description, episo
 - **THEN** the response includes robot id, surface type, ordered motors, supported command modes, and available state fields
 
 ### Requirement: Protocol compatibility handshake
-The runtime protocol SHALL include protocol version and capability metadata in the sidecar handshake so DimOS can fail fast on incompatible protocol versions or unsupported capabilities.
+The runtime protocol SHALL include protocol version and capability metadata that simulator runtimes can report through module-native description RPCs or compatibility handshakes so DimOS can fail fast on incompatible protocol versions or unsupported capabilities.
 
-#### Scenario: Compatible sidecar connects
-- **WHEN** DimOS connects to a sidecar using a compatible protocol version
-- **THEN** the runtime client accepts the sidecar description and records the protocol version in artifacts
+#### Scenario: Compatible module runtime describes itself
+- **WHEN** DimOS calls `describe()` on a Simulator Runtime Module using a compatible protocol version
+- **THEN** the runtime description includes protocol version and capability metadata that DimOS records in artifacts
 
-#### Scenario: Incompatible sidecar connects
-- **WHEN** DimOS connects to a sidecar using an incompatible protocol version
-- **THEN** prelaunch fails before launching the DimOS blueprint and records the incompatibility reason
+#### Scenario: Incompatible runtime is rejected
+- **WHEN** DimOS describes a simulator runtime using an incompatible protocol version or unsupported capabilities
+- **THEN** prelaunch or runtime setup fails before benchmark stepping and records the incompatibility reason
 
 ### Requirement: Binary-friendly observation transport
-The runtime protocol SHALL support image, depth, segmentation, and object/state observations without requiring large image tensors to be encoded as nested JSON lists.
+The runtime protocol SHALL support image, depth, segmentation, and object/state observation metadata without requiring large image tensors, raw NumPy arrays, or nested JSON lists to be encoded in RPC responses.
 
-#### Scenario: Image observation uses reference or binary payload
-- **WHEN** a sidecar returns an RGB image observation
-- **THEN** the observation frame includes stream name, kind, encoding, shape, dtype, and either a binary payload reference or a supported binary payload representation
+#### Scenario: Image observation uses DimOS stream metadata
+- **WHEN** a Simulator Runtime Module publishes an RGB image observation on a DimOS stream
+- **THEN** associated observation metadata identifies the `Image` stream, encoding, shape, dtype, sequence, or timestamp sufficient for consumers and artifacts to correlate the stream output
 
-#### Scenario: Referenced array payload is fetched separately
-- **WHEN** an observation frame reports a raw array payload reference
-- **THEN** the DimOS runtime client can fetch the referenced `.npy` bytes without embedding image arrays in the JSON step response
+#### Scenario: Camera model uses CameraInfo stream
+- **WHEN** a Simulator Runtime Module publishes an image stream with camera intrinsics
+- **THEN** the camera model is published as `CameraInfo` rather than embedded as ad hoc metadata in the step response
+
+#### Scenario: HTTP payload reference is removed from target path
+- **WHEN** a runtime observation is produced by a migrated Simulator Runtime Module
+- **THEN** the target path uses stream metadata and DimOS stream outputs rather than HTTP payload references
 
 ### Requirement: Backend-neutral protocol types
 Runtime protocol models MUST NOT expose Robosuite, LIBERO-PRO, OmniGibson, DimOS hardware adapter, or simulator object types in public fields.

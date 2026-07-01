@@ -172,6 +172,18 @@ _Avoid_: autonomous simulator loop, write-triggered stepping, settle step
 A separate process or environment that owns a benchmark simulator backend while DimOS owns orchestration, control integration, skills, and artifacts.
 _Avoid_: plugin, embedded simulator
 
+**HTTP runtime removal gate**:
+A migration success condition requiring existing HTTP runtime sidecar servers, clients, payload fetch endpoints, and HTTP-first demos to be removed once their behavior is covered by Simulator Runtime Modules.
+_Avoid_: HTTP fallback, target simulator architecture, long-term transport boundary
+
+**Simulator Runtime Module**:
+A first-class DimOS Module that represents a simulator runtime at the blueprint boundary while preserving simulator ownership of benchmark reset, stepping, observations, and scoring.
+_Avoid_: HTTP runtime sidecar, benchmark script launcher, embedded simulator
+
+**Simulator runtime blueprint helper**:
+A package-local blueprint factory that registers a simulator runtime's named Python project environment and places its Simulator Runtime Module into that environment using the standard blueprint placement API.
+_Avoid_: module-local deployment flag, global sidecar registry, caller-written placement boilerplate
+
 **Remote module worker**:
 A separate Python environment that hosts first-class DimOS Modules while the main DimOS process owns blueprint orchestration and module coordination.
 _Avoid_: arbitrary sidecar service, embedded optional dependency
@@ -208,6 +220,14 @@ _Avoid_: full optional dependency set, application module package, public remote
 A lightweight coordinator-visible DimOS Module class that declares the streams, module references, RPC surface, and config expectations used for blueprint wiring.
 _Avoid_: heavy implementation module, connection-only shim, runtime sidecar
 
+**Module IO contract**:
+The coordinator-visible set of typed stream inputs and outputs a DimOS Module exposes for blueprint wiring.
+_Avoid_: stream schema, port list, dynamic ports
+
+**Configuration-resolved module IO**:
+A module IO contract whose streams are determined from the module's final configuration before blueprint wiring.
+_Avoid_: runtime dynamic IO, late-bound ports, generated subclass IO
+
 **Module implementation descriptor**:
 A portable identity for the concrete Module implementation class that a venv module worker imports and instantiates for a module contract.
 _Avoid_: coordinator-imported heavy class, pickled module class, alternate stream contract
@@ -221,11 +241,11 @@ The phase-1 rule that an incompatible or failing venv module implementation fail
 _Avoid_: optional module fallback, background retry policy, partial blueprint success
 
 **Venv module placement API**:
-A blueprint-level mapping that runs selected Python module contracts in named venvs using concrete module implementation descriptors.
+A blueprint-level mapping that runs selected import-safe Python Module classes in named runtime environments.
 _Avoid_: new Module base class, permanent class deployment attribute, global transport setting
 
 **Python venv placement**:
-A mapping entry keyed by the coordinator-visible module contract class and valued by a named venv plus implementation descriptor.
+A mapping entry keyed by an import-safe Python Module class and valued by the name of a Python runtime environment.
 _Avoid_: deployment type, stream transport key, hardcoded worker process
 
 **Reserved deploy kwargs**:
@@ -239,6 +259,22 @@ _Avoid_: automatic venv creation, package installation plan, blueprint-embedded 
 **Runtime environment registry**:
 A runtime configuration map from stable environment names to environment backends that resolve interpreters, executables, command environment variables, and optional preparation steps for DimOS-managed processes.
 _Avoid_: venv-only config, blueprint-embedded machine paths, per-module ad hoc build commands
+
+**Runtime environment preparation**:
+An explicit pre-run action that prepares only the runtime environments used by active module placements in a loaded blueprint configuration.
+_Avoid_: implicit install during blueprint run, global environment-name command, preparing unused registry entries
+
+**Python project runtime environment**:
+A convention-driven runtime environment rooted at a Python project directory, where standard files such as `pyproject.toml`, `uv.lock`, and optionally `pixi.toml` determine how the worker Python environment is prepared and launched.
+_Avoid_: per-tool runtime backend taxonomy, blueprint-embedded setup command, manually enumerated manifest paths
+
+**Pixi-backed uv runtime**:
+A Python project runtime environment where Pixi prepares the native/toolchain layer and provides the Python interpreter used to create the project-local uv `.venv`; worker launch uses the `.venv` Python with Pixi activation environment applied.
+_Avoid_: Pixi-only Python environment, coordinator Python venv, launching without native activation environment
+
+**Toolchain-mediated worker launch**:
+A worker launch policy for convention-based Python project runtimes where DimOS invokes the project toolchain command, such as `pixi run uv run --no-sync python`, instead of reconstructing activation variables or launching the venv interpreter path directly.
+_Avoid_: hand-built Pixi activation env, mutating sync during blueprint run, bypassing project runtime conventions
 
 **Named runtime environment**:
 A stable label in the runtime environment registry that modules and worker placements reference when they need a non-default execution environment.
@@ -268,6 +304,34 @@ _Avoid_: split package requirement, top-level heavy dependency import, hidden si
 A depth image interpreted with its camera calibration and the pose of its camera frame at the image timestamp.
 _Avoid_: depth point cloud, raw 3D points
 
+**Grasp target**:
+The intended physical object or bounded scene region that grasp generation should produce grasp candidates for.
+_Avoid_: correct object, target object, grasp object
+
+**Object id**:
+A stable identifier for a registered perceived object, used when a robot command must refer to one non-ambiguous physical object.
+_Avoid_: object-ish argument, object name when identity matters
+
+**Registered object**:
+A perceived object that has been assigned an Object id and has enough spatial metadata to be used as a Grasp target.
+_Avoid_: detection when referring to a persistent object reference
+
+**Target-masked TSDF**:
+A grasp-generation workspace representation where observations outside the selected Grasp target are suppressed with a deliberate cushion so the target remains intact.
+_Avoid_: censored TSDF, object-only scene
+
+**Target bounds**:
+A world-frame axis-aligned bounding region used as a rough attention area for a Grasp target before grasp generation.
+_Avoid_: perfect object geometry, grasp geometry
+
+**Grasp candidate**:
+A proposed end-effector grasp pose for a Grasp target, optionally carrying ranking metadata such as score, width, or approach information.
+_Avoid_: executed grasp, final pick action, object pose
+
+**Pointcloud grasp generator**:
+A grasp-generation component that consumes point cloud observations of a Grasp target, optionally with scene context, and proposes Grasp candidates.
+_Avoid_: TSDF grasp generator, robot execution controller, perception registration module
+
 **SHM runtime data plane**:
 A local shared-memory command/state channel between a ControlCoordinator-facing hardware adapter and a DimOS simulator client module, used when high-rate motor control must cross local process boundaries without RPC.
 _Avoid_: remote sidecar protocol, public simulator API, benchmark control plane, module object sharing
@@ -280,9 +344,17 @@ _Avoid_: task observation, scene observation, evaluator state
 A hardware control surface that treats a robot as an ordered set of motors with per-motor state and commands, independent of whether the robot is a manipulator, mobile base, or humanoid.
 _Avoid_: manipulator-only adapter, end-effector API, task action API
 
+**Runtime motor action frame**:
+An ordered command frame addressed to a simulator runtime's declared whole-body motor surface for one benchmark step.
+_Avoid_: backend-native action vector, opaque simulator action, stream transport payload
+
 **Benchmark episode config**:
 A backend-facing declaration of benchmark intent that names the task, robot, runtime constraints, and evaluation setup before any DimOS blueprint is launched.
 _Avoid_: hardware config, simulator config, blueprint config
+
+**Benchmark reset authority**:
+The control-plane responsibility for establishing a new benchmark episode state before simulation time advances.
+_Avoid_: reset topic ownership, observation stream side effect, simulator auto-reset
 
 **Semantic skill benchmark episode**:
 A benchmark episode where the agent acts through named, task-level DimOS skills while simulator backends provide reset, observation, and external scoring.
@@ -367,3 +439,19 @@ _Avoid_: Treating a bus as owned by a single joint group when multiple groups ma
 **OpenArm**:
 An OpenArm robot configuration built from Damiao motors, with OpenArm-specific joints, side naming, limits, and robot description.
 _Avoid_: Damiao robot when referring to OpenArm-specific geometry or naming
+
+**Teleop adapter**:
+A device-specific bridge from a human teleoperation source, such as a headset controller, phone, keyboard, or physical leader arm, into DimOS coordinator-facing command streams.
+_Avoid_: teleop backend when the component emits coordinator command types, teleop module when referring only to the device adapter, controller when the device is not a robot controller
+
+**Teleop profile**:
+A configured teleoperation behavior that selects one primary way human intent drives robot motion while allowing secondary engagement, status, and diagnostic signals.
+_Avoid_: backend when referring to behavior selection, mode when the distinction affects routing and safety semantics
+
+**Primary motion output**:
+The single motion-control path a teleoperation behavior uses to drive robot movement, so one human input source does not unintentionally command the same robot through multiple motion abstractions at once.
+_Avoid_: all active outputs, debug stream, secondary status output
+
+**Teleop command envelope**:
+A small wrapper around a coordinator-facing teleoperation command that distinguishes an active command from no command and from an explicit stop command.
+_Avoid_: using a missing command as a stop signal, overloading raw motion-message contents with teleop authority state

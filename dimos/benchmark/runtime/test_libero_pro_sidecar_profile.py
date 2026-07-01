@@ -16,14 +16,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from io import BytesIO
-import json
 from pathlib import Path
 import sys
-from threading import Thread
 from typing import Literal, cast
-from urllib.request import Request, urlopen
 
 import numpy as np
 import pytest
@@ -40,7 +37,6 @@ from dimos_libero_pro_sidecar.server import (
     LiberoProRuntimeState,
     RealLiberoBackend,
     ensure_libero_config,
-    make_server,
     validate_assets,
 )
 from dimos_runtime_protocol import (
@@ -370,49 +366,6 @@ def test_libero_config_is_created_noninteractively(
     assert f"init_states: {init_states_root}" in config_text
 
 
-def test_libero_pro_http_endpoints_with_stubbed_backend(tmp_path: Path) -> None:
-    config = _config(tmp_path)
-    state = LiberoProRuntimeState(config, backend=_FakeLiberoBackend())
-    server = make_server(
-        LiberoProRuntimeConfig(
-            host="127.0.0.1",
-            port=0,
-            benchmark_name=config.benchmark_name,
-            bddl_root=config.bddl_root,
-            init_states_root=config.init_states_root,
-            camera_names=config.camera_names,
-        ),
-        state=state,
-    )
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    try:
-        health = _get_json(f"{base_url}/health")
-        assert health["ok"] is True
-        assert _get_json(f"{base_url}/describe")["backend"] == "libero-pro"
-        reset = _post_json(f"{base_url}/reset", {"episode_id": "episode", "task_id": "task"})
-        assert reset["episode_id"] == "episode"
-        step = _post_json(
-            f"{base_url}/step",
-            {
-                "episode_id": "episode",
-                "tick_id": 1,
-                "action": {"robot_id": "panda", "names": state.motor_names, "q": [0.2] * 8},
-            },
-        )
-        assert step["success"] is True
-        observations = cast("Sequence[Mapping[str, object]]", step["observations"])
-        image = next(frame for frame in observations if frame["stream"] == "agentview")
-        payload = urlopen(f"{base_url}{image['data_ref']}", timeout=5).read()
-        assert np.array_equal(np.load(BytesIO(payload), allow_pickle=False), _pure_color_image())
-        assert _get_json(f"{base_url}/score")["success"] is True
-    finally:
-        server.shutdown()
-        thread.join(timeout=5)
-        server.server_close()
-
-
 def _config(
     tmp_path: Path,
     *,
@@ -455,23 +408,3 @@ def _pure_color_image() -> np.ndarray:
     image[0, :, :] = [255, 0, 0]
     image[1, :, :] = [0, 255, 0]
     return image
-
-
-def _get_json(url: str) -> dict[str, object]:
-    with urlopen(url, timeout=5) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    assert isinstance(data, dict)
-    return data
-
-
-def _post_json(url: str, payload: dict[str, object]) -> dict[str, object]:
-    request = Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"content-type": "application/json"},
-        method="POST",
-    )
-    with urlopen(request, timeout=5) as response:
-        data = json.loads(response.read().decode("utf-8"))
-    assert isinstance(data, dict)
-    return data
