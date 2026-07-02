@@ -540,7 +540,10 @@ if global_config.simulation != "mujoco":
     _rerun_config["visual_override"]["world/odometry"] = _g1_real_odometry_root
     _rerun_config["visual_override"]["world/global_costmap"] = _g1_real_costmap
     _rerun_config["visual_override"]["world/navigation_costmap"] = _g1_real_costmap
-    _rerun_config["max_hz"]["world/lidar"] = 2.0
+    # The raw FAST-LIO scan is in the (upside-down) sensor frame, not the
+    # world frame -- registration happens in RayTracingVoxelMap. Hide it like
+    # the nav blueprints do; the voxel map is the live view.
+    _rerun_config["visual_override"]["world/lidar"] = None
     _rerun_config["max_hz"]["world/odometry"] = 15.0
 
 
