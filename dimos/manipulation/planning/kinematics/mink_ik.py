@@ -30,7 +30,7 @@ from dimos.manipulation.planning.kinematics.config import MinkKinematicsConfig
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import IKStatus
 from dimos.manipulation.planning.spec.models import IKResult, WorldRobotID
-from dimos.manipulation.planning.spec.protocols import WorldSpec
+from dimos.manipulation.planning.spec.protocols import IKStepCallback, WorldSpec
 from dimos.manipulation.planning.utils.kinematics_utils import compute_pose_error
 from dimos.manipulation.planning.world.mujoco_world import (
     compile_mujoco_model_from_config,
@@ -77,9 +77,20 @@ class _MinkRobotContext:
     mapping: _JointMapping
     arm_velocity_mask: NDArray[np.float64]
     frozen_dofs: list[int]
+    # Warm-start seed: the last collision-free solution's full qpos. Seeding
+    # the next solve from here keeps interactive dragging continuous (the
+    # elbow configuration evolves instead of re-deriving from scratch). Only
+    # collision-free results may be stored -- warming from a colliding or
+    # stuck configuration poisons every following solve.
+    q_warm: NDArray[np.float64] | None = None
 
 
 _MANIPULATION_EXTRA_HINT = "Install manipulation dependencies with: uv sync --extra manipulation."
+
+# on_step cadence during descent: frequent enough that the animated search
+# reads as continuous, rare enough that the callback doesn't dominate solve
+# time (tuned in the original reachability demo viewer).
+_ON_STEP_STRIDE = 12
 
 
 class MinkIK:
@@ -97,6 +108,10 @@ class MinkIK:
         self.config = MinkKinematicsConfig(**config_values)
         self._modules = _load_optional_dependencies(self.config.solver)
         self._robot_contexts: dict[str, _MinkRobotContext] = {}
+        # Persistent across solves: a failed solve retried with the same RNG
+        # state would re-attempt the exact same restart configurations and
+        # fail identically forever.
+        self._rng = np.random.default_rng(0)
 
     def solve(
         self,
@@ -108,8 +123,22 @@ class MinkIK:
         orientation_tolerance: float = 0.01,
         check_collision: bool = True,
         max_attempts: int = 10,
+        on_step: IKStepCallback | None = None,
     ) -> IKResult:
-        """Solve IK with Mink, returning the standard planning ``IKResult``."""
+        """Solve IK with Mink, returning the standard planning ``IKResult``.
+
+        Attempt 0 is warm-started from the previous collision-free solution
+        so interactive dragging feels continuous; the caller's seed, the home
+        pose, and random restarts follow as recovery basins. Collision-free
+        solutions are preferred over closer ones that penetrate; a converged
+        but colliding best candidate is returned with COLLISION status and
+        its joint state intact so callers can visualize it.
+
+        ``on_step(joint_state, position_error, attempt)`` is called every few
+        descent iterations with the solver's current (possibly wrong) guess so
+        a caller can animate the search. A truthy return aborts the search
+        (the target is stale) and the best result so far is returned.
+        """
         if not world.is_finalized:
             return _failure(IKStatus.NO_SOLUTION, "World must be finalized before IK")
 
@@ -126,12 +155,14 @@ class MinkIK:
         target_matrix = pose_to_matrix(target_pose)
         target_body_matrix = target_matrix @ np.linalg.inv(context.body_to_ee)
         best_result: IKResult | None = None
-        best_error = float("inf")
+        # (collision-free success, -total error): free solutions beat closer
+        # ones that penetrate.
+        best_key = (-1, -float("inf"))
 
         for attempt in range(max_attempts):
             try:
                 q0 = self._initial_q(context, seed, lower_limits, upper_limits, attempt)
-                result = self._solve_single(
+                result, aborted = self._solve_single(
                     context=context,
                     target_matrix=target_body_matrix,
                     target_ee_matrix=target_matrix,
@@ -140,27 +171,39 @@ class MinkIK:
                     upper_limits=upper_limits,
                     position_tolerance=position_tolerance,
                     orientation_tolerance=orientation_tolerance,
+                    attempt=attempt,
+                    on_step=on_step,
                 )
             except ValueError as exc:
                 return _failure(IKStatus.NO_SOLUTION, f"Mink IK mapping failed: {exc}")
             except Exception as exc:
                 return _failure(IKStatus.NO_SOLUTION, f"Mink IK solver failed: {exc}")
 
-            total_error = result.position_error + result.orientation_error
-            if total_error < best_error:
-                best_error = total_error
+            converged = result.is_success() and result.joint_state is not None
+            collision_free = converged
+            if converged and check_collision:
+                assert result.joint_state is not None
+                collision_free = world.check_config_collision_free(robot_id, result.joint_state)
+                if not collision_free:
+                    result = _collision_result(result)
+
+            key = (
+                1 if converged and collision_free else 0,
+                -(result.position_error + result.orientation_error),
+            )
+            if key > best_key:
+                best_key = key
                 best_result = result
 
-            if not result.is_success() or result.joint_state is None:
-                continue
+            if converged and collision_free:
+                assert result.joint_state is not None
+                context.q_warm = self._full_q_for_positions(
+                    context, np.asarray(result.joint_state.position, dtype=np.float64)
+                )
+                return result
 
-            if check_collision and not world.check_config_collision_free(
-                robot_id, result.joint_state
-            ):
-                best_result = _collision_failure(result)
-                continue
-
-            return result
+            if aborted:
+                break
 
         if best_result is not None:
             return best_result
@@ -177,7 +220,10 @@ class MinkIK:
         upper_limits: NDArray[np.float64],
         position_tolerance: float,
         orientation_tolerance: float,
-    ) -> IKResult:
+        attempt: int = 0,
+        on_step: IKStepCallback | None = None,
+    ) -> tuple[IKResult, bool]:
+        """One descent from ``seed_q``. Returns (result, aborted-by-on_step)."""
         mink = self._modules.mink
         configuration = mink.Configuration(context.model, seed_q.copy())
         frame_task = mink.FrameTask(
@@ -196,6 +242,7 @@ class MinkIK:
 
         final_position_error = float("inf")
         final_orientation_error = float("inf")
+        aborted = False
 
         for iteration in range(self.config.max_iterations):
             current_pose = self._current_ee_matrix(context, configuration.q)
@@ -208,16 +255,31 @@ class MinkIK:
             ):
                 joint_positions = self._q_to_dimos_positions(context, configuration.q)
                 if not _within_limits(joint_positions, lower_limits, upper_limits):
-                    return _joint_limit_failure(
-                        final_position_error, final_orientation_error, iteration + 1
+                    return (
+                        _joint_limit_failure(
+                            final_position_error, final_orientation_error, iteration + 1
+                        ),
+                        aborted,
                     )
-                return _success(
-                    context.mapping.dimos_joint_names,
-                    joint_positions,
-                    final_position_error,
-                    final_orientation_error,
-                    iteration + 1,
+                return (
+                    _success(
+                        context.mapping.dimos_joint_names,
+                        joint_positions,
+                        final_position_error,
+                        final_orientation_error,
+                        iteration + 1,
+                    ),
+                    aborted,
                 )
+
+            if on_step is not None and iteration % _ON_STEP_STRIDE == 0:
+                guess = JointState(
+                    name=context.mapping.dimos_joint_names,
+                    position=self._q_to_dimos_positions(context, configuration.q).tolist(),
+                )
+                if on_step(guess, final_position_error, attempt):
+                    aborted = True
+                    break
 
             velocity = (
                 mink.solve_ik(
@@ -237,8 +299,11 @@ class MinkIK:
 
         joint_positions = self._q_to_dimos_positions(context, configuration.q)
         if not _within_limits(joint_positions, lower_limits, upper_limits):
-            return _joint_limit_failure(
-                final_position_error, final_orientation_error, self.config.max_iterations
+            return (
+                _joint_limit_failure(
+                    final_position_error, final_orientation_error, self.config.max_iterations
+                ),
+                aborted,
             )
         current_pose = self._current_ee_matrix(context, configuration.q)
         final_position_error, final_orientation_error = compute_pose_error(
@@ -248,23 +313,29 @@ class MinkIK:
             final_position_error <= position_tolerance
             and final_orientation_error <= orientation_tolerance
         ):
-            return _success(
-                context.mapping.dimos_joint_names,
-                joint_positions,
-                final_position_error,
-                final_orientation_error,
-                self.config.max_iterations,
+            return (
+                _success(
+                    context.mapping.dimos_joint_names,
+                    joint_positions,
+                    final_position_error,
+                    final_orientation_error,
+                    self.config.max_iterations,
+                ),
+                aborted,
             )
-        return IKResult(
-            status=IKStatus.NO_SOLUTION,
-            joint_state=JointState(
-                name=context.mapping.dimos_joint_names,
-                position=joint_positions.tolist(),
+        return (
+            IKResult(
+                status=IKStatus.NO_SOLUTION,
+                joint_state=JointState(
+                    name=context.mapping.dimos_joint_names,
+                    position=joint_positions.tolist(),
+                ),
+                position_error=final_position_error,
+                orientation_error=final_orientation_error,
+                iterations=self.config.max_iterations,
+                message="Mink IK did not converge within the iteration budget",
             ),
-            position_error=final_position_error,
-            orientation_error=final_orientation_error,
-            iterations=self.config.max_iterations,
-            message="Mink IK did not converge within the iteration budget",
+            aborted,
         )
 
     def _get_robot_context(self, world: WorldSpec, robot_id: WorldRobotID) -> _MinkRobotContext:
@@ -306,11 +377,30 @@ class MinkIK:
         upper_limits: NDArray[np.float64],
         attempt: int,
     ) -> NDArray[np.float64]:
-        q = context.q_base.copy()
+        """Attempt schedule: warm start, caller's seed, home pose, random.
+
+        Without a warm seed the schedule shifts up (seed, home, random...).
+        The home pose is a deterministic recovery basin in case the warm
+        start is stuck somewhere bad.
+        """
+        if context.q_warm is None:
+            attempt += 1
         if attempt == 0:
+            return context.q_warm.copy()  # type: ignore[union-attr]
+        q = context.q_base.copy()
+        if attempt == 1:
             positions = _seed_positions_for_mapping(seed, context.mapping)
+        elif attempt == 2:
+            positions = context.q_base[context.mapping.qpos_adr]
         else:
-            positions = np.random.uniform(lower_limits, upper_limits)
+            positions = self._rng.uniform(lower_limits, upper_limits)
+        q[context.mapping.qpos_adr] = positions
+        return q
+
+    def _full_q_for_positions(
+        self, context: _MinkRobotContext, positions: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        q = context.q_base.copy()
         q[context.mapping.qpos_adr] = positions
         return q
 
@@ -550,10 +640,11 @@ def _joint_limit_failure(
     )
 
 
-def _collision_failure(result: IKResult) -> IKResult:
+def _collision_result(result: IKResult) -> IKResult:
+    """Converged-but-colliding candidate: keep the joint state for visualization."""
     return IKResult(
         status=IKStatus.COLLISION,
-        joint_state=None,
+        joint_state=result.joint_state,
         position_error=result.position_error,
         orientation_error=result.orientation_error,
         iterations=result.iterations,

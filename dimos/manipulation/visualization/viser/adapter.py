@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from dimos.manipulation.planning.monitor.world_monitor import WorldMonitor
     from dimos.manipulation.planning.spec.config import RobotModelConfig
     from dimos.manipulation.planning.spec.models import JointPath, RobotName, WorldRobotID
+    from dimos.manipulation.planning.spec.protocols import IKStepCallback
     from dimos.msgs.geometry_msgs.Pose import Pose
     from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 
@@ -118,9 +119,14 @@ class InProcessViserAdapter:
         )
         return result
 
-    def evaluate_pose_target(self, pose: Pose, robot_name: RobotName) -> TargetEvaluation:
+    def evaluate_pose_target(
+        self,
+        pose: Pose,
+        robot_name: RobotName,
+        on_step: IKStepCallback | None = None,
+    ) -> TargetEvaluation:
         """Evaluate a Cartesian target through module/WorldMonitor helper boundaries."""
-        result: TargetEvaluation = {**self._module.evaluate_pose_target(pose, robot_name)}
+        result: TargetEvaluation = {**self._module.evaluate_pose_target(pose, robot_name, on_step)}
         joint_state = result.get("joint_state")
         result["joint_state"] = copy_joint_state(
             joint_state if isinstance(joint_state, JointState) else None

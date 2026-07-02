@@ -59,7 +59,11 @@ from dimos.manipulation.planning.spec.models import (
     RobotName,
     WorldRobotID,
 )
-from dimos.manipulation.planning.spec.protocols import KinematicsSpec, PlannerSpec
+from dimos.manipulation.planning.spec.protocols import (
+    IKStepCallback,
+    KinematicsSpec,
+    PlannerSpec,
+)
 from dimos.manipulation.planning.trajectory_generator.joint_trajectory_generator import (
     JointTrajectoryGenerator,
 )
@@ -505,6 +509,7 @@ class ManipulationModule(Module):
         pose: Pose,
         seed: JointState,
         check_collision: bool,
+        on_step: IKStepCallback | None = None,
     ) -> IKResult:
         """Run the configured kinematics backend for a world-frame pose.
 
@@ -532,6 +537,7 @@ class ManipulationModule(Module):
             target_pose=target_pose,
             seed=seed,
             check_collision=check_collision,
+            on_step=on_step,
         )
 
     @rpc
@@ -879,8 +885,17 @@ class ManipulationModule(Module):
             "joint_state": target,
         }
 
-    def evaluate_pose_target(self, pose: Pose, robot_name: RobotName) -> TargetEvaluation:
-        """Evaluate a Cartesian target for visualization without planning a path."""
+    def evaluate_pose_target(
+        self,
+        pose: Pose,
+        robot_name: RobotName,
+        on_step: IKStepCallback | None = None,
+    ) -> TargetEvaluation:
+        """Evaluate a Cartesian target for visualization without planning a path.
+
+        ``on_step`` streams the IK search's intermediate guesses (in-process
+        callers only -- callbacks cannot cross the RPC boundary).
+        """
         robot_id = self.robot_id_for_name(robot_name)
         if robot_id is None:
             return {

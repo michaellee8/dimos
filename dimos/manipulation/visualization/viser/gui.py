@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from math import radians
 from typing import TypeAlias
 
@@ -622,10 +622,33 @@ class ViserPanelGui:
         if request.source == "cartesian":
             if request.pose is None:
                 return {"success": False, "status": "INVALID", "message": "No pose target"}
-            return self.adapter.evaluate_pose_target(request.pose, request.robot_name)
+            return self.adapter.evaluate_pose_target(
+                request.pose, request.robot_name, on_step=self._ik_step_animator(request)
+            )
         if request.joints is None:
             return {"success": False, "status": "INVALID", "message": "No joint target"}
         return self.adapter.evaluate_joint_target(request.joints, request.robot_name)
+
+    def _ik_step_animator(
+        self, request: TargetEvaluationRequest
+    ) -> Callable[[JointState, float, int], bool]:
+        """Animate the IK search on the target ghost, aborting stale searches.
+
+        Runs on the evaluation worker thread. The ghost shows the solver's
+        current guess flowing toward the gizmo instead of teleporting to the
+        final answer; if the user drags again mid-search, the sequence ID
+        advances and the stale solve aborts so the new target starts sooner.
+        """
+        robot_id = self.adapter.robot_id_for_name(request.robot_name)
+
+        def on_step(guess: JointState, _position_error: float, _attempt: int) -> bool:
+            if self._closed or request.sequence_id != self.state.latest_sequence_id:
+                return True
+            if self.scene is not None and robot_id is not None:
+                self.scene.set_target_joints(str(robot_id), guess.name, list(guess.position))
+            return False
+
+        return on_step
 
     def _apply_target_evaluation_result(
         self, request: TargetEvaluationRequest, result: TargetEvaluation

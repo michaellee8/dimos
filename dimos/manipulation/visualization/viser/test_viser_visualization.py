@@ -1833,3 +1833,33 @@ def test_scene_shares_ghosts_across_display_group_and_merges_joints() -> None:
     assert target.removed is False
     scene.unregister_robot("robot2")
     assert target.removed is True
+
+
+def test_gui_ik_step_animator_moves_ghost_and_aborts_stale(
+    make_panel: Callable[..., ViserPanelGui],
+) -> None:
+    adapter = make_adapter_with_robot()
+    gui = make_panel(FakeGuiServer(), adapter)
+    gui.state.selected_robot = "arm"
+    moved: list[tuple[str, list[float]]] = []
+    gui.scene = SimpleNamespace(
+        set_target_joints=lambda robot_id, names, joints: moved.append((robot_id, list(joints)))
+    )
+
+    sequence_id = gui.state.next_sequence_id()
+    request = TargetEvaluationRequest(sequence_id=sequence_id, source="cartesian", robot_name="arm")
+    on_step = gui._ik_step_animator(request)
+
+    # Live request: intermediate guesses stream to the target ghost.
+    guess = FakeJointState(["j1", "j2"], position=[0.3, 0.4])
+    assert on_step(guess, 0.05, 0) is False
+    assert moved and moved[-1][1] == [0.3, 0.4]
+
+    # A newer target supersedes this request: the search must abort.
+    gui.state.next_sequence_id()
+    assert on_step(guess, 0.05, 0) is True
+
+    # Closed panel also aborts.
+    gui.state.latest_sequence_id = request.sequence_id
+    gui.close()
+    assert on_step(guess, 0.05, 0) is True
