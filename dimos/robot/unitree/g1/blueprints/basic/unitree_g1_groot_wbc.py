@@ -426,20 +426,60 @@ def _g1_nav_path(path: NavPath) -> Any:
 _G1_ROOT = G1_RERUN_ROOT if global_config.simulation == "mujoco" else "world/odometry/g1"
 
 
-def _g1_real_odometry_root(odom: Any) -> Any:
-    """Robot-mesh root transform from FAST-LIO odometry.
+# The FAST-LIO world frame originates at the lidar's boot pose (the physical
+# ground sits ~1.2 m below z=0). Like the nav blueprints' sensor-attached
+# robot marker, everything drawn for the robot derives from the sensor pose;
+# here the offsets come from the URDF itself instead of magic numbers.
+_G1_URDF_PATH = Path(__file__).resolve().parents[2] / "g1.urdf"
+# Nominal standing pelvis height; matches G1GrootWBCTask's height_cmd.
+_G1_NOMINAL_PELVIS_Z = 0.74
+_g1_pelvis_mid360_cache: list[Any] = []
 
-    The odometry tracks the mid360 body frame (head, ~1.2 m up, pitching with
-    the torso). For the whole-robot mesh use x/y/yaw only and pin z at the
-    WBC's nominal pelvis height -- close enough for nav visualization without
-    modeling the head-to-pelvis kinematics.
+
+def _g1_pelvis_to_mid360() -> Any:
+    """Rest-pose pelvis->mid360_link transform from the G1 URDF (cached)."""
+    if not _g1_pelvis_mid360_cache:
+        import numpy as np
+        import yourdfpy
+
+        urdf = yourdfpy.URDF.load(str(_G1_URDF_PATH), load_meshes=False)
+        urdf.update_cfg(np.zeros(len(urdf.actuated_joint_names)))
+        _g1_pelvis_mid360_cache.append(urdf.get_transform("mid360_link", "pelvis"))
+    return _g1_pelvis_mid360_cache[0]
+
+
+def _g1_real_odometry_root(odom: Any) -> Any:
+    """Robot-mesh root: pelvis pose composed from FAST-LIO odometry.
+
+    The odometry tracks the mid360 body frame, so the pelvis pose is
+    T_world_mid360 @ inverse(pelvis->mid360 at rest). Waist articulation
+    between pelvis and head is ignored (rest offset), the same approximation
+    as the nav blueprints' fixed sensor-attached marker.
     """
+    import numpy as np
     import rerun as rr
 
+    from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+
+    t_world_mid360 = np.eye(4)
+    t_world_mid360[:3, :3] = odom.orientation.to_rotation_matrix()
+    t_world_mid360[:3, 3] = (odom.x, odom.y, odom.z)
+    t_world_pelvis = t_world_mid360 @ np.linalg.inv(_g1_pelvis_to_mid360())
+    q = Quaternion.from_rotation_matrix(t_world_pelvis[:3, :3])
     return rr.Transform3D(
-        translation=[odom.x, odom.y, 0.74],
-        rotation=rr.RotationAxisAngle(axis=[0.0, 0.0, 1.0], radians=float(odom.yaw)),
+        translation=t_world_pelvis[:3, 3].tolist(),
+        rotation=rr.Quaternion(xyzw=[q.x, q.y, q.z, q.w]),
     )
+
+
+def _g1_real_ground_z() -> float:
+    """Ground height in the FAST-LIO boot frame: -(mount z + nominal pelvis z)."""
+    return -(float(_g1_pelvis_to_mid360()[2, 3]) + _G1_NOMINAL_PELVIS_Z)
+
+
+def _g1_real_costmap(grid: Any) -> Any:
+    """Costmap rendered on the actual ground plane of the boot frame."""
+    return g1_costmap(grid, z_offset=_g1_real_ground_z() + 0.02)
 
 
 _static_rerun_entities: dict[str, Any] = {
@@ -491,9 +531,12 @@ _rerun_config = {
 }
 
 if global_config.simulation != "mujoco":
-    # Real hw: root the robot mesh on FAST-LIO odometry, and throttle the raw
-    # registered scan over the WiFi link (the voxel map is the useful view).
+    # Real hw: root the robot mesh on FAST-LIO odometry, draw the costmap on
+    # the boot frame's actual ground plane, and throttle the raw registered
+    # scan over the WiFi link (the voxel map is the useful view).
     _rerun_config["visual_override"]["world/odometry"] = _g1_real_odometry_root
+    _rerun_config["visual_override"]["world/global_costmap"] = _g1_real_costmap
+    _rerun_config["visual_override"]["world/navigation_costmap"] = _g1_real_costmap
     _rerun_config["max_hz"]["world/lidar"] = 2.0
     _rerun_config["max_hz"]["world/odometry"] = 15.0
 
