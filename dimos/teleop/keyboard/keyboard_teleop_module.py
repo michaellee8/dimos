@@ -27,17 +27,19 @@ Keyboard controls:
     ESC: Quit
 """
 
+from __future__ import annotations
+
 import os
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 try:
-    import pygame  # type: ignore[import-not-found]
-    from pygame.key import ScancodeWrapper  # type: ignore[attr-defined, import-not-found]
-except ImportError as exc:
-    raise ImportError(
-        "pygame is required for keyboard teleop. Install it with: pip install pygame"
-    ) from exc
+    import pygame
+except ImportError:
+    pygame = None  # type: ignore[assignment]
+
+if TYPE_CHECKING:
+    from pygame.key import ScancodeWrapper  # type: ignore[attr-defined]
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
@@ -82,6 +84,10 @@ class KeyboardTeleopModule(Module):
 
     @rpc
     def start(self) -> None:
+        if pygame is None:
+            raise ImportError(
+                "pygame is required for keyboard teleop. Install it with: pip install pygame"
+            )
         super().start()
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._pygame_loop, daemon=True)
