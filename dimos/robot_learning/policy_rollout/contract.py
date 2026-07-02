@@ -18,6 +18,7 @@ from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
     RobotPolicyAction,
+    RobotPolicyActionChunk,
     RobotPolicyObservation,
 )
 
@@ -28,3 +29,7 @@ class RobotPolicyContract(Protocol):
     def to_backend_batch(self, sample: RobotPolicyObservation) -> BackendBatch: ...
 
     def from_backend_output(self, output: BackendOutputEnvelope) -> RobotPolicyAction: ...
+
+    def chunk_from_backend_output(
+        self, output: BackendOutputEnvelope
+    ) -> RobotPolicyActionChunk: ...

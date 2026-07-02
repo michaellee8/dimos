@@ -23,6 +23,7 @@ from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
     RobotPolicyAction,
+    RobotPolicyActionChunk,
     RobotPolicyObservation,
 )
 
@@ -65,18 +66,34 @@ class VlaJepaLiberoRobotContract:
         )
 
     def from_backend_output(self, output: BackendOutputEnvelope) -> RobotPolicyAction:
-        values = output.output
-        if len(values) != 7:
-            raise ValueError(
-                f"VLA-JEPA LIBERO action must have shape (7,), got {len(values)} values"
-            )
-        if not all(np.isfinite(values)):
+        values = np.asarray(output.output, dtype=np.float32)
+        if values.shape != (7,):
+            raise ValueError(f"VLA-JEPA LIBERO action must have shape (7,), got {values.shape}")
+        if not np.all(np.isfinite(values)):
             raise ValueError("VLA-JEPA LIBERO action contains non-finite values")
-        if any(value < -1.0 or value > 1.0 for value in values):
+        if np.any((values < -1.0) | (values > 1.0)):
             raise ValueError("VLA-JEPA LIBERO action must be within [-1, 1]")
         return RobotPolicyAction(
             space_id=VLA_JEPA_LIBERO_ACTION_SPACE_ID,
-            values=tuple(values),
+            values=tuple(float(value) for value in values),
+            metadata={"backend_metadata": dict(output.metadata)},
+        )
+
+    def chunk_from_backend_output(self, output: BackendOutputEnvelope) -> RobotPolicyActionChunk:
+        if isinstance(output.output, Sequence) and len(output.output) == 0:
+            raise ValueError("VLA-JEPA LIBERO action chunk must not be empty")
+        values = np.asarray(output.output, dtype=np.float32)
+        if values.ndim != 2 or values.shape[1] != 7:
+            raise ValueError(
+                f"VLA-JEPA LIBERO action chunk must have shape (N, 7), got {values.shape}"
+            )
+        if not np.all(np.isfinite(values)):
+            raise ValueError("VLA-JEPA LIBERO action chunk contains non-finite values")
+        if np.any((values < -1.0) | (values > 1.0)):
+            raise ValueError("VLA-JEPA LIBERO action chunk must be within [-1, 1]")
+        return RobotPolicyActionChunk(
+            space_id=VLA_JEPA_LIBERO_ACTION_SPACE_ID,
+            values=tuple(tuple(float(item) for item in row) for row in values),
             metadata={"backend_metadata": dict(output.metadata)},
         )
 

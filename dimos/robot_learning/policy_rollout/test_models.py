@@ -14,7 +14,13 @@
 
 from dataclasses import asdict
 
-from dimos.robot_learning.policy_rollout.models import RobotPolicyAction, RobotPolicyObservation
+import pytest
+
+from dimos.robot_learning.policy_rollout.models import (
+    RobotPolicyAction,
+    RobotPolicyActionChunk,
+    RobotPolicyObservation,
+)
 
 
 def test_robot_policy_observation_is_runtime_independent_dataclass() -> None:
@@ -43,3 +49,35 @@ def test_robot_policy_action_is_runtime_independent_dataclass() -> None:
     assert payload["kind"] == "robot_policy_action"
     assert payload["space_id"] == "libero.ee_delta_6d_gripper.normalized.v1"
     assert payload["values"] == (0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0)
+
+
+def test_robot_policy_action_chunk_exposes_shape_and_first_action() -> None:
+    chunk = RobotPolicyActionChunk(
+        space_id="libero.ee_delta_6d_gripper.normalized.v1",
+        values=((0.0, 0.1), (0.2, 0.3)),
+        sequence=3,
+        timestamps=(1.0, 1.1),
+        metadata={"backend": "fake"},
+    )
+
+    assert chunk.kind == "robot_policy_action_chunk"
+    assert chunk.horizon == 2
+    assert chunk.action_dim == 2
+    assert chunk.shape == (2, 2)
+    assert chunk.first_action() == RobotPolicyAction(
+        space_id="libero.ee_delta_6d_gripper.normalized.v1",
+        values=(0.0, 0.1),
+        sequence=3,
+        metadata={"backend": "fake"},
+    )
+
+
+def test_robot_policy_action_chunk_rejects_empty_or_ragged_values() -> None:
+    with pytest.raises(ValueError, match="at least one"):
+        RobotPolicyActionChunk(space_id="space", values=())
+    with pytest.raises(ValueError, match="must not be empty"):
+        RobotPolicyActionChunk(space_id="space", values=((),))
+    with pytest.raises(ValueError, match="consistent dimensions"):
+        RobotPolicyActionChunk(space_id="space", values=((0.0,), (0.1, 0.2)))
+    with pytest.raises(ValueError, match="timestamps"):
+        RobotPolicyActionChunk(space_id="space", values=((0.0,),), timestamps=(1.0, 1.1))

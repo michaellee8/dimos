@@ -105,6 +105,37 @@ def test_contract_rejects_invalid_backend_output() -> None:
         contract.from_backend_output(BackendOutputEnvelope(output=(0.0,) * 6 + (2.0,)))
 
 
+def test_contract_converts_backend_output_to_runtime_action_chunk() -> None:
+    contract = VlaJepaLiberoRobotContract()
+
+    chunk = contract.chunk_from_backend_output(
+        BackendOutputEnvelope(
+            output=(
+                (0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0),
+                (0.1, 0.2, -0.2, 0.3, -0.3, 0.4, -1.0),
+            )
+        )
+    )
+
+    assert chunk.space_id == VLA_JEPA_LIBERO_ACTION_SPACE_ID
+    assert chunk.shape == (2, 7)
+    assert chunk.values[0] == pytest.approx((0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0))
+
+
+def test_contract_rejects_invalid_backend_action_chunk_output() -> None:
+    contract = VlaJepaLiberoRobotContract()
+    with pytest.raises(ValueError, match=r"shape \(N, 7\)"):
+        contract.chunk_from_backend_output(BackendOutputEnvelope(output=(0.0,) * 7))
+    with pytest.raises(ValueError, match="empty"):
+        contract.chunk_from_backend_output(BackendOutputEnvelope(output=()))
+    with pytest.raises(ValueError, match="non-finite"):
+        contract.chunk_from_backend_output(
+            BackendOutputEnvelope(output=((0.0,) * 6 + (float("nan"),),))
+        )
+    with pytest.raises(ValueError, match="within"):
+        contract.chunk_from_backend_output(BackendOutputEnvelope(output=((0.0,) * 6 + (2.0,),)))
+
+
 def _sample(
     *,
     streams: tuple[str, ...] = ("agentview", "eye_in_hand", "robot_state"),

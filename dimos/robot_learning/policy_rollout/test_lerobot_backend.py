@@ -58,9 +58,18 @@ class FakePolicy:
         self.selected_batches.append(batch)
         return (0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0)
 
-    def predict_action_chunk(self, batch: object) -> tuple[tuple[float, ...], ...]:
+    def predict_action_chunk(self, batch: object) -> object:
         self.chunk_batches.append(batch)
         return ((0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0),)
+
+
+class FakeBatchedChunkPolicy(FakePolicy):
+    def predict_action_chunk(self, batch: object) -> np.ndarray:
+        self.chunk_batches.append(batch)
+        return np.asarray(
+            [[[0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0]]],
+            dtype=np.float32,
+        )
 
 
 class FakePolicyClass:
@@ -162,7 +171,34 @@ def test_lerobot_backend_can_route_to_action_chunk(mocker) -> None:
     assert policy.chunk_batches == [{"observation.state": "state"}]
     assert output.metadata["inference_method"] == "predict_action_chunk"
     assert output.metadata["output_shape"] == [1, 7]
-    assert output.output == pytest.approx((0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0))
+    assert len(output.output) == 1
+    assert output.output[0] == pytest.approx((0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0))
+
+
+def test_lerobot_backend_accepts_singleton_batch_action_chunk(mocker) -> None:
+    policy = FakeBatchedChunkPolicy()
+    FakePolicyClass.policy = policy
+    FakePolicyClass.checkpoint_ids = []
+
+    mocker.patch(
+        "dimos.robot_learning.policy_rollout.backends.lerobot.backend._load_vla_jepa_policy_class",
+        return_value=FakePolicyClass,
+    )
+    mocker.patch(
+        "dimos.robot_learning.policy_rollout.backends.lerobot.backend._make_pre_post_processors",
+        return_value=(lambda batch: batch, lambda output: output),
+    )
+    mocker.patch(
+        "dimos.robot_learning.policy_rollout.backends.lerobot.backend._torch_no_grad",
+        return_value=FakeNoGrad(),
+    )
+    backend = LeRobotBackend(use_action_chunk=True)
+
+    output = backend.infer_batch(BackendBatch(payload={"observation.state": "state"}))
+
+    assert output.metadata["output_shape"] == [1, 1, 7]
+    assert len(output.output) == 1
+    assert output.output[0] == pytest.approx((0.0, 0.1, -0.1, 0.2, -0.2, 0.3, 1.0))
 
 
 def test_lerobot_backend_tensorizes_numpy_inputs_before_lerobot_preprocessor() -> None:

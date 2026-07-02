@@ -1,7 +1,18 @@
 # LeRobot LIBERO policy rollout gate
 
 This optional/manual gate evaluates the official LeRobot VLA-JEPA LIBERO
-checkpoint through the DimOS robot-learning seams:
+checkpoint through DimOS robot-learning seams. There are two runnable paths:
+
+- **Fast benchmark path** (default): lockstep reset/snapshot/inference/action/step
+  ownership stays in the benchmark runner so simulation can remain simple,
+  parallelizable, and faster-than-realtime where possible.
+- **Live policy stream path** (`--live-policy-stream`): runtime observation
+  assembly, `RobotPolicyModule`, and `ControlCoordinator` run as DimOS modules.
+  The policy module emits action chunks on a stream, the coordinator executes
+  them via the policy chunk control task, and the demo forwards the resulting
+  native LIBERO action row to the runtime. This is the realtime parity path.
+
+Default fast benchmark flow:
 
 ```text
 BenchmarkPolicyEvalRunner
@@ -35,14 +46,36 @@ RobotPolicyModule.blueprint(
 The helper `lerobot_libero_policy_eval_blueprint(...)` returns a blueprint-shaped
 composition of `RobotPolicyModule` and `BenchmarkPolicyEvalModule` for this gate.
 
-The v1 path intentionally bypasses `ControlCoordinator`; the sidecar runs in
-native LIBERO action mode and accepts the official relative end-effector delta +
-gripper action surface:
+The default fast benchmark path intentionally bypasses `ControlCoordinator`.
+The sidecar still runs in native LIBERO action mode and accepts the official
+relative end-effector delta + gripper action surface:
 
 ```text
 space_id = libero.ee_delta_6d_gripper.normalized.v1
 shape = (7,)
 bounds = [-1, 1]
+```
+
+The live policy stream path preserves the same native LIBERO action semantics.
+It does **not** reinterpret VLA-JEPA actions as Panda joint targets. Instead,
+the policy chunk task claims a synthetic 7-DOF action surface, emits one
+index-bounded normalized action row through `ControlCoordinator`, and the demo
+uses that row as a `RuntimeActionFrame` with the same
+`libero.ee_delta_6d_gripper.normalized.v1` space id.
+
+Live stream flow:
+
+```text
+LiberoRobotPolicyObservationBuilder.build(...)
+  -> RobotPolicyModule.update_observation(RobotPolicyObservation)
+  -> RobotPolicyModule.trigger_action_chunk_inference()
+     -> LeRobotBackend.infer_batch(..., use_action_chunk=True)
+     -> VlaJepaLiberoRobotContract.chunk_from_backend_output(...)
+  -> RobotPolicyModule.policy_action_chunk stream
+  -> ControlCoordinator.robot_policy_action_chunk stream input
+  -> PolicyChunkControlTask index-bounded execution
+  -> RuntimeActionFrame(space_id=libero.ee_delta_6d_gripper.normalized.v1)
+  -> LiberoProRuntimeModule.step(...)
 ```
 
 ## Dependencies
@@ -85,6 +118,31 @@ success_rate > 0.50
 
 Use `--device cuda` or another LeRobot-supported device when needed.
 
+## Live policy stream parity gate
+
+Run the realtime-style path by adding `--live-policy-stream`. Acceptance uses
+the real `lerobot/VLA-JEPA-LIBERO` checkpoint over a 10-episode `libero_object`
+slice and the same hard threshold:
+
+```bash
+CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+uv run \
+  --with libero \
+  --with "lerobot[vla_jepa] @ git+https://github.com/huggingface/lerobot.git" \
+  python scripts/benchmarks/demo_lerobot_libero_policy_rollout.py \
+  --live-policy-stream \
+  --device cuda \
+  --episodes-limit 10 \
+  --save-videos \
+  --artifact-dir artifacts/benchmark/lerobot-vla-jepa-libero-live-10-videos
+```
+
+`--fake-backend` is only a plumbing smoke test. Do not use it for live parity
+acceptance. `--live-chunk-timeout-s` caps how long each tick waits for a
+coordinator-emitted action, and `--live-max-stale-waits` aborts the episode
+after repeated live action timeouts so inference-shape or backend failures fail
+fast instead of spending `max_steps * timeout` seconds on one episode.
+
 ## Native-action smoke path
 
 To test protocol/sidecar/native-action plumbing without downloading LeRobot:
@@ -94,12 +152,14 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 \
 uv run --with libero \
   python scripts/benchmarks/demo_lerobot_libero_policy_rollout.py \
   --fake-backend \
+  --live-policy-stream \
   --episodes-limit 1 \
   --no-enforce-gate
 ```
 
 This still constructs the module-backed workflow and uses the real
-`VlaJepaLiberoRobotContract`, but the backend returns a fixed 7D action.
+`VlaJepaLiberoRobotContract`, but the backend returns a fixed 7D action or a
+single-row action chunk when `--live-policy-stream` is set.
 
 ## Artifacts
 
@@ -120,3 +180,8 @@ under each episode directory, for example:
 ```text
 episodes/libero_object_task0_init0/videos/libero_object_task0_init0/agentview.mp4
 ```
+
+Live stream runs also write `live_path_diagnostics.json` per episode. It records
+chunk counts, accepted refill triggers, consumed actions, inference status
+counts, stale waits/deactivations, and the last command sequence observed from
+`ControlCoordinator`.

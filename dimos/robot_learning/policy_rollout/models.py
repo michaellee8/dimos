@@ -18,6 +18,7 @@ from typing import TypeAlias
 
 JsonObject: TypeAlias = Mapping[str, object]
 BackendPayload: TypeAlias = Mapping[str, object]
+BackendActionOutput: TypeAlias = tuple[float, ...] | tuple[tuple[float, ...], ...]
 
 
 @dataclass(frozen=True)
@@ -46,7 +47,7 @@ class BackendBatch:
 class BackendOutputEnvelope:
     """Backend-native policy output and inference metadata."""
 
-    output: tuple[float, ...]
+    output: BackendActionOutput
     metadata: JsonObject = field(default_factory=dict)
 
 
@@ -78,7 +79,50 @@ class RobotPolicyAction:
     kind: str = "robot_policy_action"
 
 
-RuntimeActionOutput: TypeAlias = RobotPolicyAction
+@dataclass(frozen=True)
+class RobotPolicyActionChunk:
+    """Runtime-independent ordered chunk of robot-learning policy actions."""
+
+    space_id: str
+    values: tuple[tuple[float, ...], ...]
+    sequence: int | None = None
+    timestamps: tuple[float, ...] | None = None
+    metadata: JsonObject = field(default_factory=dict)
+    kind: str = "robot_policy_action_chunk"
+
+    def __post_init__(self) -> None:
+        if not self.values:
+            raise ValueError("RobotPolicyActionChunk must contain at least one action row")
+        action_dim = len(self.values[0])
+        if action_dim == 0:
+            raise ValueError("RobotPolicyActionChunk action rows must not be empty")
+        if any(len(row) != action_dim for row in self.values):
+            raise ValueError("RobotPolicyActionChunk action rows must have consistent dimensions")
+        if self.timestamps is not None and len(self.timestamps) != len(self.values):
+            raise ValueError("RobotPolicyActionChunk timestamps must match horizon")
+
+    @property
+    def horizon(self) -> int:
+        return len(self.values)
+
+    @property
+    def action_dim(self) -> int:
+        return len(self.values[0])
+
+    @property
+    def shape(self) -> tuple[int, int]:
+        return (self.horizon, self.action_dim)
+
+    def first_action(self) -> RobotPolicyAction:
+        return RobotPolicyAction(
+            space_id=self.space_id,
+            values=self.values[0],
+            sequence=self.sequence,
+            metadata=self.metadata,
+        )
+
+
+RuntimeActionOutput: TypeAlias = RobotPolicyAction | RobotPolicyActionChunk
 
 
 @dataclass(frozen=True)

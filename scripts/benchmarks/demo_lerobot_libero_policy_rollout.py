@@ -26,13 +26,15 @@ For a lightweight native-action smoke test that does not download LeRobot, pass
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 import json
 from pathlib import Path
 import sys
+import time
 import traceback
 from typing import Protocol
+from uuid import uuid4
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL_SRC = REPO_ROOT / "packages" / "dimos-runtime-protocol" / "src"
@@ -47,12 +49,17 @@ from dimos_runtime_protocol import (
     EpisodeResetRequest,
     EpisodeResetResponse,
     ObservationFrame,
+    RuntimeActionFrame,
     StepRequest,
     StepResponse,
 )
+import imageio.v2 as imageio
 import numpy as np
 
 from dimos.benchmark.runtime.artifacts import write_json
+from dimos.control.components import HardwareComponent, HardwareType
+from dimos.control.coordinator import ControlCoordinator, TaskConfig
+from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.robot_learning.policy_rollout.backends.backend import PolicyBackend
 from dimos.robot_learning.policy_rollout.evaluation import (
@@ -60,6 +67,7 @@ from dimos.robot_learning.policy_rollout.evaluation import (
     BenchmarkEpisodeSpec,
     BenchmarkEvaluationSummary,
     BenchmarkPolicyEvalModule,
+    LiberoRobotPolicyObservationBuilder,
     PolicyEvalRuntimeSession,
     RuntimeStreamSnapshot,
     libero_object_episode_matrix,
@@ -68,11 +76,14 @@ from dimos.robot_learning.policy_rollout.models import (
     BackendBatch,
     BackendOutputEnvelope,
     PolicyBackendDescription,
+    RobotPolicyObservation,
 )
 from dimos.robot_learning.policy_rollout.robot_policy_module import RobotPolicyModule
 from dimos.robot_learning.policy_rollout.vla_jepa_libero_contract import (
+    VLA_JEPA_LIBERO_ACTION_SPACE_ID,
     VlaJepaLiberoRobotContract,
 )
+from dimos.simulation.runtime_client.shm_motor import MotorShmOwner
 
 DEFAULT_CAMERAS = ("agentview", "robot0_eye_in_hand")
 DEFAULT_CHECKPOINT = "lerobot/VLA-JEPA-LIBERO"
@@ -81,6 +92,8 @@ DEFAULT_ARTIFACT_DIR = REPO_ROOT / "artifacts" / "benchmark" / "lerobot-vla-jepa
 
 class DescribedPolicyModule(Protocol):
     def describe_backend(self) -> PolicyBackendDescription: ...
+
+    def close(self) -> None: ...
 
 
 class _LiberoProRuntime(Protocol):
@@ -96,10 +109,11 @@ class _LiberoProRuntime(Protocol):
 class FixedActionBackend:
     """PolicyBackend test double that exercises contract conversion without LeRobot."""
 
-    def __init__(self, action: Sequence[float]) -> None:
+    def __init__(self, action: Sequence[float], *, use_action_chunk: bool = False) -> None:
         if len(action) != 7:
             raise ValueError("fixed action must have exactly 7 values")
         self._action = tuple(float(value) for value in action)
+        self._use_action_chunk = use_action_chunk
         self._initialized = False
         self._episode_resets = 0
 
@@ -112,12 +126,16 @@ class FixedActionBackend:
     def infer_batch(self, batch: BackendBatch) -> BackendOutputEnvelope:
         if not self._initialized:
             raise RuntimeError("FixedActionBackend was not initialized")
+        output: tuple[float, ...] | tuple[tuple[float, ...], ...] = self._action
+        if self._use_action_chunk:
+            output = (self._action,)
         return BackendOutputEnvelope(
-            output=self._action,
+            output=output,
             metadata={
                 "backend_type": "fixed_action",
                 "batch_metadata": dict(batch.metadata),
                 "episode_resets": self._episode_resets,
+                "use_action_chunk": self._use_action_chunk,
             },
         )
 
@@ -176,20 +194,191 @@ class ModuleLiberoRuntimeSession(PolicyEvalRuntimeSession):
         return RuntimeStreamSnapshot(observations=tuple(observations), values=stream_values)
 
 
+class _LivePolicyCoordinator:
+    """Module-native live policy path with stream/RPC policy-to-control wiring."""
+
+    def __init__(self, *, args: argparse.Namespace) -> None:
+        self._args = args
+        self._action_names = [f"policy_action/{index}" for index in range(7)]
+        self._owner = MotorShmOwner(f"policy_action_{uuid4().hex}", self._action_names)
+        self._component = HardwareComponent(
+            hardware_id="policy_action",
+            hardware_type=HardwareType.WHOLE_BODY,
+            joints=self._action_names,
+            adapter_type="benchmark_runtime",
+            address=self._owner.key,
+            auto_enable=False,
+            adapter_kwargs={
+                "motor_names": self._action_names,
+                "connect_timeout_s": 5.0,
+            },
+        )
+        self._task_name = "policy_chunk_action"
+        self._module_coordinator: ModuleCoordinator | None = None
+        self._policy_module: RobotPolicyModule | None = None
+        self._control_coordinator: ControlCoordinator | None = None
+        self._policy_observation_transport: object | None = None
+        self._last_command_sequence = 0
+        self.chunk_count = 0
+        self.consumed_actions = 0
+        self.stale_deactivations = 0
+
+    @property
+    def last_command_sequence(self) -> int:
+        return self._last_command_sequence
+
+    def start(self) -> None:
+        policy_blueprint = self._policy_blueprint()
+        control_blueprint = ControlCoordinator.blueprint(
+            tick_rate=float(self._args.control_step_hz),
+            publish_joint_state=False,
+            hardware=[self._component],
+            tasks=[
+                TaskConfig(
+                    name=self._task_name,
+                    type="policy_chunk",
+                    joint_names=self._action_names,
+                    auto_start=True,
+                    params={
+                        "accepted_action_space_id": VLA_JEPA_LIBERO_ACTION_SPACE_ID,
+                        "ticks_per_action": 1,
+                        "execute_first_n": 1,
+                        "stale_timeout_ticks": 1,
+                        "action_mapping": "target",
+                        "policy_trigger_method": "trigger_policy_action_chunk_inference",
+                    },
+                )
+            ],
+        )
+        blueprint = (
+            autoconnect(policy_blueprint, control_blueprint)
+            .remappings(
+                [
+                    (
+                        RobotPolicyModule,
+                        "policy_action_chunk",
+                        "robot_policy_action_chunk",
+                    )
+                ]
+            )
+            .global_config(viewer="none", n_workers=1)
+        )
+        self._module_coordinator = ModuleCoordinator.build(blueprint)
+        self._policy_module = self._module_coordinator.get_instance(RobotPolicyModule)
+        self._control_coordinator = self._module_coordinator.get_instance(ControlCoordinator)
+        if self._policy_module is None or self._control_coordinator is None:
+            raise RuntimeError(
+                "module-native live policy blueprint did not deploy required modules"
+            )
+        self._policy_observation_transport = self._module_coordinator._transport_registry[
+            ("policy_observation", RobotPolicyObservation)
+        ]
+
+    def _policy_blueprint(self):  # type: ignore[no-untyped-def]
+        if self._args.fake_backend:
+            return RobotPolicyModule.blueprint(
+                backend_type="fixed_action",
+                backend_params={
+                    "action": _fixed_action_values(self._args.fixed_action),
+                    "use_action_chunk": True,
+                },
+                contract_type="vla_jepa_libero",
+                contract_params={},
+            )
+        return RobotPolicyModule.blueprint(
+            backend_type="lerobot",
+            backend_params={
+                "checkpoint_id": self._args.checkpoint,
+                "device": self._args.device,
+                "use_action_chunk": True,
+            },
+            contract_type="vla_jepa_libero",
+            contract_params={},
+        )
+
+    def reset_episode(self, episode_id: str) -> None:
+        if self._policy_module is None:
+            raise RuntimeError("live policy modules have not been started")
+        self._policy_module.reset(episode_id=episode_id)
+
+    def update_observation(self, sample: RobotPolicyObservation) -> None:
+        if self._policy_observation_transport is None:
+            raise RuntimeError("live policy modules have not been started")
+        publish = getattr(self._policy_observation_transport, "publish", None)
+        if not callable(publish):
+            raise RuntimeError("policy observation transport does not support publish")
+        publish(sample)
+
+    def describe_backend(self) -> PolicyBackendDescription:
+        if self._policy_module is None:
+            policy_module = _policy_module(self._args)
+            try:
+                return policy_module.describe_backend()
+            finally:
+                policy_module.close()
+        return self._policy_module.describe_backend()
+
+    def diagnostics(self) -> dict[str, object]:
+        if self._control_coordinator is None:
+            return {}
+        diagnostics = self._control_coordinator.task_invoke(self._task_name, "diagnostics")
+        if not isinstance(diagnostics, dict):
+            return {}
+        return {str(key): value for key, value in diagnostics.items()}
+
+    def next_action_values(self, *, timeout_s: float) -> tuple[float, ...] | None:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            sequence, commands = self._owner.read_commands()
+            if sequence > self._last_command_sequence:
+                self._last_command_sequence = sequence
+                self.consumed_actions += 1
+                return tuple(float(command.q) for command in commands)
+            time.sleep(0.001)
+        self.stale_deactivations += 1
+        return None
+
+    def close(self) -> None:
+        if self._module_coordinator is not None:
+            self._module_coordinator.stop()
+            self._module_coordinator = None
+            self._policy_module = None
+            self._control_coordinator = None
+            self._policy_observation_transport = None
+        self._owner.close()
+        self._owner.unlink()
+
+
 def run_policy_gate(args: argparse.Namespace) -> BenchmarkEvaluationSummary:
     artifact_dir = _repo_path(args.artifact_dir)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     episodes = _selected_episodes(args.episodes_limit)
-    policy_module = _policy_module(args)
+    policy_module = None if args.live_policy_stream else _policy_module(args)
+    live: _LivePolicyCoordinator | None = None
     results: list[BenchmarkEpisodeResult] = []
     cleanup: dict[str, object] = {"episodes": []}
     try:
+        if args.live_policy_stream:
+            live = _LivePolicyCoordinator(args=args)
+            live.start()
         for episode in episodes:
             episode_dir = artifact_dir / "episodes" / episode.episode_id
-            result = _run_one_episode(args, episode, policy_module, episode_dir, cleanup)
+            if live is not None:
+                result = _run_one_live_episode(args, episode, live, episode_dir, cleanup)
+            else:
+                if policy_module is None:
+                    raise RuntimeError("synchronous policy module was not initialized")
+                result = _run_one_episode(args, episode, policy_module, episode_dir, cleanup)
             results.append(result)
         summary = _summary(results, args.success_threshold)
-        _write_aggregate_artifacts(artifact_dir, results, summary, policy_module, args, cleanup)
+        _write_aggregate_artifacts(
+            artifact_dir,
+            results,
+            summary,
+            live if live is not None else policy_module,
+            args,
+            cleanup,
+        )
         if args.enforce_gate and not summary.passed:
             raise SystemExit(
                 f"LeRobot LIBERO policy gate failed: "
@@ -197,10 +386,13 @@ def run_policy_gate(args: argparse.Namespace) -> BenchmarkEvaluationSummary:
             )
         return summary
     except Exception as exc:
-        _write_setup_failure_artifacts(artifact_dir, policy_module, args, cleanup, exc)
+        _write_setup_failure_artifacts(artifact_dir, live or policy_module, args, cleanup, exc)
         raise
     finally:
-        policy_module.close()
+        if live is not None:
+            live.close()
+        if policy_module is not None:
+            policy_module.close()
 
 
 def _run_one_episode(
@@ -241,6 +433,207 @@ def _run_one_episode(
         _stop_runtime(client, episode_dir, cleanup_entry)
 
 
+def _run_one_live_episode(
+    args: argparse.Namespace,
+    episode: BenchmarkEpisodeSpec,
+    live: _LivePolicyCoordinator,
+    episode_dir: Path,
+    cleanup: dict[str, object],
+) -> BenchmarkEpisodeResult:
+    client = _start_runtime(args, episode)
+    cleanup_entry: dict[str, object] = {
+        "episode_id": episode.episode_id,
+        "runtime": "module-native-live-policy-stream",
+    }
+    cast_cleanup = cleanup.setdefault("episodes", [])
+    if isinstance(cast_cleanup, list):
+        cast_cleanup.append(cleanup_entry)
+    diagnostics: dict[str, object] = {}
+    try:
+        result, diagnostics = _run_live_episode_loop(
+            args,
+            episode,
+            client,
+            live,
+            episode_dir,
+        )
+        episode_dir.mkdir(parents=True, exist_ok=True)
+        write_json(episode_dir / "live_path_diagnostics.json", _json_ready(diagnostics))
+        return result
+    finally:
+        cleanup_entry["live_path_diagnostics"] = diagnostics
+        _stop_runtime(client, episode_dir, cleanup_entry)
+
+
+def _run_live_episode_loop(
+    args: argparse.Namespace,
+    episode: BenchmarkEpisodeSpec,
+    client: PolicyEvalRuntimeSession,
+    live: _LivePolicyCoordinator,
+    episode_dir: Path,
+) -> tuple[BenchmarkEpisodeResult, dict[str, object]]:
+    reset_response = client.reset(
+        EpisodeResetRequest(
+            episode_id=episode.episode_id,
+            task_id=episode.task_id,
+            seed=episode.seed,
+            options={
+                **dict(episode.options),
+                "task_index": episode.task_index,
+                "init_state_index": episode.init_state_index,
+            },
+        )
+    )
+    live.reset_episode(episode.episode_id)
+    runtime_description = reset_response.runtime_description
+    episode_dir.mkdir(parents=True, exist_ok=True)
+    write_json(episode_dir / "runtime_description.json", _json_ready(runtime_description))
+    sample_builder = LiberoRobotPolicyObservationBuilder()
+    snapshot = client.latest_observation_snapshot()
+    observations = snapshot.observations
+    reward_sum = 0.0
+    done = False
+    success: bool | None = None
+    last_values: tuple[float, ...] = ()
+    observed_streams = snapshot.observed_streams
+    video_streams = tuple(args.camera_names) if args.save_videos else ()
+    video_frames: dict[str, list[np.ndarray]] = {stream: [] for stream in video_streams}
+    steps = 0
+    stale_waits = 0
+    consecutive_stale_waits = 0
+
+    for tick_id in range(args.max_steps):
+        _append_video_frames(video_frames, snapshot.values)
+        sample = sample_builder.build(
+            episode=episode,
+            tick_id=tick_id,
+            observations=observations,
+            runtime_description=runtime_description,
+            reward=reward_sum,
+            done=done,
+            success=success,
+            observation_values=snapshot.values,
+        )
+        live.update_observation(sample)
+        command_values = live.next_action_values(timeout_s=float(args.live_chunk_timeout_s))
+        if command_values is None:
+            stale_waits += 1
+            consecutive_stale_waits += 1
+            if consecutive_stale_waits >= int(args.live_max_stale_waits):
+                break
+            continue
+        consecutive_stale_waits = 0
+        last_values = command_values
+        step_response = client.step(
+            StepRequest(
+                episode_id=episode.episode_id,
+                tick_id=tick_id,
+                action=RuntimeActionFrame(
+                    frame_type="runtime_action",
+                    space_id=VLA_JEPA_LIBERO_ACTION_SPACE_ID,
+                    values=list(command_values),
+                    tick_id=tick_id,
+                ),
+            )
+        )
+        steps = tick_id + 1
+        reward_sum += step_response.reward
+        done = step_response.done
+        success = step_response.success
+        snapshot = client.latest_observation_snapshot()
+        observations = snapshot.observations
+        observed_streams = snapshot.observed_streams
+        if done:
+            break
+
+    _write_live_videos(
+        episode_dir,
+        episode.episode_id,
+        video_frames,
+        fps=int(args.control_step_hz),
+    )
+    episode_success = bool(success)
+    failure_reason = None
+    if not episode_success:
+        if stale_waits >= int(args.live_max_stale_waits) and not last_values:
+            failure_reason = "live_action_timeout"
+        else:
+            failure_reason = "done_without_success" if done else "max_steps_without_success"
+    task_diagnostics = live.diagnostics()
+    inference_status_counts = task_diagnostics.get("inference_status_counts", {})
+    if not isinstance(inference_status_counts, dict):
+        inference_status_counts = {}
+    diagnostics: dict[str, object] = {
+        "chunk_count": _int_diagnostic(task_diagnostics, "accepted_chunks", live.chunk_count),
+        "consumed_actions": _int_diagnostic(
+            task_diagnostics, "consumed_actions", live.consumed_actions
+        ),
+        "refill_triggers": _int_diagnostic(task_diagnostics, "refill_triggers", 0),
+        "inference_status_counts": {
+            str(key): int(value)
+            for key, value in inference_status_counts.items()
+            if isinstance(value, int)
+        },
+        "stale_waits": stale_waits,
+        "live_max_stale_waits": int(args.live_max_stale_waits),
+        "stale_deactivations": _int_diagnostic(
+            task_diagnostics, "stale_deactivations", live.stale_deactivations
+        ),
+        "last_command_sequence": live.last_command_sequence,
+    }
+    return BenchmarkEpisodeResult(
+        episode_id=episode.episode_id,
+        task_id=episode.task_id,
+        task_index=episode.task_index,
+        init_state_index=episode.init_state_index,
+        success=episode_success,
+        steps=steps,
+        reward_sum=reward_sum,
+        done=done,
+        failure_reason=failure_reason,
+        action_shape=(len(last_values),),
+        action_min=min(last_values) if last_values else None,
+        action_max=max(last_values) if last_values else None,
+        observed_streams=observed_streams,
+    ), diagnostics
+
+
+def _int_diagnostic(diagnostics: Mapping[str, object], key: str, default: int) -> int:
+    value = diagnostics.get(key)
+    return value if isinstance(value, int) else default
+
+
+def _append_video_frames(
+    video_frames: dict[str, list[np.ndarray]],
+    stream_values: Mapping[str, object],
+) -> None:
+    for stream, frames in video_frames.items():
+        value = stream_values.get(stream)
+        if not isinstance(value, np.ndarray):
+            continue
+        if value.ndim != 3 or value.shape[2] != 3:
+            continue
+        frames.append(value.astype(np.uint8, copy=False))
+
+
+def _write_live_videos(
+    episode_dir: Path,
+    episode_id: str,
+    video_frames: dict[str, list[np.ndarray]],
+    *,
+    fps: int,
+) -> None:
+    if fps <= 0:
+        raise ValueError("video fps must be positive")
+    for stream, frames in video_frames.items():
+        if not frames:
+            continue
+        stream_name = stream.replace("/", "_")
+        video_path = episode_dir / "videos" / episode_id / f"{stream_name}.mp4"
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        imageio.mimsave(video_path, frames, fps=fps)  # type: ignore[arg-type]
+
+
 def _selected_episodes(limit: int | None) -> list[BenchmarkEpisodeSpec]:
     episodes = libero_object_episode_matrix()
     return episodes if limit is None else episodes[:limit]
@@ -249,12 +642,19 @@ def _selected_episodes(limit: int | None) -> list[BenchmarkEpisodeSpec]:
 def _policy_module(args: argparse.Namespace) -> RobotPolicyModule:
     backend: PolicyBackend
     if args.fake_backend:
-        backend = FixedActionBackend(_fixed_action_values(args.fixed_action))
+        backend = FixedActionBackend(
+            _fixed_action_values(args.fixed_action),
+            use_action_chunk=bool(args.live_policy_stream),
+        )
         return RobotPolicyModule(backend=backend, contract=VlaJepaLiberoRobotContract())
     else:
         return RobotPolicyModule(
             backend_type="lerobot",
-            backend_params={"checkpoint_id": args.checkpoint, "device": args.device},
+            backend_params={
+                "checkpoint_id": args.checkpoint,
+                "device": args.device,
+                "use_action_chunk": bool(args.live_policy_stream),
+            },
             contract_type="vla_jepa_libero",
             contract_params={},
         )
@@ -333,8 +733,11 @@ def _write_aggregate_artifacts(
         {
             "checkpoint": args.checkpoint,
             "fake_backend": args.fake_backend,
+            "live_policy_stream": args.live_policy_stream,
+            "live_chunk_timeout_s": args.live_chunk_timeout_s,
+            "live_max_stale_waits": args.live_max_stale_waits,
             "episodes": len(results),
-            "expected_gate_episodes": 50,
+            "expected_gate_episodes": 10 if args.live_policy_stream else 50,
             "success_threshold": args.success_threshold,
             "enforce_gate": args.enforce_gate,
             "save_videos": args.save_videos,
@@ -352,11 +755,15 @@ def _write_aggregate_artifacts(
 
 def _write_setup_failure_artifacts(
     artifact_dir: Path,
-    policy_module: DescribedPolicyModule,
+    policy_module: DescribedPolicyModule | None,
     args: argparse.Namespace,
     cleanup: dict[str, object],
     exc: Exception,
 ) -> None:
+    close_policy_module = False
+    if policy_module is None:
+        policy_module = _policy_module(args)
+        close_policy_module = True
     write_json(
         artifact_dir / "setup_error.json",
         {
@@ -365,7 +772,7 @@ def _write_setup_failure_artifacts(
             "traceback": traceback.format_exc(),
             "gate_verified": False,
             "policy_executed": False,
-            "expected_gate_episodes": 50,
+            "expected_gate_episodes": 10 if args.live_policy_stream else 50,
             "success_threshold": args.success_threshold,
             "hint": "Check per-episode sidecar logs and prepare LIBERO assets before rerunning.",
         },
@@ -378,7 +785,10 @@ def _write_setup_failure_artifacts(
         {
             "checkpoint": args.checkpoint,
             "fake_backend": args.fake_backend,
-            "expected_gate_episodes": 50,
+            "live_policy_stream": args.live_policy_stream,
+            "live_chunk_timeout_s": args.live_chunk_timeout_s,
+            "live_max_stale_waits": args.live_max_stale_waits,
+            "expected_gate_episodes": 10 if args.live_policy_stream else 50,
             "success_threshold": args.success_threshold,
             "enforce_gate": args.enforce_gate,
             "save_videos": args.save_videos,
@@ -393,6 +803,8 @@ def _write_setup_failure_artifacts(
         },
     )
     write_json(artifact_dir / "cleanup_status.json", cleanup)
+    if close_policy_module:
+        policy_module.close()
 
 
 def _fixed_action_values(raw: str) -> tuple[float, ...]:
@@ -471,6 +883,23 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--success-threshold", type=float, default=0.50)
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     parser.add_argument("--device", default=None)
+    parser.add_argument(
+        "--live-policy-stream",
+        action="store_true",
+        help="Run real policy chunks through RobotPolicyModule streams and ControlCoordinator.",
+    )
+    parser.add_argument(
+        "--live-chunk-timeout-s",
+        type=float,
+        default=5.0,
+        help="Seconds to wait for each ControlCoordinator-emitted live policy action.",
+    )
+    parser.add_argument(
+        "--live-max-stale-waits",
+        type=int,
+        default=3,
+        help="Abort an episode after this many consecutive live action timeouts.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--episodes-limit", type=int, default=None)
     parser.add_argument("--no-enforce-gate", dest="enforce_gate", action="store_false")

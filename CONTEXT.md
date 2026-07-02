@@ -100,6 +100,38 @@ _Avoid_: assuming all policy actions are joint positions, opaque policy output
 A runtime-independent robot-learning action emitted by a robot policy module after backend inference and contract conversion, before adaptation to benchmark runtime frames or real robot control commands.
 _Avoid_: runtime action frame, motor command, backend tensor
 
+**Normalized robot policy action**:
+A robot policy action whose numeric values remain in the policy-native normalized action space; the robot policy contract validates the normalized action while the control task owns physical execution scaling and safety mapping.
+_Avoid_: denormalized controller command, physical joint target, unchecked backend output
+
+**Robot policy action chunk**:
+A short-horizon sequence of robot policy actions produced by a policy backend for one observation, where DimOS owns how much of the chunk to execute before replanning.
+_Avoid_: single waypoint when the backend predicts a horizon, blindly executed full horizon, backend-owned execution loop
+
+**Index-bounded policy chunk execution**:
+A v1 policy chunk execution convention where a control task consumes a configured number of leading actions from each robot policy action chunk before accepting or waiting for the next chunk.
+_Avoid_: time-window chunk execution, full-horizon execution, backend-owned chunk timing
+
+**Stale policy chunk deactivation**:
+A policy chunk control behavior where the task stops contributing commands after its active chunk exceeds a configured staleness limit, allowing normal ControlCoordinator arbitration or hardware hold behavior to take over.
+_Avoid_: continuing stale policy actions, forced zero command, hidden full-horizon fallback
+
+**Policy chunk inference trigger**:
+A fast control-path signal from a policy chunk control task to a robot policy module requesting that a new robot policy action chunk be inferred asynchronously from the latest available observation.
+_Avoid_: blocking policy inference call, direct chunk return from the control tick, external refill module
+
+**Policy chunk stream return**:
+A live policy-control convention where robot policy action chunks requested by a fast inference trigger are delivered back to the ControlCoordinator through a stream rather than as the trigger RPC return value.
+_Avoid_: polling for chunks, blocking trigger response, synchronous chunk handoff
+
+**Live policy parity gate**:
+A real-policy validation run that checks the live policy stream path against the established benchmark policy path, expecting comparable policy success rather than merely proving plumbing with fake actions.
+_Avoid_: fake-backend smoke as acceptance, plumbing-only realtime demo, single-episode proof
+
+**Live policy stream path**:
+A stream-native rollout topology where ready robot policy observations flow into a robot policy module and runtime-independent robot policy actions flow out, primarily for physical robot rollout and secondarily for realtime simulator smoke tests of the same topology.
+_Avoid_: fast benchmark path, synchronous eval path, realtime benchmark gate
+
 **Native benchmark action surface**:
 A benchmark runtime action interface whose command values are defined by the benchmark environment itself rather than by a DimOS motor or joint surface.
 _Avoid_: motor command alias, hidden joint target, controller-specific shortcut
@@ -120,13 +152,17 @@ _Avoid_: overloaded motor frame, unnamed action vector, backend tensor leak
 A control-coordinator task that accepts and validates commands for a semantic action surface while leaving the concrete runtime or robot mapping to the task implementation.
 _Avoid_: joint trajectory task, motor adapter, policy bypass
 
+**Policy action control path**:
+A live rollout control path where a robot policy action enters the ControlCoordinator as a first-class input and is handled by a policy-action-aware control task before becoming hardware commands.
+_Avoid_: external policy command converter, direct runtime step path, policy module controller bypass
+
 **Robot policy contract**:
 A robot-learning boundary that declares a specific robot/runtime and policy-backend input-output convention, including how aligned robot-native samples become backend-ready batches and how backend outputs become robot-native policy action chunks.
 _Avoid_: execution contract, control-task adapter, universal robot contract
 
-**Robot learning sample**:
-A runtime-independent policy observation artifact that carries semantically named observation roles, task context, timestamps, and metadata for robot-learning inference or training.
-_Avoid_: benchmark sidecar response, runtime observation frame, backend-ready batch
+**Robot policy observation**:
+A runtime-independent policy input artifact that carries semantically named observation roles, timestamps, and policy-relevant metadata for robot-learning inference.
+_Avoid_: benchmark sidecar response, runtime observation frame, backend-ready batch, robot learning sample
 
 **Backend-ready batch**:
 The policy-backend-specific inference or training input produced from an aligned robot-native sample by a robot policy contract.

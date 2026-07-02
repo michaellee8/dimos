@@ -98,7 +98,7 @@ class LeRobotBackend:
             output = self._infer(policy, backend_batch)
         if self._postprocessor is not None:
             output = self._postprocessor(output)
-        action = _flat_float_tuple(output)
+        action = _action_output_tuple(output, preserve_rank=self._use_action_chunk)
         return BackendOutputEnvelope(
             output=action,
             metadata={
@@ -246,6 +246,21 @@ def _to_torch_tensor(key: str, value: np.ndarray) -> object:
 def _flat_float_tuple(value: object) -> tuple[float, ...]:
     array = _as_numpy_array(value).reshape(-1)
     return tuple(float(item) for item in array)
+
+
+def _action_output_tuple(
+    value: object,
+    *,
+    preserve_rank: bool,
+) -> tuple[float, ...] | tuple[tuple[float, ...], ...]:
+    if not preserve_rank:
+        return _flat_float_tuple(value)
+    array = _as_numpy_array(value)
+    if array.ndim == 3 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim != 2:
+        raise ValueError(f"LeRobot action chunk output must have rank 2, got shape {array.shape}")
+    return tuple(tuple(float(item) for item in row) for row in array)
 
 
 def _as_numpy_array(value: object) -> np.ndarray:
