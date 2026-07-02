@@ -650,7 +650,7 @@ def test_joint_state_to_ordered_positions_rejects_invalid_inputs() -> None:
             joint_names=joint_names,
             joint_name_mapping=mapping,
         )
-    with pytest.raises(ValueError, match="missing joints"):
+    with pytest.raises(ValueError, match="Unrecognized joint name"):
         joint_state_to_ordered_positions(
             JointState(name=["mystery", "joint2"], position=[1.0, 2.0]),
             joint_names=joint_names,
