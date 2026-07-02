@@ -498,8 +498,11 @@ function sendCommand(name, btn) {
     const nonce = ++ui.nonce;
     btn.dataset.status = 'pending';
     state.stateChannel.send(JSON.stringify({ type: 'sport_cmd', name, nonce }));
-    // Watchdog: if no ack in 3s, mark error and clear pending.
-    const timer = setTimeout(() => resolveAck(nonce, false), 3000);
+    // Ack watchdog. StandReady is a robot-side combo (standup → recovery →
+    // balance → joystick) with ~3.6s of settling sleeps — 3s would mark it
+    // failed while the robot is mid-stand.
+    const timeoutMs = name === 'StandReady' ? 9000 : 3000;
+    const timer = setTimeout(() => resolveAck(nonce, false), timeoutMs);
     ui.pending.set(nonce, { el: btn, name, timer });
 }
 
