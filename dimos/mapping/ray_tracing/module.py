@@ -56,6 +56,9 @@ class RayTracingVoxelMapConfig(NativeModuleConfig):
     global_emit_every: int = 1
     # Size the local region to this percentile of batch point distances.
     region_percentile: float = 95.0
+    # Input clouds are already world-registered (e.g. a simulator's raycast
+    # lidar); odometry then only supplies the ray-cast origin.
+    world_frame_points: bool = False
 
 
 class RayTracingVoxelMap(NativeModule, mapping.GlobalPointcloud):

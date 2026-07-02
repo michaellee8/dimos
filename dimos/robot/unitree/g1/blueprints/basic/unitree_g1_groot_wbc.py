@@ -148,7 +148,7 @@ if global_config.simulation and global_config.simulation != "mujoco":
     raise ValueError("unitree-g1-groot-wbc only supports --simulation mujoco")
 
 if global_config.simulation == "mujoco":
-    from dimos.mapping.voxels import VoxelGridMapper
+    from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
     from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
     from dimos.simulation.engines.robot_sim_binding import (
         RobotSimSpec,
@@ -280,7 +280,17 @@ if global_config.simulation == "mujoco":
         auto_start=True,
         params={"default_positions": ARM_DEFAULT_POSE},
     )
-    _mapper = VoxelGridMapper.blueprint(emit_every=1)
+    # Same mapper as real hardware for sim/real parity. MuJoCo's raycast
+    # lidar publishes world-registered clouds and the sim module publishes
+    # ground-truth Odometry, so the raytracer only uses odometry for the
+    # ray-cast origin (world_frame_points). Lidar frames arrive at ~1 Hz, so
+    # emit per frame.
+    _mapper = RayTracingVoxelMap.blueprint(
+        voxel_size=_G1_NAV_VOXEL_RESOLUTION,
+        world_frame_points=True,
+        emit_every=0,
+        global_emit_every=1,
+    )
     _nav_stack = autoconnect(
         _mapper,
         CostMapper.blueprint(
@@ -298,7 +308,7 @@ if global_config.simulation == "mujoco":
         MovementManager.blueprint(),
     )
     _remappings = [
-        (VoxelGridMapper, "lidar", "pointcloud"),
+        (RayTracingVoxelMap, "lidar", "pointcloud"),
         (ControlCoordinator, "twist_command", "cmd_vel"),
     ]
 else:
@@ -533,6 +543,7 @@ _rerun_config = {
         "world/g1/imu": 10.0,
         "world/g1/motor_states": 10.0,
         "world/g1/motor_command": 10.0,
+        "world/odometry": 15.0,
         "world/global_map": 1.0,
         "world/global_costmap": 2.0,
         "world/navigation_costmap": 2.0,
@@ -554,7 +565,6 @@ if global_config.simulation != "mujoco":
     # world frame -- registration happens in RayTracingVoxelMap. Hide it like
     # the nav blueprints do; the voxel map is the live view.
     _rerun_config["visual_override"]["world/lidar"] = None
-    _rerun_config["max_hz"]["world/odometry"] = 15.0
 
 
 def _viewer() -> Any:

@@ -43,10 +43,12 @@ from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import Out
 from dimos.hardware.sensors.camera.spec import DepthCameraConfig, DepthCameraHardware
+from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
+from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.Imu import Imu
@@ -306,6 +308,10 @@ class MujocoSimModule(
     # root. Published every step; consumers like the viser viewer use
     # this to translate the robot in world space.
     odom: Out[PoseStamped]
+    # Same base pose as ``odom`` in nav_msgs form, for consumers that speak
+    # Odometry (e.g. RayTracingVoxelMap, ReplanningAStarPlanner) so sim can
+    # run the same nav stack as real hardware.
+    odometry: Out[Odometry]
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -746,17 +752,24 @@ class MujocoSimModule(
             base_quat = data.qpos[
                 self._root_base_qpos_adr + 3 : self._root_base_qpos_adr + 7
             ]  # (w, x, y, z) per MuJoCo convention
-            self.odom.publish(
-                PoseStamped(
-                    ts=time.time(),
+            base_pose = PoseStamped(
+                ts=time.time(),
+                frame_id="world",
+                position=Vector3(float(base_pos[0]), float(base_pos[1]), float(base_pos[2])),
+                orientation=Quaternion(
+                    float(base_quat[1]),
+                    float(base_quat[2]),
+                    float(base_quat[3]),
+                    float(base_quat[0]),
+                ),  # PoseStamped uses x,y,z,w
+            )
+            self.odom.publish(base_pose)
+            self.odometry.publish(
+                Odometry(
+                    ts=base_pose.ts,
                     frame_id="world",
-                    position=Vector3(float(base_pos[0]), float(base_pos[1]), float(base_pos[2])),
-                    orientation=Quaternion(
-                        float(base_quat[1]),
-                        float(base_quat[2]),
-                        float(base_quat[3]),
-                        float(base_quat[0]),
-                    ),  # PoseStamped uses x,y,z,w
+                    child_frame_id="base_link",
+                    pose=Pose(base_pose.position, base_pose.orientation),
                 )
             )
 

@@ -44,6 +44,10 @@ pub struct Config {
     /// stray far hit cannot inflate it.
     #[validate(range(min = 0.0, max = 100.0))]
     pub region_percentile: f32,
+    /// Input clouds are already world-registered (e.g. a simulator's raycast
+    /// lidar). Odometry is then used only for the ray-cast origin instead of
+    /// also transforming the points.
+    pub world_frame_points: bool,
 }
 
 fn validate_health_range(cfg: &Config) -> Result<(), ValidationError> {
@@ -689,6 +693,7 @@ mod tests {
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
+            world_frame_points: false,
         }
     }
 
@@ -878,6 +883,7 @@ mod tests {
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
+            world_frame_points: false,
         };
         // Build the floor over a y band so it is a 2d plane, not a wire.
         let max_x = 25.0_f32;
@@ -1033,6 +1039,7 @@ mod tests {
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
+            world_frame_points: false,
         };
 
         // Staircase
@@ -1107,6 +1114,7 @@ mod tests {
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
+            world_frame_points: false,
         };
 
         // Flat floor from the sensor out to a vertical wall.
@@ -1169,6 +1177,7 @@ mod tests {
             emit_every: 1,
             global_emit_every: 1,
             region_percentile: 95.0,
+            world_frame_points: false,
         };
 
         // Staircase topped by a flat landing and a back wall.
@@ -1300,6 +1309,7 @@ mod tests {
                 emit_every: 1,
                 global_emit_every: 1,
                 region_percentile: 95.0,
+                world_frame_points: false,
             };
             let (mut map, _) = build_surface(&floor, voxel_size, cfg.max_health);
             let row: Vec<VoxelKey> = map

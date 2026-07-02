@@ -79,15 +79,21 @@ impl RayTracingVoxelMap {
             return;
         }
 
-        // Transform sensor-frame points into the world by the odom pose.
-        let rot = rotation.to_rotation_matrix();
-        let points: Vec<(f32, f32, f32)> = points
-            .iter()
-            .map(|&(x, y, z)| {
-                let p = rot * Vector3::new(x, y, z) + translation;
-                (p.x, p.y, p.z)
-            })
-            .collect();
+        // Transform sensor-frame points into the world by the odom pose --
+        // unless the source already registers them (world_frame_points), in
+        // which case odometry only supplies the ray-cast origin.
+        let points: Vec<(f32, f32, f32)> = if self.config.world_frame_points {
+            points
+        } else {
+            let rot = rotation.to_rotation_matrix();
+            points
+                .iter()
+                .map(|&(x, y, z)| {
+                    let p = rot * Vector3::new(x, y, z) + translation;
+                    (p.x, p.y, p.z)
+                })
+                .collect()
+        };
 
         let out_frame_id = "world";
 
