@@ -19,14 +19,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-pydrake = pytest.importorskip("pydrake")
-_ = pydrake
-
 from dimos.manipulation.planning.groups.models import PlanningGroupDefinition
 from dimos.manipulation.planning.spec.config import RobotModelConfig
-from dimos.manipulation.planning.world.drake_world import DrakeWorld
+from dimos.manipulation.planning.world.drake_world import DRAKE_AVAILABLE, DrakeWorld
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.JointState import JointState
+
+requires_drake = pytest.mark.skipif(
+    not DRAKE_AVAILABLE,
+    reason="Drake planning-group tests require the manipulation extra",
+)
 
 
 def _write_urdf(path: Path) -> None:
@@ -72,6 +74,43 @@ def _arm_group(
     )
 
 
+def test_drake_config_group_helpers_resolve_groups_without_drake_runtime(tmp_path: Path) -> None:
+    urdf = tmp_path / "robot.urdf"
+    _write_urdf(urdf)
+    config = _config(urdf, [_arm_group("joint2", "joint1", name="wrist")])
+
+    group = DrakeWorld._planning_group_from_config(config, "arm/wrist")
+
+    assert DrakeWorld._primary_pose_group_id_for_config(config) == "arm/wrist"
+    assert group.id == "arm/wrist"
+    assert group.joint_names == ("arm/joint2", "arm/joint1")
+    assert group.local_joint_names == ("joint2", "joint1")
+    assert group.tip_link == "tool0"
+
+
+def test_drake_config_group_helpers_validate_duplicate_and_ambiguous_groups(
+    tmp_path: Path,
+) -> None:
+    urdf = tmp_path / "robot.urdf"
+    _write_urdf(urdf)
+    duplicate = _config(
+        urdf,
+        [_arm_group("joint1", name="same"), _arm_group("joint2", name="same")],
+    )
+    ambiguous = _config(
+        urdf,
+        [_arm_group("joint1", name="a"), _arm_group("joint2", name="b")],
+    )
+
+    with pytest.raises(ValueError, match="already registered"):
+        DrakeWorld._validate_planning_group_config(duplicate)
+    with pytest.raises(ValueError, match="multiple pose"):
+        DrakeWorld._primary_pose_group_id_for_config(ambiguous)
+    with pytest.raises(KeyError, match="Unknown planning group ID"):
+        DrakeWorld._planning_group_from_config(ambiguous, "arm/missing")
+
+
+@requires_drake
 def test_drake_group_fk_uses_tip_link_and_legacy_unique_pose_group(tmp_path: Path) -> None:
     urdf = tmp_path / "robot.urdf"
     _write_urdf(urdf)
@@ -91,6 +130,7 @@ def test_drake_group_fk_uses_tip_link_and_legacy_unique_pose_group(tmp_path: Pat
     assert world.get_jacobian(ctx, robot_id).shape == (6, 2)
 
 
+@requires_drake
 def test_drake_group_jacobian_shape_and_group_local_order(tmp_path: Path) -> None:
     urdf = tmp_path / "robot.urdf"
     _write_urdf(urdf)
@@ -118,6 +158,7 @@ def test_drake_group_jacobian_shape_and_group_local_order(tmp_path: Path) -> Non
     np.testing.assert_allclose(reverse_jacobian[:, 1], forward_jacobian[:, 0])
 
 
+@requires_drake
 def test_drake_legacy_wrappers_fail_at_call_time_for_no_or_ambiguous_pose(tmp_path: Path) -> None:
     urdf = tmp_path / "robot.urdf"
     _write_urdf(urdf)
@@ -142,6 +183,7 @@ def test_drake_legacy_wrappers_fail_at_call_time_for_no_or_ambiguous_pose(tmp_pa
         ambiguous.get_jacobian(ambiguous.get_live_context(), ambiguous_id)
 
 
+@requires_drake
 def test_drake_group_jacobian_rejects_non_controllable_group_joints(tmp_path: Path) -> None:
     urdf = tmp_path / "robot.urdf"
     _write_urdf(urdf)

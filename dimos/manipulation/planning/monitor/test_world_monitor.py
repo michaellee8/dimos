@@ -340,6 +340,87 @@ def test_current_group_joint_state_uses_public_names_in_group_order() -> None:
     assert state.position == [0.2, 0.1]
 
 
+def test_current_global_joint_state_skips_stale_robots_and_preserves_state_order() -> None:
+    fake_world = FakeWorld()
+    monitor = world_monitor_module.WorldMonitor(world=fake_world)  # type: ignore[arg-type]
+    fresh_id = monitor.add_robot(_three_joint_reordered_group_config())
+    stale_id = monitor.add_robot(
+        RobotModelConfig(
+            name="arm2",
+            model_path=Path("/tmp/arm2.urdf"),
+            joint_names=["a", "b"],
+            planning_groups=[
+                PlanningGroupDefinition(
+                    name="manipulator", joint_names=("a", "b"), base_link="base", tip_link="ee"
+                )
+            ],
+        )
+    )
+    monitor._state_monitors[fresh_id] = _FakeStateMonitor([0.1, 0.2, 0.3])  # type: ignore[attr-defined]
+    monitor._state_monitors[stale_id] = _FakeStateMonitor([1.0, 2.0], stale=True)  # type: ignore[attr-defined]
+    monitor.add_robot(
+        RobotModelConfig(
+            name="arm3",
+            model_path=Path("/tmp/arm3.urdf"),
+            joint_names=["x"],
+            planning_groups=[
+                PlanningGroupDefinition(
+                    name="manipulator", joint_names=("x",), base_link="base", tip_link="ee"
+                )
+            ],
+        )
+    )
+
+    state = monitor.current_global_joint_state(max_age=0.5)
+
+    assert state.name == ["arm/j1", "arm/j2", "arm/j3"]
+    assert state.position == [0.1, 0.2, 0.3]
+
+
+def test_current_group_joint_state_rejects_stale_or_unavailable_state() -> None:
+    stale_world = FakeWorld()
+    stale_monitor = world_monitor_module.WorldMonitor(world=stale_world)  # type: ignore[arg-type]
+    stale_id = stale_monitor.add_robot(_three_joint_reordered_group_config())
+    stale_monitor._state_monitors[stale_id] = _FakeStateMonitor([0.1, 0.2, 0.3], stale=True)  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="stale"):
+        stale_monitor.current_group_joint_state("arm/manipulator")
+
+    unavailable_monitor = world_monitor_module.WorldMonitor(world=FakeWorld())  # type: ignore[arg-type]
+    unavailable_monitor.add_robot(_three_joint_reordered_group_config())
+    with pytest.raises(ValueError, match="unavailable"):
+        unavailable_monitor.current_group_joint_state("arm/manipulator")
+
+
+def test_group_ee_pose_uses_current_state_when_no_joint_state_is_provided() -> None:
+    fake_world = FakeWorld()
+    monitor = world_monitor_module.WorldMonitor(world=fake_world)  # type: ignore[arg-type]
+    robot_id = monitor.add_robot(_three_joint_reordered_group_config())
+    monitor._state_monitors[robot_id] = _FakeStateMonitor([0.1, 0.2, 0.3])  # type: ignore[attr-defined]
+
+    pose = monitor.get_group_ee_pose("arm/manipulator")
+
+    set_calls = [call for call in fake_world.calls if call[0] == "set_joint_state"]
+    assert set_calls[0][3].name == ["j1", "j2", "j3"]
+    assert set_calls[0][3].position == [0.1, 0.2, 0.3]
+    assert pose.position.x == 1
+
+
+def test_group_ee_pose_without_joint_state_rejects_stale_or_unavailable_state() -> None:
+    stale_world = FakeWorld()
+    stale_monitor = world_monitor_module.WorldMonitor(world=stale_world)  # type: ignore[arg-type]
+    stale_id = stale_monitor.add_robot(_three_joint_reordered_group_config())
+    stale_monitor._state_monitors[stale_id] = _FakeStateMonitor([0.1, 0.2, 0.3], stale=True)  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="stale"):
+        stale_monitor.get_group_ee_pose("arm/manipulator")
+
+    unavailable_monitor = world_monitor_module.WorldMonitor(world=FakeWorld())  # type: ignore[arg-type]
+    unavailable_monitor.add_robot(_three_joint_reordered_group_config())
+    with pytest.raises(ValueError, match="unavailable"):
+        unavailable_monitor.get_group_ee_pose("arm/manipulator")
+
+
 def test_group_kinematics_with_full_state_does_not_require_current_state() -> None:
     fake_world = FakeWorld()
     monitor = world_monitor_module.WorldMonitor(world=fake_world)  # type: ignore[arg-type]

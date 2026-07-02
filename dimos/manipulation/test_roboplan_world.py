@@ -563,6 +563,148 @@ def test_group_fk_and_jacobian_use_group_tip_and_local_joint_order(
     np.testing.assert_allclose(jacobian, np.arange(18, dtype=np.float64).reshape(6, 3)[:, [2, 1]])
 
 
+def test_group_kinematics_reject_missing_tip_or_missing_context(
+    fake_roboplan: None, robot_config: RobotModelConfig
+) -> None:
+    no_tip_config = robot_config.model_copy(
+        update={
+            "planning_groups": [
+                PlanningGroupDefinition(
+                    name="joint_only", joint_names=("joint1", "joint2"), base_link="base"
+                )
+            ]
+        }
+    )
+    world, robot_id = _make_world(fake_roboplan, no_tip_config)
+    world.finalize()
+
+    with pytest.raises(ValueError, match="no tip link"):
+        world.get_group_ee_pose(world.get_live_context(), "arm/joint_only")
+    with pytest.raises(ValueError, match="no tip link"):
+        world.get_group_jacobian(world.get_live_context(), "arm/joint_only")
+
+    ctx = world.get_live_context()
+    del ctx.q_by_robot[robot_id]
+    with pytest.raises(KeyError, match=robot_id):
+        world.get_link_pose(ctx, robot_id, "tcp")
+
+    jacobian_world, jacobian_robot_id = _make_world(fake_roboplan, robot_config)
+    jacobian_world.finalize()
+    jacobian_ctx = jacobian_world.get_live_context()
+    del jacobian_ctx.q_by_robot[jacobian_robot_id]
+    with pytest.raises(KeyError, match=jacobian_robot_id):
+        jacobian_world.get_group_jacobian(jacobian_ctx, "arm/manipulator")
+
+
+def test_group_jacobian_validates_projection_shape_and_joint_names(
+    fake_roboplan: None,
+    robot_config: RobotModelConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world, robot_id = _make_world(fake_roboplan, robot_config)
+    world.finalize()
+    ctx = world.get_live_context()
+    world.set_joint_state(ctx, robot_id, JointState(name=["joint1", "joint2"], position=[0.0, 0.0]))
+
+    monkeypatch.setattr(FakeScene, "joint_group_joint_names", ["joint1", "other"])
+    monkeypatch.setattr(
+        FakeScene,
+        "computeFrameJacobian",
+        lambda self, q, frame_name, local=True: np.ones((6, 2)),
+    )
+    with pytest.raises(ValueError, match="Unknown joints"):
+        world.get_group_jacobian(ctx, "arm/manipulator")
+
+    monkeypatch.setattr(FakeScene, "joint_group_joint_names", ["joint1", "joint2"])
+    monkeypatch.setattr(
+        FakeScene,
+        "computeFrameJacobian",
+        lambda self, q, frame_name, local=True: np.ones((5, 2)),
+    )
+    with pytest.raises(ValueError, match="Unexpected RoboPlan Jacobian shape"):
+        world.get_group_jacobian(ctx, "arm/manipulator")
+
+    monkeypatch.setattr(
+        FakeScene,
+        "computeFrameJacobian",
+        lambda self, q, frame_name, local=True: np.ones((6, 3)),
+    )
+    with pytest.raises(ValueError, match="cannot project"):
+        world.get_group_jacobian(ctx, "arm/manipulator")
+
+
+def test_group_jacobian_falls_back_to_configured_joint_order_when_scene_order_is_unavailable(
+    fake_roboplan: None,
+    robot_config: RobotModelConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    world, robot_id = _make_world(fake_roboplan, robot_config)
+    world.finalize()
+    ctx = world.get_live_context()
+    world.set_joint_state(ctx, robot_id, JointState(name=["joint1", "joint2"], position=[0.0, 0.0]))
+
+    def missing_group_info(self: FakeScene, name: str) -> FakeJointGroupInfo:
+        _ = (self, name)
+        raise AttributeError("no joint group info")
+
+    monkeypatch.setattr(FakeScene, "getJointGroupInfo", missing_group_info)
+    monkeypatch.setattr(
+        FakeScene,
+        "computeFrameJacobian",
+        lambda self, q, frame_name, local=True: np.arange(12, dtype=np.float64).reshape(6, 2),
+    )
+
+    np.testing.assert_allclose(
+        world.get_group_jacobian(ctx, "arm/manipulator"),
+        np.arange(12, dtype=np.float64).reshape(6, 2),
+    )
+
+
+def test_legacy_kinematics_wrappers_require_unique_pose_group(
+    fake_roboplan: None, robot_config: RobotModelConfig
+) -> None:
+    no_pose_config = robot_config.model_copy(
+        update={
+            "planning_groups": [
+                PlanningGroupDefinition(name="base", joint_names=("joint1",), base_link="base")
+            ]
+        }
+    )
+    no_pose_world, no_pose_id = _make_world(fake_roboplan, no_pose_config)
+    no_pose_world.finalize()
+    with pytest.raises(ValueError, match="no pose-targetable"):
+        no_pose_world.get_ee_pose(no_pose_world.get_live_context(), no_pose_id)
+    with pytest.raises(ValueError, match="no pose-targetable"):
+        no_pose_world.get_jacobian(no_pose_world.get_live_context(), no_pose_id)
+
+    ambiguous_config = robot_config.model_copy(
+        update={
+            "planning_groups": [
+                PlanningGroupDefinition(
+                    name="a", joint_names=("joint1",), base_link="base", tip_link="a_tip"
+                ),
+                PlanningGroupDefinition(
+                    name="b", joint_names=("joint2",), base_link="base", tip_link="b_tip"
+                ),
+            ]
+        }
+    )
+    ambiguous_world, ambiguous_id = _make_world(fake_roboplan, ambiguous_config)
+    ambiguous_world.finalize()
+    with pytest.raises(ValueError, match="pose-targetable planning groups"):
+        ambiguous_world.get_jacobian(ambiguous_world.get_live_context(), ambiguous_id)
+
+
+def test_group_lookup_rejects_unknown_group_id(
+    fake_roboplan: None, robot_config: RobotModelConfig
+) -> None:
+    world, _ = _make_world(fake_roboplan, robot_config)
+    world.finalize()
+
+    with pytest.raises(KeyError, match="Unknown planning group ID"):
+        world.get_group_ee_pose(world.get_live_context(), "other/missing")
+
+
 def test_native_planner_converts_path(fake_roboplan: None, robot_config: RobotModelConfig) -> None:
     world, robot_id = _make_world(fake_roboplan, robot_config)
     world.finalize()

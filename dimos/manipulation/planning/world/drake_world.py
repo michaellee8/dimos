@@ -334,7 +334,8 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
             raise KeyError(f"Robot '{robot_id}' not found")
         return self._robots[robot_id].config
 
-    def _validate_planning_group_config(self, config: RobotModelConfig) -> None:
+    @staticmethod
+    def _validate_planning_group_config(config: RobotModelConfig) -> None:
         seen_group_names: set[str] = set()
         for definition in config.planning_groups:
             make_planning_group_id(config.name, definition.name)
@@ -343,8 +344,9 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
             make_global_joint_names(config.name, definition.joint_names)
             seen_group_names.add(definition.name)
 
+    @staticmethod
     def _planning_group_from_config(
-        self, config: RobotModelConfig, group_id: PlanningGroupID
+        config: RobotModelConfig, group_id: PlanningGroupID
     ) -> PlanningGroup:
         for definition in config.planning_groups:
             if make_planning_group_id(config.name, definition.name) == group_id:
@@ -369,7 +371,8 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
                 continue
         raise KeyError(f"Unknown planning group ID: {group_id}")
 
-    def _primary_pose_group_id_for_config(self, config: RobotModelConfig) -> PlanningGroupID | None:
+    @staticmethod
+    def _primary_pose_group_id_for_config(config: RobotModelConfig) -> PlanningGroupID | None:
         pose_groups = [group for group in config.planning_groups if group.has_pose_target]
         if not pose_groups:
             return None
