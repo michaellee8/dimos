@@ -901,9 +901,13 @@ class ManipulationModule(Module):
                 "message": "Planning is not initialized or current state is unavailable",
                 "collision_free": False,
             }
-        # Visualization needs the best kinematic candidate even when it is not
-        # plan-valid yet, so solve IK first and report collision separately.
-        ik = self._solve_ik_for_pose(robot_id, pose, current, check_collision=False)
+        # Collision-checked solve: mink retries seeds until it finds a
+        # self-collision-free configuration (matching plan_to_pose), so the
+        # target ghost shows a plan-valid candidate instead of the first
+        # kinematic solution phasing through the torso. If every seed
+        # collides, the best (colliding) candidate is still returned and
+        # reported as COLLISION below.
+        ik = self._solve_ik_for_pose(robot_id, pose, current, check_collision=True)
         joint_state = JointState(ik.joint_state) if ik.joint_state else None
         collision_free = bool(
             joint_state is not None and self._world_monitor.is_state_valid(robot_id, joint_state)

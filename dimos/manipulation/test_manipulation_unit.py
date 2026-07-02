@@ -406,7 +406,9 @@ class TestPlanningInitialization:
         assert result["joint_state"].position == [0.1, 0.2, 0.3]
         assert result["ee_pose"] is achieved_pose
         _, kwargs = module._kinematics.solve.call_args
-        assert kwargs["check_collision"] is False
+        # Collision-checked so the ghost shows plan-valid candidates (mink
+        # retries seeds until one clears self-collision).
+        assert kwargs["check_collision"] is True
         module._world_monitor.is_state_valid.assert_called_once_with("robot_id", candidate)
 
     def test_evaluate_pose_target_reports_collision_without_dropping_candidate(self, robot_config):
