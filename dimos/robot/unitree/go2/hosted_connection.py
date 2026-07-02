@@ -136,6 +136,7 @@ class Go2HostedConnection(GO2Connection):
         # GO2Connection.start() stands the robot up, hence the initial posture.
         self._posture = "StandReady"
         self._obstacle_avoidance = True  # corrected from config.g in start()
+        self._light_on = False  # head LED assumed off until toggled
         self._last_mux_pub = 0.0  # monotonic stamp for the video_max_fps cap
 
     @rpc
@@ -302,6 +303,8 @@ class Go2HostedConnection(GO2Connection):
             self._set_cam_selection(msg.get("cams", []))
         elif kind == "obstacle_avoidance":
             self._handle_obstacle_avoidance(msg)
+        elif kind == "light":
+            self._handle_light(msg)
         elif kind == "video_stats":
             self.video_stats.publish(VideoStats.from_dict(msg))
         elif kind == "clock_report":
@@ -521,6 +524,20 @@ class Go2HostedConnection(GO2Connection):
 
         self._submit_cmd(f"obstacle_avoidance {enabled}", nonce, task)
 
+    def _handle_light(self, msg: dict[str, Any]) -> None:
+        """Toggle the head LED (VUI brightness on/off)."""
+        enabled = bool(msg.get("enabled"))
+        nonce = msg.get("nonce")
+
+        def task() -> bool:
+            ok = bool(self.connection.set_light(enabled))
+            if ok:
+                self._light_on = enabled
+            logger.info("light: enabled=%s ok=%s", enabled, ok)
+            return ok
+
+        self._submit_cmd(f"light {enabled}", nonce, task)
+
     def _send_ack(self, nonce: Any, ok: bool) -> None:
         # Best-effort: the ack rides state_reliable_back, which doesn't exist
         # while no operator is connected — a dropped ack there is expected, but
@@ -582,6 +599,7 @@ class Go2HostedConnection(GO2Connection):
                 "posture": self._posture,
                 "rage": self._rage_active,
                 "obstacle_avoidance": self._obstacle_avoidance,
+                "light": self._light_on,
                 "cams": list(self._cam_selected),
                 "estopped": self._estopped,
             },

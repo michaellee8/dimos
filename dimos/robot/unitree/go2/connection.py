@@ -89,6 +89,7 @@ class Go2ConnectionProtocol(Protocol):
     def sport_command(self, api_id: int) -> bool: ...
     def set_obstacle_avoidance(self, enabled: bool = True) -> None: ...
     def set_rage_mode(self, enable: bool) -> bool: ...
+    def set_light(self, on: bool = True) -> bool: ...
     def publish_request(self, topic: str, data: dict) -> dict: ...  # type: ignore[type-arg]
 
 
@@ -185,6 +186,9 @@ class ReplayConnection(UnitreeWebRTCConnection, CompositeResource):
         pass
 
     def set_rage_mode(self, enable: bool) -> bool:
+        return True
+
+    def set_light(self, on: bool = True) -> bool:
         return True
 
     @simple_mcache

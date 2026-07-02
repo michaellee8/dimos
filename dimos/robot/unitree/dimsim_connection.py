@@ -104,6 +104,9 @@ class DimSimConnection:
     def set_rage_mode(self, enable: bool) -> bool:
         return True
 
+    def set_light(self, on: bool = True) -> bool:
+        return True
+
     def publish_request(self, topic: str, data: dict[str, Any]) -> dict[Any, Any]:
         return {}
 

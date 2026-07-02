@@ -382,6 +382,15 @@ class UnitreeWebRTCConnection(Resource):
             },
         )
 
+    def set_light(self, on: bool = True) -> bool:
+        """Head LED on/off via the VUI brightness api (1005, levels 0-10)."""
+        return bool(
+            self.publish_request(
+                RTC_TOPIC["VUI"],
+                {"api_id": 1005, "parameter": {"brightness": 10 if on else 0}},
+            )
+        )
+
     @simple_mcache
     def raw_video_stream(self) -> Observable[VideoMessage]:
         subject: Subject[VideoMessage] = Subject()
