@@ -304,11 +304,9 @@ class WorldMonitor:
             if positions is not None:
                 joint_names = self._robot_joints.get(robot_id, [])
                 return JointState(
-                    {
-                        "name": joint_names,
-                        "position": positions.tolist(),
-                        "velocity": velocities.tolist() if velocities is not None else [],
-                    }
+                    name=joint_names,
+                    position=positions.tolist(),
+                    velocity=velocities.tolist() if velocities is not None else [],
                 )
 
         # Fall back to world's live context
@@ -331,7 +329,7 @@ class WorldMonitor:
                 if local_name in pos_by_name:
                     names.append(f"{robot_name}/{local_name}")
                     positions.append(float(pos_by_name[local_name]))
-        return JointState({"name": names, "position": positions})
+        return JointState(name=names, position=positions)
 
     def current_group_joint_state(
         self, group_id: PlanningGroupID, max_age: float = 1.0
@@ -378,10 +376,8 @@ class WorldMonitor:
                 raise ValueError(f"Current state is missing group joint '{local_name}'")
             positions_by_name[local_name] = float(position)
         return JointState(
-            {
-                "name": list(current_state.name),
-                "position": [positions_by_name[name] for name in current_state.name],
-            }
+            name=list(current_state.name),
+            position=[positions_by_name[name] for name in current_state.name],
         )
 
     def _full_robot_joint_state_from_input(
@@ -392,9 +388,7 @@ class WorldMonitor:
         if not joint_state.name:
             if len(joint_state.position) != len(config.joint_names):
                 return None
-            return JointState(
-                {"name": list(config.joint_names), "position": list(joint_state.position)}
-            )
+            return JointState(name=list(config.joint_names), position=list(joint_state.position))
         if len(joint_state.name) != len(joint_state.position):
             raise ValueError("JointState name and position lengths must match")
         resolved_positions: dict[str, float] = {}
@@ -416,10 +410,8 @@ class WorldMonitor:
         if set(resolved_positions) != set(config.joint_names):
             return None
         return JointState(
-            {
-                "name": list(config.joint_names),
-                "position": [resolved_positions[name] for name in config.joint_names],
-            }
+            name=list(config.joint_names),
+            position=[resolved_positions[name] for name in config.joint_names],
         )
 
     def _validate_planning_group_config(self, config: RobotModelConfig) -> None:
@@ -438,7 +430,7 @@ class WorldMonitor:
             velocities = self._state_monitors[robot_id].get_current_velocities()
             if velocities is not None:
                 joint_names = self._robot_joints.get(robot_id, [])
-                return JointState({"name": joint_names, "velocity": velocities.tolist()})
+                return JointState(name=joint_names, velocity=velocities.tolist())
         return None
 
     def wait_for_state(self, robot_id: WorldRobotID, timeout: float = 1.0) -> bool:
