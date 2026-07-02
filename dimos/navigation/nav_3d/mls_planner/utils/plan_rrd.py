@@ -280,10 +280,10 @@ def main(
         None, "--out", help="Output .rrd path. If omitted, spawn rerun live."
     ),
     lidar_stream: str = typer.Option(
-        "fastlio_lidar", "--lidar-stream", help="Lidar stream in the recording"
+        "pointlio_lidar", "--lidar-stream", help="Lidar stream in the recording"
     ),
     odom_stream: str = typer.Option(
-        "fastlio_odometry", "--odom-stream", help="Odometry stream in the recording"
+        "pointlio_odometry", "--odom-stream", help="Odometry stream in the recording"
     ),
     align_tol: float = typer.Option(0.05, "--align-tol", help="Lidar/odom alignment tolerance (s)"),
     voxel_size: float = typer.Option(0.08, "--voxel-size", help="Voxel edge length (m)"),
@@ -295,7 +295,7 @@ def main(
         "--min-health",
         help="Voxel health floor; more negative needs more hits to appear and more misses to clear",
     ),
-    max_health: int = typer.Option(1, "--max-health", help="Voxel health ceiling"),
+    max_health: int = typer.Option(5, "--max-health", help="Voxel health ceiling"),
     support_min: int = typer.Option(
         4,
         "--support-min",
@@ -307,13 +307,13 @@ def main(
         2.0, "--max-overhead", help="Ignore surface more than this far above the sensor (m)"
     ),
     surface_closing_radius: float = typer.Option(
-        0.8,
+        0.3,
         "--surface-closing-radius",
         help="Hole-fill radius (m); morphological closing fills holes up to twice this wide",
     ),
     node_spacing: float = typer.Option(1.0, "--node-spacing", help="Graph node spacing (m)"),
     wall_clearance: float = typer.Option(
-        0.3,
+        0.1,
         "--wall-clearance",
         help="Hard clearance; cells closer to a wall or edge are impassable (m)",
     ),

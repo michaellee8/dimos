@@ -36,8 +36,6 @@ from dimos.robot.unitree.go2.go2_mid360_static_transforms import (
 from dimos.visualization.vis_module import vis_module
 
 voxel_size = 0.08
-# Height of the head-mounted lidar above the ground while standing.
-go2_lidar_height = 0.5
 # base_link <- lidar mount rotation, so nav reads odometry in the level body frame.
 _sensor_mount_rotation = list(base_link_from_mid360().rotation.to_tuple())
 
@@ -130,20 +128,22 @@ unitree_go2_nav_3d = autoconnect(
         voxel_size=voxel_size,
         emit_every=1,
         global_emit_every=50,
-        max_health=10,
-        graze_cos=0.85,
+        min_health=-1,
+        max_health=5,
+        support_min=4,
     ),
     # global_map is remapped off so the planner runs purely on the
     # incremental local_map + region_bounds pair.
     MLSPlannerNative.blueprint(
         world_frame="odom",
         voxel_size=voxel_size,
-        robot_height=go2_lidar_height,
-        wall_clearance_m=0.2,
+        robot_height=0.3,
+        surface_closing_radius=0.3,
+        wall_clearance_m=0.1,
         wall_buffer_m=0.75,
         wall_buffer_weight=100.0,
-        step_threshold_m=0.16,
-        step_penalty_weight=1.0,
+        step_threshold_m=0.15,
+        step_penalty_weight=4.0,
         viz_publish_hz=0.0,
     ).remappings([(MLSPlannerNative, "global_map", "global_map_unused")]),
     GoalRelay.blueprint(),
