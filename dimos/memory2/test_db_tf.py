@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+import platform
+
+import pytest
 
 from dimos.memory2.db_tf_sql import DbTfSql
 from dimos.memory2.store.sqlite import SqliteStore
@@ -32,6 +35,11 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.DeformationNode import DeformationNode, tf_id_for
 from dimos.msgs.tf2_msgs.TFMessage import TFMessage
 from dimos.protocol.tf.tf import MultiTBuffer
+
+# sqlite-vec fails to load on Linux ARM (32-bit binary in the aarch64 wheel) and
+# on macOS in CI; SqliteStore loads it on init, so skip like memory2/conftest.py.
+_SKIP_SQLITE_VEC = platform.machine() == "aarch64" or platform.system() == "Darwin"
+pytestmark = pytest.mark.skipif(_SKIP_SQLITE_VEC, reason="sqlite-vec extension not loadable here")
 
 _T0 = 1000.0
 _DYN_RATE = 30.0
