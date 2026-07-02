@@ -16,12 +16,6 @@
 """3D navigation on Go2 with voxel-grid mapping, MLS planning, and holonomic
 trajectory control over WebRTC.
 
-Decouples planning from control: ``MLSPlannerNative`` owns route safety and
-emits the ``Path`` (empty when nothing ahead is traversable), while
-``DanHolonomicTC`` follows that path with the holonomic tracking law. Compared
-to ``unitree_go2_nav_3d`` this swaps ``PointLio`` + ``RayTracingVoxelMap`` for
-``VoxelGridMapper``, adds ``PoseOdomRelay``, and replaces ``BasicPathFollower``
-with ``DanHolonomicTC``.
 """
 
 from typing import Any
@@ -30,9 +24,9 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
 from dimos.mapping.voxels import VoxelGridMapper
 from dimos.navigation.dannav.local_planner.module import DanLocalPlanner
-from dimos.navigation.holonomic_trajectory_controller.module import DanHolonomicTC
+from dimos.navigation.dannav.holonomic_tc.module import DanHolonomicTC
 from dimos.navigation.movement_manager.movement_manager import MovementManager
-from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay, PoseOdomRelay
+from dimos.navigation.nav_3d.mls_planner.goal_relay import GoalRelay
 from dimos.navigation.nav_3d.mls_planner.mls_planner_native import MLSPlannerNative
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic import rerun_config
 from dimos.robot.unitree.go2.connection import GO2Connection
@@ -40,7 +34,9 @@ from dimos.visualization.vis_module import vis_module
 
 voxel_size = 0.05
 # Height of the head-mounted lidar above the ground while standing.
-go2_lidar_height = 1.0
+# While in case of Go2 it's ~ .3m, but in this blueprint 
+# MLSPlanner works better on Go2 lidar when the value is 0.5
+go2_lidar_height = 0.5
 
 
 def _render_global_map(msg: Any) -> Any:
@@ -65,8 +61,6 @@ _nav_rerun_config = {
     "visual_override": {
         **rerun_config["visual_override"],
         "world/global_map": _render_global_map,
-        # MLS path is remapped to planner_path for DanLocalPlanner; suppress the
-        # hot re-rooted stream so rerun only shows the gated path on world/path.
         "world/planner_path": None,
         "world/path": _render_path,
         "world/surface_map": None,
@@ -77,9 +71,7 @@ _nav_rerun_config = {
 
 unitree_go2_mls_htc = autoconnect(
     vis_module(viewer_backend=global_config.viewer, rerun_config=_nav_rerun_config),
-    # "mcf" for stair traversal
     GO2Connection.blueprint(motion_mode="mcf"),
-    PoseOdomRelay.blueprint(),
     VoxelGridMapper.blueprint(
         voxel_size=voxel_size,
         frame_id="world",
@@ -95,11 +87,16 @@ unitree_go2_mls_htc = autoconnect(
         step_threshold_m=0.16,
         step_penalty_weight=1.0,
         viz_publish_hz=0.0,
-    ).remappings([(MLSPlannerNative, "path", "planner_path")]),
+    ).remappings(
+        [
+            (MLSPlannerNative, "path", "planner_path"),
+            # The planner's start pose is the robot's odom pose
+            (MLSPlannerNative, "start_pose", "odom"),
+        ]
+    ),
     GoalRelay.blueprint(),
-    DanLocalPlanner.blueprint(lock_replan=3.0),
-    DanHolonomicTC.blueprint(),
+    # Seeting resample_spacing_m to > 0.0 will smooth out jagged paths retunned my MLSP
+    DanLocalPlanner.blueprint(resample_spacing_m=0.1),
+    DanHolonomicTC.blueprint(run_profile='walk'),
     MovementManager.blueprint(),
 ).global_config(n_workers=10, robot_model="unitree_go2", obstacle_avoidance=False)
-
-__all__ = ["unitree_go2_mls_htc"]

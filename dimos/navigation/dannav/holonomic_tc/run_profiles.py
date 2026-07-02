@@ -14,8 +14,8 @@
 
 """Named Go2 movement envelopes (speed and limit caps).
 
-Data and validation only. Live wiring: ``GlobalConfig.go2_run_profile``,
-``LocalPlanner._resolve_run_envelope``, and ``go2.connection`` locomotion mode.
+Data and validation only. Live wiring: ``DanHolonomicTCConfig.run_profile`` and
+``_HolonomicPathFollower._resolve_run_envelope``.
 """
 
 from __future__ import annotations
@@ -24,8 +24,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 import math
 
-from dimos.navigation.holonomic_trajectory_controller.trajectory_command_limits import HolonomicCommandLimits
-from dimos.navigation.holonomic_trajectory_controller.trajectory_path_speed_profile import PathSpeedProfileLimits
+from dimos.navigation.dannav.geometry.path_speed_profile import PathSpeedProfileLimits
 
 _POSITIVE_FIELDS: tuple[str, ...] = (
     "requested_planner_speed_m_s",
@@ -54,8 +53,6 @@ class RunProfile:
     max_planar_cmd_accel_m_s2: float
     max_yaw_rate_rad_s: float
     max_yaw_accel_rad_s2: float
-    required_locomotion_mode: str
-    description: str = ""
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -66,17 +63,6 @@ class RunProfile:
                 raise RunProfileError(
                     f"{self.name!r}.{field_name} must be a positive finite float, got {value!r}"
                 )
-        if not self.required_locomotion_mode.strip():
-            raise RunProfileError(f"{self.name!r}.required_locomotion_mode must be non-empty")
-
-    def command_limits(self) -> HolonomicCommandLimits:
-        """Body-frame command saturation envelope for this profile."""
-        return HolonomicCommandLimits(
-            max_planar_speed_m_s=self.requested_planner_speed_m_s,
-            max_yaw_rate_rad_s=self.max_yaw_rate_rad_s,
-            max_planar_linear_accel_m_s2=self.max_planar_cmd_accel_m_s2,
-            max_yaw_accel_rad_s2=self.max_yaw_accel_rad_s2,
-        )
 
     def path_speed_profile_limits_at(self, max_speed_m_s: float) -> PathSpeedProfileLimits:
         """Geometry-aware path speed limits at the given cruise cap (m/s)."""
@@ -89,10 +75,9 @@ class RunProfile:
 
 @dataclass(frozen=True)
 class RunProfileRegistry:
-    """Named run profiles with a declared default profile name."""
+    """Named run profiles."""
 
     profiles: Mapping[str, RunProfile]
-    default_profile_name: str
 
     def __post_init__(self) -> None:
         if not self.profiles:
@@ -102,10 +87,6 @@ class RunProfileRegistry:
                 raise RunProfileError(
                     f"registry key {key!r} does not match profile name {profile.name!r}"
                 )
-        if self.default_profile_name not in self.profiles:
-            raise RunProfileError(
-                f"default profile {self.default_profile_name!r} is not in the registry"
-            )
         object.__setattr__(self, "profiles", dict(self.profiles))
 
     def get(self, name: str) -> RunProfile:
@@ -116,13 +97,8 @@ class RunProfileRegistry:
             known = ", ".join(sorted(self.profiles))
             raise RunProfileError(f"unknown run profile {name!r}; known profiles: {known}") from exc
 
-    def names(self) -> tuple[str, ...]:
-        """Profile names in registration order."""
-        return tuple(self.profiles)
-
 
 GO2_RUN_PROFILES = RunProfileRegistry(
-    default_profile_name="walk",
     profiles={
         "walk": RunProfile(
             name="walk",
@@ -133,8 +109,6 @@ GO2_RUN_PROFILES = RunProfileRegistry(
             max_planar_cmd_accel_m_s2=5.0,
             max_yaw_rate_rad_s=1.0,
             max_yaw_accel_rad_s2=5.0,
-            required_locomotion_mode="default",
-            description="Default cautious navigation; matches today's LocalPlanner walking behavior.",
         ),
         "trot": RunProfile(
             name="trot",
@@ -145,8 +119,6 @@ GO2_RUN_PROFILES = RunProfileRegistry(
             max_planar_cmd_accel_m_s2=5.0,
             max_yaw_rate_rad_s=1.2,
             max_yaw_accel_rad_s2=5.0,
-            required_locomotion_mode="default",
-            description="Faster trot within the default locomotion mode.",
         ),
         "run_conservative": RunProfile(
             name="run_conservative",
@@ -157,31 +129,6 @@ GO2_RUN_PROFILES = RunProfileRegistry(
             max_planar_cmd_accel_m_s2=6.0,
             max_yaw_rate_rad_s=1.0,
             max_yaw_accel_rad_s2=4.0,
-            required_locomotion_mode="default",
-            description=(
-                "Conservative run envelope at planner speed caps; stays in default "
-                "locomotion mode so onboard lidar and obstacle avoidance remain active."
-            ),
-        ),
-        "run_verified": RunProfile(
-            name="run_verified",
-            requested_planner_speed_m_s=2.5,
-            max_tangent_accel_m_s2=2.5,
-            max_normal_accel_m_s2=1.2,
-            goal_decel_m_s2=2.0,
-            max_planar_cmd_accel_m_s2=6.0,
-            max_yaw_rate_rad_s=0.8,
-            max_yaw_accel_rad_s2=3.0,
-            required_locomotion_mode="rage",
-            description="Highest envelope; switches Go2 to rage locomotion mode.",
         ),
     },
 )
-
-
-__all__ = [
-    "GO2_RUN_PROFILES",
-    "RunProfile",
-    "RunProfileError",
-    "RunProfileRegistry",
-]

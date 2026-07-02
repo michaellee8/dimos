@@ -17,7 +17,7 @@
 Cartesian law in the plan frame: position error ``(p_ref - p_meas)`` is
 rotated into the measured body frame, then a proportional correction is added
 to the reference body ``Twist`` (feedforward). Heading uses the same
-``angle_diff`` convention as ``trajectory_metrics.pose_errors_vs_reference``.
+``angle_diff`` convention used elsewhere in navigation.
 
 This is a standard omnidirectional tracking law, not a path-curvature or
 lookahead car-style law (no Pure Pursuit).
@@ -29,8 +29,8 @@ import math
 
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.navigation.holonomic_trajectory_controller.trajectory_command_limits import HolonomicCommandLimits
-from dimos.navigation.holonomic_trajectory_controller.trajectory_types import TrajectoryMeasuredSample, TrajectoryReferenceSample
+from dimos.navigation.dannav.holonomic_tc.command_limits import HolonomicCommandLimits
+from dimos.navigation.dannav.holonomic_tc.types import TrajectoryMeasuredSample, TrajectoryReferenceSample
 from dimos.utils.trigonometry import angle_diff
 
 
@@ -161,6 +161,3 @@ class HolonomicTrackingController:
             return raw
         out = _scale_planar_twist(raw, lim.max_planar_speed_m_s)
         return _clamp_yaw_rate(out, lim.max_yaw_rate_rad_s)
-
-
-__all__ = ["HolonomicTrackingController"]

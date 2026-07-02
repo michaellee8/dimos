@@ -27,7 +27,6 @@ force zero speed at the origin.
 
 from __future__ import annotations
 
-import bisect
 from collections.abc import Sequence
 from dataclasses import dataclass
 import math
@@ -54,21 +53,6 @@ class PathSpeedProfileLimits:
                 raise ValueError(f"{name} must be a non-negative finite float, got {value!r}")
 
 
-def _circular_arc_geometry_speed_cap_m_s(
-    abs_radius_m: float, limits: PathSpeedProfileLimits
-) -> float:
-    """Upper speed from centripetal bound ``v^2 / R <= a_n`` and ``max_speed_m_s``."""
-    if not math.isfinite(abs_radius_m) or abs_radius_m <= 0.0:
-        raise ValueError(f"abs_radius_m must be finite and positive, got {abs_radius_m!r}")
-    v_curve = math.sqrt(limits.max_normal_accel_m_s2 * abs_radius_m)
-    return min(limits.max_speed_m_s, v_curve)
-
-
-def _line_segment_geometry_speed_cap_m_s(limits: PathSpeedProfileLimits) -> float:
-    """Geometric cap for a straight segment (no curvature binding)."""
-    return float(limits.max_speed_m_s)
-
-
 def _vertex_progress_along_polyline_m(
     cumulative_segment_s_m: NDArray[np.float64],
 ) -> NDArray[np.float64]:
@@ -78,35 +62,70 @@ def _vertex_progress_along_polyline_m(
     return vertex_s
 
 
-def _polyline_geometry_speed_cap_m_s(
+def _polyline_geometry_speed_caps_m_s(
     path_xy: NDArray[np.float64],
-    vertex_s_m: Sequence[float],
-    progress_m: float,
+    vertex_s_m: NDArray[np.float64],
+    s_profile: Sequence[float],
     limits: PathSpeedProfileLimits,
-) -> float:
-    """Geometry speed cap at arc length ``progress_m`` on a planar polyline."""
-    if len(path_xy) < 3:
-        return _line_segment_geometry_speed_cap_m_s(limits)
+) -> list[float]:
+    """Geometry speed cap at every arc length in ``s_profile`` on a planar polyline.
 
-    for i in range(1, len(path_xy) - 1):
-        vertex_s = float(vertex_s_m[i])
-        prev_s = float(vertex_s_m[i - 1])
-        next_s = float(vertex_s_m[i + 1])
-        local_scale = max(vertex_s - prev_s, next_s - vertex_s, 1.0)
-        if abs(float(progress_m) - vertex_s) > max(1e-9, local_scale * 1e-9):
-            continue
-        p0, p1, p2 = path_xy[i - 1], path_xy[i], path_xy[i + 1]
-        a = float(np.linalg.norm(p1 - p0))
-        b = float(np.linalg.norm(p2 - p1))
-        c = float(np.linalg.norm(p2 - p0))
-        v10 = p1 - p0
-        v20 = p2 - p0
-        area2 = abs(float(v10[0] * v20[1] - v10[1] * v20[0]))
-        if min(a, b, c, area2) <= 1e-9:
-            return _line_segment_geometry_speed_cap_m_s(limits)
-        radius = (a * b * c) / (2.0 * area2)
-        return _circular_arc_geometry_speed_cap_m_s(radius, limits)
-    return _line_segment_geometry_speed_cap_m_s(limits)
+    The cap is ``max_speed_m_s`` everywhere except at interior vertices, where a
+    corner binds it via the centripetal bound ``v^2 / R <= a_n`` to
+    ``sqrt(max_normal_accel_m_s2 * R)``. ``R = a b c / (2 * area)`` is the
+    circumradius of the local vertex triangle. A degenerate triangle
+    (near-collinear or a zero-length side) leaves the cap at ``max_speed_m_s``.
+
+    Corner caps depend only on the fixed vertices, so they are computed once for
+    all interior vertices and scattered onto the matching ``s_profile`` samples
+    (each vertex arc length is itself a sample). Every other sample keeps the
+    straight-segment cap ``max_speed_m_s``.
+    """
+    max_cap = float(limits.max_speed_m_s)
+    s_arr = np.asarray(s_profile, dtype=np.float64)
+    caps = np.full(s_arr.shape[0], max_cap, dtype=np.float64)
+    if len(path_xy) < 3 or s_arr.shape[0] == 0:
+        return caps.tolist()
+
+    p0 = path_xy[:-2]
+    p1 = path_xy[1:-1]
+    p2 = path_xy[2:]
+    side_a = np.linalg.norm(p1 - p0, axis=1)
+    side_b = np.linalg.norm(p2 - p1, axis=1)
+    side_c = np.linalg.norm(p2 - p0, axis=1)
+    v10 = p1 - p0
+    v20 = p2 - p0
+    area2 = np.abs(v10[:, 0] * v20[:, 1] - v10[:, 1] * v20[:, 0])
+
+    degenerate = np.minimum(np.minimum(side_a, side_b), np.minimum(side_c, area2)) <= 1e-9
+    with np.errstate(divide="ignore", invalid="ignore"):
+        radius = (side_a * side_b * side_c) / (2.0 * area2)
+        v_curve = np.sqrt(limits.max_normal_accel_m_s2 * radius)
+    corner = np.where(degenerate, max_cap, np.minimum(max_cap, v_curve))
+
+    vertex_s = np.asarray(vertex_s_m, dtype=np.float64)
+    interior_s = vertex_s[1:-1]
+    local_scale = np.maximum(
+        np.maximum(interior_s - vertex_s[:-2], vertex_s[2:] - interior_s), 1.0
+    )
+    tol = np.maximum(1e-9, local_scale * 1e-9)
+
+    # Each interior vertex arc length is present as a sample, so match every
+    # vertex to the nearest sample; the match is exact within ``tol``.
+    m = s_arr.shape[0]
+    idx = np.searchsorted(s_arr, interior_s, side="left")
+    left = np.clip(idx - 1, 0, m - 1)
+    right = np.clip(idx, 0, m - 1)
+    dl = np.abs(s_arr[left] - interior_s)
+    dr = np.abs(s_arr[right] - interior_s)
+    nearest = np.where(dl <= dr, left, right)
+    within = np.minimum(dl, dr) <= tol
+
+    # Lowest vertex index wins a shared sample: assign high-to-low so index 0 is
+    # written last (matches the original first-match-wins scan over vertices).
+    order = np.nonzero(within)[0][::-1]
+    caps[nearest[order]] = corner[order]
+    return caps.tolist()
 
 
 def _profile_sample_distances_m(
@@ -182,9 +201,7 @@ def profile_speed_along_polyline(
     vertex_s_m = _vertex_progress_along_polyline_m(cumulative_segment_s_m)
     total_length_m = float(vertex_s_m[-1])
     s_profile = _profile_sample_distances_m(total_length_m, vertex_s_m, num_samples)
-    caps = [
-        _polyline_geometry_speed_cap_m_s(path_xy, vertex_s_m, s, limits) for s in s_profile
-    ]
+    caps = _polyline_geometry_speed_caps_m_s(path_xy, vertex_s_m, s_profile, limits)
     v_profile = _speed_profile_from_geometry_caps(
         s_profile,
         caps,
@@ -201,27 +218,4 @@ def speed_at_progress_m(
     """Linearly interpolate profile speed at arc length ``progress_m``."""
     if not s_m:
         return 0.0
-    if len(s_m) == 1:
-        return float(v_m_s[0])
-
-    s = float(np.clip(progress_m, s_m[0], s_m[-1]))
-    if s <= s_m[0]:
-        return float(v_m_s[0])
-    if s >= s_m[-1]:
-        return float(v_m_s[-1])
-
-    idx = bisect.bisect_right(s_m, s) - 1
-    idx = max(0, min(idx, len(s_m) - 2))
-    s0, s1 = float(s_m[idx]), float(s_m[idx + 1])
-    v0, v1 = float(v_m_s[idx]), float(v_m_s[idx + 1])
-    if s1 <= s0:
-        return v0
-    u = (s - s0) / (s1 - s0)
-    return v0 + (v1 - v0) * u
-
-
-__all__ = [
-    "PathSpeedProfileLimits",
-    "profile_speed_along_polyline",
-    "speed_at_progress_m",
-]
+    return float(np.interp(progress_m, s_m, v_m_s))

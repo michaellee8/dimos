@@ -41,39 +41,27 @@ from dimos.core.core import rpc
 from dimos.core.global_config import GlobalConfig
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
-from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.base import NavigationState
-from dimos.navigation.holonomic_trajectory_controller.holonomic_path_controller import (
-    CommandEnvelopeOverrides,
-    HolonomicPathController,
-    command_envelope_overrides_for_profile,
-)
-from dimos.navigation.holonomic_trajectory_controller.path_distancer import PathDistancer
-from dimos.navigation.holonomic_trajectory_controller.trajectory_control_tick_export import (
-    JsonlTrajectoryControlTickSink,
-)
-from dimos.navigation.holonomic_trajectory_controller.trajectory_control_tick_log import (
-    TrajectoryControlTickSink,
-    append_trajectory_control_tick,
-)
-from dimos.navigation.holonomic_trajectory_controller.trajectory_path_speed_profile import (
+from dimos.navigation.dannav.geometry.path_distancer import PathDistancer
+from dimos.navigation.dannav.geometry.path_speed_profile import (
     PathSpeedProfileLimits,
     profile_speed_along_polyline,
     speed_at_progress_m,
 )
-from dimos.navigation.holonomic_trajectory_controller.trajectory_run_profiles import (
+from dimos.navigation.dannav.holonomic_tc.holonomic_path_controller import (
+    HolonomicPathController,
+    _pose_from_xy_yaw,
+)
+from dimos.navigation.dannav.holonomic_tc.run_profiles import (
     GO2_RUN_PROFILES,
     RunProfile,
     RunProfileError,
 )
-from dimos.navigation.holonomic_trajectory_controller.trajectory_types import (
-    TrajectoryMeasuredSample,
+from dimos.navigation.dannav.holonomic_tc.types import (
     TrajectoryReferenceSample,
 )
 from dimos.utils.logging_config import setup_logger
@@ -92,19 +80,12 @@ logger = setup_logger()
 
 @dataclass(frozen=True)
 class ActiveRunEnvelope:
-    """The movement envelope governing the current follow.
+    """Resolved movement envelope for the current session profile."""
 
-    The speed is the session profile's requested speed (or the optional cruise
-    override) after any global slowdown scaling, and the limits come from the
-    profile. ``GO2_RUN_PROFILES`` is the single envelope source, so even the
-    default profile carries ``command_overrides``.
-    """
-
-    profile_name: str
+    profile: RunProfile
     speed_m_s: float
     path_limits: PathSpeedProfileLimits
     goal_decel_m_s2: float
-    command_overrides: CommandEnvelopeOverrides
 
 
 class _HolonomicPathFollower:
@@ -113,27 +94,23 @@ class _HolonomicPathFollower:
     Owns the follow state machine, the holonomic tracking law, and the
     run-profile speed/accel envelope. Has no transport: ``DanHolonomicTC`` wires
     the ``path`` / ``odometry`` / ``stop_movement`` streams to its methods and
-    forwards ``cmd_vel`` / ``stopped_navigating``. Unit-testable directly, the
-    way the old ``LocalPlanner`` was.
+    forwards ``cmd_vel`` / ``stopped_navigating``.
     """
 
-    cmd_vel: Subject  # Subject[Twist]
-    stopped_navigating: Subject  # Subject[StopMessage]
+    cmd_vel: Subject[Twist]
+    stopped_navigating: Subject[StopMessage]
 
     _thread: Thread | None = None
     _path: Path | None = None
     _path_distancer: PathDistancer | None = None
     _current_odom: PoseStamped | None = None
 
-    _pose_index: int
     _lock: RLock
     _stop_planning_event: Event
     _state: PlannerState
-    _state_unique_id: int
     _global_config: GlobalConfig
     _goal_tolerance: float
     _controller: HolonomicPathController
-    _trajectory_tick_sink: TrajectoryControlTickSink | None
     _previous_odom_for_velocity: PoseStamped | None
 
     _run_profile: str
@@ -146,7 +123,6 @@ class _HolonomicPathFollower:
     _orientation_tolerance: float
     _align_heading_before_move: bool
     _align_goal_yaw: bool
-    _goal_reached: bool
 
     def __init__(self, config: DanHolonomicTCConfig) -> None:
         self.cmd_vel = Subject()
@@ -154,19 +130,15 @@ class _HolonomicPathFollower:
 
         self._config = config
         self._global_config = config.g
-        self._pose_index = 0
         self._lock = RLock()
         self._stop_planning_event = Event()
         self._state = "idle"
-        self._state_unique_id = 0
-        self._goal_reached = False
         self._goal_tolerance = float(config.goal_tolerance)
         self._orientation_tolerance = float(config.orientation_tolerance)
         self._control_frequency = float(config.control_frequency)
         self._align_heading_before_move = bool(config.align_heading_before_move)
         self._align_goal_yaw = bool(config.align_goal_yaw)
         self._run_profile = config.run_profile
-        self._trajectory_tick_sink = self._make_trajectory_tick_sink()
         self._previous_odom_for_velocity = None
         self._path_speed_profile_s = None
         self._path_speed_profile_v = None
@@ -186,6 +158,7 @@ class _HolonomicPathFollower:
 
         self._controller = HolonomicPathController(
             self._global_config,
+            envelope.profile,
             envelope.speed_m_s,
             self._control_frequency,
             k_position_per_s=config.k_position_per_s,
@@ -195,7 +168,7 @@ class _HolonomicPathFollower:
         )
         self._apply_run_envelope(envelope)
 
-    # ---- lifecycle ----------------------------------------------------------
+    # lifecycle
 
     def close(self) -> None:
         with self._lock:
@@ -203,7 +176,6 @@ class _HolonomicPathFollower:
         self.stop_planning()
         if thread is not None:
             thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
-        self._close_trajectory_tick_sink()
 
     def handle_odom(self, msg: PoseStamped) -> None:
         with self._lock:
@@ -215,10 +187,8 @@ class _HolonomicPathFollower:
         self._stop_planning_event = Event()
 
         with self._lock:
-            self._goal_reached = False
             self._path = path
             self._path_distancer = PathDistancer(path)
-            self._pose_index = 0
             self._previous_odom_for_velocity = None
             self._rebuild_path_speed_profile(self._path_distancer)
             self._thread = Thread(target=self._thread_entrypoint, daemon=True)
@@ -235,10 +205,6 @@ class _HolonomicPathFollower:
 
             self._path = path
             self._path_distancer = PathDistancer(path)
-            current_odom = self._current_odom
-            if current_odom is not None:
-                current_pos = np.array([current_odom.position.x, current_odom.position.y])
-                self._pose_index = self._path_distancer.find_closest_point_index(current_pos)
             self._rebuild_path_speed_profile(self._path_distancer)
 
         return True
@@ -249,11 +215,10 @@ class _HolonomicPathFollower:
 
         with self._lock:
             self._thread = None
-            self._goal_reached = False
 
         self._reset_state()
 
-    # ---- run-profile envelope ----------------------------------------------
+    # run-profile envelope
 
     def set_run_profile(self, profile: str) -> bool:
         """Set the session-default movement envelope and apply it live.
@@ -279,14 +244,11 @@ class _HolonomicPathFollower:
             if self._cruise_speed_override is not None
             else profile.requested_planner_speed_m_s
         )
-        if self._global_config.nerf_speed < 1.0:
-            speed *= self._global_config.nerf_speed
         return ActiveRunEnvelope(
-            profile_name=profile.name,
+            profile=profile,
             speed_m_s=speed,
             path_limits=profile.path_speed_profile_limits_at(speed),
             goal_decel_m_s2=profile.goal_decel_m_s2,
-            command_overrides=command_envelope_overrides_for_profile(profile),
         )
 
     def _resolve_run_envelope(self) -> ActiveRunEnvelope | None:
@@ -310,29 +272,14 @@ class _HolonomicPathFollower:
 
     def _apply_run_envelope(self, envelope: ActiveRunEnvelope) -> None:
         self._active_envelope = envelope
-        self._controller.set_command_envelope(envelope.command_overrides)
+        self._controller.set_profile(envelope.profile)
         self._controller.set_speed(envelope.speed_m_s)
         with self._lock:
             path_distancer = self._path_distancer
         if path_distancer is not None:
             self._rebuild_path_speed_profile(path_distancer)
 
-    # ---- tick logging -------------------------------------------------------
-
-    def _make_trajectory_tick_sink(self) -> TrajectoryControlTickSink | None:
-        path = self._config.trajectory_tick_log_path
-        if path is None or str(path).strip() == "":
-            return None
-        return JsonlTrajectoryControlTickSink(path)
-
-    def _close_trajectory_tick_sink(self) -> None:
-        sink = self._trajectory_tick_sink
-        close = getattr(sink, "close", None)
-        if callable(close):
-            close()
-        self._trajectory_tick_sink = None
-
-    # ---- introspection ------------------------------------------------------
+    # introspection
 
     def get_state(self) -> NavigationState:
         with self._lock:
@@ -346,11 +293,7 @@ class _HolonomicPathFollower:
             case _:
                 raise ValueError(f"Unknown planner state: {state}")
 
-    def is_goal_reached(self) -> bool:
-        with self._lock:
-            return self._goal_reached
-
-    # ---- control loop -------------------------------------------------------
+    # control loop
 
     def _thread_entrypoint(self) -> None:
         try:
@@ -367,7 +310,6 @@ class _HolonomicPathFollower:
         if new_state == self._state:
             return
         self._state = new_state
-        self._state_unique_id += 1
         logger.info("changed state", state=new_state)
 
     def _initial_state(self, path: Path, current_odom: PoseStamped | None) -> PlannerState:
@@ -388,7 +330,6 @@ class _HolonomicPathFollower:
         first_yaw = path.poses[0].orientation.euler[2]
         robot_yaw = current_odom.orientation.euler[2]
         initial_yaw_error = angle_diff(first_yaw, robot_yaw)
-        self._controller.reset_yaw_error(initial_yaw_error)
         if abs(initial_yaw_error) < self._orientation_tolerance:
             return "path_following"
         return "initial_rotation"
@@ -419,8 +360,6 @@ class _HolonomicPathFollower:
             elif state == "final_rotation":
                 cmd_vel = self._compute_final_rotation()
             elif state == "arrived":
-                with self._lock:
-                    self._goal_reached = True
                 # Stop motion before signalling arrival, matching the path
                 # followers downstream consumers expect.
                 self.cmd_vel.on_next(Twist())
@@ -459,20 +398,7 @@ class _HolonomicPathFollower:
 
         self._controller.set_speed(self._active_envelope.speed_m_s)
         measured_body_twist = self._estimate_measured_body_twist(current_odom)
-        cmd = self._controller.rotate(yaw_error, current_odom, measured_body_twist)
-        ref_pose = _pose_from_xy_yaw(
-            float(current_odom.position.x),
-            float(current_odom.position.y),
-            float(first_yaw),
-        )
-        self._append_trajectory_control_tick(
-            ref_pose,
-            Twist(),
-            current_odom,
-            measured_body_twist,
-            cmd,
-        )
-        return cmd
+        return self._controller.rotate(yaw_error, current_odom, measured_body_twist)
 
     def _compute_path_following(self) -> Twist:
         with self._lock:
@@ -495,12 +421,7 @@ class _HolonomicPathFollower:
                 self._change_state("arrived")
             return Twist()
 
-        closest_index = path_distancer.find_closest_point_index(current_pos)
-
-        with self._lock:
-            self._pose_index = closest_index
-
-        path_speed = self._path_speed_for_index(path_distancer, closest_index, current_pos)
+        path_speed = self._path_speed_at_position(path_distancer, current_pos)
         self._controller.set_speed(path_speed)
         reference_sample = self._lookahead_reference_sample(
             path_distancer,
@@ -509,18 +430,11 @@ class _HolonomicPathFollower:
             path_speed,
         )
         measured_body_twist = self._estimate_measured_body_twist(current_odom)
-        cmd = self._controller.advance_reference(
+        return self._controller.advance_reference(
             reference_sample,
             current_odom,
             measured_body_twist,
         )
-        self._append_trajectory_control_sample(
-            reference_sample,
-            current_odom,
-            measured_body_twist,
-            cmd,
-        )
-        return cmd
 
     def _lookahead_reference_sample(
         self,
@@ -569,13 +483,11 @@ class _HolonomicPathFollower:
             twist_body=feedforward,
         )
 
-    def _path_speed_for_index(
+    def _path_speed_at_position(
         self,
         path_distancer: PathDistancer,
-        closest_index: int,
         current_pos: np.ndarray,
     ) -> float:
-        del closest_index
         self._ensure_path_speed_profile(path_distancer)
         envelope = self._active_envelope
         progress_m = float(path_distancer.project(current_pos).s_along_path_m)
@@ -637,74 +549,16 @@ class _HolonomicPathFollower:
 
         self._controller.set_speed(self._active_envelope.speed_m_s)
         measured_body_twist = self._estimate_measured_body_twist(current_odom)
-        cmd = self._controller.rotate(yaw_error, current_odom, measured_body_twist)
-        ref_pose = _pose_from_xy_yaw(
-            float(current_odom.position.x),
-            float(current_odom.position.y),
-            float(goal_yaw),
-        )
-        self._append_trajectory_control_tick(
-            ref_pose,
-            Twist(),
-            current_odom,
-            measured_body_twist,
-            cmd,
-        )
-        return cmd
+        return self._controller.rotate(yaw_error, current_odom, measured_body_twist)
 
     def _reset_state(self) -> None:
         with self._lock:
             self._change_state("idle")
             self._path = None
             self._path_distancer = None
-            self._pose_index = 0
             self._previous_odom_for_velocity = None
             self._controller.set_speed(self._active_envelope.speed_m_s)
             self._controller.reset_errors()
-
-    def _append_trajectory_control_tick(
-        self,
-        reference_pose: Pose,
-        reference_twist: Twist,
-        current_odom: PoseStamped,
-        measured_body_twist: Twist,
-        command: Twist,
-    ) -> None:
-        reference = TrajectoryReferenceSample(
-            time_s=float(current_odom.ts),
-            pose_plan=reference_pose,
-            twist_body=reference_twist,
-        )
-        self._append_trajectory_control_sample(
-            reference,
-            current_odom,
-            measured_body_twist,
-            command,
-        )
-
-    def _append_trajectory_control_sample(
-        self,
-        reference: TrajectoryReferenceSample,
-        current_odom: PoseStamped,
-        measured_body_twist: Twist,
-        command: Twist,
-    ) -> None:
-        sink = self._trajectory_tick_sink
-        if sink is None:
-            return
-        measurement = TrajectoryMeasuredSample(
-            time_s=float(current_odom.ts),
-            pose_plan=Pose(current_odom.position, current_odom.orientation),
-            twist_body=measured_body_twist,
-        )
-        append_trajectory_control_tick(
-            sink,
-            reference,
-            measurement,
-            command,
-            1.0 / self._control_frequency,
-            wall_time_s=time.time(),
-        )
 
     def _estimate_measured_body_twist(self, current_odom: PoseStamped) -> Twist:
         previous = self._previous_odom_for_velocity
@@ -734,16 +588,9 @@ class _HolonomicPathFollower:
         )
 
 
-def _pose_from_xy_yaw(x: float, y: float, yaw: float) -> Pose:
-    return Pose(
-        position=Vector3(x, y, 0.0),
-        orientation=Quaternion.from_euler(Vector3(0.0, 0.0, float(yaw))),
-    )
-
-
 class DanHolonomicTCConfig(ModuleConfig):
     control_frequency: float = 10.0
-    run_profile: str = "trot"
+    run_profile: str = "walk"
     speed_m_s: float | None = None
     goal_tolerance: float = 0.2
     orientation_tolerance: float = 0.35
@@ -753,13 +600,12 @@ class DanHolonomicTCConfig(ModuleConfig):
     k_yaw_rate_per_s: float = 1.0
     align_heading_before_move: bool = False
     align_goal_yaw: bool = False
-    trajectory_tick_log_path: str | None = None
 
 
 class DanHolonomicTC(Module):
     """Follow a planned ``Path`` with the holonomic tracking law.
 
-    Mirrors ``BasicPathFollower``'s stream surface. The planner owns route
+    Consumes the robot's ``PoseStamped`` odom directly. The planner owns route
     safety and emits the ``Path``: an empty path stops the follow, a non-empty
     path updates the active route or starts a new follow. Publishes
     ``nav_cmd_vel`` until the goal is within tolerance, then ``goal_reached``.
@@ -769,7 +615,7 @@ class DanHolonomicTC(Module):
     config: DanHolonomicTCConfig
 
     path: In[Path]
-    odometry: In[Odometry]
+    odom: In[PoseStamped]
     stop_movement: In[Bool]
 
     nav_cmd_vel: Out[Twist]
@@ -788,7 +634,7 @@ class DanHolonomicTC(Module):
         self.register_disposable(
             self._core.stopped_navigating.subscribe(self._on_core_stopped)
         )
-        self.register_disposable(Disposable(self.odometry.subscribe(self._on_odometry)))
+        self.register_disposable(Disposable(self.odom.subscribe(self._on_odom)))
         self.register_disposable(Disposable(self.path.subscribe(self._on_path)))
         if self.stop_movement.transport is not None:
             self.register_disposable(Disposable(self.stop_movement.subscribe(self._on_stop)))
@@ -799,8 +645,8 @@ class DanHolonomicTC(Module):
         self.nav_cmd_vel.publish(Twist())
         super().stop()
 
-    def _on_odometry(self, msg: Odometry) -> None:
-        self._core.handle_odom(msg.to_pose_stamped())
+    def _on_odom(self, msg: PoseStamped) -> None:
+        self._core.handle_odom(msg)
 
     def _on_path(self, path: Path) -> None:
         # The planner owns path safety: it sends the route as far as it is safe,
@@ -826,10 +672,6 @@ class DanHolonomicTC(Module):
     def set_run_profile(self, profile: str) -> bool:
         """Set the session-default movement envelope, applied live."""
         return self._core.set_run_profile(profile)
-
-    @rpc
-    def is_goal_reached(self) -> bool:
-        return self._core.is_goal_reached()
 
     @rpc
     def get_state(self) -> NavigationState:

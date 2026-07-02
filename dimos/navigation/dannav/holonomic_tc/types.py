@@ -12,12 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Per-tick reference and measured samples for holonomic path following and JSONL logging.
+"""Per-tick reference and measured samples for holonomic path following.
 
 **Plan horizontal frame (``pose_plan``)**
 
-- Positions and yaw use the same plan horizontal convention as ``Path``,
-  ``PathDistancer``, and ``trajectory_metrics.pose_errors_vs_reference``.
+- Positions and yaw use the same plan horizontal convention as ``Path`` and
+  ``PathDistancer``.
 
 **Body command frame (``twist_body``)**
 
@@ -41,8 +41,8 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 
 
 @dataclass(frozen=True)
-class TrajectoryReferenceSample:
-    """One timed point on the reference trajectory (target)."""
+class TrajectorySample:
+    """Timed pose + body twist sample (shared shape)."""
 
     time_s: float
     pose_plan: Pose
@@ -54,19 +54,10 @@ class TrajectoryReferenceSample:
 
 
 @dataclass(frozen=True)
-class TrajectoryMeasuredSample:
+class TrajectoryReferenceSample(TrajectorySample):
+    """One timed point on the reference trajectory (target)."""
+
+
+@dataclass(frozen=True)
+class TrajectoryMeasuredSample(TrajectorySample):
     """One timed measurement of actual robot state for tracking."""
-
-    time_s: float
-    pose_plan: Pose
-    twist_body: Twist
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "pose_plan", Pose(self.pose_plan))
-        object.__setattr__(self, "twist_body", Twist(self.twist_body))
-
-
-__all__ = [
-    "TrajectoryMeasuredSample",
-    "TrajectoryReferenceSample",
-]

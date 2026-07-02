@@ -14,9 +14,8 @@
 
 """Holonomic body-frame command limits and saturation.
 
-Limits apply to the same planar ``cmd_vel`` convention as
-``trajectory_metrics.commanded_planar_speed`` (``linear.x``, ``linear.y`` in
-the body frame) and to yaw rate ``angular.z``.
+Limits apply to planar ``cmd_vel`` (``linear.x``, ``linear.y`` in the body
+frame) and to yaw rate ``angular.z``.
 
 Non-planar components (``linear.z``, ``angular.x``, ``angular.y``) are not
 slew-limited here; they are passed through from ``raw_cmd`` so a future
@@ -116,9 +115,3 @@ def clamp_holonomic_cmd_vel(
             wz,
         ),
     )
-
-
-__all__ = [
-    "HolonomicCommandLimits",
-    "clamp_holonomic_cmd_vel",
-]

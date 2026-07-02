@@ -12,10 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass
-
 import numpy as np
-from numpy.typing import NDArray
 
 from dimos.core.global_config import GlobalConfig
 from dimos.msgs.geometry_msgs.Pose import Pose
@@ -23,13 +20,19 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.navigation.holonomic_trajectory_controller.trajectory_command_limits import (
+from dimos.navigation.dannav.holonomic_tc.command_limits import (
     HolonomicCommandLimits,
     clamp_holonomic_cmd_vel,
 )
-from dimos.navigation.holonomic_trajectory_controller.trajectory_holonomic_tracking_controller import HolonomicTrackingController
-from dimos.navigation.holonomic_trajectory_controller.trajectory_run_profiles import RunProfile
-from dimos.navigation.holonomic_trajectory_controller.trajectory_types import TrajectoryMeasuredSample, TrajectoryReferenceSample
+from dimos.navigation.dannav.holonomic_tc.holonomic_tracking_controller import (
+    HolonomicTrackingController,
+)
+from dimos.navigation.dannav.holonomic_tc.run_profiles import RunProfile
+from dimos.navigation.dannav.holonomic_tc.types import (
+    TrajectoryMeasuredSample,
+    TrajectoryReferenceSample,
+)
+from dimos.utils.transform_utils import normalize_angle
 
 
 def _pose_from_xy_yaw(x: float, y: float, yaw: float) -> Pose:
@@ -43,32 +46,8 @@ def _pose_from_pose_stamped(odom: PoseStamped) -> Pose:
     return Pose(odom.position, odom.orientation)
 
 
-@dataclass(frozen=True)
-class CommandEnvelopeOverrides:
-    """Run-profile command caps that replace the GlobalConfig defaults.
-
-    The planar speed cap keeps tracking ``set_speed`` (the geometry-capped
-    path speed); these are the remaining saturation limits a movement
-    envelope owns.
-    """
-
-    max_yaw_rate_rad_s: float
-    max_planar_cmd_accel_m_s2: float
-    max_yaw_accel_rad_s2: float
-
-
-def command_envelope_overrides_for_profile(profile: RunProfile) -> CommandEnvelopeOverrides:
-    """Map a :class:`RunProfile` to planner command caps (planar speed excluded)."""
-    limits = profile.command_limits()
-    return CommandEnvelopeOverrides(
-        max_yaw_rate_rad_s=limits.max_yaw_rate_rad_s,
-        max_planar_cmd_accel_m_s2=limits.max_planar_linear_accel_m_s2,
-        max_yaw_accel_rad_s2=limits.max_yaw_accel_rad_s2,
-    )
-
-
 class HolonomicPathController:
-    """Follow path segments using the holonomic tracking law (P3-3, issue 921).
+    """Follow path segments using the holonomic tracking law.
 
     Wraps :class:`HolonomicTrackingController` in the :class:`Controller` seam
     (lookahead + odom). Rotations in place use the same law with a fixed
@@ -78,6 +57,7 @@ class HolonomicPathController:
     def __init__(
         self,
         global_config: GlobalConfig,
+        profile: RunProfile,
         speed: float,
         control_frequency: float,
         k_position_per_s: float,
@@ -86,6 +66,7 @@ class HolonomicPathController:
         k_yaw_rate_per_s: float = 0.0,
     ) -> None:
         self._global_config = global_config
+        self._profile = profile
         self._speed = float(speed)
         self._control_frequency = float(control_frequency)
         self._inner = HolonomicTrackingController(
@@ -94,7 +75,6 @@ class HolonomicPathController:
             k_velocity_per_s=k_velocity_per_s,
             k_yaw_rate_per_s=k_yaw_rate_per_s,
         )
-        self._envelope_overrides: CommandEnvelopeOverrides | None = None
         self._limits = self._make_limits()
         self._inner.configure(self._limits)
         self._previous_cmd = Twist()
@@ -104,51 +84,20 @@ class HolonomicPathController:
         self._limits = self._make_limits()
         self._inner.configure(self._limits)
 
-    def set_command_envelope(self, overrides: CommandEnvelopeOverrides | None) -> None:
-        """Apply (or clear, with ``None``) a run profile's command caps."""
-        self._envelope_overrides = overrides
+    def set_profile(self, profile: RunProfile) -> None:
+        """Apply a run profile's command saturation caps."""
+        self._profile = profile
         self._limits = self._make_limits()
         self._inner.configure(self._limits)
 
     def _make_limits(self) -> HolonomicCommandLimits:
-        overrides = self._envelope_overrides
-        if overrides is not None:
-            return HolonomicCommandLimits(
-                max_planar_speed_m_s=self._speed,
-                max_yaw_rate_rad_s=overrides.max_yaw_rate_rad_s,
-                max_planar_linear_accel_m_s2=overrides.max_planar_cmd_accel_m_s2,
-                max_yaw_accel_rad_s2=overrides.max_yaw_accel_rad_s2,
-            )
-        max_yaw_rate = self._global_config.local_planner_max_yaw_rate_rad_s
+        profile = self._profile
         return HolonomicCommandLimits(
             max_planar_speed_m_s=self._speed,
-            max_yaw_rate_rad_s=self._speed if max_yaw_rate is None else float(max_yaw_rate),
-            max_planar_linear_accel_m_s2=self._global_config.local_planner_max_planar_cmd_accel_m_s2,
-            max_yaw_accel_rad_s2=self._global_config.local_planner_max_yaw_accel_rad_s2,
+            max_yaw_rate_rad_s=profile.max_yaw_rate_rad_s,
+            max_planar_linear_accel_m_s2=profile.max_planar_cmd_accel_m_s2,
+            max_yaw_accel_rad_s2=profile.max_yaw_accel_rad_s2,
         )
-
-    def advance(
-        self,
-        lookahead_point: NDArray[np.float64],
-        current_odom: PoseStamped,
-        measured_body_twist: Twist | None = None,
-    ) -> Twist:
-        current_pos = np.array([float(current_odom.position.x), float(current_odom.position.y)])
-        direction = np.asarray(lookahead_point, dtype=np.float64) - current_pos
-        distance = float(np.linalg.norm(direction))
-
-        if distance < 1e-6 or not np.isfinite(distance):
-            return Twist()
-
-        ref_yaw = float(np.arctan2(direction[1], direction[0]))
-        ref_pose = _pose_from_xy_yaw(float(lookahead_point[0]), float(lookahead_point[1]), ref_yaw)
-        # Feedforward along the reference heading in the body frame of the target pose.
-        ref_ff = Twist(
-            linear=Vector3(self._speed, 0.0, 0.0),
-            angular=Vector3(0.0, 0.0, 0.0),
-        )
-        ref = TrajectoryReferenceSample(0.0, ref_pose, ref_ff)
-        return self.advance_reference(ref, current_odom, measured_body_twist)
 
     def advance_reference(
         self,
@@ -179,7 +128,7 @@ class HolonomicPathController:
             return self._limit_output(self._apply_sim_angular(t))
 
         robot_yaw = float(current_odom.orientation.euler[2])
-        target_yaw = float(np.arctan2(np.sin(robot_yaw + yaw_error), np.cos(robot_yaw + yaw_error)))
+        target_yaw = float(normalize_angle(robot_yaw + yaw_error))
         p = _pose_from_xy_yaw(
             float(current_odom.position.x),
             float(current_odom.position.y),
@@ -194,9 +143,6 @@ class HolonomicPathController:
     def reset_errors(self) -> None:
         self._inner.reset()
         self._previous_cmd = Twist()
-
-    def reset_yaw_error(self, value: float) -> None:
-        del value
 
     def _apply_sim_angular(self, t: Twist) -> Twist:
         wz = float(t.angular.z)

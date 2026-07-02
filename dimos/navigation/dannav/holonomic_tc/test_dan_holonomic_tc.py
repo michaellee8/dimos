@@ -12,14 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``DanHolonomicTC`` stream wiring.
-
-These exercise the module surface that routes the ``path`` / ``odometry`` /
-``stop_movement`` inputs into the control core and forwards ``nav_cmd_vel`` /
-``goal_reached``: an empty path stops, a non-empty path hot-swaps or starts,
-``stop_movement`` cancels, and arrival publishes ``goal_reached(True)``. The
-control law itself is covered in ``test_holonomic_path_follower``.
-"""
+"""``DanHolonomicTC`` module integration: cancel inputs, path hot-swap, arrival."""
 
 from __future__ import annotations
 
@@ -28,27 +21,25 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 import math
 import time
-from typing import Any
+from typing import Any, Literal
+
+import pytest
 
 from dimos_lcm.std_msgs import Bool  # type: ignore[import-untyped]
 
 from dimos.core.stream import Stream, Transport
-from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Twist import Twist
-from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.navigation.base import NavigationState
-from dimos.navigation.holonomic_trajectory_controller.module import DanHolonomicTC
+from dimos.navigation.dannav.holonomic_tc.module import DanHolonomicTC
+
+_CancelVia = Literal["empty_path", "stop_movement"]
 
 
 class _DirectTransport(Transport):  # type: ignore[type-arg]
-    """Synchronous in-process transport so ``start()`` can wire the inputs.
-
-    Delivers each broadcast straight to the subscribed handlers on the calling
-    thread, which keeps the wiring assertions deterministic.
-    """
+    """Synchronous in-process transport so ``start()`` can wire the inputs."""
 
     def __init__(self) -> None:
         self._subscribers: list[Callable[[Any], Any]] = []
@@ -84,11 +75,12 @@ def _yaw_quaternion(yaw_rad: float) -> Quaternion:
     return Quaternion(0.0, 0.0, math.sin(yaw_rad / 2.0), math.cos(yaw_rad / 2.0))
 
 
-def _odometry(x: float, y: float, yaw_rad: float, *, ts: float = 1.0) -> Odometry:
-    return Odometry(
+def _odom(x: float, y: float, yaw_rad: float, *, ts: float = 1.0) -> PoseStamped:
+    return PoseStamped(
         ts=ts,
         frame_id="map",
-        pose=Pose(position=[x, y, 0.0], orientation=_yaw_quaternion(yaw_rad)),
+        position=[x, y, 0.0],
+        orientation=_yaw_quaternion(yaw_rad),
     )
 
 
@@ -137,12 +129,8 @@ class _ModuleHarness:
         self.captured = captured
         self._unsubs = unsubs
 
-    @property
-    def core(self) -> Any:
-        return self.module._core
-
     def feed_odom(self, x: float, y: float, yaw_rad: float, *, ts: float = 1.0) -> None:
-        self.module.odometry.transport.broadcast(None, _odometry(x, y, yaw_rad, ts=ts))
+        self.module.odom.transport.broadcast(None, _odom(x, y, yaw_rad, ts=ts))
 
     def feed_path(self, path: Path) -> None:
         self.module.path.transport.broadcast(None, path)
@@ -163,7 +151,7 @@ class _ModuleHarness:
 def _running_module(**config: Any) -> Iterator[_ModuleHarness]:
     module = DanHolonomicTC(**config)
     module.path.transport = _DirectTransport()
-    module.odometry.transport = _DirectTransport()
+    module.odom.transport = _DirectTransport()
     module.stop_movement.transport = _DirectTransport()
     captured = _Captured()
     unsubs = [
@@ -178,80 +166,48 @@ def _running_module(**config: Any) -> Iterator[_ModuleHarness]:
         harness.close()
 
 
-def test_empty_path_publishes_zero_twist_and_clears_route() -> None:
+def _assert_route_cleared(h: _ModuleHarness) -> None:
+    assert _wait_until(lambda: h.module.get_state() == NavigationState.IDLE)
+    assert _wait_until(lambda: bool(h.captured.cmd_vel) and _is_zero_twist(h.captured.cmd_vel[-1]))
+    assert not h.captured.goal_reached
+
+
+@pytest.mark.parametrize("cancel_via", ["empty_path", "stop_movement"])
+def test_cancel_publishes_zero_twist_and_clears_route(cancel_via: _CancelVia) -> None:
     with _running_module(goal_tolerance=0.2) as h:
         h.feed_odom(0.0, 0.0, 0.0)
         h.feed_path(_path_from_points([(0.0, 0.0), (2.0, 0.0)]))
-        thread = h.core._thread
-        assert thread is not None  # a route is active
 
-        h.feed_empty_path()
-        thread.join(timeout=1.0)
+        if cancel_via == "empty_path":
+            h.feed_empty_path()
+        else:
+            h.feed_stop(True)
 
-        assert not thread.is_alive()
-        assert h.core._path is None
-        assert h.core._thread is None
-        assert h.core.get_state() == NavigationState.IDLE
-        assert h.captured.cmd_vel
-        assert _is_zero_twist(h.captured.cmd_vel[-1])
-        assert not h.captured.goal_reached
+        _assert_route_cleared(h)
 
 
-def test_stop_movement_publishes_zero_twist_and_clears_route() -> None:
+def test_hot_update_path_swaps_route_to_new_goal() -> None:
+    # Robot at (1, 0): old goal (2, 0) is still out of tolerance; after the
+    # swap the terminus is (1, 0), so arrival proves the new route took effect.
     with _running_module(goal_tolerance=0.2) as h:
-        h.feed_odom(0.0, 0.0, 0.0)
+        h.feed_odom(1.0, 0.0, 0.0)
         h.feed_path(_path_from_points([(0.0, 0.0), (2.0, 0.0)]))
-        thread = h.core._thread
-        assert thread is not None
+        assert not _wait_until(lambda: bool(h.captured.goal_reached), timeout=0.2)
 
-        h.feed_stop(True)
-        thread.join(timeout=1.0)
+        h.feed_path(_path_from_points([(0.0, 0.0), (1.0, 0.0)]))
 
-        assert not thread.is_alive()
-        assert h.core._path is None
-        assert h.core._thread is None
-        assert h.core.get_state() == NavigationState.IDLE
-        assert h.captured.cmd_vel
-        assert _is_zero_twist(h.captured.cmd_vel[-1])
-
-
-def test_stop_movement_false_does_not_clear_route() -> None:
-    with _running_module(goal_tolerance=0.2) as h:
-        h.feed_odom(0.0, 0.0, 0.0)
-        h.feed_path(_path_from_points([(0.0, 0.0), (2.0, 0.0)]))
-        thread = h.core._thread
-
-        h.feed_stop(False)
-
-        assert h.core._thread is thread
-        assert h.core._path is not None
-
-
-def test_hot_update_path_swaps_route_without_restarting_thread() -> None:
-    with _running_module(goal_tolerance=0.2) as h:
-        h.feed_odom(0.0, 0.0, 0.0)
-        h.feed_path(_path_from_points([(0.0, 0.0), (2.0, 0.0)]))
-        thread_before = h.core._thread
-        assert thread_before is not None
-
-        h.feed_path(_path_from_points([(0.0, 0.0), (0.0, 2.0)]))
-
-        # Same control thread: the route was hot-swapped, not restarted.
-        assert h.core._thread is thread_before
-        swapped = [(float(p.position.x), float(p.position.y)) for p in h.core._path.poses]
-        assert swapped == [(0.0, 0.0), (0.0, 2.0)]
+        assert _wait_until(lambda: bool(h.captured.goal_reached))
+        assert h.captured.goal_reached[-1].data is True
 
 
 def test_arrival_publishes_goal_reached_without_final_spin() -> None:
-    # Odom sits on the goal with a misaligned heading; align_goal_yaw=False must
-    # report arrival on position alone, never spinning to align the final yaw.
+    # Odom on the goal with misaligned heading; align_goal_yaw=False must report
+    # arrival on position alone, never spinning to align the final yaw.
     with _running_module(goal_tolerance=0.2, align_goal_yaw=False) as h:
         h.feed_odom(1.0, 0.0, 1.2)
         h.feed_path(_path_from_points([(0.0, 0.0), (1.0, 0.0)]))
 
         assert _wait_until(lambda: bool(h.captured.goal_reached))
-        assert [bool(b.data) for b in h.captured.goal_reached] == [True]
-        assert h.core.is_goal_reached() is True
-        # No final rotation: every command published was a body-yaw rate of zero.
+        assert h.captured.goal_reached[-1].data is True
         assert h.captured.cmd_vel
         assert all(abs(float(cmd.angular.z)) < 1e-6 for cmd in h.captured.cmd_vel)

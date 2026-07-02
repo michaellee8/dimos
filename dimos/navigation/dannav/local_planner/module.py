@@ -15,21 +15,12 @@
 """Path-stream middleware between ``MLSPlannerNative`` and ``DanHolonomicTC``.
 
 ``MLSPlannerNative`` re-roots and re-emits a path on every lidar frame: the
-stream is sparse, unsmoothed, and unthrottled. The old ``GlobalPlanner`` shaped
-that stream before the tracker saw it (replan throttle, smoothing/resample,
-veer-triggered replan); those were deleted with ``dannav`` and never reproduced.
-
-``DanLocalPlanner`` reinstates them in a transport-free core (``_ReplanGate``)
-wrapped in a thin ``Module``, without touching the Rust planner. Every feature
-lives in :class:`DanLocalPlannerConfig` and defaults to off, so the module is a
-pass-through until configured:
+stream is sparse, unsmoothed, and unthrottled. 
 
 - ``lock_replan``: commit-window throttle (forward a path only at commit
   moments, suppress in between so the follower keeps a stable lookahead).
 - ``resample_spacing_m`` / ``smoothing_window``: smooth + uniform resample
   the committed path (``smooth_resample_path``).
-- ``max_path_deviation_m``: veer override (commit the latest replan when the
-  robot drifts off the committed path).
 
 :class:`_ReplanGate` tracks the committed path with a :class:`PathDistancer`
 and forwards a fresh planner path only when the robot has advanced
@@ -55,9 +46,9 @@ from dimos.core.stream import In, Out
 from dimos.mapping.occupancy.path_resampling import smooth_resample_path
 from dimos.msgs.geometry_msgs.PointStamped import PointStamped
 from dimos.msgs.geometry_msgs.Pose import Pose
-from dimos.msgs.nav_msgs.Odometry import Odometry
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.nav_msgs.Path import Path
-from dimos.navigation.holonomic_trajectory_controller.path_distancer import PathDistancer
+from dimos.navigation.dannav.geometry.path_distancer import PathDistancer
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -72,9 +63,8 @@ class DanLocalPlannerConfig(ModuleConfig):
 
     lock_replan: float = 0.0  # commit-window length in m; 0 disables gating
     goal_commit_tolerance_m: float = 0.3  # match a path end to the clicked goal
-    resample_spacing_m: float = 0.1  # resample spacing in m; 0 disables smoothing
+    resample_spacing_m: float = 0.0  # resample spacing in m; 0 disables smoothing
     smoothing_window: int = 100  # moving-average window
-    max_path_deviation_m: float | None = None  # veer override; None disables
 
 
 class _ReplanGate:
@@ -95,8 +85,8 @@ class _ReplanGate:
 
     def __init__(self, config: DanLocalPlannerConfig) -> None:
         self._cfg = config
-        # Latest robot xy from odometry; progress and veer deviation are measured
-        # against the committed path with it.
+        # Latest robot xy from odometry; arc-length progress is measured against
+        # the committed path with it.
         self._robot_xy: NDArray[np.float64] | None = None
         # xy of the most recent finite click, armed until a path ends at it
         # (fresh-click commit) or a cancel disarms it.
@@ -107,7 +97,7 @@ class _ReplanGate:
         self._committed: PathDistancer | None = None
         self._anchor_progress_m: float = 0.0
 
-    def on_odom(self, odom: Odometry) -> None:
+    def on_odom(self, odom: PoseStamped) -> None:
         self._robot_xy = np.array([odom.position.x, odom.position.y], dtype=float)
 
     def on_goal(self, goal: PointStamped) -> None:
@@ -157,8 +147,8 @@ class _ReplanGate:
     def _commit(self, path: Path) -> Path:
         """Adopt ``path`` as the committed path and return it for publishing.
 
-        Smoothing reshapes ``path`` here before it is stored, so progress and
-        veer deviation are measured against the same polyline the tracker follows.
+        Smoothing reshapes ``path`` here before it is stored, so progress is
+        measured against the same polyline the tracker follows.
         """
         smoothed = self._smooth(path)
         self._committed = PathDistancer(smoothed)
@@ -218,14 +208,14 @@ class DanLocalPlanner(Module):
     """Gate and shape ``MLSPlannerNative``'s path stream for ``DanHolonomicTC``.
 
     Sits between the planner output (remapped to ``planner_path``) and the
-    follower's ``path`` input. Forwards the paths :class:`_ReplanGate` commits;
-    ``DanHolonomicTC`` keeps its unchanged ``BasicPathFollower`` surface.
+    follower's ``path`` input. Forwards the paths :class:`_ReplanGate` commits
+    unchanged to ``DanHolonomicTC``.
     """
 
     config: DanLocalPlannerConfig
 
     planner_path: In[Path]  # from MLSPlannerNative.path (remapped)
-    odometry: In[Odometry]  # from PoseOdomRelay.odometry
+    odom: In[PoseStamped]  # from GO2Connection.odom
     goal: In[PointStamped]  # from MovementManager.goal; the click/cancel signal
 
     path: Out[Path]  # to DanHolonomicTC.path
@@ -239,13 +229,13 @@ class DanLocalPlanner(Module):
         super().start()
         # Subscribe odom and goal before paths so the gate has the latest robot
         # pose and armed goal when a planner path arrives.
-        self.register_disposable(Disposable(self.odometry.subscribe(self._on_odometry)))
+        self.register_disposable(Disposable(self.odom.subscribe(self._on_odom)))
         self.register_disposable(Disposable(self.goal.subscribe(self._on_goal)))
         self.register_disposable(
             Disposable(self.planner_path.subscribe(self._on_planner_path))
         )
 
-    def _on_odometry(self, msg: Odometry) -> None:
+    def _on_odom(self, msg: PoseStamped) -> None:
         self._gate.on_odom(msg)
 
     def _on_goal(self, msg: PointStamped) -> None:
