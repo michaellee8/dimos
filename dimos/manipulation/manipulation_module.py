@@ -25,6 +25,7 @@ Subclass PickAndPlaceModule (pick_and_place_module.py) adds perception integrati
 from __future__ import annotations
 
 from enum import Enum
+import math
 import threading
 import time
 from typing import TYPE_CHECKING, Any, TypeAlias
@@ -85,6 +86,15 @@ if TYPE_CHECKING:
     from dimos.core.rpc_client import RPCClient
 
 logger = setup_logger()
+
+# Interactive (gizmo) evaluation criterion, matching the original reachability
+# demo viewer: success is position-gated at 2 cm and orientation is a soft
+# task cost, never pass/fail. A 7-DOF arm frequently cannot hit an arbitrary
+# gizmo orientation exactly; failing the whole pose for a few degrees made
+# clearly-reachable targets read as unreachable. The achieved errors are
+# reported in the result so the panel can display them.
+_EVAL_POSITION_TOLERANCE_M = 0.02
+_EVAL_ORIENTATION_TOLERANCE_RAD = math.pi
 
 # Composite type aliases for readability (using semantic IDs from planning.spec)
 RobotEntry: TypeAlias = tuple[WorldRobotID, RobotModelConfig, JointTrajectoryGenerator]
@@ -509,6 +519,8 @@ class ManipulationModule(Module):
         pose: Pose,
         seed: JointState,
         check_collision: bool,
+        position_tolerance: float = 0.001,
+        orientation_tolerance: float = 0.01,
         on_step: IKStepCallback | None = None,
     ) -> IKResult:
         """Run the configured kinematics backend for a world-frame pose.
@@ -536,6 +548,8 @@ class ManipulationModule(Module):
             robot_id=robot_id,
             target_pose=target_pose,
             seed=seed,
+            position_tolerance=position_tolerance,
+            orientation_tolerance=orientation_tolerance,
             check_collision=check_collision,
             on_step=on_step,
         )
@@ -928,7 +942,15 @@ class ManipulationModule(Module):
         # kinematic solution phasing through the torso. If every seed
         # collides, the best (colliding) candidate is still returned and
         # reported as COLLISION below.
-        ik = self._solve_ik_for_pose(robot_id, pose, current, check_collision=True)
+        ik = self._solve_ik_for_pose(
+            robot_id,
+            pose,
+            current,
+            check_collision=True,
+            position_tolerance=_EVAL_POSITION_TOLERANCE_M,
+            orientation_tolerance=_EVAL_ORIENTATION_TOLERANCE_RAD,
+            on_step=on_step,
+        )
         joint_state = JointState(ik.joint_state) if ik.joint_state else None
         collision_free = bool(
             joint_state is not None and self._world_monitor.is_state_valid(robot_id, joint_state)

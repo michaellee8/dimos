@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from math import radians
+from math import degrees, radians
 from typing import TypeAlias
 
 import numpy as np
@@ -171,6 +171,10 @@ class ViserPanelGui:
 
     def _build_panel_controls(self, gui: GuiApi) -> None:
         self._handles["status"] = gui.add_markdown("Starting manipulation panel...")
+        # Live IK verdict: streams "solving..." with the current error during
+        # the search, then the final reached/FAILED verdict with position and
+        # rotation error magnitudes.
+        self._handles["ik_status"] = gui.add_markdown("IK: idle")
         robots = self.adapter.list_robots()
         self._build_scene_controls(gui)
         self._build_reachability_controls(gui)
@@ -641,11 +645,15 @@ class ViserPanelGui:
         """
         robot_id = self.adapter.robot_id_for_name(request.robot_name)
 
-        def on_step(guess: JointState, _position_error: float, _attempt: int) -> bool:
+        def on_step(guess: JointState, position_error: float, attempt: int) -> bool:
             if self._closed or request.sequence_id != self.state.latest_sequence_id:
                 return True
             if self.scene is not None and robot_id is not None:
                 self.scene.set_target_joints(str(robot_id), guess.name, list(guess.position))
+            self._set_handle_value(
+                "ik_status",
+                f"IK: solving... attempt {attempt + 1} | pos {position_error * 1000:.0f} mm",
+            )
             return False
 
         return on_step
@@ -661,6 +669,8 @@ class ViserPanelGui:
         success = bool(result.get("success", False))
         self.state.feasibility.status = self._feasibility_status(result, success, collision_free)
         self.state.feasibility.message = str(result.get("message", ""))
+        if request.source == "cartesian":
+            self._set_handle_value("ik_status", self._ik_verdict_text(result, collision_free))
         self.state.target_status = (
             TargetStatus.FEASIBLE if success and collision_free else TargetStatus.INFEASIBLE
         )
@@ -949,6 +959,28 @@ class ViserPanelGui:
         px, py, pz = (float(value) for value in target.position)
         qw, qx, qy, qz = (float(value) for value in target.wxyz)
         return Pose({"position": [px, py, pz], "orientation": [qx, qy, qz, qw]})
+
+    @staticmethod
+    def _ik_verdict_text(result: TargetEvaluation, collision_free: bool) -> str:
+        """Final IK verdict with error magnitudes, like the original viewer.
+
+        Distinguishes "close but self-colliding" from "did not reach" so a
+        red ghost is diagnosable at a glance.
+        """
+        status = str(result.get("status", "")).upper()
+        reached = status in {"SUCCESS", "COLLISION"}
+        verdict = "reached" if reached else "FAILED"
+        if not collision_free:
+            verdict += ", SELF-COLLISION"
+        pos = result.get("position_error")
+        rot = result.get("orientation_error")
+        errors = []
+        if isinstance(pos, (int, float)):
+            errors.append(f"pos {float(pos) * 1000:.0f} mm")
+        if isinstance(rot, (int, float)):
+            errors.append(f"rot {degrees(float(rot)):.0f} deg")
+        suffix = f" ({', '.join(errors)})" if errors else ""
+        return f"IK {verdict}{suffix}"
 
     def _feasibility_status(
         self, result: TargetEvaluation, success: bool, collision_free: bool
