@@ -68,6 +68,11 @@ class Go2HostedConnectionConfig(ConnectionConfig):
     # zero-velocity stop. Off by default: a WiFi blip shouldn't drop the robot
     # mid-patrol; the 0.2s cmd_vel deadman + stop_movement cover the base.
     damp_on_operator_lost: bool = False
+    # Publish-side video caps (0 = source rate/resolution). Applied at the mux,
+    # so they hold on both transports: capping here beats letting congestion
+    # show up as encoder drops/freezes on a constrained uplink.
+    video_max_width: int = 0
+    video_max_fps: float = 0.0
 
 
 # Frame-embedded capture time for glass-to-glass latency, read back by the
@@ -131,6 +136,7 @@ class Go2HostedConnection(GO2Connection):
         # GO2Connection.start() stands the robot up, hence the initial posture.
         self._posture = "StandReady"
         self._obstacle_avoidance = True  # corrected from config.g in start()
+        self._last_mux_pub = 0.0  # monotonic stamp for the video_max_fps cap
 
     @rpc
     def start(self) -> None:
@@ -169,10 +175,18 @@ class Go2HostedConnection(GO2Connection):
         with self._cam_lock:
             self._cam_frames[cam] = img
             shown = cam in self._cam_selected
-        if shown:
-            out = self._composite()
-            if out is not None:
-                self.mux_image.publish(out)
+        if not shown:
+            return
+        # FPS cap before any mux/encode work — skipping here is nearly free.
+        max_fps = self.config.video_max_fps
+        if max_fps > 0:
+            now = time.monotonic()
+            if now - self._last_mux_pub < 1.0 / max_fps:
+                return
+            self._last_mux_pub = now
+        out = self._composite()
+        if out is not None:
+            self.mux_image.publish(out)
 
     def _composite(self) -> Image | None:
         with self._cam_lock:
@@ -181,7 +195,7 @@ class Go2HostedConnection(GO2Connection):
         if not imgs:
             return None
         if len(imgs) == 1:
-            return self._stamp(imgs[0])
+            return self._stamp(self._downscale(imgs[0]))
         import cv2
 
         target_h = min(im.data.shape[0] for im in imgs)
@@ -192,8 +206,24 @@ class Go2HostedConnection(GO2Connection):
                 cv2.resize(im.data, (int(w * target_h / h), target_h)) if h != target_h else im.data
             )
         return self._stamp(
-            Image(data=np.hstack(tiles), format=imgs[0].format, frame_id="camera_mux")
+            self._downscale(
+                Image(data=np.hstack(tiles), format=imgs[0].format, frame_id="camera_mux")
+            )
         )
+
+    def _downscale(self, img: Image) -> Image:
+        """Cap publish width at config.video_max_width (0 = off). Runs before
+        _stamp so the strip's 16px cells stay decodable at the sent size."""
+        max_w = self.config.video_max_width
+        if max_w <= 0 or img.data.ndim < 2:
+            return img
+        h, w = img.data.shape[:2]
+        if w <= max_w:
+            return img
+        import cv2
+
+        out = cv2.resize(img.data, (max_w, max(1, int(h * max_w / w))))
+        return Image(data=out, format=img.format, frame_id=img.frame_id)
 
     def _stamp(self, img: Image) -> Image:
         """Append a bottom strip encoding capture time as B/W cells (benchmark).

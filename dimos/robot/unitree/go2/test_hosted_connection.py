@@ -65,8 +65,18 @@ def _bare_connection() -> Go2HostedConnection:
     conn._posture = "StandReady"
     conn._obstacle_avoidance = True
     conn._cam_selected = ["cam1"]
+    conn._cam_frames = {}
+    conn._cam_lock = threading.Lock()
+    conn._last_mux_pub = 0.0
+    conn.mux_image = MagicMock()
     conn._cmd_stats = SimpleNamespace(snapshot=lambda: None)
-    conn.config = SimpleNamespace(cmd_stale_after_sec=0.5, damp_on_operator_lost=False)
+    conn.config = SimpleNamespace(
+        cmd_stale_after_sec=0.5,
+        damp_on_operator_lost=False,
+        latency_stamp=False,
+        video_max_width=0,
+        video_max_fps=0.0,
+    )
     # Command execution plane (normally built in start()).
     conn._cmd_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Go2CmdTest")
     conn._cmd_pending = 0
@@ -393,6 +403,56 @@ def test_failed_posture_command_leaves_posture(monkeypatch: pytest.MonkeyPatch) 
     conn._handle_sport_cmd({"name": "StandDown", "nonce": 3})
     _wait_for(lambda: (3, False) in acks)
     assert conn._posture == "StandReady"
+
+
+# ─── publish-side video caps (mux fps / width) ───────────────────────
+
+
+def _img(w: int, h: int):
+    import numpy as np
+
+    from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
+
+    return Image(data=np.zeros((h, w, 3), dtype=np.uint8), format=ImageFormat.RGB, frame_id="t")
+
+
+def test_video_max_fps_caps_mux_publish_rate() -> None:
+    conn = _bare_connection()
+    conn.config.video_max_fps = 5.0  # 200ms budget — two immediate frames → one publish
+
+    conn._on_cam("cam1", _img(64, 48))
+    conn._on_cam("cam1", _img(64, 48))
+
+    assert conn.mux_image.publish.call_count == 1
+
+
+def test_video_max_fps_zero_publishes_every_frame() -> None:
+    conn = _bare_connection()
+
+    conn._on_cam("cam1", _img(64, 48))
+    conn._on_cam("cam1", _img(64, 48))
+
+    assert conn.mux_image.publish.call_count == 2
+
+
+def test_video_max_width_downscales_composite() -> None:
+    conn = _bare_connection()
+    conn.config.video_max_width = 320
+
+    conn._on_cam("cam1", _img(640, 480))
+
+    out = conn.mux_image.publish.call_args[0][0]
+    assert out.data.shape[1] == 320
+    assert out.data.shape[0] == 240  # aspect preserved
+
+
+def test_video_max_width_zero_keeps_source_resolution() -> None:
+    conn = _bare_connection()
+
+    conn._on_cam("cam1", _img(640, 480))
+
+    out = conn.mux_image.publish.call_args[0][0]
+    assert out.data.shape[:2] == (480, 640)
 
 
 # ─── E-STOP latch + operator-loss safety ─────────────────────────────

@@ -81,6 +81,10 @@ class LiveKitBrokerConfig(ProviderConfig):
     robot_id: str | None = None
     robot_name: str | None = None
     heartbeat_hz: float = 1.0
+    # Publish-side encoder caps (0 = LiveKit defaults). Bounds uplink usage on
+    # constrained links instead of letting congestion surface as drops/freezes.
+    video_max_bitrate_bps: int = 0
+    video_max_fps: float = 0.0
 
     def _create(self) -> LiveKitBrokerProvider:
         return LiveKitBrokerProvider(self)
@@ -126,10 +130,18 @@ class _VideoPublisher:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._source: rtc.VideoSource | None = None
         self._publish_task: asyncio.Task[None] | None = None
+        # (max_bitrate_bps, max_fps); zeros = LiveKit defaults.
+        self._encoding: tuple[int, float] = (0, 0.0)
 
-    def bind(self, room: rtc.Room, loop: asyncio.AbstractEventLoop) -> None:
+    def bind(
+        self,
+        room: rtc.Room,
+        loop: asyncio.AbstractEventLoop,
+        encoding: tuple[int, float] = (0, 0.0),
+    ) -> None:
         self._room = room
         self._loop = loop
+        self._encoding = encoding
 
     def reset(self) -> None:
         """Drop per-session state so a later bind() (reconnect) re-publishes the
@@ -166,6 +178,12 @@ class _VideoPublisher:
         try:
             track = rtc.LocalVideoTrack.create_video_track("camera", self._source)
             opts = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA)
+            max_bitrate, max_fps = self._encoding
+            if max_bitrate > 0 or max_fps > 0:
+                opts.video_encoding = rtc.VideoEncoding(
+                    max_bitrate=max_bitrate or 3_000_000,
+                    max_framerate=max_fps or 30.0,
+                )
             await self._room.local_participant.publish_track(track, opts)
         except Exception:
             # Clear _source so the next captured frame retries publish, instead
@@ -259,7 +277,11 @@ class LiveKitBrokerProvider(AsyncProviderBase):
             self._notify_operator_lost()
 
         await self._room.connect(url, token)
-        self._video.bind(self._room, asyncio.get_running_loop())
+        self._video.bind(
+            self._room,
+            asyncio.get_running_loop(),
+            encoding=(self._config.video_max_bitrate_bps, self._config.video_max_fps),
+        )
         logger.info(
             "LiveKit broker provider connected: session=%s room=%s robot=%s",
             self.session_id,
