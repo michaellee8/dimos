@@ -948,7 +948,12 @@ function computeMeshBounds(meshes) {
   for (const mesh of meshes) {
     if (!mesh.getTotalVertices || mesh.getTotalVertices() === 0) continue;
     mesh.computeWorldMatrix(true);
-    mesh.refreshBoundingInfo(true);
+    // Do NOT refreshBoundingInfo() here: it recomputes bounds from the raw
+    // vertex buffer, which for KHR_mesh_quantization GLBs (the babylon cook
+    // profile quantizes) yields raw integer coords (0..16383) — the camera
+    // then auto-frames a phantom ~18 km scene. The loader's bounding info is
+    // already dequantized and correct; the world-matrix refresh above is all
+    // that's needed.
     const box = mesh.getBoundingInfo().boundingBox;
     min.x = Math.min(min.x, box.minimumWorld.x);
     min.y = Math.min(min.y, box.minimumWorld.y);
