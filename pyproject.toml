@@ -621,6 +621,8 @@ ignore = [
     # Carries both the render and raycast-lidar subsystems; factoring those
     # out of the engine class is a planned follow-up.
     "dimos/simulation/backend/mujoco/engine.py",
+    "dimos/simulation/bridges/babylon/module.py",
+    "dimos/simulation/bridges/babylon/static/app.js",
     "dimos/navigation/cmu_nav/modules/*/main.cpp",
     "dimos/navigation/cmu_nav/common/*.hpp",
 ]

@@ -59,7 +59,7 @@ def test_scene_control_clients_conform() -> None:
     ),
 )
 def test_babylon_backend_satisfies_physics_authority() -> None:
-    from dimos.simulation.backend.babylon.module import BabylonSceneViewerModule
+    from dimos.simulation.bridges.babylon.module import BabylonSceneViewerModule
 
     required = {
         "entity_state_batch",
