@@ -52,9 +52,9 @@ class EEFTwistTaskConfig:
     joint_names: list[str]
     model_path: str | Path
     ee_joint_id: int
+    timeout: float
+    max_joint_delta_deg: float
     priority: int = 10
-    timeout: float = 0.3
-    max_joint_delta_deg: float = 15.0
 
 
 class EEFTwistTask(BaseControlTask):
