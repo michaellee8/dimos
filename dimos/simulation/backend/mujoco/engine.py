@@ -23,6 +23,7 @@ from pathlib import Path
 import threading
 import time
 from typing import TYPE_CHECKING, cast
+import xml.etree.ElementTree as ET
 
 import mujoco
 import mujoco.viewer as viewer  # type: ignore[import-untyped]
@@ -30,7 +31,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
-from dimos.simulation.backend.base import SimulationEngine
+from dimos.simulation.backend.base import CameraFrame, PhysicsEngine
 from dimos.simulation.backend.mujoco.robot_sim_binding import (
     RobotSimBinding,
     RobotSimSpec,
@@ -45,20 +46,20 @@ if TYPE_CHECKING:
 logger = setup_logger()
 
 # Step hook signature: called with the engine instance inside the sim thread.
+# (Narrowed from base.StepHook so hooks can use MuJoCo-level accessors.)
 StepHook = Callable[["MujocoEngine"], None]
-
-_MJJNT_FREE = int(mujoco.mjtJoint.mjJNT_FREE)  # type: ignore[attr-defined]
+_MJJNT_FREE = int(mujoco.mjtJoint.mjJNT_FREE)
+_MUJOCO_FROM_BINARY_PATH = "from_binary_path"
 _RESET_WAIT_TIMEOUT_S = 5.0
+_RENDERER_GEOM_HEADROOM = 1024
 
-
-def _camera_name_candidates(camera_name: str) -> tuple[str, ...]:
-    stripped = camera_name.strip("/")
-    candidates = [camera_name]
-    if stripped != camera_name:
-        candidates.append(stripped)
-    elif stripped:
-        candidates.append(f"/{stripped}")
-    return tuple(dict.fromkeys(candidates))
+# How long the sim holds its reset pose (no dynamics integration) waiting for
+# the controller to send its first command before it gives up and free-runs.
+# A torque-controlled robot (motor actuators) has no holding torque until its
+# whole-body controller engages, so without this it would collapse under
+# gravity during the startup window and then be violently recovered — a
+# transient that can hand MuJoCo's solver a rank-deficient contact Hessian.
+_CONTROL_ENGAGE_TIMEOUT_S = 5.0
 
 
 def _camera_ray_directions(width: int, height: int, fovy_degrees: float) -> NDArray[np.float64]:
@@ -86,18 +87,11 @@ class CameraConfig:
     width: int = 640
     height: int = 480
     fps: float = 15.0
-    max_geom: int | None = 10000
+    render_rgb: bool = True
+    render_depth: bool = True
+    scene_option: mujoco.MjvOption | None = None
+    max_geom: int | None = None
     geom_groups: tuple[int, ...] | None = None
-
-
-@dataclass
-class CameraFrame:
-    rgb: NDArray[np.uint8]
-    depth: NDArray[np.float32]
-    cam_pos: NDArray[np.float64]
-    cam_mat: NDArray[np.float64]
-    fovy: float
-    timestamp: float
 
 
 @dataclass
@@ -123,8 +117,8 @@ class RaycastLidarFrame:
 class _CameraRendererState:
     cfg: CameraConfig
     cam_id: int
-    rgb_renderer: mujoco.Renderer
-    depth_renderer: mujoco.Renderer
+    rgb_renderer: mujoco.Renderer | None
+    depth_renderer: mujoco.Renderer | None
     scene_option: mujoco.MjvOption | None
     interval: float
     last_render_time: float = 0.0
@@ -140,7 +134,7 @@ class _RaycastLidarState:
     last_cast_time: float = 0.0
 
 
-class MujocoEngine(SimulationEngine):
+class MujocoEngine(PhysicsEngine):
     """
     MuJoCo simulation engine.
 
@@ -151,10 +145,11 @@ class MujocoEngine(SimulationEngine):
 
     def __init__(
         self,
-        config_path: Path,
-        headless: bool,
+        config_path: Path | None = None,
+        headless: bool = True,
         cameras: list[CameraConfig] | None = None,
         raycast_lidars: list[RaycastLidarConfig] | None = None,
+        meshdir: str | Path | None = None,
         on_before_step: StepHook | None = None,
         on_after_step: StepHook | None = None,
         assets: dict[str, bytes] | None = None,
@@ -165,7 +160,16 @@ class MujocoEngine(SimulationEngine):
         spawn_yaw: float | None = None,
         reset_joint_positions: list[float] | None = None,
     ) -> None:
-        super().__init__(config_path=config_path, headless=headless)
+        """Either ``config_path`` (legacy: load an MJCF/MJB from disk) or
+        ``model`` (preferred: a model already compiled by the caller, e.g.
+        via ``MjSpec.attach`` at sim-module start) must be supplied. When
+        ``model`` is provided, ``config_path`` becomes the metadata-only
+        ``self.config_path`` and the joint-mapping fallback (model-only) is
+        used in place of XML actuator parsing.
+        """
+        if model is None and config_path is None:
+            raise ValueError("MujocoEngine: either model or config_path must be provided")
+        super().__init__(config_path=config_path or Path("/dev/null"), headless=headless)
         self._on_before_step: StepHook | None = on_before_step
         self._on_after_step: StepHook | None = on_after_step
         self._spawn_xy = spawn_xy
@@ -173,30 +177,22 @@ class MujocoEngine(SimulationEngine):
         self._spawn_yaw = spawn_yaw
         self._reset_joint_positions = reset_joint_positions
 
-        model_path = self._resolve_model_path(config_path)
-        binary_model = model_path.suffix.lower() == ".mjb"
+        if model is not None and assets is not None:
+            raise ValueError("MujocoEngine cannot use injected assets with a precompiled model")
         if model is not None:
-            if assets is not None:
-                raise ValueError("MujocoEngine cannot use injected assets with a precompiled model")
             self._model = model
-        elif assets is not None:
-            # MJCFs that reference meshes by bare filename (e.g. menagerie
-            # G1) need the mesh bytes injected by name; from_xml_path can't
-            # find them on disk.
-            if binary_model:
-                raise ValueError("MujocoEngine cannot inject XML assets into a binary MJB model")
-            with open(model_path) as f:
-                xml_str = f.read()
-            self._model = mujoco.MjModel.from_xml_string(xml_str, assets=assets)
-        elif binary_model:
-            self._model = mujoco.MjModel.from_binary_path(str(model_path))  # type: ignore[attr-defined]
+            self._xml_path = None
         else:
-            self._model = mujoco.MjModel.from_xml_path(str(model_path))
-        self._xml_path = model_path
+            assert config_path is not None
+            xml_path = self._resolve_model_path(config_path)
+            self._model = self._load_model(xml_path, meshdir=meshdir, assets=assets)
+            self._xml_path = xml_path
 
         self._data = mujoco.MjData(self._model)
-        mapping_xml_path = None if model is not None or binary_model else self._xml_path
-        self._joint_mappings = build_joint_mappings(mapping_xml_path, self._model)
+        self._lock = threading.Lock()
+        self._reset_requested = threading.Event()
+        self._reset_done_events: list[threading.Event] = []
+        self._joint_mappings = build_joint_mappings(self._xml_path, self._model)
         self._robot_binding: RobotSimBinding | None = None
         if robot_sim_spec is not None:
             self._robot_binding = resolve_robot_sim_binding(
@@ -211,11 +207,21 @@ class MujocoEngine(SimulationEngine):
             self._root_qpos_adr, self._root_qvel_adr = self._find_first_freejoint_adrs()
         timestep = float(self._model.opt.timestep)
         self._control_frequency = 1.0 / timestep if timestep > 0.0 else 100.0
+        self._root_free_qpos_adr: int | None = None
+        self._root_free_qvel_adr: int | None = None
+        self._root_kinematic_pose: tuple[float, float, float] | None = None
+        self._scene_body_ids = self._collect_body_ids("dimos_scene")
+        if self._robot_binding is not None:
+            self._root_free_qpos_adr = self._robot_binding.root_qpos_adr
+            self._root_free_qvel_adr = self._robot_binding.root_qvel_adr
+        else:
+            for joint_id in range(self._model.njnt):
+                if self._model.jnt_type[joint_id] == _MJJNT_FREE:
+                    self._root_free_qpos_adr = int(self._model.jnt_qposadr[joint_id])
+                    self._root_free_qvel_adr = int(self._model.jnt_dofadr[joint_id])
+                    break
 
         self._connected = False
-        self._lock = threading.Lock()
-        self._reset_requested = False
-        self._reset_done_events: list[threading.Event] = []
         self._stop_event = threading.Event()
         self._sim_thread: threading.Thread | None = None
 
@@ -227,6 +233,11 @@ class MujocoEngine(SimulationEngine):
         self._joint_velocity_targets = [0.0] * self._num_joints
         self._joint_effort_targets = [0.0] * self._num_joints
         self._command_mode = "position"
+        # Set once the controller sends its first command; until then the sim
+        # holds its reset pose instead of integrating dynamics (see
+        # ``_CONTROL_ENGAGE_TIMEOUT_S``). Latched: a respawn keeps it engaged.
+        self._control_engaged = False
+        self._sim_start_wall: float | None = None
         self._apply_spawn_pose_unlocked()
         self._apply_reset_joint_positions_unlocked()
         for i, mapping in enumerate(self._joint_mappings):
@@ -264,6 +275,44 @@ class MujocoEngine(SimulationEngine):
             raise FileNotFoundError(f"MuJoCo model not found: {model_path}")
         return model_path
 
+    def _load_model(
+        self,
+        xml_path: Path,
+        *,
+        meshdir: str | Path | None,
+        assets: dict[str, bytes] | None,
+    ) -> mujoco.MjModel:
+        if xml_path.suffix.lower() == ".mjb":
+            return self._load_binary_model(xml_path)
+
+        if assets is not None:
+            with open(xml_path) as file:
+                xml_str = file.read()
+            return mujoco.MjModel.from_xml_string(xml_str, assets=assets)
+
+        if meshdir is None:
+            return mujoco.MjModel.from_xml_path(str(xml_path))
+
+        root = ET.parse(xml_path).getroot()
+        compiler = root.find("compiler")
+        if compiler is None:
+            compiler = ET.Element("compiler")
+            root.insert(0, compiler)
+        compiler.set("meshdir", str(Path(meshdir).expanduser().resolve()))
+        for include in root.iter("include"):
+            include_file = include.get("file")
+            if include_file and not Path(include_file).is_absolute():
+                include.set("file", str((xml_path.parent / include_file).resolve()))
+        return mujoco.MjModel.from_xml_string(ET.tostring(root, encoding="unicode"))
+
+    @staticmethod
+    def _load_binary_model(model_path: Path) -> mujoco.MjModel:
+        load_binary_model = cast(
+            "Callable[[str], mujoco.MjModel]",
+            getattr(mujoco.MjModel, _MUJOCO_FROM_BINARY_PATH),
+        )
+        return load_binary_model(str(model_path))
+
     def _find_first_freejoint_adrs(self) -> tuple[int | None, int | None]:
         if self._model.njnt > 0 and int(self._model.jnt_type[0]) == _MJJNT_FREE:
             return int(self._model.jnt_qposadr[0]), int(self._model.jnt_dofadr[0])
@@ -280,6 +329,46 @@ class MujocoEngine(SimulationEngine):
         if mapping.actuator_id is not None:
             return float(self._data.actuator_length[mapping.actuator_id])
         return 0.0
+
+    def _collect_body_ids(self, root_name: str) -> set[int]:
+        root_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, root_name)
+        if root_id < 0:
+            return set()
+        body_ids = {root_id}
+        changed = True
+        while changed:
+            changed = False
+            for body_id in range(self._model.nbody):
+                parent_id = int(self._model.body_parentid[body_id])
+                if parent_id in body_ids and body_id not in body_ids:
+                    body_ids.add(body_id)
+                    changed = True
+        return body_ids
+
+    def _is_scene_geom(self, geom_id: int) -> bool:
+        if geom_id < 0 or not self._scene_body_ids:
+            return False
+        return int(self._model.geom_bodyid[geom_id]) in self._scene_body_ids
+
+    def _has_blocking_scene_contact(self) -> bool:
+        """Return true for non-floor contacts between robot and baked scene."""
+        if not self._scene_body_ids:
+            return False
+        for contact_idx in range(self._data.ncon):
+            contact = self._data.contact[contact_idx]
+            geom1 = int(contact.geom1)
+            geom2 = int(contact.geom2)
+            geom1_is_scene = self._is_scene_geom(geom1)
+            geom2_is_scene = self._is_scene_geom(geom2)
+            if geom1_is_scene == geom2_is_scene:
+                continue
+            if float(contact.dist) > 1e-4:
+                continue
+            normal = contact.frame[:3]
+            if abs(float(normal[2])) > 0.75:
+                continue
+            return True
+        return False
 
     def _apply_control(self) -> None:
         with self._lock:
@@ -343,12 +432,26 @@ class MujocoEngine(SimulationEngine):
             logger.error("connect() failed", cls=self.__class__.__name__, error=str(e))
             return False
 
+    def run_blocking(self, on_started: Callable[[], None] | None = None) -> None:
+        logger.info("run_blocking()", cls=self.__class__.__name__)
+        with self._lock:
+            self._connected = True
+            self._stop_event.clear()
+        try:
+            self._sim_loop(on_started=on_started)
+        finally:
+            with self._lock:
+                self._connected = False
+
+    def request_stop(self) -> None:
+        with self._lock:
+            self._connected = False
+        self._stop_event.set()
+
     def disconnect(self) -> bool:
         try:
             logger.info("disconnect()", cls=self.__class__.__name__)
-            with self._lock:
-                self._connected = False
-            self._stop_event.set()
+            self.request_stop()
             if self._sim_thread and self._sim_thread.is_alive():
                 self._sim_thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
             self._sim_thread = None
@@ -356,6 +459,27 @@ class MujocoEngine(SimulationEngine):
         except Exception as e:
             logger.error("disconnect() failed", cls=self.__class__.__name__, error=str(e))
             return False
+
+    def _camera_id(self, camera_name: str) -> int:
+        """Resolve a camera by trying its name as written and ``/``-prefixed.
+
+        Precomposed scene ``.mjb`` files (e.g. supermarket) have all bodies /
+        cameras / joints prefixed with ``/`` because ``MjSpec.attach`` walks
+        their hierarchy. Configs written for compose-time runs pass the bare
+        name (``lidar_front_camera``); without this fallback ``mj_name2id``
+        returns -1 and the camera is silently skipped, killing the lidar.
+        """
+        stripped = camera_name.strip("/")
+        candidates = [camera_name]
+        if stripped != camera_name:
+            candidates.append(stripped)
+        elif stripped:
+            candidates.append(f"/{stripped}")
+        for candidate in dict.fromkeys(candidates):
+            cam_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_CAMERA, candidate)
+            if cam_id >= 0:
+                return int(cam_id)
+        return -1
 
     def _init_cameras(self) -> dict[str, _CameraRendererState]:
         """Create renderers for all configured cameras"""
@@ -365,24 +489,31 @@ class MujocoEngine(SimulationEngine):
             if cam_id < 0:
                 logger.warning("Camera not found in MJCF, skipping", camera_name=cfg.name)
                 continue
-            max_geom = cfg.max_geom
-            if max_geom is None:
-                max_geom = max(10000, int(self._model.ngeom) + 1000)
-            rgb_renderer = mujoco.Renderer(
-                self._model,
-                height=cfg.height,
-                width=cfg.width,
-                max_geom=max_geom,
-            )  # type: ignore[call-arg]
-            depth_renderer = mujoco.Renderer(
-                self._model,
-                height=cfg.height,
-                width=cfg.width,
-                max_geom=max_geom,
-            )  # type: ignore[call-arg]
-            depth_renderer.enable_depth_rendering()
-            scene_option = None
-            if cfg.geom_groups is not None:
+            max_geom = cfg.max_geom or max(int(self._model.ngeom) + _RENDERER_GEOM_HEADROOM, 10000)
+            rgb_renderer = (
+                mujoco.Renderer(
+                    self._model,
+                    height=cfg.height,
+                    width=cfg.width,
+                    max_geom=max_geom,
+                )
+                if cfg.render_rgb
+                else None
+            )
+            depth_renderer = (
+                mujoco.Renderer(
+                    self._model,
+                    height=cfg.height,
+                    width=cfg.width,
+                    max_geom=max_geom,
+                )
+                if cfg.render_depth
+                else None
+            )
+            if depth_renderer is not None:
+                depth_renderer.enable_depth_rendering()
+            scene_option = cfg.scene_option
+            if scene_option is None and cfg.geom_groups is not None:
                 scene_option = mujoco.MjvOption()
                 geomgroup = scene_option.geomgroup  # type: ignore[attr-defined]
                 geomgroup[:] = 0
@@ -439,19 +570,33 @@ class MujocoEngine(SimulationEngine):
                 continue
             state.last_render_time = now
 
-            state.rgb_renderer.update_scene(
-                self._data, camera=state.cam_id, scene_option=state.scene_option
-            )
-            rgb = state.rgb_renderer.render().copy()
+            rgb: NDArray[np.uint8] | None = None
+            if state.rgb_renderer is not None:
+                if state.scene_option is None:
+                    state.rgb_renderer.update_scene(self._data, camera=state.cam_id)
+                else:
+                    state.rgb_renderer.update_scene(
+                        self._data,
+                        camera=state.cam_id,
+                        scene_option=state.scene_option,
+                    )
+                rgb = state.rgb_renderer.render().copy()
 
-            state.depth_renderer.update_scene(
-                self._data, camera=state.cam_id, scene_option=state.scene_option
-            )
-            depth = state.depth_renderer.render().copy()
+            depth: NDArray[np.float32] | None = None
+            if state.depth_renderer is not None:
+                if state.scene_option is None:
+                    state.depth_renderer.update_scene(self._data, camera=state.cam_id)
+                else:
+                    state.depth_renderer.update_scene(
+                        self._data,
+                        camera=state.cam_id,
+                        scene_option=state.scene_option,
+                    )
+                depth = state.depth_renderer.render().astype(np.float32, copy=True)
 
             frame = CameraFrame(
                 rgb=rgb,
-                depth=depth.astype(np.float32),
+                depth=depth,
                 cam_pos=self._data.cam_xpos[state.cam_id].copy(),
                 cam_mat=self._data.cam_xmat[state.cam_id].copy(),
                 fovy=float(self._model.cam_fovy[state.cam_id]),
@@ -515,21 +660,22 @@ class MujocoEngine(SimulationEngine):
     @staticmethod
     def _close_cam_renderers(cam_renderers: dict[str, _CameraRendererState]) -> None:
         for state in cam_renderers.values():
-            state.rgb_renderer.close()
-            state.depth_renderer.close()
+            if state.rgb_renderer is not None:
+                state.rgb_renderer.close()
+            if state.depth_renderer is not None:
+                state.depth_renderer.close()
 
     def _reset_unlocked(self) -> None:
         if self._model.nkey > 0:
             mujoco.mj_resetDataKeyframe(self._model, self._data, 0)
         else:
-            mujoco.mj_resetData(self._model, self._data)  # type: ignore[attr-defined]
+            mujoco.mj_resetData(self._model, self._data)
         self._apply_spawn_pose_unlocked()
         self._apply_reset_joint_positions_unlocked()
         for i, mapping in enumerate(self._joint_mappings):
             self._joint_position_targets[i] = self._current_position(mapping)
         self._command_mode = "position"
-
-        root_pose = self.get_root_pose_unlocked()
+        root_pose = self._root_pose_unlocked()
         if root_pose is not None:
             position, _ = root_pose
             logger.info(
@@ -538,31 +684,6 @@ class MujocoEngine(SimulationEngine):
                 y=float(position[1]),
                 z=float(position[2]),
             )
-
-    def _apply_spawn_pose_unlocked(self) -> None:
-        qpos_adr = self._root_qpos_adr
-        if qpos_adr is None:
-            mujoco.mj_forward(self._model, self._data)
-            return
-
-        qpos = self._data.qpos
-        if self._spawn_xy is not None:
-            qpos[qpos_adr] = float(self._spawn_xy[0])
-            qpos[qpos_adr + 1] = float(self._spawn_xy[1])
-        if self._spawn_z is not None:
-            qpos[qpos_adr + 2] = float(self._spawn_z)
-        if self._spawn_yaw is not None:
-            qpos[qpos_adr + 3 : qpos_adr + 7] = [
-                math.cos(float(self._spawn_yaw) * 0.5),
-                0.0,
-                0.0,
-                math.sin(float(self._spawn_yaw) * 0.5),
-            ]
-
-        qvel_adr = self._root_qvel_adr
-        if qvel_adr is not None:
-            self._data.qvel[qvel_adr : qvel_adr + 6] = 0.0
-        mujoco.mj_forward(self._model, self._data)
 
     def _apply_reset_joint_positions_unlocked(self) -> None:
         if self._reset_joint_positions is None:
@@ -575,9 +696,36 @@ class MujocoEngine(SimulationEngine):
                 self._data.qvel[mapping.dof_adr] = 0.0
         mujoco.mj_forward(self._model, self._data)
 
-    def _sim_loop(self) -> None:
+    def _apply_spawn_pose_unlocked(self) -> None:
+        qpos_adr = self._root_free_qpos_adr
+        if qpos_adr is None:
+            mujoco.mj_forward(self._model, self._data)
+            return
+
+        qpos = self._data.qpos
+        if self._spawn_xy is not None:
+            qpos[qpos_adr] = self._spawn_xy[0]
+            qpos[qpos_adr + 1] = self._spawn_xy[1]
+        if self._spawn_z is not None:
+            qpos[qpos_adr + 2] = self._spawn_z
+        if self._spawn_yaw is not None:
+            qpos[qpos_adr + 3 : qpos_adr + 7] = [
+                math.cos(self._spawn_yaw * 0.5),
+                0.0,
+                0.0,
+                math.sin(self._spawn_yaw * 0.5),
+            ]
+
+        qvel_adr = self._root_free_qvel_adr
+        if qvel_adr is not None:
+            self._data.qvel[qvel_adr : qvel_adr + 6] = 0.0
+        self._root_kinematic_pose = None
+        mujoco.mj_forward(self._model, self._data)
+
+    def _sim_loop(self, on_started: Callable[[], None] | None = None) -> None:
         logger.info("sim loop started", cls=self.__class__.__name__)
         dt = 1.0 / self._control_frequency
+        self._sim_start_wall = time.time()
 
         # Camera renderers: created once in the sim thread
         cam_renderers = self._init_cameras()
@@ -586,21 +734,36 @@ class MujocoEngine(SimulationEngine):
         def _step_once(sync_viewer: bool) -> None:
             loop_start = time.time()
             reset_done_events: list[threading.Event] = []
-            with self._lock:
-                if self._reset_requested:
-                    self._reset_requested = False
+            if self._reset_requested.is_set():
+                with self._lock:
+                    self._reset_requested.clear()
                     self._reset_unlocked()
                     reset_done_events = self._reset_done_events
                     self._reset_done_events = []
-            for reset_done_event in reset_done_events:
-                reset_done_event.set()
+                for reset_done_event in reset_done_events:
+                    reset_done_event.set()
             if self._on_before_step is not None:
                 try:
                     self._on_before_step(self)
                 except Exception as exc:
                     logger.error("on_before_step failed", error=str(exc))
             self._apply_control()
-            mujoco.mj_step(self._model, self._data)
+            if self._control_engaged or self._sim_start_wall is None:
+                mujoco.mj_step(self._model, self._data)
+            elif time.time() - self._sim_start_wall > _CONTROL_ENGAGE_TIMEOUT_S:
+                # Controller never engaged; free-run rather than freeze forever.
+                logger.warning(
+                    "no controller command within %.1fs; free-running uncontrolled",
+                    _CONTROL_ENGAGE_TIMEOUT_S,
+                    cls=self.__class__.__name__,
+                )
+                self._control_engaged = True
+                mujoco.mj_step(self._model, self._data)
+            else:
+                # Hold the reset pose: recompute derived state + sensors so the
+                # controller still gets observations, but don't integrate
+                # dynamics (no free-fall) until it sends its first command.
+                mujoco.mj_forward(self._model, self._data)
             if sync_viewer:
                 m_viewer.sync()
             self._update_joint_state()
@@ -618,12 +781,16 @@ class MujocoEngine(SimulationEngine):
                 time.sleep(sleep_time)
 
         if self._headless:
+            if on_started is not None:
+                on_started()
             while not self._stop_event.is_set():
                 _step_once(sync_viewer=False)
         else:
             with viewer.launch_passive(
                 self._model, self._data, show_left_ui=False, show_right_ui=False
             ) as m_viewer:
+                if on_started is not None:
+                    on_started()
                 while m_viewer.is_running() and not self._stop_event.is_set():
                     _step_once(sync_viewer=True)
 
@@ -661,14 +828,23 @@ class MujocoEngine(SimulationEngine):
 
     @property
     def model(self) -> mujoco.MjModel:
+        """Raw MjModel — PRIVATE to ``dimos/simulation/backend/mujoco/``.
+
+        Code outside this package must use the ``PhysicsEngine`` surface
+        (or the named MuJoCo accessors like ``body_id``/``find_sensor_slice``)
+        instead; touching MjModel elsewhere couples that consumer to MuJoCo.
+        """
         return self._model
 
     @property
     def data(self) -> mujoco.MjData:
-        """Live MjData. In-process consumers (sensors, PD hooks) read it
-        directly; physics integration in the sim thread mutates it under
-        ``self._lock`` so reads inside the same MujocoEngine instance are
-        coherent without extra locking."""
+        """Raw MjData — PRIVATE to ``dimos/simulation/backend/mujoco/``.
+
+        Physics integration in the sim thread mutates it under ``self._lock``;
+        same-package consumers (renderer, PD hooks) read it directly. Code
+        outside this package must use ``read_sensor_data``/``read_qpos``/
+        ``get_body_world_poses`` etc. instead.
+        """
         return self._data
 
     @property
@@ -702,14 +878,17 @@ class MujocoEngine(SimulationEngine):
     def write_joint_command(self, command: JointState) -> None:
         if command.position:
             self._command_mode = "position"
+            self._control_engaged = True
             self._set_position_targets(command.position)
             return
         if command.velocity:
             self._command_mode = "velocity"
+            self._control_engaged = True
             self._set_velocity_targets(command.velocity)
             return
         if command.effort:
             self._command_mode = "effort"
+            self._control_engaged = True
             self._set_effort_targets(command.effort)
             return
 
@@ -768,7 +947,7 @@ class MujocoEngine(SimulationEngine):
         with self._lock:
             if done_event is not None:
                 self._reset_done_events.append(done_event)
-            self._reset_requested = True
+            self._reset_requested.set()
         if done_event is None:
             return True
         return done_event.wait(timeout)
@@ -791,7 +970,7 @@ class MujocoEngine(SimulationEngine):
                 self._spawn_yaw = spawn_yaw
             if done_event is not None:
                 self._reset_done_events.append(done_event)
-            self._reset_requested = True
+            self._reset_requested.set()
         if done_event is None:
             return True
         return done_event.wait(timeout)
@@ -828,17 +1007,171 @@ class MujocoEngine(SimulationEngine):
                 return None
             return float(ray_start_z - distance)
 
+    def enforce_position_targets(self) -> None:
+        """Pin modeled joints to their current position targets.
+
+        This is a development stub for stacks that do not yet run a real
+        whole-body controller. It leaves the floating base alone, but prevents
+        contact impulses from folding the articulated joints.
+        """
+        with self._lock:
+            for i, mapping in enumerate(self._joint_mappings):
+                target = self._joint_position_targets[i]
+                if mapping.qpos_adr is not None:
+                    self._data.qpos[mapping.qpos_adr] = target
+                    self._joint_positions[i] = target
+                if mapping.dof_adr is not None:
+                    self._data.qvel[mapping.dof_adr] = 0.0
+                    self._joint_velocities[i] = 0.0
+            mujoco.mj_forward(self._model, self._data)
+
+    def apply_root_twist(
+        self,
+        linear_x: float,
+        linear_y: float,
+        angular_z: float,
+        *,
+        fixed_z: float | None = None,
+    ) -> bool:
+        """Integrate planar velocity onto the configured freejoint root.
+
+        The root is treated as kinematic once this method is used: we
+        maintain an internal desired x/y/yaw and write it back every tick.
+        That prevents contact impulses or gravity settling from slowly
+        walking the floating base when the commanded twist is zero.
+        """
+        qpos_adr = self._root_free_qpos_adr
+        if qpos_adr is None:
+            return False
+
+        dt = 1.0 / self._control_frequency
+        with self._lock:
+            qpos = self._data.qpos
+            if self._root_kinematic_pose is None:
+                qw, qx, qy, qz = qpos[qpos_adr + 3 : qpos_adr + 7]
+                yaw = math.atan2(
+                    2.0 * (qw * qz + qx * qy),
+                    1.0 - 2.0 * (qy * qy + qz * qz),
+                )
+                self._root_kinematic_pose = (
+                    float(qpos[qpos_adr]),
+                    float(qpos[qpos_adr + 1]),
+                    yaw,
+                )
+
+            old_x, old_y, old_yaw = self._root_kinematic_pose
+            new_x = old_x + (math.cos(old_yaw) * linear_x - math.sin(old_yaw) * linear_y) * dt
+            new_y = old_y + (math.sin(old_yaw) * linear_x + math.cos(old_yaw) * linear_y) * dt
+            new_yaw = old_yaw + angular_z * dt
+
+            qpos[qpos_adr] = new_x
+            qpos[qpos_adr + 1] = new_y
+            if fixed_z is not None:
+                qpos[qpos_adr + 2] = fixed_z
+
+            qpos[qpos_adr + 3 : qpos_adr + 7] = [
+                math.cos(new_yaw * 0.5),
+                0.0,
+                0.0,
+                math.sin(new_yaw * 0.5),
+            ]
+            mujoco.mj_forward(self._model, self._data)
+
+            if self._has_blocking_scene_contact():
+                qpos[qpos_adr] = old_x
+                qpos[qpos_adr + 1] = old_y
+                qpos[qpos_adr + 3 : qpos_adr + 7] = [
+                    math.cos(old_yaw * 0.5),
+                    0.0,
+                    0.0,
+                    math.sin(old_yaw * 0.5),
+                ]
+                mujoco.mj_forward(self._model, self._data)
+            else:
+                self._root_kinematic_pose = (new_x, new_y, new_yaw)
+
+            qvel_adr = self._root_free_qvel_adr
+            if qvel_adr is not None:
+                self._data.qvel[qvel_adr : qvel_adr + 6] = 0.0
+        return True
+
     def get_root_pose(self) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
         with self._lock:
-            return self.get_root_pose_unlocked()
+            return self._root_pose_unlocked()
 
-    def get_root_pose_unlocked(self) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
-        qpos_adr = self._root_qpos_adr
+    def _root_pose_unlocked(self) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+        qpos_adr = self._root_free_qpos_adr
         if qpos_adr is None:
             return None
         position = self._data.qpos[qpos_adr : qpos_adr + 3].copy()
         qw, qx, qy, qz = self._data.qpos[qpos_adr + 3 : qpos_adr + 7].copy()
         return position, np.array([qx, qy, qz, qw], dtype=np.float64)
+
+    def get_body_world_poses(
+        self, body_ids: list[int]
+    ) -> list[tuple[NDArray[np.float64], NDArray[np.float64]]]:
+        """World (position, quaternion_wxyz) per body id, from latest stepped data."""
+        with self._lock:
+            return [
+                (self._data.xpos[body_id].copy(), self._data.xquat[body_id].copy())
+                for body_id in body_ids
+            ]
+
+    def body_id(self, name: str) -> int | None:
+        """Resolve a body name to its MuJoCo id (with attach-prefix fallback)."""
+        bid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, name)
+        if bid >= 0:
+            return int(bid)
+        bid = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, f"/{name.lstrip('/')}")
+        return int(bid) if bid >= 0 else None
+
+    def find_sensor_slice(self, *names: str, dim: int = 3) -> slice | None:
+        """Resolve named sensors to a sensordata slice.
+
+        Tries each name exactly, then with the MjSpec attach prefix (``/name``),
+        then as a unique ``/name`` suffix match (warning on ambiguity).
+        """
+        model = self._model
+        for name in names:
+            sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, name)
+            if sensor_id >= 0:
+                address = int(model.sensor_adr[sensor_id])
+                return slice(address, address + dim)
+            attached_name = f"/{name.lstrip('/')}"
+            sensor_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SENSOR, attached_name)
+            if sensor_id >= 0:
+                address = int(model.sensor_adr[sensor_id])
+                return slice(address, address + dim)
+
+            suffix = f"/{name.lstrip('/')}"
+            matches: list[int] = []
+            for candidate_id in range(model.nsensor):
+                candidate = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, candidate_id)
+                if candidate is not None and candidate.endswith(suffix):
+                    matches.append(candidate_id)
+            if len(matches) == 1:
+                address = int(model.sensor_adr[matches[0]])
+                return slice(address, address + dim)
+            if len(matches) > 1:
+                logger.warning(
+                    "Ambiguous attached MuJoCo sensor name",
+                    requested=name,
+                    matches=[
+                        mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_SENSOR, match)
+                        for match in matches
+                    ],
+                )
+        return None
+
+    def read_sensor_data(self, sensor_slice: slice) -> NDArray[np.float64]:
+        """Copy a sensordata slice from the latest stepped state (thread-safe)."""
+        with self._lock:
+            return self._data.sensordata[sensor_slice].copy()
+
+    def read_qpos(self, qpos_slice: slice) -> NDArray[np.float64]:
+        """Copy a qpos slice from the latest stepped state (thread-safe)."""
+        with self._lock:
+            return self._data.qpos[qpos_slice].copy()
 
     def get_actuator_ctrl_range(self, joint_index: int) -> tuple[float, float] | None:
         mapping = self._joint_mappings[joint_index]
@@ -885,9 +1218,11 @@ class MujocoEngine(SimulationEngine):
             return None
         return float(self._model.cam_fovy[cam_id])
 
-    def _camera_id(self, camera_name: str) -> int:
-        for candidate in _camera_name_candidates(camera_name):
-            cam_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_CAMERA, candidate)
-            if cam_id >= 0:
-                return int(cam_id)
-        return -1
+    def get_camera_pose(
+        self, camera_name: str
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]] | None:
+        """Get a named camera's latest world pose from MuJoCo data."""
+        cam_id = self._camera_id(camera_name)
+        if cam_id < 0:
+            return None
+        return self._data.cam_xpos[cam_id].copy(), self._data.cam_xmat[cam_id].copy()

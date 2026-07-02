@@ -24,6 +24,7 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
+from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.simulation.backend.mujoco.engine import MujocoEngine
 from dimos.simulation.sim_module import MujocoSimModule, MujocoSimModuleConfig
 
@@ -36,6 +37,18 @@ class _FakeData:
 class _FakeEngine:
     data = _FakeData()
     joint_names = ["joint_a", "joint_b"]
+
+    @staticmethod
+    def get_root_pose():
+        return None
+
+    @staticmethod
+    def read_sensor_data(sl):
+        return _FakeData.sensordata[sl]
+
+    @staticmethod
+    def read_qpos(sl):
+        return _FakeData.qpos[sl]
 
 
 class _FakeRespawnEngine:
@@ -87,6 +100,8 @@ def test_ready_signal_happens_after_joint_state_and_imu_write() -> None:
     module._imu_base_qpos_slice = slice(3, 7)
     module._imu_gyro_slice = slice(0, 3)
     module._imu_accel_slice = slice(3, 6)
+    module._imu_linvel_slice = None
+    module._entity_bodies = []
     module.odom = MagicMock()
     module.imu = MagicMock()
 
@@ -106,7 +121,7 @@ def test_ready_signal_happens_after_joint_state_and_imu_write() -> None:
     module._sim_hooks = _FakeHooks()
     module._shm = _FakeShm()
 
-    module._publish_shm_and_lcm(_FakeEngine)
+    module._publish_state(_FakeEngine)
 
     assert events == ["joint_state", "imu", "ready"]
 
@@ -130,6 +145,9 @@ def test_respawn_at_uses_ground_height_plus_initial_root_clearance() -> None:
     hooks = _FakeSimHooks()
     module._engine = engine
     module._sim_hooks = hooks
+    module._cmd_vel_lock = threading.Lock()
+    module._cmd_vel = Twist.zero()
+    module._last_cmd_vel_time = 0.0
     module._root_spawn_clearance_z = 0.793
 
     assert module.respawn_at(2.6, 0.0, yaw=0.25) is True
@@ -146,7 +164,7 @@ def test_respawn_at_uses_ground_height_plus_initial_root_clearance() -> None:
 def test_reset_waiters_are_released_when_reset_requests_are_coalesced() -> None:
     engine = object.__new__(MujocoEngine)
     engine._lock = threading.Lock()
-    engine._reset_requested = False
+    engine._reset_requested = threading.Event()
     engine._reset_done_events = []
     engine._spawn_xy = None
     engine._spawn_z = None
@@ -185,7 +203,7 @@ def test_reset_waiters_are_released_when_reset_requests_are_coalesced() -> None:
 
     _wait_until_waiters_ready()
     with engine._lock:
-        assert engine._reset_requested
+        assert engine._reset_requested.is_set()
         assert engine._spawn_xy == (1.0, 2.0)
         assert engine._spawn_z == 0.5
         assert engine._spawn_yaw == 0.25

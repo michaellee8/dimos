@@ -618,6 +618,9 @@ ignore = [
     "dimos/web/dimos_interface/themes.json",
     "dimos/manipulation/manipulation_module.py",
     "dimos/manipulation/visualization/viser/test_viser_visualization.py",
+    # Carries both the render and raycast-lidar subsystems; factoring those
+    # out of the engine class is a planned follow-up.
+    "dimos/simulation/backend/mujoco/engine.py",
     "dimos/navigation/cmu_nav/modules/*/main.cpp",
     "dimos/navigation/cmu_nav/common/*.hpp",
 ]
