@@ -16,9 +16,10 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, model_validator
 
 from dimos.teleop.openarm_mini.adapter import OpenArmMiniTeleopAdapter
 from dimos.teleop.openarm_mini.config import OpenArmMiniTeleopConfig
@@ -31,13 +32,34 @@ class OpenArmMiniTeleopModuleConfig(TeleopModuleConfig):
     openarm_mini: OpenArmMiniTeleopConfig = Field(
         default_factory=lambda: OpenArmMiniTeleopConfig(enabled_sides=("left",))
     )
+    openarm_mini_defaults: OpenArmMiniTeleopConfig = Field(
+        default_factory=lambda: OpenArmMiniTeleopConfig(enabled_sides=("left",)),
+        exclude=True,
+    )
 
-    @field_validator("openarm_mini", mode="before")
+    @model_validator(mode="before")
     @classmethod
     def _merge_partial_openarm_mini_config(cls, value: object) -> object:
-        if isinstance(value, dict) and "enabled_sides" not in value:
-            return {"enabled_sides": ("left",), **value}
-        return value
+        if not isinstance(value, dict):
+            return value
+
+        openarm_mini = value.get("openarm_mini")
+        if not isinstance(openarm_mini, dict):
+            return value
+
+        defaults = value.get("openarm_mini_defaults")
+        default_config = (
+            defaults
+            if isinstance(defaults, OpenArmMiniTeleopConfig)
+            else OpenArmMiniTeleopConfig(enabled_sides=("left",))
+        )
+        return {
+            **value,
+            "openarm_mini": {
+                **asdict(default_config),
+                **openarm_mini,
+            },
+        }
 
 
 class OpenArmMiniTeleopModule(TeleopModule):

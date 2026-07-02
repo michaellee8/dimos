@@ -152,6 +152,14 @@ _Avoid_: calibration, homing, sender-side clamp
 A teleoperation validation mode where a real leader device drives commands rendered against a follower model without connecting to follower hardware or executing physical motion. "Visualization-only" describes the follower side, not the leader input.
 _Avoid_: hardware validation, fake leader demo, dry run when physical execution is possible
 
+**Real-hardware opt-in**:
+A teleoperation bring-up boundary where follower hardware remains mocked unless the operator provides an explicit hardware connection setting. The presence of that setting means the follower may connect and physically move.
+_Avoid_: implicit hardware fallback, hidden arming flag, visualization-only mode
+
+**Follower-observed teleop visualization**:
+A teleoperation visualization mode that renders the follower-side state reported through the control stack rather than the leader-derived command alone. It answers "what is the follower doing or reporting?" rather than only "what is the leader commanding?"
+_Avoid_: command-only visualization, leader preview, visualization-only teleop test
+
 **Configuration-resolved module IO**:
 A module IO contract whose streams are determined from the module's final configuration before blueprint wiring.
 _Avoid_: runtime dynamic IO, late-bound ports, generated subclass IO

@@ -16,10 +16,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from dimos.constants import STATE_DIR
+from dimos.robot.manipulators.openarm.config import openarm_joints
 
 OPENARM_MINI_TELEOP_EXTRA = "openarm-mini-teleop"
 OPENARM_MINI_STATE_DIR = STATE_DIR / "teleop" / "openarm_mini"
@@ -55,6 +57,7 @@ class OpenArmMiniTeleopConfig:
     max_joint_jump_radians: float = 0.75
     authority_active: bool = True
     enabled_sides: tuple[str, ...] = OPENARM_MINI_SIDES
+    target_joint_names_by_side: Mapping[str, Sequence[str]] | None = None
 
     def __post_init__(self) -> None:
         """Validate selected OpenArm Mini leader sides."""
@@ -64,6 +67,14 @@ class OpenArmMiniTeleopConfig:
             validate_side(side)
         if len(set(self.enabled_sides)) != len(self.enabled_sides):
             raise ValueError("enabled_sides must not contain duplicate sides")
+        if self.target_joint_names_by_side is None:
+            return
+        for side, target_joint_names in self.target_joint_names_by_side.items():
+            validate_side(side)
+            if len(target_joint_names) != 7:
+                raise ValueError(
+                    f"target_joint_names_by_side[{side!r}] must contain exactly 7 names"
+                )
 
     def calibration_path(self, side: str) -> Path:
         """Return the configured or default calibration directory for a side."""
@@ -82,6 +93,16 @@ class OpenArmMiniTeleopConfig:
     def sides(self) -> tuple[str, ...]:
         """Return the selected leader sides in runtime order."""
         return self.enabled_sides
+
+    def target_joint_names(self, side: str) -> tuple[str, ...]:
+        """Return the follower joint names emitted for a leader side."""
+        validate_side(side)
+        if self.target_joint_names_by_side is None:
+            return tuple(openarm_joints(side))
+        configured = self.target_joint_names_by_side.get(side)
+        if configured is None:
+            return tuple(openarm_joints(side))
+        return tuple(configured)
 
 
 class OpenArmMiniDependencyError(ImportError):

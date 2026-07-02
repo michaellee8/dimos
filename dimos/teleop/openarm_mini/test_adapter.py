@@ -191,6 +191,19 @@ def test_config_rejects_invalid_or_duplicate_enabled_sides() -> None:
         OpenArmMiniTeleopConfig(enabled_sides=("left", "left"))
 
 
+def test_config_resolves_default_and_configured_target_joint_names() -> None:
+    right_target_names = tuple(f"right_arm/openarm_right_joint{i}" for i in range(1, 8))
+    config = OpenArmMiniTeleopConfig(target_joint_names_by_side={"right": right_target_names})
+
+    assert config.target_joint_names("left") == tuple(f"openarm_left_joint{i}" for i in range(1, 8))
+    assert config.target_joint_names("right") == right_target_names
+
+
+def test_config_rejects_wrong_target_joint_name_count() -> None:
+    with pytest.raises(ValueError, match="exactly 7"):
+        OpenArmMiniTeleopConfig(target_joint_names_by_side={"right": ("only_one",)})
+
+
 def test_adapter_returns_none_without_authority(tmp_path: Path) -> None:
     left_path, right_path = _write_calibrations(tmp_path)
     buses = {"left": _FakeBus(_readings()), "right": _FakeBus(_readings())}
@@ -217,6 +230,39 @@ def test_adapter_returns_none_without_authority(tmp_path: Path) -> None:
     adapter.disconnect()
 
     assert command is None
+
+
+def test_adapter_emits_configured_global_target_joint_names(tmp_path: Path) -> None:
+    left_path, right_path = _write_calibrations(tmp_path)
+    right_bus = _FakeBus(_readings())
+    target_names = tuple(f"right_arm/openarm_right_joint{i}" for i in range(1, 8))
+
+    def bus_factory(
+        side: str,
+        port: str,
+        calibration: OpenArmMiniCalibration,
+        baudrate: int,
+    ) -> OpenArmMiniSideBus:
+        assert side == "right"
+        return right_bus
+
+    adapter = OpenArmMiniTeleopAdapter(
+        OpenArmMiniTeleopConfig(
+            left_calibration_path=left_path,
+            right_calibration_path=right_path,
+            enabled_sides=("right",),
+            target_joint_names_by_side={"right": target_names},
+        ),
+        bus_factory=bus_factory,
+    )
+
+    adapter.connect()
+    command = adapter.get_current_command()
+    adapter.disconnect()
+
+    assert command is not None
+    assert command.joint is not None
+    assert command.joint.name == list(target_names)
 
 
 def test_adapter_rejects_jump_threshold_by_returning_no_command(tmp_path: Path) -> None:

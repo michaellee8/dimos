@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from dimos.msgs.sensor_msgs.JointState import JointState
@@ -67,6 +68,7 @@ def map_side_readings(
     side: str,
     readings: dict[str, float],
     *,
+    target_joint_names: Sequence[str] | None = None,
     previous_positions_by_joint: dict[str, float] | None = None,
     max_joint_jump_radians: float | None = None,
 ) -> OpenArmMiniSideCommand:
@@ -74,7 +76,12 @@ def map_side_readings(
     validate_side(side)
     _validate_readings(readings)
 
-    follower_joint_names = openarm_joints(side)
+    follower_joint_names = tuple(target_joint_names or openarm_joints(side))
+    if len(follower_joint_names) != len(LEADER_JOINT_NAMES):
+        raise OpenArmMiniMappingError(
+            f"target_joint_names must contain {len(LEADER_JOINT_NAMES)} names, "
+            f"got {len(follower_joint_names)}"
+        )
     side_limits = OPENARM_FOLLOWER_JOINT_LIMITS[side]
     positions_by_joint = {
         follower_joint: _clamp(readings[f"joint_{index}"], *side_limits[index - 1])

@@ -58,6 +58,16 @@ def test_combined_command_uses_openarm_follower_joint_names() -> None:
     assert len(joint_state.position) == 14
 
 
+def test_mapping_can_emit_configured_target_joint_names() -> None:
+    target_names = [f"right_arm/openarm_right_joint{i}" for i in range(1, 8)]
+
+    command = map_side_readings("right", _readings(), target_joint_names=target_names)
+
+    assert list(command.positions_by_joint) == target_names
+    assert command.positions_by_joint["right_arm/openarm_right_joint1"] == pytest.approx(0.1)
+    assert not hasattr(command, "gripper_position")
+
+
 def test_follower_joint_limits_clamp_sender_side() -> None:
     readings = _readings()
     readings["joint_1"] = 5.0

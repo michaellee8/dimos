@@ -62,6 +62,15 @@ def test_confirmation_table_displays_raw_zero_offsets_and_flip() -> None:
 
 def test_parse_flip_overrides_defaults_none_and_validation() -> None:
     assert _parse_flip_overrides(None, "left") == set(DEFAULT_FLIPS_BY_SIDE["left"])
+    assert _parse_flip_overrides(None, "right") == {
+        "joint_1",
+        "joint_2",
+        "joint_3",
+        "joint_4",
+        "joint_5",
+        "joint_6",
+        "joint_7",
+    }
     assert _parse_flip_overrides("none", "left") == set()
     assert _parse_flip_overrides("joint_1,joint_7", "right") == {"joint_1", "joint_7"}
 

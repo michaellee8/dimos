@@ -82,6 +82,7 @@ all_blueprints = {
     "mid360-realsense-record-with-pcap": "dimos.robot.assembly.mid360_realsense_30:mid360_realsense_record_with_pcap",
     "openarm-dual-whole-body": "dimos.robot.manipulators.openarm.blueprints.basic:openarm_dual_whole_body",
     "openarm-mini-left-teleop-viser": "dimos.robot.manipulators.openarm.blueprints.teleop:openarm_mini_left_teleop_viser",
+    "openarm-mini-right-teleop-viser": "dimos.robot.manipulators.openarm.blueprints.teleop:openarm_mini_right_teleop_viser",
     "openarm-mini-teleop-openarm": "dimos.robot.manipulators.openarm.blueprints.teleop:openarm_mini_teleop_openarm",
     "openarm-mock-planner-coordinator": "dimos.robot.manipulators.openarm.blueprints.planner:openarm_mock_planner_coordinator",
     "openarm-planner-coordinator": "dimos.robot.manipulators.openarm.blueprints.planner:openarm_planner_coordinator",

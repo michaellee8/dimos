@@ -130,6 +130,7 @@ class OpenArmMiniTeleopAdapter:
                 side_command = map_side_readings(
                     side,
                     bus.read_positions(),
+                    target_joint_names=self.config.target_joint_names(side),
                     previous_positions_by_joint=self._previous_positions_by_side.get(side),
                     max_joint_jump_radians=self.config.max_joint_jump_radians,
                 )

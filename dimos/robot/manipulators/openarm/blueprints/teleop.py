@@ -16,9 +16,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+from dimos.control.components import HardwareComponent
 from dimos.control.coordinator import ControlCoordinator, TaskConfig
-from dimos.core.coordination.blueprints import autoconnect
+from dimos.core.coordination.blueprints import Blueprint, autoconnect
+from dimos.core.global_config import global_config
 from dimos.manipulation.manipulation_module import ManipulationModule
+from dimos.manipulation.planning.groups.identifiers import make_global_joint_names
 from dimos.robot.manipulators.common.blueprints import cartesian_ik_task
 from dimos.robot.manipulators.openarm.config import (
     LEFT_CAN,
@@ -26,6 +31,7 @@ from dimos.robot.manipulators.openarm.config import (
     OPENARM_V10_FK_MODEL,
     RIGHT_CAN,
     openarm_hardware,
+    openarm_joints,
     openarm_model_config,
     openarm_single_hardware,
     openarm_single_model_config,
@@ -102,6 +108,61 @@ def _servo_task(hw_name: str, joint_names: list[str]) -> TaskConfig:
     )
 
 
+_OPENARM_MINI_RIGHT_TELEOP_ROBOT_NAME = "right_arm"
+_OPENARM_MINI_RIGHT_TELEOP_LEADER_PORT = "/dev/ttyACM0"
+
+
+def _openarm_mini_right_teleop_joint_names() -> list[str]:
+    return make_global_joint_names(
+        _OPENARM_MINI_RIGHT_TELEOP_ROBOT_NAME,
+        openarm_joints("right"),
+    )
+
+
+def _openarm_mini_right_teleop_hardware() -> HardwareComponent:
+    adapter_type = "openarm" if global_config.can_port else "mock"
+    hardware = openarm_hardware(
+        side="right",
+        address=global_config.can_port,
+        adapter_type=adapter_type,
+        adapter_kwargs=OPENARM_ADAPTER_KWARGS if global_config.can_port else None,
+    )
+    return replace(hardware, joints=_openarm_mini_right_teleop_joint_names())
+
+
+def _openarm_mini_right_teleop_config() -> OpenArmMiniTeleopConfig:
+    return OpenArmMiniTeleopConfig(
+        port_right=_OPENARM_MINI_RIGHT_TELEOP_LEADER_PORT,
+        enabled_sides=("right",),
+        target_joint_names_by_side={
+            "right": tuple(_openarm_mini_right_teleop_joint_names()),
+        },
+    )
+
+
+def _openarm_mini_right_teleop_viser_blueprint() -> Blueprint:
+    hardware = _openarm_mini_right_teleop_hardware()
+    teleop_config = _openarm_mini_right_teleop_config()
+    return autoconnect(
+        OpenArmMiniTeleopModule.blueprint(
+            openarm_mini=teleop_config,
+            openarm_mini_defaults=teleop_config,
+        ),
+        ControlCoordinator.blueprint(
+            hardware=[hardware],
+            tasks=[_servo_task(hardware.hardware_id, hardware.joints)],
+        ),
+        ManipulationModule.blueprint(
+            robots=[openarm_model_config("right")],
+            visualization={"backend": "viser"},
+        ),
+    )
+
+
+_openarm_mini_right_teleop_hw = _openarm_mini_right_teleop_hardware()
+_openarm_mini_right_teleop_cfg = _openarm_mini_right_teleop_config()
+
+
 openarm_mini_teleop_openarm = autoconnect(
     TeleopModule.blueprint(adapter=OpenArmMiniTeleopAdapter()),
     ControlCoordinator.blueprint(
@@ -120,5 +181,25 @@ openarm_mini_left_teleop_viser = autoconnect(
     OpenArmJointStateViserModule.blueprint(
         robot=openarm_model_config("left"),
         robot_id="openarm_left",
+    ),
+)
+
+openarm_mini_right_teleop_viser = autoconnect(
+    OpenArmMiniTeleopModule.blueprint(
+        openarm_mini=_openarm_mini_right_teleop_cfg,
+        openarm_mini_defaults=_openarm_mini_right_teleop_cfg,
+    ),
+    ControlCoordinator.blueprint(
+        hardware=[_openarm_mini_right_teleop_hw],
+        tasks=[
+            _servo_task(
+                _openarm_mini_right_teleop_hw.hardware_id,
+                _openarm_mini_right_teleop_hw.joints,
+            )
+        ],
+    ),
+    ManipulationModule.blueprint(
+        robots=[openarm_model_config("right")],
+        visualization={"backend": "viser"},
     ),
 )

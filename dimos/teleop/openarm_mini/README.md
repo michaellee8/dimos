@@ -149,3 +149,48 @@ does not start `ControlCoordinator`, does not connect OpenArm follower hardware,
 does not use mock follower hardware, and does not validate physical follower
 execution or coordinator routing. Use the production OpenArm Mini teleop
 blueprint and hardware validation separately for physical execution bring-up.
+
+## Right-arm coordinator + Viser bring-up
+
+Use `openarm-mini-right-teleop-viser` to route a real OpenArm Mini right leader
+through `ControlCoordinator` and render the right follower state in
+`ManipulationModule`'s Viser backend. The leader is always physical; the follower
+is mock by default and becomes real only when `--can-port` is provided.
+
+Mock follower, safe for coordinator/Viser validation without a connected OpenArm
+follower:
+
+```bash
+uv run dimos run openarm-mini-right-teleop-viser
+```
+
+Real right OpenArm follower over CAN:
+
+```bash
+uv run dimos --can-port can0 run openarm-mini-right-teleop-viser
+```
+
+The blueprint requires:
+
+- a real OpenArm Mini right leader connected to the configured right Feetech
+  serial port (default `/dev/ttyACM0`)
+- a valid right calibration artifact at the default right calibration path, or a
+  configured `right_calibration_path`
+- Viser dependencies from `uv sync --extra manipulation` or `uv sync --extra all`
+- `--can-port` only when intentionally enabling the real right follower
+
+Override the right leader serial port with a module option:
+
+```bash
+uv run dimos run openarm-mini-right-teleop-viser \
+  -o openarmminiteleopmodule.openarm_mini.port_right=/dev/ttyUSB0
+```
+
+The right blueprint publishes ManipulationModule-compatible global coordinator
+joint names (`right_arm/openarm_right_joint1` through
+`right_arm/openarm_right_joint7`). Viser renders follower-observed
+`coordinator_joint_state`, not the raw sender-side command, so mock mode validates
+the same coordinator routing used before real hardware is connected. Before using
+`--can-port`, align the physical follower near the leader-implied command and be
+ready to stop the process; automatic startup alignment gating is out of scope for
+v1.
