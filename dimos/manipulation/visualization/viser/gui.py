@@ -576,7 +576,11 @@ class ViserPanelGui:
                 pose=pose,
             )
         )
-        self.refresh()
+        # No refresh() here: a gizmo drag fires tens of events per second and
+        # this callback runs in the client's event thread, so a full panel
+        # resync per event queues later gizmo updates behind it and the gizmo
+        # freezes on weak CPUs. _apply_target_evaluation_result refreshes once
+        # per coalesced evaluation instead.
 
     def _submit_joint_target_evaluation(self) -> None:
         robot_name = self.state.selected_robot
