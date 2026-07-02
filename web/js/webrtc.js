@@ -305,9 +305,11 @@ function selectedIceType(report) {
         : 'direct';  // host
 }
 
-// Glass-to-glass latency: read the robot's frame-embedded capture stamp back
-// off the rendered <video>. Constants MUST match _stamp() in hosted_connection.py.
+// Glass-to-glass latency: read the robot's capture stamp from a strip APPENDED
+// below the video (robot draws it as extra rows, not over content). Constants
+// MUST match _stamp() in hosted_connection.py.
 const STAMP_CELL_PX = 16;
+const STAMP_STRIP_PX = 16;  // height of the appended strip, in rows
 const STAMP_SYNC = [1, 0, 1, 0];
 const STAMP_TIME_BITS = 44;
 const STAMP_CELLS = STAMP_SYNC.length + STAMP_TIME_BITS;
@@ -319,18 +321,20 @@ function readLatencyStamp() {
     if (!v || !v.videoWidth) return 0;
     const s = STAMP_CELL_PX;
     const w = STAMP_CELLS * s;
-    if (v.videoWidth < w || v.videoHeight < s) return 0;
+    if (v.videoWidth < w || v.videoHeight < STAMP_STRIP_PX) return 0;
     _stampCanvas.width = w;
-    _stampCanvas.height = s;
+    _stampCanvas.height = STAMP_STRIP_PX;
     const ctx = _stampCanvas.getContext('2d', { willReadFrequently: true });
     let px;
     try {
-        ctx.drawImage(v, 0, 0, w, s, 0, 0, w, s);
-        px = ctx.getImageData(0, 0, w, s).data;  // RGBA
+        // The strip is the bottom STAMP_STRIP_PX rows of the frame.
+        const srcY = v.videoHeight - STAMP_STRIP_PX;
+        ctx.drawImage(v, 0, srcY, w, STAMP_STRIP_PX, 0, 0, w, STAMP_STRIP_PX);
+        px = ctx.getImageData(0, 0, w, STAMP_STRIP_PX).data;  // RGBA
     } catch (_) {
         return 0;  // tainted canvas / not ready
     }
-    const cy = (s / 2) | 0;
+    const cy = (STAMP_STRIP_PX / 2) | 0;
     const bitAt = (i) => {
         const cx = (i * s + s / 2) | 0;
         const o = (cy * w + cx) * 4;
