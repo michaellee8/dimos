@@ -385,7 +385,7 @@ export function startVideoStats(channel) {
         if (!prev) { inFlight = false; return; }  // need two samples for deltas
 
         const dt = (now - prev.timestamp) / 1000;
-        if (dt <= 0) return;
+        if (dt <= 0) { inFlight = false; return; }  // must clear inFlight or stats wedge forever
         const dFrames = (inbound.framesDecoded ?? 0) - (prev.framesDecoded ?? 0);
         const dBytes = (inbound.bytesReceived ?? 0) - (prev.bytesReceived ?? 0);
         const dLost = (inbound.packetsLost ?? 0) - (prev.packetsLost ?? 0);
@@ -430,7 +430,12 @@ export function stopVideoStats() {
 // misses. Stops on terminal auth/not-found — nothing to be gained by spam.
 export function startOpHeartbeat(sessionId) {
     stopOpHeartbeat();
+    // In-flight guard: fetch has no timeout, so a hung request would stack a
+    // new POST every interval behind it.
+    let inFlight = false;
     state.opHeartbeatTimer = setInterval(async () => {
+        if (inFlight) return;
+        inFlight = true;
         try {
             await api('POST', `/sessions/${sessionId}/op-heartbeat`);
         } catch (err) {
@@ -439,6 +444,8 @@ export function startOpHeartbeat(sessionId) {
                 console.warn('[op-heartbeat] terminal:', msg);
                 stopOpHeartbeat();
             }
+        } finally {
+            inFlight = false;
         }
     }, OP_HEARTBEAT_INTERVAL_MS);
 }

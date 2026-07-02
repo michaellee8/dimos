@@ -7,7 +7,8 @@ import { mountHud } from './hud.js';
 import { setupLiveKit } from './livekit.js';
 import { navigate } from './router.js';
 import { state } from './state.js';
-import { startKeyboardLoop } from './views/keyboard.js';
+import { stopTick } from './views/go2.js';
+import { startKeyboardLoop, stopKeyboardLoop } from './views/keyboard.js';
 import { startVR } from './vr.js';
 import { setupWebRTC } from './webrtc.js';
 
@@ -59,11 +60,15 @@ export async function connectKeyboard(sessionId, robotName, transport) {
 export async function connectGo2(sessionId, robotName, transport) {
     state.activeRobot = { session_id: sessionId, robot_name: robotName, transport: transport || 'cloudflare' };
     try {
-        navigate('go2');  // renderGo2() runs startKeyboardLoop()
+        navigate('go2');  // renderGo2() runs startKeyboardLoop() + startTick()
         await setupTransport(sessionId, transport);
         setStatus(`Connected — ${robotName}`);
     } catch (e) {
         console.error(e);
+        // renderGo2 already started the drive loop + telemetry tick; stop them
+        // or they survive the navigate and stack across retries.
+        stopKeyboardLoop();
+        stopTick();
         setStatus(`Connection failed: ${e.message}`);
         setTimeout(() => navigate('dashboard'), 3000);
     }

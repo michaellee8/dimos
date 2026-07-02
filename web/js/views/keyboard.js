@@ -115,9 +115,10 @@ function buildTwist() {
     const strafe = (kb.has('q') ? 1 : 0) - (kb.has('e') ? 1 : 0);
 
     const scale = shift ? 2.0 : (ctrl ? 0.5 : 1.0);
-    // Speed-bar multiplier (go2 cockpit): Normal 0.5 / High 1.0 / Rage 1.0.
-    // Linear scaled by lin, angular by ang. Defaults to 1 for the keyboard view.
-    const sp = state.speedScale || { lin: 1.0, ang: 1.0 };
+    // Speed-bar multiplier: state.js initializes {lin:0.5, ang:0.5} (Normal),
+    // so the standalone keyboard view also drives at the safe Normal scale;
+    // the go2 speed bar overrides it. (The || fallback only covers undefined.)
+    const sp = state.speedScale || { lin: 0.5, ang: 0.5 };
     return {
         linear_x:  fwd * scale * sp.lin,
         linear_y:  strafe * scale * sp.lin,

@@ -26,6 +26,20 @@ function toU8(bytes) {
 }
 
 export async function setupLiveKit(sessionId) {
+    // Same re-entry guard as setupWebRTC — a double-click Connect would
+    // otherwise spin up two Rooms that fight over state.*.
+    if (state.setupInProgress) {
+        throw new Error('Connect already in progress — disconnect first to retry');
+    }
+    state.setupInProgress = true;
+    try {
+        return await _setupLiveKitInner(sessionId);
+    } finally {
+        state.setupInProgress = false;
+    }
+}
+
+async function _setupLiveKitInner(sessionId) {
     const LK = window.LivekitClient;
     if (!LK) throw new Error('LiveKit client SDK not loaded');
     setStatus('Connecting (LiveKit)...');

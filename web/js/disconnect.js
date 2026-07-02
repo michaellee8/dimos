@@ -47,6 +47,9 @@ export async function disconnect() {
     state.liveStats.offsetMs = 0;
     state.liveStats.cmdHz = 0;
     state.liveStats.cmd = null;
+    state.liveStats.soc = null;      // else next robot briefly shows this one's battery
+    state.liveStats.iceType = null;  // ditto for the ICE path label
+    state.speedScale = { lin: 0.5, ang: 0.5 };  // don't leak cockpit Rage scale into next session
     state.cmdSendCount = 0;
 
     const canvas = document.getElementById('canvas');
