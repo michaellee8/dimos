@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from threading import Event, RLock, Thread
+from threading import Event, RLock, Thread, current_thread
 import time
 import traceback
 from typing import Any, Literal, TypeAlias
@@ -169,11 +169,7 @@ class _HolonomicPathFollower:
     # lifecycle
 
     def close(self) -> None:
-        with self._lock:
-            thread = self._thread
         self.stop_planning()
-        if thread is not None:
-            thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
 
     def handle_odom(self, msg: PoseStamped) -> None:
         with self._lock:
@@ -182,14 +178,17 @@ class _HolonomicPathFollower:
     def start_planning(self, path: Path) -> None:
         self.stop_planning()
 
-        self._stop_planning_event = Event()
-
         with self._lock:
+            self._stop_planning_event = Event()
             self._path = path
             self._path_distancer = PathDistancer(path)
             self._previous_odom_for_velocity = None
             self._rebuild_path_speed_profile(self._path_distancer)
-            self._thread = Thread(target=self._thread_entrypoint, daemon=True)
+            self._thread = Thread(
+                target=self._thread_entrypoint,
+                args=(self._stop_planning_event,),
+                daemon=True,
+            )
             self._thread.start()
 
     def update_path(self, path: Path) -> bool:
@@ -208,12 +207,17 @@ class _HolonomicPathFollower:
         return True
 
     def stop_planning(self) -> None:
-        self.cmd_vel.on_next(Twist())
-        self._stop_planning_event.set()
-
         with self._lock:
+            thread = self._thread
             self._thread = None
+            self._stop_planning_event.set()
 
+        if thread is not None and thread is not current_thread():
+            thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
+            if thread.is_alive():
+                logger.warning("Holonomic control thread did not exit within join timeout.")
+
+        self.cmd_vel.on_next(Twist())
         self._reset_state()
 
     # run-profile envelope
@@ -273,9 +277,8 @@ class _HolonomicPathFollower:
         self._controller.set_profile(envelope.profile)
         self._controller.set_speed(envelope.speed_m_s)
         with self._lock:
-            path_distancer = self._path_distancer
-        if path_distancer is not None:
-            self._rebuild_path_speed_profile(path_distancer)
+            if self._path_distancer is not None:
+                self._rebuild_path_speed_profile(self._path_distancer)
 
     # introspection
 
@@ -293,16 +296,21 @@ class _HolonomicPathFollower:
 
     # control loop
 
-    def _thread_entrypoint(self) -> None:
+    def _thread_entrypoint(self, stop_event: Event) -> None:
         try:
-            self._loop()
+            self._loop(stop_event)
         except Exception as e:
             traceback.print_exc()
             logger.exception("Error in holonomic trajectory control", exc_info=e)
             self.stopped_navigating.on_next("error")
         finally:
-            self._reset_state()
-            self.cmd_vel.on_next(Twist())
+            with self._lock:
+                owns_state = self._thread is current_thread()
+                if owns_state:
+                    self._thread = None
+                    self._reset_state()
+            if owns_state:
+                self.cmd_vel.on_next(Twist())
 
     def _change_state(self, new_state: PlannerState) -> None:
         if new_state == self._state:
@@ -328,9 +336,7 @@ class _HolonomicPathFollower:
             return "path_following"
         return "initial_rotation"
 
-    def _loop(self) -> None:
-        stop_event = self._stop_planning_event
-
+    def _loop(self, stop_event: Event) -> None:
         with self._lock:
             path = self._path
             current_odom = self._current_odom
@@ -482,10 +488,11 @@ class _HolonomicPathFollower:
         path_distancer: PathDistancer,
         current_pos: np.ndarray,
     ) -> float:
-        self._ensure_path_speed_profile(path_distancer)
         envelope = self._active_envelope
         progress_m = float(path_distancer.project(current_pos).s_along_path_m)
-        profile_speed = self._profiled_path_speed_m_s(progress_m)
+        with self._lock:
+            self._ensure_path_speed_profile(path_distancer)
+            profile_speed = self._profiled_path_speed_m_s(progress_m)
         distance_cap = math.sqrt(
             max(
                 0.0,
