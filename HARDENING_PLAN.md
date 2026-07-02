@@ -95,7 +95,10 @@ ticks with pending commands. Backward-compatible both directions.)
 
 ## Workstream B — Robot-side hardening `[dimos]` (P1)
 
-### B1. Bound command execution — `S`
+### B1. Bound command execution — `S` — ✅ implemented (single-worker executor)
+(Repo-idiomatic single-worker ThreadPoolExecutor instead of a semaphore —
+strict ordering; backlog >4 busy-rejects with ack ok=false; Damp/E-STOP
+bypasses the queue on an urgent thread.)
 - **Issue:** Every `sport_cmd`/`set_mode`/`obstacle_avoidance`/`StandReady`
   spawns an unbounded daemon thread (`hosted_connection.py:246,268,295,312`).
   Exposure is low (single authenticated operator, UI disables pending
@@ -104,24 +107,26 @@ ticks with pending commands. Backward-compatible both directions.)
   contention ack `ok:false, reason:"busy"` immediately. Optional: serialize
   sport cmds through a single worker + queue(maxsize=1).
 
-### B2. Nonce idempotency — `S`
+### B2. Nonce idempotency — `S` — ✅ implemented (10s TTL, cleared on operator_lost)
 - **Issue:** `nonce` is echoed but never deduped (`hosted_connection.py:223`).
   Not a replay *vulnerability* (channel is DTLS-authenticated,
   ordered-reliable), but double-click/browser-retry double-executes.
 - **Plan:** `deque(maxlen=64)` of seen nonces; duplicate → re-ack last result,
   don't re-execute.
 
-### B3. `_rage_active` race — `S`
+### B3. `_rage_active` race — `S` — ✅ solved by B1's serialization
+(check moved inside the single-worker task; B2 alone would NOT have fixed
+this — the race was two *different* rapid commands, not duplicates.)
 - **Issue:** Read in `_handle_set_mode` (line 280), written in the spawned
   thread (line 289), no lock — rapid toggles can double-fire `set_rage_mode`.
 - **Plan:** Guard with a small `threading.Lock` (or fold into B1's
   serialization, which fixes it for free).
 
-### B4. Stale watchdog comment — `S` (trivial, do with B1)
+### B4. Stale watchdog comment — `S` — ✅ fixed
 - `connection.py:201` says "Auto-stop after 0.5 seconds"; the constant is
   `cmd_vel_timeout = 0.2`. Fix the comment — it's the safety-critical number.
 
-### B5. LiveKit heartbeat terminal condition — `S`
+### B5. LiveKit heartbeat terminal condition — `S` — ✅ implemented (5-strike 401/404 stop)
 - **Issue:** CF provider stops after 5 consecutive 401/404; LiveKit's loop
   (`livekit_broker.py:288`) retries/logs forever on revoked key/deleted
   session.
@@ -150,7 +155,7 @@ logs. Tests: app/test_ratelimit.py.)
   `owner_id|sub|IP`) at the router level: writes 10/min, TURN 6/min,
   heartbeats exempt. Return 429 with `Retry-After`.
 
-### C3. Signup gating — `S` **P1**
+### C3. Signup gating — `S` **P1** — ⏸ deferred by decision (2026-07-01)
 - **Issue:** Cognito self-signup is open with auto-verified email
   (`terraform/cognito.tf`) — anyone can register and mint robot API keys.
   Tenant isolation contains them, but it's an open surface.
@@ -179,7 +184,30 @@ logs. Tests: app/test_ratelimit.py.)
 
 ## Workstream D — Scale & operability `[teleop]` (P2, plan now)
 
-### D1. Single-instance SPOF — `L`
+### D1. Single-instance SPOF — `L` — explain-only for now (decision 2026-07-01)
+
+**What breaks today, concretely:**
+1. **Broker restart kills live sessions.** `_robot_channel_ids` is in-memory;
+   after a restart the robot's next heartbeat ack returns null channel ids →
+   the robot closes its negotiated datachannels → teleop drops even though
+   the CF session is still alive. Operator must re-join, sometimes the robot
+   must re-create its session.
+2. **`--workers >1` silently breaks.** Each uvicorn worker gets its own maps;
+   the worker that served `bridge-datachannel` knows the ids, the worker that
+   serves the robot's `heartbeat` doesn't → channels never open. Nothing
+   errors; teleop just doesn't work.
+3. **Instance death = full outage.** SQLite rides the instance; Litestream is
+   one-way backup (minutes-fresh restore on re-pave), not failover. Recovery
+   is manual: terraform re-pave + DNS wait.
+4. **Capacity ceiling.** One t3.small handles the current fleet fine, but
+   every robot heartbeats at 1 Hz — the ceiling arrives as latency on the
+   session-setup path first.
+
+**Why the plan's order fixes it cheaply:** moving the channel-id maps into
+`TeleopSession` columns (step 2) alone fixes #1 and #2 — the heartbeat then
+reads ids from the DB, so restarts and multiple workers become safe. Postgres
+(step 3) fixes #3's data loss; the ALB pair (step 4) fixes #3's availability.
+None of it changes the data plane — media/commands never touch the broker.
 - **Issue:** One t3.small + SQLite; Litestream is one-way backup, not
   failover. Broker holds in-memory state (`_robot_channel_ids`,
   `_session_locks`, `_pending_video_renegotiations`,
@@ -219,7 +247,10 @@ proxy /metrics, so scrape on-box. CloudWatch alarms remain a follow-up.)
 
 ## Workstream E — Video quality & frontend fixes (P1)
 
-### E1. Codec/bitrate control on the robot track — `M/L` `[dimos]`
+### E1. Codec/bitrate control on the robot track — `M/L` `[dimos]` — ✅ knobs shipped (opt-in)
+(mux-level video_max_fps/video_max_width; BrokerConfig.video_codec preference
+on aiortc; LiveKit TrackPublishOptions.video_encoding. Closed-loop bitrate
+adaptation from operator video_stats remains the stretch follow-up.)
 - **Issue:** aiortc defaults (VP8, source-rate, native resolution): no target
   bitrate, no degradation preference — congestion shows up as drops/freezes
   instead of graceful downscale. This is the single biggest lever on perceived
