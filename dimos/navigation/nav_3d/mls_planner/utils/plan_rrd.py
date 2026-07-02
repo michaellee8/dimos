@@ -314,12 +314,24 @@ def main(
 
     store = SqliteStore(path=str(db_path))
     with store:
+        # Guard against typo'd names: store.stream() silently registers a new
+        # empty stream, which would replay as zero frames with no error.
+        available = store.list_streams()
+        for stream_name in (lidar_stream, odom_stream):
+            if stream_name not in available:
+                raise typer.BadParameter(
+                    f"stream {stream_name!r} not found in {db_path}; "
+                    f"available: {', '.join(available)}"
+                )
         lidar = store.stream(lidar_stream, PointCloud2).order_by("ts")
+        odom = store.stream(odom_stream, Odometry).order_by("ts")
+        for stream_name, stream in ((lidar_stream, lidar), (odom_stream, odom)):
+            if next(iter(stream), None) is None:
+                raise typer.BadParameter(f"stream {stream_name!r} in {db_path} is empty")
         if from_time is not None:
             lidar = lidar.from_time(from_time)
         if to_time is not None:
             lidar = lidar.to_time(to_time)
-        odom = store.stream(odom_stream, Odometry).order_by("ts")
 
         pose_tagged = lidar.align(odom, tolerance=align_tol).transform(
             FnTransformer(_attach_pose_from_odom)
