@@ -817,9 +817,14 @@ class ViserPanelGui:
             ok = self.adapter.preview_path(robot_name)
             self._finish_operation(f"preview={ok}", operation_id=operation_id)
 
+        # The preview blocks for the whole ghost animation, and frame pushes
+        # can lag on slow links -- a flat timeout shorter than the animation
+        # bricks the panel (FAILED) on every long plan. Scale it with the
+        # planned duration.
+        planned_duration = self.adapter.get_planned_trajectory_duration(robot_name) or 3.0
         self._operation_worker.submit(
             operation,
-            timeout_seconds=self.config.preview_request_timeout,
+            timeout_seconds=max(self.config.preview_request_timeout, planned_duration * 2 + 5.0),
             on_error=lambda message: self._set_operation_error(message, operation_id),
         )
 
@@ -926,6 +931,9 @@ class ViserPanelGui:
     def _set_operation_error(self, message: str, operation_id: int) -> None:
         if self._operation_is_current(operation_id):
             self._operation_sequence_id += 1
+            # Also log: the panel error line is easy to miss and the UI may
+            # not be visible when this fires.
+            logger.warning(f"Viser panel operation failed: {message}")
             self._set_error(message)
 
     def _set_recoverable_error(self, message: str) -> None:
@@ -944,7 +952,12 @@ class ViserPanelGui:
     def _set_handle_value(self, key: str, value: str) -> None:
         handle = self._handles.get(key)
         if isinstance(handle, GuiMarkdownHandle):
-            self._set_optional_handle_attr(handle, "value", value)
+            # viser >= 1.0 markdown handles expose ``content``; older ones
+            # ``value``. Setting a missing attr is silently dropped by the
+            # hasattr guard, which left the whole panel's text frozen at
+            # "Starting manipulation panel..." on current viser.
+            attr = "content" if hasattr(handle, "content") else "value"
+            self._set_optional_handle_attr(handle, attr, value)
 
     def _set_disabled(self, key: str, disabled: bool) -> None:
         handle = self._handles.get(key)
