@@ -51,23 +51,19 @@ resource "aws_security_group" "teleop" {
   description = "dimos-teleop microservice"
   vpc_id      = data.aws_vpc.selected.id
 
-  # SSH
+  # SSH — narrow ssh_ingress_cidrs in tfvars to admin IPs.
   ingress {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.ssh_ingress_cidrs
   }
 
-  # App (HTTP)
-  ingress {
-    from_port   = var.app_port
-    to_port     = var.app_port
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+  # No app_port (8450) ingress: uvicorn binds 127.0.0.1 and Caddy (80/443) is
+  # the only public entry. A public 8450 would be plaintext HTTP straight to
+  # the app, bypassing TLS.
 
-  # HTTPS (for future TLS termination)
+  # HTTPS (Caddy TLS termination)
   ingress {
     from_port   = 443
     to_port     = 443

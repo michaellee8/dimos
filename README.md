@@ -45,7 +45,7 @@ terraform apply
 This creates:
 - t3.small EC2 instance (Ubuntu 22.04)
 - Elastic IP (static)
-- Security group (HTTP 8450, HTTPS 443, SSH 22)
+- Security group (HTTPS 443, HTTP 80, SSH 22 restricted via `ssh_ingress_cidrs`; app port 8450 is loopback-only behind Caddy)
 - Deploys the app via user_data
 
 ### DNS Setup (Route53)

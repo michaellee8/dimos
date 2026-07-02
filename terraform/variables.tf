@@ -24,6 +24,12 @@ variable "app_port" {
   default = 8450
 }
 
+variable "ssh_ingress_cidrs" {
+  description = "CIDRs allowed to SSH (port 22). Default keeps the historic open behavior; NARROW THIS to your admin IPs (e.g. [\"203.0.113.7/32\"])."
+  type        = list(string)
+  default     = ["0.0.0.0/0"]
+}
+
 variable "cf_teleop_app_id" {
   description = "Cloudflare Realtime SFU App ID"
   sensitive   = true

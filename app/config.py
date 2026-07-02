@@ -38,8 +38,9 @@ class Settings(BaseSettings):
     # Database
     database_url: str = "sqlite+aiosqlite:///./teleop.db"
 
-    # Server
-    host: str = "0.0.0.0"
+    # Server. Loopback by default — Caddy is the only public entry; anything
+    # that really wants a public bind must opt in with HOST=0.0.0.0.
+    host: str = "127.0.0.1"
     port: int = 8450
 
     @model_validator(mode="after")
