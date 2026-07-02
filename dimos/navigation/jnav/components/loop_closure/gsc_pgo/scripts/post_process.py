@@ -55,8 +55,11 @@ from gtsam import (
 import numpy as np
 
 from dimos.msgs.geometry_msgs.Pose import Pose
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.nav_msgs.DeformationNode import DeformationNode, tf_id_for
 from dimos.msgs.nav_msgs.Odometry import Odometry
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.navigation.jnav.msgs.Graph3D import Graph3D
 from dimos.navigation.jnav.utils import recording_db as rdb
 from dimos.navigation.jnav.utils.apriltags import (
     DEFAULT_MAX_ANGULAR_SPEED_DPS,
@@ -66,6 +69,9 @@ from dimos.navigation.jnav.utils.apriltags import (
     DEFAULT_MAX_VIEW_ANGLE_DEG,
     DEFAULT_MIN_SHARPNESS,
     DEFAULT_MIN_TAG_PX,
+    _write_tag_stream,
+    detect_raw_detections,
+    view_quality,
 )
 
 VISIT_GAP_S = 30.0
@@ -86,7 +92,12 @@ ODOM_STREAM = arg("--odom", "pointlio_odometry")  # input odometry stream (keyfr
 # reject anything that isn't a plain identifier to keep that injection-free.
 if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", ODOM_STREAM):
     raise ValueError(f"unsafe --odom stream name: {ODOM_STREAM!r}")
-RAW_STREAM = arg("--tags", "raw_april_tags")  # input unfiltered AprilTag stream
+RAW_STREAM = arg(
+    "--tags", "raw_april_tags"
+)  # unfiltered AprilTag stream (auto-detected if missing)
+CAMERA = arg("--camera", "color_image")  # image stream to detect on when RAW_STREAM is missing
+MARKER_LENGTH_M = float(arg("--tag-size", "0.10"))  # AprilTag edge length (m), for auto-detect
+DICTIONARY = arg("--dict", "DICT_APRILTAG_36h11")  # AprilTag dictionary, for auto-detect
 IGNORE_TAGS = {
     int(marker_id) for marker_id in arg("--ignore-tags").replace(",", " ").split()
 }  # dynamic/moving tags
@@ -128,8 +139,30 @@ T_base_optical = Pose3(
 )
 store = rdb.store(DB)
 if RAW_STREAM not in store.list_streams():
-    sys.exit(
-        f"!! {RAW_STREAM} missing -- run detect_tags.py first to build the unfiltered tag stream."
+    # No tag stream yet -> detect them now (so a fresh recording only needs post_process).
+    if CAMERA not in store.list_streams():
+        sys.exit(
+            f"!! {RAW_STREAM} missing and can't auto-detect: camera stream {CAMERA!r} not in db."
+        )
+    print(
+        f"{RAW_STREAM} missing -- detecting AprilTags over {CAMERA} "
+        f"(tag_size={MARKER_LENGTH_M} m, dict={DICTIONARY})...",
+        flush=True,
+    )
+    camera_matrix = np.array(intrinsics["intrinsics"], float).reshape(3, 3)
+    distortion = np.array(intrinsics.get("distortion", []), float)
+    raw_detections, _, n_images = detect_raw_detections(
+        store,
+        camera_matrix,
+        distortion,
+        image_stream=CAMERA,
+        marker_length=MARKER_LENGTH_M,
+        dictionary=DICTIONARY,
+    )
+    _write_tag_stream(store, RAW_STREAM, raw_detections, diagnostics=True)
+    print(
+        f"wrote {RAW_STREAM}: {len(raw_detections)} raw detections over {n_images} frames",
+        flush=True,
     )
 
 
@@ -194,6 +227,20 @@ raw_detections = []
 for observation in store.stream(RAW_STREAM):
     pose = observation.data
     tags = observation.tags
+    # distance_m / view_angle_deg are derived from the tag pose (not required in the
+    # tag stream), so any detector's raw stream works as long as it carries the pose
+    # + the image-only diagnostics (sharpness/reproj_px/tag_px). speeds default to -1
+    # ("unknown", always passes) when a stream doesn't record them.
+    tag_pose = [
+        pose.x,
+        pose.y,
+        pose.z,
+        pose.orientation.x,
+        pose.orientation.y,
+        pose.orientation.z,
+        pose.orientation.w,
+    ]
+    distance_m, view_angle_deg = view_quality(tag_pose)
     raw_detections.append(
         dict(
             ts=float(observation.ts),
@@ -205,17 +252,12 @@ for observation in store.stream(RAW_STREAM):
                 Point3(pose.x, pose.y, pose.z),
             ),
             reproj_px=float(tags["reproj_px"]),
-            **{
-                diagnostic: float(tags[diagnostic])
-                for diagnostic in (
-                    "sharpness",
-                    "tag_px",
-                    "distance_m",
-                    "view_angle_deg",
-                    "lin_speed",
-                    "ang_speed",
-                )
-            },
+            sharpness=float(tags["sharpness"]),
+            tag_px=float(tags["tag_px"]),
+            distance_m=float(distance_m),
+            view_angle_deg=float(view_angle_deg),
+            lin_speed=float(tags.get("lin_speed", -1.0)),
+            ang_speed=float(tags.get("ang_speed", -1.0)),
         )
     )
 gated_detections = [
@@ -538,6 +580,61 @@ def pose_tuple(pose):
         quaternion.w(),
     )
 
+
+# Persist the PGO's internal artifacts as REAL streams (true payload types):
+#   gt_tf_deformation_nodes (DeformationNode) -- per keyframe, the raw pose (original)
+#     then the optimized pose (current); a deformation-aware tf.get can replay the
+#     loop-closure correction from these exactly like the online gsc_pgo stream.
+#   pose_graph (Graph3D) -- the optimized keyframe nodes + sequential odom edges.
+_tf_edge_id = tf_id_for("map", "odom")
+_deform_name = f"gt_tf_deformation_nodes{SUFFIX}"
+if _deform_name in store.list_streams():
+    store.delete_stream(_deform_name)
+_deform_stream = store.stream(_deform_name, DeformationNode)
+for index in range(num_keyframes):
+    node_ts = float(keyframe_times[index])
+    for keyframe_pose in (raw_keyframe_poses[index], estimate.atPose3(index)):  # original, current
+        px, py, pz, qx, qy, qz, qw = pose_tuple(keyframe_pose)
+        _deform_stream.append(
+            DeformationNode(
+                id=index,
+                tf_id=_tf_edge_id,
+                pose=PoseStamped(
+                    ts=node_ts, frame_id="map", position=[px, py, pz], orientation=[qx, qy, qz, qw]
+                ),
+            ),
+            ts=node_ts,
+            pose=None,
+            tags={"tf_id": str(_tf_edge_id), "id": str(index)},
+        )
+print(f"wrote {_deform_name}: {num_keyframes} keyframes (raw+optimized)", flush=True)
+
+_graph_name = f"pose_graph{SUFFIX}"
+if _graph_name in store.list_streams():
+    store.delete_stream(_graph_name)
+_graph_nodes = []
+for index in range(num_keyframes):
+    px, py, pz, qx, qy, qz, qw = pose_tuple(estimate.atPose3(index))
+    _graph_nodes.append(
+        Graph3D.Node3D(
+            pose=PoseStamped(
+                ts=float(keyframe_times[index]),
+                frame_id="map",
+                position=[px, py, pz],
+                orientation=[qx, qy, qz, qw],
+            ),
+            id=index,
+        )
+    )
+_graph_edges = [
+    Graph3D.Edge(index, index + 1, float(keyframe_times[index + 1]))
+    for index in range(num_keyframes - 1)
+]
+_graph_ts = float(keyframe_times[-1])
+store.stream(_graph_name, Graph3D).append(
+    Graph3D(ts=_graph_ts, nodes=_graph_nodes, edges=_graph_edges), ts=_graph_ts, pose=None
+)
+print(f"wrote {_graph_name}: {num_keyframes} nodes, {len(_graph_edges)} edges", flush=True)
 
 if WHAT in ("odom", "both"):
     out_name = f"{OUT_PREFIX}_odometry{SUFFIX}"
