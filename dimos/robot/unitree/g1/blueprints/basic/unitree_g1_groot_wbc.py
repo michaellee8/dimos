@@ -419,9 +419,10 @@ _rerun_config = {
         "world/path": _g1_nav_path,
     },
     "max_hz": {
-        # 15 Hz keeps the URDF mesh produce rate under rerun 0.32.0a1's serve
-        # throughput so the viewer holds live instead of drifting behind.
-        "world/coordinator_joint_state": 15.0,
+        # 50 Hz mesh animation. The 15 Hz cap predates the newest_first serve
+        # fix; with serving healthy the produce rate no longer outruns the
+        # viewer. Drop back toward 15 if the viewer ever drifts behind again.
+        "world/coordinator_joint_state": 50.0,
         # Raw whole-body state streams arrive at ~440 Hz. The mesh animates
         # from coordinator_joint_state (above); these are only useful as debug
         # plots, so throttle them hard instead of flooding Rerun's store.
