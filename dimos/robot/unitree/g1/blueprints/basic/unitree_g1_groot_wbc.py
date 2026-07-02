@@ -299,21 +299,6 @@ if global_config.simulation == "mujoco":
         (VoxelGridMapper, "lidar", "pointcloud"),
         (ControlCoordinator, "twist_command", "cmd_vel"),
     ]
-    # Arm manipulation planner (sim-first; real hw follows once validated).
-    # Plans against the pelvis-rooted arm models from the reachability
-    # registry and executes through the per-arm trajectory tasks below.
-    # Viser is on by default in sim -- this is the interactive test surface.
-    # Reachability map overlays are opt-in:
-    #   -o manipulationmodule.visualization.reachability_maps.g1-left=<map.npz>
-    _manipulation_stack: tuple[Any, ...] = (
-        planner(
-            robots=[g1_arm_model_config(side) for side in G1_ARM_SIDES],
-            world_backend="mujoco",
-            kinematics={"backend": "mink"},
-            floor_z=0.0,
-            visualization={"backend": "viser", "port": 8095},
-        ),
-    )
 else:
     from dimos.robot.unitree.g1.wholebody_connection import G1WholeBodyConnection
 
@@ -340,7 +325,24 @@ else:
     )
     _nav_stack = MovementManager.blueprint()
     _remappings = [(ControlCoordinator, "twist_command", "cmd_vel")]
-    _manipulation_stack = ()
+
+# Arm manipulation planner (sim and real: plans are kinematic either way and
+# execution is gated behind the coordinator's arm/dry-run state on hardware).
+# Plans against the pelvis-rooted arm models from the reachability registry
+# and executes through the per-arm trajectory tasks below. Viser is the
+# interactive test surface; execute stays disabled unless
+# -o manipulationmodule.visualization.allow_plan_execute=true is passed.
+# Reachability map overlays are opt-in:
+#   -o manipulationmodule.visualization.reachability_maps.g1-left=<map.npz>
+_manipulation_stack: tuple[Any, ...] = (
+    planner(
+        robots=[g1_arm_model_config(side) for side in G1_ARM_SIDES],
+        world_backend="mujoco",
+        kinematics={"backend": "mink"},
+        floor_z=0.0,
+        visualization={"backend": "viser", "port": 8095},
+    ),
+)
 
 
 def _g1_groot_rerun_blueprint() -> Any:
