@@ -342,6 +342,12 @@ power cycle, final clean session 03:28→03:58.
   the working datachannel transport, so "channels OK, video dead" ⇒ no
   frames fed, not network. The 03:23:15 boot `DataChannelTimeoutError`
   (`peer=connecting, ice=checking`) is the same zombie-slot family.
+- **Broker-side confirmation (EC2 journal):** 5× `video: pull gave no offer
+  errs=['empty_track_error']` across two sessions in the 03:20–03:24Z window —
+  CF saw the track registered but **zero RTP behind it**. Independent proof
+  the frames died robot-side, exactly matching the MAX_BUNDLE deduction.
+  (`empty_track_error` ≠ the `not_found_track_error` propagation race the
+  pull retry handles — no point retrying an empty track.)
 - **Ops rule:** channels work but video black → power-cycle the dog first;
   also make sure no phone runs the Unitree app (it takes the slot).
 - **Prevention (open):** (a) robot-side no-frames watchdog — no `color_image`
@@ -382,6 +388,17 @@ power cycle, final clean session 03:28→03:58.
 - **Fix:** best-effort-guard `liedown()`/`stop_movement()` in the stop path
   (log, don't raise) and bound local-link teardown so workers exit inside
   the 5s grace.
+
+### DM-6. bridge-datachannel 410→502 residual — `[teleop broker]` **P2, one occurrence**
+- **Evidence (EC2 journal):** 03:12:23Z `PUT …/datachannels/close → 410 Gone`
+  then `POST …/52f62a90…/bridge-datachannel → 502`. The `adfcce2` fix maps
+  CloudflareSessionGoneError to 409 only when `e.session_id` matches the
+  stored robot/operator CF id — a 410 whose session id matches neither (or a
+  CF error body that doesn't parse as session-gone) still falls through to
+  the opaque 502. Self-heals (client re-provisions) but should be a 409 with
+  a clear "re-provision" detail. Fix: widen the fallback in
+  `_bridge_datachannel_locked` to treat any CloudflareSessionGoneError as
+  409 + clear both stale CF ids.
 
 ### DM-5. ICE 701 console spam — `[teleop web]` **P3, cosmetic**
 - `STUN/TURN … timed out` for the `:53` endpoints (DNS-port trick most
