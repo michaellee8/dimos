@@ -320,6 +320,15 @@ class BabylonSceneViewerModule(Module):
         self._lcm_handle_thread.start()
 
         logger.info("Babylon scene viewer: http://localhost:%s/", self._port)
+        if os.environ.get("DIMOS_BABYLON_OPEN", "1").lower() not in ("0", "false", "no"):
+            # Auto-open the viewer once the server is up (same QoL as the
+            # rerun-web viewer). DIMOS_BABYLON_OPEN=0 for headless/CI runs.
+            import webbrowser
+
+            try:
+                webbrowser.open(f"http://localhost:{self._port}/")
+            except Exception:  # headless environments have no opener
+                pass
 
     @rpc
     def stop(self) -> None:
