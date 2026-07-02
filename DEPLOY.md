@@ -82,9 +82,11 @@ SSH_KEY=/path/to/daneel-local.pem ./scripts/deploy.sh <elastic_ip>
 
 `scripts/deploy.sh`:
 1. Rsyncs `app/` to `/opt/dimos-teleop/app/` (excludes `.venv`, `.env`, `*.db`).
-2. Reinstalls `requirements.txt` (cheap if nothing changed).
-3. Restarts the `dimos-teleop` systemd unit.
-4. Health-checks `http://127.0.0.1:8450/health` from inside the box.
+2. Rsyncs `web/` (the SPA Caddy serves) and the repo `Caddyfile`
+   (reloads Caddy only if it changed).
+3. Reinstalls `requirements.txt` (cheap if nothing changed).
+4. Restarts the `dimos-teleop` systemd unit.
+5. Health-checks `http://127.0.0.1:8450/health` from inside the box.
 
 Until the first run of `scripts/deploy.sh`, the systemd unit fails-and-retries
 because `app/main.py` doesn't exist. That's expected and harmless.
@@ -94,19 +96,19 @@ working branch), pull locally, and re-run.
 
 ## Step 4: Configure HTTPS (Caddy)
 
-Once DNS propagates (`dig teleop.dimensionalos.com` returns the EIP), update Caddy:
+The repo `Caddyfile` is the single source of truth — it splits `/api`, `/health`
+and docs to uvicorn and serves the static SPA from `/opt/dimos-teleop/web`
+(a bare `reverse_proxy` would break the frontend). `scripts/deploy.sh` ships
+it and reloads Caddy automatically; to do it by hand:
 
 ```bash
-ssh -i daneel-local.pem ubuntu@<elastic_ip>
-sudo tee /etc/caddy/Caddyfile << 'EOF'
-teleop.dimensionalos.com {
-    reverse_proxy 127.0.0.1:8450
-}
-EOF
-sudo systemctl restart caddy
+scp -i daneel-local.pem Caddyfile ubuntu@<elastic_ip>:/tmp/
+ssh -i daneel-local.pem ubuntu@<elastic_ip> \
+  'sudo cp /tmp/Caddyfile /etc/caddy/Caddyfile && sudo systemctl reload caddy'
 ```
 
-Caddy auto-provisions Let's Encrypt TLS. HTTPS is live within seconds.
+Once DNS propagates (`dig teleop.dimensionalos.com` returns the EIP), Caddy
+auto-provisions Let's Encrypt TLS. HTTPS is live within seconds.
 
 ## Step 5: Verify
 
