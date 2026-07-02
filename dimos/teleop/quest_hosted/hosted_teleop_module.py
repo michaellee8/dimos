@@ -15,18 +15,18 @@
 """Hosted Teleop Module — Cloudflare Realtime SFU client.
 
 .. deprecated::
-    For the data planes (commands, telemetry) use ``CloudflareTransport``
-    bound directly to blueprint streams instead — see
-    ``dimos/protocol/pubsub/impl/webrtc`` and the
-    ``teleop-hosted-go2-transport`` blueprint. This module remains only for
-    video-track publishing until ``BrokerProvider`` grows media support,
-    after which it will be removed.
+    DO NOT USE for new work. This module owns its own RTCPeerConnection —
+    a second broker session next to any transport-bound streams. The current
+    pattern binds ``Cloudflare*``/``LiveKit*`` transports (including video —
+    ``BrokerProvider`` has media support) directly to the streams of ONE
+    module per robot: see ``go2_hosted_connection.py`` and
+    ``arm_hosted_connection.py``. Kept only because ``teleop-hosted-go2`` /
+    ``teleop-hosted-xarm7`` still run on it; deleted once those migrate.
 """
 
 from __future__ import annotations
 
 import asyncio
-from enum import IntEnum
 import json
 import threading
 import time
@@ -56,18 +56,15 @@ from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.Joy import Joy
 from dimos.protocol.pubsub.impl.webrtc.providers.sdp import propagate_bundle_candidates
 from dimos.protocol.pubsub.impl.webrtc.providers.video_track import CameraVideoTrack
-from dimos.teleop.quest.quest_types import Buttons, QuestControllerState
+
+# Hand is re-exported for back-compat; it lives in quest_types now.
+from dimos.teleop.quest.quest_types import Buttons, Hand, QuestControllerState
 from dimos.teleop.utils.stream_stats import LiveStreamStats
 from dimos.teleop.utils.teleop_transforms import webxr_to_robot
 from dimos.teleop.utils.video_stats import VideoStats
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
-
-
-class Hand(IntEnum):
-    LEFT = 0
-    RIGHT = 1
 
 
 class HostedTeleopConfig(ModuleConfig):
@@ -110,10 +107,9 @@ class HostedTeleopModule(Module):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         warnings.warn(
-            "HostedTeleopModule is deprecated: bind CloudflareTransport to your "
-            "blueprint streams instead (cmd_unreliable / state_reliable / "
-            "state_reliable_back). It remains only for video-track publishing "
-            "until BrokerProvider supports media tracks.",
+            "HostedTeleopModule is deprecated: bind Cloudflare*/LiveKit* "
+            "transports to your module's streams instead (video included) — "
+            "see go2_hosted_connection.py / arm_hosted_connection.py.",
             DeprecationWarning,
             stacklevel=2,
         )

@@ -1,4 +1,4 @@
-# Hosted Teleop Module
+# Hosted Teleop
 
 Robot dials out to the [dimensional-teleop](https://github.com/dimensionalOS/dimensional-teleop)
 broker (Cloudflare Realtime SFU) — no inbound ports needed. The browser/VR
@@ -7,11 +7,23 @@ robot video goes out as a WebRTC track.
 
 ## Files
 
-- **`hosted_teleop_module.py`** — base. Owns the dial-out, datachannel
-  lifecycle, video send, clock-sync, and the command-plane telemetry pushed
-  back to the HUD. Subclassed for actuation.
-- **`hosted_extensions.py`** — concrete subclasses: arm IK, mobile-base twist.
-- **`blueprints.py`** — wires the module to a robot driver.
+The session (dial-out, datachannel lifecycle, video track) is owned by the
+per-process `BrokerProvider` (`dimos/protocol/pubsub/impl/webrtc/providers/`);
+blueprints bind `Cloudflare*`/`LiveKit*` transports to the streams of ONE
+module per robot so everything shares that single session:
+
+- **`go2_hosted_connection.py`** — Go2 driver + hosted plane in one module
+  (subclasses `GO2Connection`; the driver is `dedicated_worker=True`, so the
+  broker-bound streams must live in its process).
+- **`arm_hosted_connection.py`** — hosted plane for coordinator-driven arms
+  (standalone: actuation goes to the ControlCoordinator over LCM). Camera mux
+  shared bits live in `dimos/teleop/utils/camera_mux.py`.
+- **`blueprints.py`** — wires the above to robots, cameras, and transports.
+- **`hosted_teleop_module.py`** / **`hosted_extensions.py`** — DEPRECATED,
+  do not use for new work: the pre-transport-swap stack (the module owns its
+  own RTCPeerConnection). Still used by the `teleop-hosted-go2` /
+  `teleop-hosted-xarm7` blueprints; delete once those migrate to the
+  transport-swap modules above.
 
 The operator HTML lives in the [dimensional-teleop](https://github.com/dimensionalOS/dimensional-teleop)
 broker repo (`web/`), not here.
