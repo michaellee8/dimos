@@ -19,6 +19,7 @@ logging.basicConfig(
 )
 
 from config import settings
+from metrics import install as install_metrics
 from models.database import init_db
 from ratelimit import install as install_rate_limit
 from routers import auth, keys, sessions
@@ -61,6 +62,9 @@ app.add_middleware(
 # Passive unless RATE_LIMIT_ENFORCE=true — see ratelimit.py. Module-level
 # handle so tests (and a future admin toggle) can flip .enforce at runtime.
 rate_limiter = install_rate_limit(app, enforce=settings.rate_limit_enforce)
+
+# Prometheus /metrics — loopback-only in prod (Caddy doesn't proxy it).
+install_metrics(app)
 
 app.include_router(auth.router, prefix="/api/v1")
 app.include_router(keys.router, prefix="/api/v1")

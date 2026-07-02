@@ -8,10 +8,11 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
+from metrics import OPERATOR_EVICTIONS, ROBOT_EVICTIONS, SESSIONS_BY_STATE
 from models.database import async_session, get_db
 from models.session import TeleopSession
 from services import livekit
@@ -956,6 +957,7 @@ async def _reap_stale_operators() -> None:
                 _robot_channel_ids.pop(s.id, None)
                 _pending_video_renegotiations.discard(s.id)
                 await db.commit()
+                OPERATOR_EVICTIONS.inc()
 
 
 async def _reap_stale_robots() -> None:
@@ -990,6 +992,18 @@ async def _reap_stale_robots() -> None:
                 _robot_channel_ids.pop(s.id, None)
                 _pending_video_renegotiations.discard(s.id)
                 await db.commit()
+                ROBOT_EVICTIONS.inc()
+
+
+async def _refresh_session_gauge() -> None:
+    """teleop_sessions{state=…} for /metrics, piggybacked on the reaper tick."""
+    async with async_session() as db:
+        rows = (await db.execute(
+            select(TeleopSession.state, func.count()).group_by(TeleopSession.state)
+        )).all()
+    counts = dict(rows)
+    for state_name in ("idle", "active", "disconnected"):
+        SESSIONS_BY_STATE.labels(state_name).set(counts.get(state_name, 0))
 
 
 async def operator_reaper_loop() -> None:
@@ -999,6 +1013,7 @@ async def operator_reaper_loop() -> None:
         try:
             await _reap_stale_operators()
             await _reap_stale_robots()
+            await _refresh_session_gauge()
         except Exception:
             log.exception("session reaper failed")
         await asyncio.sleep(OP_REAPER_INTERVAL_SEC)

@@ -18,6 +18,8 @@ import time
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from metrics import RATE_LIMIT_HITS
+
 log = logging.getLogger(__name__)
 
 # route class → (max tokens = burst, refill tokens/sec). Rates are per caller.
@@ -127,6 +129,7 @@ def install(app, enforce: bool) -> RateLimiter:
         caller = caller_id(request)
         allowed, retry_after = limiter.check(caller, route_class)
         if not allowed:
+            RATE_LIMIT_HITS.labels(route_class, str(limiter.enforce).lower()).inc()
             if limiter.enforce:
                 return JSONResponse(
                     status_code=429,

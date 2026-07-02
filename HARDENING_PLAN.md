@@ -191,7 +191,10 @@ logs. Tests: app/test_ratelimit.py.)
   channel ids from the replacement instance; drive resumes without robot
   restart.
 
-### D2. Observability — `M`
+### D2. Observability — `M` — ✅ /metrics shipped (loopback-only)
+(bare prometheus_client: http counters/latency by route template, session
+gauge via reaper tick, eviction + rate-limit-hit counters. Caddy does not
+proxy /metrics, so scrape on-box. CloudWatch alarms remain a follow-up.)
 - **Issue:** journald-only logs, no metrics, no alerting; `report.json` exists
   robot-side but nothing aggregates fleet health.
 - **Plan:** `/metrics` (prometheus-fastapi-instrumentator) + CloudWatch agent;
