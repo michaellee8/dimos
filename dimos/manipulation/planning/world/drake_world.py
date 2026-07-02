@@ -25,12 +25,12 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from dimos.manipulation.planning.groups.identifiers import is_global_joint_name
-from dimos.manipulation.planning.groups.utils import (
-    planning_group_from_configs,
-    primary_pose_group_id_for_config,
-    validate_planning_group_config,
+from dimos.manipulation.planning.groups.identifiers import (
+    is_global_joint_name,
+    make_global_joint_names,
+    make_planning_group_id,
 )
+from dimos.manipulation.planning.groups.models import PlanningGroup
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import ObstacleType
 from dimos.manipulation.planning.spec.models import (
@@ -216,7 +216,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         with self._lock:
             if any(data.config.name == config.name for data in self._robots.values()):
                 raise ValueError(f"Robot name '{config.name}' is already registered")
-            validate_planning_group_config(config)
+            self._validate_planning_group_config(config)
 
             self._robot_counter += 1
             robot_id = f"robot_{self._robot_counter}"
@@ -228,11 +228,11 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
 
             ee_link = config.base_link
             try:
-                primary_group_id = primary_pose_group_id_for_config(config)
+                primary_group_id = self._primary_pose_group_id_for_config(config)
             except ValueError:
                 primary_group_id = None
             if primary_group_id is not None:
-                primary_group = planning_group_from_configs(primary_group_id, [config])
+                primary_group = self._planning_group_from_config(config, primary_group_id)
                 if primary_group.tip_link is not None:
                     ee_link = primary_group.tip_link
             ee_frame = self._plant.GetBodyByName(ee_link, model_instance).body_frame()
@@ -333,6 +333,49 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         if robot_id not in self._robots:
             raise KeyError(f"Robot '{robot_id}' not found")
         return self._robots[robot_id].config
+
+    def _validate_planning_group_config(self, config: RobotModelConfig) -> None:
+        seen_group_names: set[str] = set()
+        for definition in config.planning_groups:
+            make_planning_group_id(config.name, definition.name)
+            if definition.name in seen_group_names:
+                raise ValueError(f"Planning group '{definition.name}' is already registered")
+            make_global_joint_names(config.name, definition.joint_names)
+            seen_group_names.add(definition.name)
+
+    def _planning_group_from_config(
+        self, config: RobotModelConfig, group_id: PlanningGroupID
+    ) -> PlanningGroup:
+        for definition in config.planning_groups:
+            if make_planning_group_id(config.name, definition.name) == group_id:
+                joint_names = tuple(make_global_joint_names(config.name, definition.joint_names))
+                return PlanningGroup(
+                    group_id,
+                    config.name,
+                    definition.name,
+                    joint_names,
+                    definition.joint_names,
+                    definition.base_link,
+                    definition.tip_link,
+                    definition.source,
+                )
+        raise KeyError(f"Unknown planning group ID: {group_id}")
+
+    def _planning_group_from_id(self, group_id: PlanningGroupID) -> PlanningGroup:
+        for robot_data in self._robots.values():
+            try:
+                return self._planning_group_from_config(robot_data.config, group_id)
+            except KeyError:
+                continue
+        raise KeyError(f"Unknown planning group ID: {group_id}")
+
+    def _primary_pose_group_id_for_config(self, config: RobotModelConfig) -> PlanningGroupID | None:
+        pose_groups = [group for group in config.planning_groups if group.has_pose_target]
+        if not pose_groups:
+            return None
+        if len(pose_groups) > 1:
+            raise ValueError(f"Robot '{config.name}' has multiple pose groups")
+        return make_planning_group_id(config.name, pose_groups[0].name)
 
     def get_joint_limits(
         self, robot_id: WorldRobotID
@@ -861,9 +904,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         return np.asarray([name_to_pos[name] for name in robot_data.config.joint_names])
 
     def _robot_id_for_group(self, group_id: PlanningGroupID) -> WorldRobotID:
-        group = planning_group_from_configs(
-            group_id, [data.config for data in self._robots.values()]
-        )
+        group = self._planning_group_from_id(group_id)
         matches = [
             rid for rid, data in self._robots.items() if data.config.name == group.robot_name
         ]
@@ -970,7 +1011,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         if robot_id not in self._robots:
             raise KeyError(f"Robot '{robot_id}' not found")
         robot_data = self._robots[robot_id]
-        group_id = primary_pose_group_id_for_config(robot_data.config)
+        group_id = self._primary_pose_group_id_for_config(robot_data.config)
         if group_id is None:
             raise ValueError(
                 f"Robot '{robot_data.config.name}' has no pose-targetable planning group"
@@ -982,9 +1023,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         if not self._finalized:
             raise RuntimeError("World must be finalized first")
 
-        group = planning_group_from_configs(
-            group_id, [data.config for data in self._robots.values()]
-        )
+        group = self._planning_group_from_id(group_id)
         if group.tip_link is None:
             raise ValueError(f"Planning group '{group_id}' has no tip link")
         robot_data = self._robots[self._robot_id_for_group(group_id)]
@@ -1034,7 +1073,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         if robot_id not in self._robots:
             raise KeyError(f"Robot '{robot_id}' not found")
         robot_data = self._robots[robot_id]
-        group_id = primary_pose_group_id_for_config(robot_data.config)
+        group_id = self._primary_pose_group_id_for_config(robot_data.config)
         if group_id is None:
             raise ValueError(
                 f"Robot '{robot_data.config.name}' has no pose-targetable planning group"
@@ -1046,9 +1085,7 @@ class DrakeWorld(WorldSpec, VisualizationSpec):
         if not self._finalized:
             raise RuntimeError("World must be finalized first")
 
-        group = planning_group_from_configs(
-            group_id, [data.config for data in self._robots.values()]
-        )
+        group = self._planning_group_from_id(group_id)
         if group.tip_link is None:
             raise ValueError(f"Planning group '{group_id}' has no tip link")
         robot_data = self._robots[self._robot_id_for_group(group_id)]

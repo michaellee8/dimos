@@ -138,7 +138,7 @@ def test_drake_legacy_wrappers_fail_at_call_time_for_no_or_ambiguous_pose(tmp_pa
         )
     )
     ambiguous.finalize()
-    with pytest.raises(ValueError, match="multiple pose-targetable"):
+    with pytest.raises(ValueError, match="multiple pose"):
         ambiguous.get_jacobian(ambiguous.get_live_context(), ambiguous_id)
 
 

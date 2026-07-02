@@ -41,12 +41,12 @@ except ImportError as exc:
         "Install the manipulation extra before selecting the roboplan backend."
     ) from exc
 
-from dimos.manipulation.planning.groups.identifiers import is_global_joint_name
-from dimos.manipulation.planning.groups.utils import (
-    planning_group_from_configs,
-    primary_pose_group_id_for_config,
-    validate_planning_group_config,
+from dimos.manipulation.planning.groups.identifiers import (
+    is_global_joint_name,
+    make_global_joint_names,
+    make_planning_group_id,
 )
+from dimos.manipulation.planning.groups.models import PlanningGroup
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.spec.enums import ObstacleType, PlanningStatus
 from dimos.manipulation.planning.spec.models import (
@@ -117,7 +117,7 @@ class RoboPlanWorld:
             raise FileNotFoundError(f"Robot model not found: {Path(config.model_path).resolve()}")
         if any(data.config.name == config.name for data in self._robots.values()):
             raise ValueError(f"Robot name '{config.name}' is already registered")
-        validate_planning_group_config(config)
+        self._validate_planning_group_config(config)
 
         self._validate_robot_config(config)
         self._robot_counter += 1
@@ -286,16 +286,14 @@ class RoboPlanWorld:
     def get_ee_pose(self, ctx: RoboPlanContext, robot_id: WorldRobotID) -> PoseStamped:
         """Get end-effector pose if RoboPlan exposes FK."""
         robot = self._get_robot(robot_id)
-        group_id = primary_pose_group_id_for_config(robot.config)
+        group_id = self._primary_pose_group_id_for_config(robot.config)
         if group_id is None:
             raise ValueError(f"Robot '{robot.config.name}' has no pose-targetable planning group")
         return self.get_group_ee_pose(ctx, group_id)
 
     def get_group_ee_pose(self, ctx: RoboPlanContext, group_id: PlanningGroupID) -> PoseStamped:
         """Get planning-group tip pose if RoboPlan exposes FK."""
-        group = planning_group_from_configs(
-            group_id, [data.config for data in self._robots.values()]
-        )
+        group = self._planning_group_from_id(group_id)
         if group.tip_link is None:
             raise ValueError(f"Planning group '{group_id}' has no tip link")
         mat = self.get_link_pose(ctx, self._robot_id_for_group(group_id), group.tip_link)
@@ -325,7 +323,7 @@ class RoboPlanWorld:
     def get_jacobian(self, ctx: RoboPlanContext, robot_id: WorldRobotID) -> NDArray[np.float64]:
         """Get end-effector Jacobian if RoboPlan exposes a compatible API."""
         robot = self._get_robot(robot_id)
-        group_id = primary_pose_group_id_for_config(robot.config)
+        group_id = self._primary_pose_group_id_for_config(robot.config)
         if group_id is None:
             raise ValueError(f"Robot '{robot.config.name}' has no pose-targetable planning group")
         return self.get_group_jacobian(ctx, group_id)
@@ -334,9 +332,7 @@ class RoboPlanWorld:
         self, ctx: RoboPlanContext, group_id: PlanningGroupID
     ) -> NDArray[np.float64]:
         """Get planning-group Jacobian projected to group-local joint order."""
-        group = planning_group_from_configs(
-            group_id, [data.config for data in self._robots.values()]
-        )
+        group = self._planning_group_from_id(group_id)
         if group.tip_link is None:
             raise ValueError(f"Planning group '{group_id}' has no tip link")
         robot_id = self._robot_id_for_group(group_id)
@@ -559,15 +555,63 @@ class RoboPlanWorld:
             return None
         return list(group_info.joint_names)
 
+    def _validate_planning_group_config(self, config: RobotModelConfig) -> None:
+        """Validate planning groups before mutating backend state."""
+        seen_group_names: set[str] = set()
+        for definition in config.planning_groups:
+            group_id = make_planning_group_id(config.name, definition.name)
+            if definition.name in seen_group_names:
+                raise ValueError(f"Planning group '{group_id}' is already registered")
+            make_global_joint_names(config.name, definition.joint_names)
+            seen_group_names.add(definition.name)
+
+    def _planning_group_from_config(
+        self, config: RobotModelConfig, group_id: PlanningGroupID
+    ) -> PlanningGroup:
+        for definition in config.planning_groups:
+            if make_planning_group_id(config.name, definition.name) == group_id:
+                return PlanningGroup(
+                    id=group_id,
+                    robot_name=config.name,
+                    group_name=definition.name,
+                    joint_names=tuple(make_global_joint_names(config.name, definition.joint_names)),
+                    local_joint_names=definition.joint_names,
+                    base_link=definition.base_link,
+                    tip_link=definition.tip_link,
+                    source=definition.source,
+                )
+        raise KeyError(f"Unknown planning group ID: {group_id}")
+
+    def _planning_group_from_id(self, group_id: PlanningGroupID) -> PlanningGroup:
+        for robot in self._robots.values():
+            try:
+                return self._planning_group_from_config(robot.config, group_id)
+            except KeyError:
+                continue
+        raise KeyError(f"Unknown planning group ID: {group_id}")
+
+    def _primary_pose_group_id_for_config(self, config: RobotModelConfig) -> PlanningGroupID | None:
+        pose_group_ids = [
+            make_planning_group_id(config.name, group.name)
+            for group in config.planning_groups
+            if group.has_pose_target
+        ]
+        if not pose_group_ids:
+            return None
+        if len(pose_group_ids) > 1:
+            raise ValueError(
+                f"Robot '{config.name}' has {len(pose_group_ids)} pose-targetable "
+                "planning groups; use an explicit planning group ID"
+            )
+        return pose_group_ids[0]
+
     def _get_robot(self, robot_id: WorldRobotID) -> _RoboPlanRobotData:
         if robot_id not in self._robots:
             raise KeyError(f"Robot '{robot_id}' not found")
         return self._robots[robot_id]
 
     def _robot_id_for_group(self, group_id: PlanningGroupID) -> WorldRobotID:
-        group = planning_group_from_configs(
-            group_id, [data.config for data in self._robots.values()]
-        )
+        group = self._planning_group_from_id(group_id)
         matches = [
             rid for rid, data in self._robots.items() if data.config.name == group.robot_name
         ]
