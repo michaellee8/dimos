@@ -55,6 +55,10 @@ ALLOWED_SPORT_CMDS: dict[str, int] = {
     "FrontJump": 1031,  # acrobatic — leaps
 }
 
+# Commands that latch a posture the UI should reflect (gestures like Hello
+# return to the prior stance, so they don't touch it).
+_POSTURE_SPORT_CMDS = frozenset({"StandDown", "RecoveryStand", "Sit", "Damp"})
+
 
 class Go2HostedConnectionConfig(ConnectionConfig):
     telemetry_hz: float = 3.0  # robot → operator HUD telemetry push rate
@@ -122,12 +126,22 @@ class Go2HostedConnection(GO2Connection):
         # E-STOP latch: set by {"type":"estop"}; while latched, move() refuses
         # twists and non-urgent commands are rejected until {"type":"estop_clear"}.
         self._estopped = False
+        # Robot-authoritative UI state, pushed in telemetry so a reconnecting
+        # operator's cockpit reflects reality instead of optimistic defaults.
+        # GO2Connection.start() stands the robot up, hence the initial posture.
+        self._posture = "StandReady"
+        self._obstacle_avoidance = True  # corrected from config.g in start()
 
     @rpc
     def start(self) -> None:
         super().start()
         self._stop_event.clear()
         self._cmd_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Go2Cmd")
+        # Firmware OA was just set from config.g by GO2Connection.start().
+        try:
+            self._obstacle_avoidance = bool(self.config.g.obstacle_avoidance)
+        except AttributeError:
+            pass
         # Force firmware out of Rage so _rage_active=False matches reality —
         # a prior session may have left it on, and the set_mode short-circuit
         # then locks the user in Rage.
@@ -275,12 +289,14 @@ class Go2HostedConnection(GO2Connection):
         Damp urgently — never queued behind slower commands."""
         self._estopped = True
         logger.warning("E-STOP latched by operator")
-        self._submit_cmd(
-            "estop",
-            nonce,
-            lambda: bool(self.connection.sport_command(ALLOWED_SPORT_CMDS["Damp"])),
-            urgent=True,
-        )
+
+        def task() -> bool:
+            ok = bool(self.connection.sport_command(ALLOWED_SPORT_CMDS["Damp"]))
+            if ok:
+                self._posture = "Damp"
+            return ok
+
+        self._submit_cmd("estop", nonce, task, urgent=True)
 
     def _handle_estop_clear(self, nonce: Any) -> None:
         """Re-arm. Deliberately does NOT move the robot — the operator must
@@ -414,14 +430,15 @@ class Go2HostedConnection(GO2Connection):
             self._send_ack(nonce, False)
             return
 
+        def task() -> bool:
+            ok = bool(self.connection.sport_command(api_id))
+            if ok and name in _POSTURE_SPORT_CMDS:
+                self._posture = name
+            return ok
+
         # Damp is the E-STOP: it must jump the queue, not wait behind slower
         # queued commands (StandReady holds the worker for ~3.3s).
-        self._submit_cmd(
-            f"sport_cmd {name}",
-            nonce,
-            lambda: bool(self.connection.sport_command(api_id)),
-            urgent=(name == "Damp"),
-        )
+        self._submit_cmd(f"sport_cmd {name}", nonce, task, urgent=(name == "Damp"))
 
     def _stand_ready_task(self) -> bool:
         """Standup → settle → BalanceStand → RecoveryStand (drive-ready).
@@ -434,6 +451,7 @@ class Go2HostedConnection(GO2Connection):
         self.connection.balance_stand()
         time.sleep(0.3)
         self.connection.sport_command(ALLOWED_SPORT_CMDS["RecoveryStand"])
+        self._posture = "StandReady"
         return True
 
     def _handle_set_mode(self, msg: dict[str, Any]) -> None:
@@ -467,6 +485,7 @@ class Go2HostedConnection(GO2Connection):
 
         def task() -> bool:
             self.connection.set_obstacle_avoidance(enabled)
+            self._obstacle_avoidance = enabled
             logger.info("obstacle_avoidance: enabled=%s", enabled)
             return True
 
@@ -521,28 +540,36 @@ class Go2HostedConnection(GO2Connection):
         except (KeyError, TypeError, ValueError):
             return None
 
+    def _telemetry_payload(self) -> dict[str, Any]:
+        """One telemetry frame. `state` is robot-authoritative UI state so a
+        (re)connecting operator seeds its cockpit from reality — posture, rage,
+        obstacle avoidance, camera selection, E-STOP latch."""
+        return {
+            "type": "robot_telemetry",
+            "cmd": self._cmd_stats.snapshot(),
+            "soc": self._battery_soc(),
+            "state": {
+                "posture": self._posture,
+                "rage": self._rage_active,
+                "obstacle_avoidance": self._obstacle_avoidance,
+                "cams": list(self._cam_selected),
+                "estopped": self._estopped,
+            },
+            "robot_ts": time.time(),
+        }
+
     def _start_telemetry(self) -> None:
         def runner() -> None:
             interval = 1.0 / max(self.config.telemetry_hz, 0.1)
             while not self._stop_event.is_set():
-                snap = self._cmd_stats.snapshot()
-                soc = self._battery_soc()
-                if snap is not None or soc is not None:
-                    payload = json.dumps(
-                        {
-                            "type": "robot_telemetry",
-                            "cmd": snap,
-                            "soc": soc,
-                            "robot_ts": time.time(),
-                        }
-                    )
-                    # debug (not warning): this fires at telemetry_hz with no
-                    # operator connected, so a failed publish here is the norm
-                    # and would flood the log at a higher level.
-                    try:
-                        self.telemetry_out.publish(payload.encode())
-                    except Exception:
-                        logger.debug("telemetry publish failed", exc_info=True)
+                payload = json.dumps(self._telemetry_payload())
+                # debug (not warning): this fires at telemetry_hz with no
+                # operator connected, so a failed publish here is the norm
+                # and would flood the log at a higher level.
+                try:
+                    self.telemetry_out.publish(payload.encode())
+                except Exception:
+                    logger.debug("telemetry publish failed", exc_info=True)
                 self._stop_event.wait(interval)
 
         self._telemetry_thread = threading.Thread(

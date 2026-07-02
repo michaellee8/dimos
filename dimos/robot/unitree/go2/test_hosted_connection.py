@@ -62,6 +62,10 @@ def _bare_connection() -> Go2HostedConnection:
     conn.connection = MagicMock()
     conn._last_cmd_ts = 0.0
     conn._estopped = False
+    conn._posture = "StandReady"
+    conn._obstacle_avoidance = True
+    conn._cam_selected = ["cam1"]
+    conn._cmd_stats = SimpleNamespace(snapshot=lambda: None)
     conn.config = SimpleNamespace(cmd_stale_after_sec=0.5, damp_on_operator_lost=False)
     # Command execution plane (normally built in start()).
     conn._cmd_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Go2CmdTest")
@@ -338,6 +342,57 @@ def test_busy_rejection_does_not_poison_nonce(monkeypatch: pytest.MonkeyPatch) -
     conn._handle_sport_cmd({"name": "Hello", "nonce": 99})
     _wait_for(lambda: (99, True) in acks)
     assert conn.connection.sport_command.call_count == conn._MAX_PENDING_CMDS + 1
+
+
+# ─── telemetry state snapshot (operator UI seeding) ──────────────────
+
+
+def test_telemetry_payload_carries_robot_state() -> None:
+    conn = _bare_connection()
+    conn._rage_active = True
+    conn._obstacle_avoidance = False
+    conn._cam_selected = ["cam1", "cam2"]
+    conn._estopped = True
+    conn._posture = "Sit"
+
+    p = conn._telemetry_payload()
+
+    assert p["type"] == "robot_telemetry"
+    assert p["state"] == {
+        "posture": "Sit",
+        "rage": True,
+        "obstacle_avoidance": False,
+        "cams": ["cam1", "cam2"],
+        "estopped": True,
+    }
+    assert "robot_ts" in p
+
+
+def test_posture_tracks_successful_posture_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Posture cmds update _posture on success; gestures (Hello) don't."""
+    conn = _bare_connection()
+    conn.connection.sport_command.return_value = True
+    acks: list[tuple[Any, bool]] = []
+    monkeypatch.setattr(conn, "_send_ack", lambda nonce, ok: acks.append((nonce, ok)))
+
+    conn._handle_sport_cmd({"name": "Sit", "nonce": 1})
+    _wait_for(lambda: (1, True) in acks)
+    assert conn._posture == "Sit"
+
+    conn._handle_sport_cmd({"name": "Hello", "nonce": 2})
+    _wait_for(lambda: (2, True) in acks)
+    assert conn._posture == "Sit"  # gesture leaves posture untouched
+
+
+def test_failed_posture_command_leaves_posture(monkeypatch: pytest.MonkeyPatch) -> None:
+    conn = _bare_connection()
+    conn.connection.sport_command.return_value = False
+    acks: list[tuple[Any, bool]] = []
+    monkeypatch.setattr(conn, "_send_ack", lambda nonce, ok: acks.append((nonce, ok)))
+
+    conn._handle_sport_cmd({"name": "StandDown", "nonce": 3})
+    _wait_for(lambda: (3, False) in acks)
+    assert conn._posture == "StandReady"
 
 
 # ─── E-STOP latch + operator-loss safety ─────────────────────────────
