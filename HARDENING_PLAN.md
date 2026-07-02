@@ -47,7 +47,11 @@ tracked separately.)
   appears ≤1.5 s, WASD stops sending, HUD health goes `bad`; frames resume →
   overlay clears, drive resumes only after Stand/Drive.
 
-### A2. Robot-side E-STOP latch + stop-on-disconnect — `[dimos]` `M`
+### A2. Robot-side E-STOP latch + stop-on-disconnect — `[dimos]` `M` — ✅ implemented
+(estop/estop_clear message types + latch gating move() and commands; Damp on
+the urgent path; providers inject synthetic operator_lost on both transports
+→ stop_movement + nonce-cache reset + config-gated damp_on_operator_lost.
+Browser E-STOP sends estop + legacy Damp; re-arm sends estop_clear.)
 - **Issue:** No `estop` message type exists robot-side ("Damp" is just an
   allow-listed sport cmd). Browser E-STOP is fire-and-forget over the link —
   if the link is down it never arrives. Channel close is silent

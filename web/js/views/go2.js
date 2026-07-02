@@ -262,9 +262,13 @@ function wireGo2() {
 
     document.getElementById('estop').addEventListener('click', () => {
         ui.estopped = true;
-        // E-STOP = Damp: robot goes limp immediately. Send on state_reliable
-        // (reliable plane). Fire-and-forget — don't gate the latch on an ack.
+        // Dedicated estop type: new robots latch (move() refuses twists,
+        // commands rejected until estop_clear) AND Damp urgently. The legacy
+        // sport_cmd Damp follows for older robots that don't know estop —
+        // on new ones it's an idempotent second Damp (urgent path, harmless).
+        // Fire-and-forget — don't gate the local latch on an ack.
         if (state.stateChannel && state.stateChannel.readyState === 'open') {
+            state.stateChannel.send(JSON.stringify({ type: 'estop', nonce: ++ui.nonce }));
             state.stateChannel.send(JSON.stringify({ type: 'sport_cmd', name: 'Damp', nonce: ++ui.nonce }));
         }
         document.querySelectorAll('.cmd-btn').forEach((b) => (b.dataset.status = 'idle'));
@@ -273,6 +277,10 @@ function wireGo2() {
     });
     document.getElementById('rearm').addEventListener('click', () => {
         ui.estopped = false;  // re-arm; operator must Stand/Drive-ready to resume
+        // Clear the robot-side latch too (older robots ignore unknown types).
+        if (state.stateChannel && state.stateChannel.readyState === 'open') {
+            state.stateChannel.send(JSON.stringify({ type: 'estop_clear', nonce: ++ui.nonce }));
+        }
         refreshControls();
     });
 
