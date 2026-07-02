@@ -14,7 +14,7 @@
 
 from enum import Enum
 import time
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 
 from pydantic import Field
 from reactivex import empty
@@ -23,20 +23,12 @@ from reactivex.observable import Observable
 import rerun.blueprint as rrb
 
 from dimos.agents.annotation import skill
-from dimos.constants import (
-    DEFAULT_CAPACITY_COLOR_IMAGE,
-    DEFAULT_WORLD_FRAME,
-)
-from dimos.core.coordination.module_coordinator import ModuleCoordinator
+from dimos.constants import DEFAULT_WORLD_FRAME
 from dimos.core.core import rpc
 from dimos.core.global_config import GlobalConfig
 from dimos.core.resource import CompositeResource
 from dimos.core.stream import In, Out
 from dimos.core.tf_module import TfModule, TfModuleConfig
-from dimos.core.transport import LCMTransport, pSHMTransport
-
-if TYPE_CHECKING:
-    from dimos.core.rpc_client import ModuleProxy
 from dimos.memory2.replay import Replay, resolve_db_path
 from dimos.memory2.store.sqlite import SqliteStore
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
@@ -356,21 +348,3 @@ class GO2Connection(TfModule, Camera, Pointcloud):
         Returns None if no frame has been captured yet.
         """
         return self._latest_video_frame
-
-
-def deploy(dimos: ModuleCoordinator, ip: str, prefix: str = "") -> "ModuleProxy":
-    connection = dimos.deploy(GO2Connection, ip=ip)
-
-    connection.pointcloud.transport = pSHMTransport(
-        f"{prefix}/lidar", default_capacity=DEFAULT_CAPACITY_COLOR_IMAGE
-    )
-    connection.color_image.transport = pSHMTransport(
-        f"{prefix}/image", default_capacity=DEFAULT_CAPACITY_COLOR_IMAGE
-    )
-
-    connection.cmd_vel.transport = LCMTransport(f"{prefix}/cmd_vel", Twist)
-
-    connection.camera_info.transport = LCMTransport(f"{prefix}/camera_info", CameraInfo)
-    connection.start()
-
-    return connection
