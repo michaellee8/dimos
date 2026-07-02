@@ -302,6 +302,10 @@ if global_config.simulation == "mujoco":
         (ControlCoordinator, "twist_command", "cmd_vel"),
     ]
 else:
+    import os
+
+    from dimos.hardware.sensors.lidar.fastlio2.module import FastLio2
+    from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
     from dimos.robot.unitree.g1.wholebody_connection import G1WholeBodyConnection
 
     # Real-hw backend: DDS connection module + transport_lcm adapter.
@@ -336,7 +340,32 @@ else:
         auto_start=True,
         params={"default_positions": ARM_DEFAULT_POSE},
     )
-    _nav_stack = MovementManager.blueprint()
+    # Real-hw nav: the proven unitree-g1-nav-simple front-end (Livox MID-360
+    # through FAST-LIO2 for world-registered clouds + odometry, raytracing
+    # voxel map -> height costmap -> replanning A*), but executed through the
+    # coordinator's twist_command by the WBC policy instead of sport mode.
+    # FAST-LIO's odom frame has ground at z~0 (init_pose applied), matching
+    # the costmap's height assumptions.
+    _nav_stack = autoconnect(
+        FastLio2.blueprint(
+            host_ip=os.getenv("LIDAR_HOST_IP", "192.168.123.164"),
+            lidar_ip=os.getenv("LIDAR_IP", "192.168.123.120"),
+        ),
+        RayTracingVoxelMap.blueprint(voxel_size=_G1_NAV_VOXEL_RESOLUTION),
+        CostMapper.blueprint(
+            config=HeightCostConfig(
+                resolution=_G1_NAV_VOXEL_RESOLUTION,
+                can_pass_under=G1.height_clearance + _G1_NAV_OVERHEAD_SAFETY_MARGIN,
+                can_climb=_G1_NAV_MAX_STEP_HEIGHT,
+            ),
+            initial_safe_radius_meters=G1.width_clearance + _G1_NAV_SAFE_RADIUS_MARGIN,
+        ),
+        ReplanningAStarPlanner.blueprint(
+            robot_width=G1.width_clearance,
+            robot_rotation_diameter=_G1_NAV_ROTATION_DIAMETER,
+        ),
+        MovementManager.blueprint(),
+    )
     _remappings = [(ControlCoordinator, "twist_command", "cmd_vel")]
 
 # Arm manipulation planner (sim and real: plans are kinematic either way and
@@ -389,13 +418,35 @@ def _g1_nav_path(path: NavPath) -> Any:
     return path.to_rerun(z_offset=0.3)
 
 
+# Robot mesh root. Sim: MujocoSimModule publishes /odom (PoseStamped), which
+# the bridge logs as a Transform3D at world/odom -- the mesh lives underneath.
+# Real hw: FAST-LIO publishes /odometry (Odometry) instead, logged at
+# world/odometry, so the mesh roots there and _g1_real_odometry_root shapes
+# the transform.
+_G1_ROOT = G1_RERUN_ROOT if global_config.simulation == "mujoco" else "world/odometry/g1"
+
+
+def _g1_real_odometry_root(odom: Any) -> Any:
+    """Robot-mesh root transform from FAST-LIO odometry.
+
+    The odometry tracks the mid360 body frame (head, ~1.2 m up, pitching with
+    the torso). For the whole-robot mesh use x/y/yaw only and pin z at the
+    WBC's nominal pelvis height -- close enough for nav visualization without
+    modeling the head-to-pelvis kinematics.
+    """
+    import rerun as rr
+
+    return rr.Transform3D(
+        translation=[odom.x, odom.y, 0.74],
+        rotation=rr.RotationAxisAngle(axis=[0.0, 0.0, 1.0], radians=float(odom.yaw)),
+    )
+
+
 _static_rerun_entities: dict[str, Any] = {
-    # MujocoSimModule logs odom as a Transform3D at world/odom; the robot
-    # mesh lives underneath and link transforms are driven by joint state.
-    G1_RERUN_ROOT: g1_urdf_static_robot(root_path=G1_RERUN_ROOT),
+    _G1_ROOT: g1_urdf_static_robot(root_path=_G1_ROOT),
     # Fixed-joint (and rest-pose) link transforms, logged once. The per-frame
     # animator (g1_urdf_joint_state) then only updates the movable joints.
-    f"{G1_RERUN_ROOT}/_joint_rest": g1_urdf_static_joints(root_path=G1_RERUN_ROOT),
+    f"{_G1_ROOT}/_joint_rest": g1_urdf_static_joints(root_path=_G1_ROOT),
 }
 _static_rerun_entities.update(scene_package_static_entities(global_config.scene_package))
 
@@ -413,7 +464,7 @@ _rerun_config = {
         "world/camera_info": None,
         "world/depth_image": None,
         "world/depth_camera_info": None,
-        "world/coordinator_joint_state": g1_urdf_joint_state(root_path=G1_RERUN_ROOT),
+        "world/coordinator_joint_state": g1_urdf_joint_state(root_path=_G1_ROOT),
         "world/global_costmap": g1_costmap,
         "world/navigation_costmap": g1_costmap,
         "world/path": _g1_nav_path,
@@ -438,6 +489,13 @@ _rerun_config = {
     },
     "static": _static_rerun_entities,
 }
+
+if global_config.simulation != "mujoco":
+    # Real hw: root the robot mesh on FAST-LIO odometry, and throttle the raw
+    # registered scan over the WiFi link (the voxel map is the useful view).
+    _rerun_config["visual_override"]["world/odometry"] = _g1_real_odometry_root
+    _rerun_config["max_hz"]["world/lidar"] = 2.0
+    _rerun_config["max_hz"]["world/odometry"] = 15.0
 
 
 def _viewer() -> Any:
