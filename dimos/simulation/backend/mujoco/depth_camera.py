@@ -21,7 +21,7 @@ import numpy as np
 from numpy.typing import NDArray
 import open3d as o3d  # type: ignore[import-untyped]
 
-from dimos.simulation.mujoco.constants import MAX_HEIGHT, MAX_RANGE, MIN_RANGE
+from dimos.simulation.legacy.mujoco.constants import MAX_HEIGHT, MAX_RANGE, MIN_RANGE
 
 
 def depth_image_to_point_cloud(

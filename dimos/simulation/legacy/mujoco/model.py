@@ -26,8 +26,12 @@ import numpy as np
 from dimos.core.global_config import GlobalConfig
 from dimos.mapping.occupancy.extrude_occupancy import generate_mujoco_scene
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
-from dimos.simulation.mujoco.input_controller import InputController
-from dimos.simulation.mujoco.policy import G1OnnxController, Go1OnnxController, OnnxController
+from dimos.simulation.legacy.mujoco.input_controller import InputController
+from dimos.simulation.legacy.mujoco.policy import (
+    G1OnnxController,
+    Go1OnnxController,
+    OnnxController,
+)
 from dimos.utils.data import get_data
 
 

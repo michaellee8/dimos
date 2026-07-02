@@ -36,7 +36,7 @@ Use `resolve_scene_package()` for the same values accepted by
 `--scene-package`:
 
 ```python
-from dimos.simulation.scenes.catalog import resolve_scene_package
+from dimos.simulation.scene.catalog import resolve_scene_package
 
 package = resolve_scene_package(global_config.scene_package)
 ```
@@ -52,7 +52,7 @@ Supported inputs:
 Use `load_scene_package()` when you already have the exact metadata path:
 
 ```python
-from dimos.simulation.scene_assets.spec import load_scene_package
+from dimos.simulation.scene.package import load_scene_package
 
 package = load_scene_package("data/scene_packages/dimos_office/scene.meta.json")
 ```

@@ -27,7 +27,7 @@ from dimos.hardware.manipulators.spec import (
     JointLimits,
     ManipulatorInfo,
 )
-from dimos.simulation.engines.mujoco_shm import (
+from dimos.simulation.backend.mujoco.shm import (
     ManipShmReader,
     shm_key_from_path,
 )

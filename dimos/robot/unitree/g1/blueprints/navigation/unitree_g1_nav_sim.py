@@ -23,7 +23,7 @@ from dimos.navigation.cmu_nav.main import cmu_nav_rerun_config, create_cmu_nav
 from dimos.navigation.movement_manager.movement_manager import MovementManager
 from dimos.robot.unitree.g1.config import G1, G1_LOCAL_PLANNER_PRECOMPUTED_PATHS
 from dimos.robot.unitree.g1.g1_rerun import g1_static_robot
-from dimos.simulation.unity.module import UnityBridgeModule
+from dimos.simulation.bridges.unity.module import UnityBridgeModule
 from dimos.visualization.vis_module import vis_module
 
 nav_config: dict[str, Any] = dict(

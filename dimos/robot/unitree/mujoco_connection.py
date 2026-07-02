@@ -46,7 +46,7 @@ from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.robot.unitree.type.odometry import Odometry
-from dimos.simulation.mujoco.constants import (
+from dimos.simulation.legacy.mujoco.constants import (
     LAUNCHER_PATH,
     LIDAR_FPS,
     VIDEO_CAMERA_FOV,
@@ -54,7 +54,7 @@ from dimos.simulation.mujoco.constants import (
     VIDEO_HEIGHT,
     VIDEO_WIDTH,
 )
-from dimos.simulation.mujoco.shared_memory import ShmWriter
+from dimos.simulation.legacy.mujoco.shared_memory import ShmWriter
 from dimos.utils.data import get_data
 from dimos.utils.logging_config import setup_logger
 

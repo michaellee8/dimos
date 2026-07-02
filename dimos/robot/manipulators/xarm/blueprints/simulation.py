@@ -27,7 +27,7 @@ from dimos.robot.manipulators.xarm.config import (
     make_xarm7_model_config,
     make_xarm_hardware,
 )
-from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
+from dimos.simulation.sim_module import MujocoSimModule
 from dimos.visualization.rerun.bridge import RerunBridgeModule
 
 XARM7_SIM_HOME = [0.0, 0.0, 0.0, 0.0, 0.0, -0.7, 0.0]

@@ -21,12 +21,12 @@ import pytest
 
 mujoco = pytest.importorskip("mujoco")
 
-from dimos.simulation.engines.mujoco_engine import MujocoEngine
-from dimos.simulation.engines.robot_sim_binding import (
+from dimos.simulation.backend.mujoco.engine import MujocoEngine
+from dimos.simulation.backend.mujoco.robot_sim_binding import (
     RobotSimSpec,
     resolve_robot_sim_binding,
 )
-from dimos.simulation.utils.xml_parser import build_joint_mappings
+from dimos.simulation.backend.mujoco.xml_parser import build_joint_mappings
 
 pytestmark = pytest.mark.mujoco
 

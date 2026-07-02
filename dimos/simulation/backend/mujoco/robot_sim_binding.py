@@ -26,7 +26,7 @@ from dataclasses import dataclass
 
 import mujoco
 
-from dimos.simulation.utils.xml_parser import JointMapping
+from dimos.simulation.backend.mujoco.xml_parser import JointMapping
 
 _MJOBJ_BODY = int(mujoco.mjtObj.mjOBJ_BODY)
 _MJOBJ_JOINT = int(mujoco.mjtObj.mjOBJ_JOINT)

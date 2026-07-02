@@ -27,8 +27,8 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import make_vector3
 from dimos.msgs.std_msgs.Bool import Bool
-from dimos.simulation.mujoco.direct_cmd_vel_explorer import DirectCmdVelExplorer
-from dimos.simulation.mujoco.person_on_track import PersonTrackPublisher
+from dimos.simulation.testing.direct_cmd_vel_explorer import DirectCmdVelExplorer
+from dimos.simulation.testing.person_on_track import PersonTrackPublisher
 
 
 def _pose(x: float, y: float, theta: float) -> PoseStamped:

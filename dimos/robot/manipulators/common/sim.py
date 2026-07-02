@@ -26,6 +26,6 @@ def mujoco_if_sim(sim_path: str | Path, dof: int) -> tuple[Blueprint, ...]:
     if not global_config.simulation:
         return ()
 
-    from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
+    from dimos.simulation.sim_module import MujocoSimModule
 
     return (MujocoSimModule.blueprint(address=str(sim_path), headless=False, dof=dof),)

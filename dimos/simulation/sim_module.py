@@ -52,19 +52,24 @@ from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.msgs.sensor_msgs.Imu import Imu
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.simulation.engines.mujoco_engine import (
+from dimos.simulation.backend.mujoco.engine import (
     CameraConfig,
     CameraFrame,
     MujocoEngine,
     RaycastLidarConfig,
 )
-from dimos.simulation.engines.mujoco_shm import (
+from dimos.simulation.backend.mujoco.robot_sim_binding import RobotSimSpec
+from dimos.simulation.backend.mujoco.shm import (
     CMD_MODE_PD_TAU,
     ManipShmWriter,
     shm_key_from_path,
 )
-from dimos.simulation.engines.robot_sim_binding import RobotSimSpec
-from dimos.simulation.mujoco.constants import LIDAR_RESOLUTION, MAX_HEIGHT, MAX_RANGE, MIN_RANGE
+from dimos.simulation.legacy.mujoco.constants import (
+    LIDAR_RESOLUTION,
+    MAX_HEIGHT,
+    MAX_RANGE,
+    MIN_RANGE,
+)
 from dimos.spec import perception
 from dimos.utils.logging_config import setup_logger
 
@@ -254,7 +259,7 @@ class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     mujoco_lidar_max_height: float = MAX_HEIGHT
     mujoco_lidar_robot_exclusion_radius: float = 0.0
     # Inject menagerie/dimos-bundled mesh bytes (via
-    # dimos.simulation.mujoco.model.get_assets) into MjModel.from_xml_string.
+    # dimos.simulation.legacy.mujoco.model.get_assets) into MjModel.from_xml_string.
     # MJCFs that reference meshes by bare filename (G1 GR00T, Go2) need this;
     # self-contained MJCFs with on-disk meshes (xarm scene.xml) don't.
     inject_legacy_assets: bool = False
@@ -386,7 +391,7 @@ class MujocoSimModule(
         if self.config.inject_legacy_assets:
             # Lazy import: get_assets pulls in mujoco_playground (heavy,
             # optional) and is only needed when injecting bundled meshes.
-            from dimos.simulation.mujoco.model import get_assets
+            from dimos.simulation.legacy.mujoco.model import get_assets
 
             engine_assets = get_assets()
         # Compose rendered cameras separately from raycast lidar. Each
@@ -571,7 +576,10 @@ class MujocoSimModule(
 
     def _compose_model(self) -> mujoco.MjModel:
         """Compose optional scene package MJCF + robot MJCF + entities."""
-        from dimos.simulation.mujoco.entity_scene import add_entities_to_spec, spawn_penetrators
+        from dimos.simulation.backend.mujoco.entity_scene import (
+            add_entities_to_spec,
+            spawn_penetrators,
+        )
 
         if self.config.robot_mjcf is None:
             raise RuntimeError("MujocoSimModule: robot_mjcf is required for composition")

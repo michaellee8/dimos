@@ -79,7 +79,7 @@ from dimos.robot.unitree.g1.g1_rerun import (
     g1_urdf_joint_state,
     g1_urdf_static_robot,
 )
-from dimos.simulation.scene_assets.spec import ScenePackage
+from dimos.simulation.scene.package import ScenePackage
 from dimos.utils.data import LfsPath
 from dimos.visualization.rerun.scene_package import scene_package_static_entities
 from dimos.visualization.vis_module import vis_module
@@ -142,11 +142,11 @@ if global_config.simulation and global_config.simulation != "mujoco":
 
 if global_config.simulation == "mujoco":
     from dimos.mapping.voxels import VoxelGridMapper
-    from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
-    from dimos.simulation.engines.robot_sim_binding import (
+    from dimos.simulation.backend.mujoco.robot_sim_binding import (
         RobotSimSpec,
         mjcf_joint_names_from_hardware,
     )
+    from dimos.simulation.sim_module import MujocoSimModule
 
     _g1_sim_joints = tuple(g1_joints)
     _g1_sim_spec = RobotSimSpec(
@@ -202,7 +202,7 @@ if global_config.simulation == "mujoco":
                 scene_path,
             )
 
-        from dimos.simulation.scenes.catalog import resolve_scene_package
+        from dimos.simulation.scene.catalog import resolve_scene_package
 
         package = resolve_scene_package(global_config.scene_package)
         if package is None:

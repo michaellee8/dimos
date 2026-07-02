@@ -30,13 +30,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
-from dimos.simulation.engines.base import SimulationEngine
-from dimos.simulation.engines.robot_sim_binding import (
+from dimos.simulation.backend.base import SimulationEngine
+from dimos.simulation.backend.mujoco.robot_sim_binding import (
     RobotSimBinding,
     RobotSimSpec,
     resolve_robot_sim_binding,
 )
-from dimos.simulation.utils.xml_parser import JointMapping, build_joint_mappings
+from dimos.simulation.backend.mujoco.xml_parser import JointMapping, build_joint_mappings
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:

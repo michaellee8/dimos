@@ -24,8 +24,8 @@ from unittest.mock import MagicMock
 import numpy as np
 import pytest
 
-from dimos.simulation.engines.mujoco_engine import MujocoEngine
-from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule, MujocoSimModuleConfig
+from dimos.simulation.backend.mujoco.engine import MujocoEngine
+from dimos.simulation.sim_module import MujocoSimModule, MujocoSimModuleConfig
 
 
 class _FakeData:
