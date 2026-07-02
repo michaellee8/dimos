@@ -27,7 +27,8 @@ of the robot hangs off it:
 Mount geometry (measured on the physical rig)
 ---------------------------------------------
 - base_link -> front_camera: 32.7cm forward, ~4.3cm up (URDF front_camera mount).
-- front_camera -> mid360_link: lidar is 3.2cm back, 12cm up, pitched 44 deg down.
+- front_camera -> mid360_link: lidar is 3.2cm back, 12cm up, pitched 44 deg down
+  and yawed -90 deg about its own z (the puck is mounted sideways).
 - front_camera -> camera_optical: the standard ROS optical rotation (x-right, y-down,
   z-forward).
 
@@ -55,7 +56,10 @@ OPTICAL_RPY = (-math.pi / 2, 0.0, -math.pi / 2)
 
 BASE_TO_CAMERA_XYZ = (0.32715, -0.00003, 0.04297)
 CAMERA_TO_MID360_XYZ = (-0.032, 0.0, 0.12)
-CAMERA_TO_MID360_RPY = (0.0, MID360_PITCH_DOWN, 0.0)
+# Pitched down 44 deg, then yawed -90 deg about the sensor's own z (the puck is
+# mounted sideways). Ry(44) @ Rz(-90) expressed as extrinsic-xyz rpy — verified
+# against gravity in the china_office recording (base_link level to ~4 deg).
+CAMERA_TO_MID360_RPY = (-MID360_PITCH_DOWN, 0.0, -math.pi / 2)
 
 
 def _mid360_to_base() -> tuple[tuple[float, float, float], tuple[float, float, float]]:
