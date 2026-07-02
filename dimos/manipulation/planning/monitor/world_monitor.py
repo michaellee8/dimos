@@ -324,20 +324,12 @@ class WorldMonitor:
             state = self.get_current_joint_state(robot_id)
             if state is None:
                 continue
-            pos_by_name = dict(zip(state.name, state.position, strict=True))
-            for local_name in self._robot_joints.get(robot_id, []):
-                if local_name in pos_by_name:
-                    names.append(f"{robot_name}/{local_name}")
-                    positions.append(float(pos_by_name[local_name]))
+            for name, position in zip(state.name, state.position, strict=True):
+                names.append(f"{robot_name}/{name}")
+                positions.append(float(position))
         return JointState(name=names, position=positions)
 
     def current_group_joint_state(
-        self, group_id: PlanningGroupID, max_age: float = 1.0
-    ) -> JointState:
-        """Return current joint state scoped and ordered for one planning group."""
-        return self._current_robot_joint_state_for_group(group_id, max_age)
-
-    def _current_robot_joint_state_for_group(
         self, group_id: PlanningGroupID, max_age: float = 1.0
     ) -> JointState:
         """Return current joint state scoped and ordered for one planning group."""
