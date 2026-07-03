@@ -216,13 +216,29 @@ name prefix so several copies can coexist, e.g. one copy per robot. Because
 blueprints are plain Python values, a variable-size (and mixed-type) fleet is
 just a loop:
 
-```python
+```python session=blueprint-ns
 from dimos.core.coordination.blueprints import autoconnect, namespace
+from dimos.core.module import Module, ModuleConfig
+from dimos.core.stream import In, Out
+
+class Cloud: ...
+
+class SensorConfig(ModuleConfig):
+    ip: str = ""
+
+class Sensor(Module):
+    config: SensorConfig
+    pointcloud: Out[Cloud]
+
+class AggregateMapper(Module):
+    pointcloud: In[Cloud]
+
+robot_ips = ["10.0.0.1", "10.0.0.2"]
 
 fleet = autoconnect(
     AggregateMapper.blueprint(),   # shared: one instance for the whole fleet
     *[
-        namespace(f"robot{i}", GO2Connection.blueprint(ip=ip), expose={"pointcloud"})
+        namespace(f"robot{i}", Sensor.blueprint(ip=ip), expose={"pointcloud"})
         for i, ip in enumerate(robot_ips)
     ],
 )
