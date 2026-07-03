@@ -776,6 +776,21 @@ def _ref_msg(module_name: str, ref: object, spec_name: str, detail: str) -> str:
     )
 
 
+def _atom_namespace(instance_name: str) -> str:
+    return instance_name.rsplit("/", 1)[0] if "/" in instance_name else ""
+
+
+def _namespace_levels(consumer_namespace: str) -> list[str]:
+    """Ref search order: the consumer's namespace, enclosing ones, then global."""
+    levels = []
+    namespace = consumer_namespace
+    while namespace:
+        levels.append(namespace)
+        namespace = _atom_namespace(namespace)
+    levels.append("")
+    return levels
+
+
 def _resolve_single_ref(
     bp: Any,
     module_ref: Any,
@@ -786,32 +801,54 @@ def _resolve_single_ref(
 ) -> Any:
     """Resolve a module ref to its provider.
 
-    Returns a module type, a ``DisabledModuleProxy``, or *None* (skip).
+    Returns an instance name, a module type (provider outside the blueprint),
+    a ``DisabledModuleProxy``, or *None* (skip).
     """
-    from dimos.core.coordination.blueprints import DisabledModuleProxy
+    from dimos.core.coordination.blueprints import BlueprintAtom, DisabledModuleProxy
+    from dimos.core.module import is_module_type
 
     m = bp.module.__name__
     s = module_ref.spec.__name__
+    is_class_ref = is_module_type(spec)
 
-    possible = [
-        other.module
-        for other in blueprint.active_blueprints
-        if other != bp and spec_structural_compliance(other.module, spec)
-    ]
-    if existing_modules:
-        bp_module_set = {o.module for o in blueprint.active_blueprints}
-        for mod_cls in existing_modules:
-            if (
-                mod_cls != bp.module
-                and mod_cls not in bp_module_set
-                and spec_structural_compliance(mod_cls, spec)
-            ):
-                possible.append(mod_cls)
-    valid = [c for c in possible if spec_annotation_compliance(c, spec)]
+    def satisfies(cls: type) -> bool:
+        return cls is spec if is_class_ref else spec_structural_compliance(cls, spec)
+
+    def module_of(candidate: Any) -> type[ModuleBase]:
+        return candidate.module if isinstance(candidate, BlueprintAtom) else candidate
+
+    def result_of(candidate: Any) -> Any:
+        return candidate.name if isinstance(candidate, BlueprintAtom) else candidate
+
+    def display(candidate: Any) -> str:
+        return candidate.name if isinstance(candidate, BlueprintAtom) else candidate.__name__
+
+    # Search the consumer's own namespace first so a per-robot consumer binds
+    # to its own robot's provider instead of colliding with the other robots'.
+    possible: list[Any] = []
+    for level in _namespace_levels(_atom_namespace(bp.name)):
+        possible = [
+            other
+            for other in blueprint.active_blueprints
+            if other != bp and _atom_namespace(other.name) == level and satisfies(other.module)
+        ]
+        if level == "" and existing_modules:
+            bp_module_set = {o.module for o in blueprint.active_blueprints}
+            possible += [
+                mod_cls
+                for mod_cls in existing_modules
+                if mod_cls != bp.module and mod_cls not in bp_module_set and satisfies(mod_cls)
+            ]
+        if possible:
+            break
 
     if not possible:
         if module_ref.optional:
             return None
+        if is_class_ref:
+            # The provider class is not in the blueprint; keep the class and
+            # let get_instance resolve it (legacy behavior, possibly None).
+            return spec
         disabled = next(
             (
                 other.module
@@ -831,6 +868,8 @@ def _resolve_single_ref(
             return DisabledModuleProxy(s)
         raise Exception(_ref_msg(m, module_ref, s, "No module met that spec."))
 
+    valid = [c for c in possible if is_class_ref or spec_annotation_compliance(module_of(c), spec)]
+
     if len(possible) == 1:
         if not valid:
             logger.warning(
@@ -838,15 +877,15 @@ def _resolve_single_ref(
                     m,
                     module_ref,
                     s,
-                    f"{possible[0].__name__} met the spec structurally but had "
+                    f"{display(possible[0])} met the spec structurally but had "
                     f"annotation mismatches.\nPlease either change the {s} spec "
-                    f"or the {possible[0].__name__} module.",
+                    f"or the {module_of(possible[0]).__name__} module.",
                 )
             )
-        return possible[0]
+        return result_of(possible[0])
 
     if len(valid) == 1:
-        return valid[0]
+        return result_of(valid[0])
 
     if len(valid) > 1:
         raise Exception(
@@ -854,14 +893,14 @@ def _resolve_single_ref(
                 m,
                 module_ref,
                 s,
-                f"Multiple modules met that spec: {valid}.\n"
+                f"Multiple modules met that spec: {[display(c) for c in valid]}.\n"
                 f"To fix this use .remappings, for example:\n"
                 f"    autoconnect(...).remappings([ ({m}, {module_ref.name!r}, "
                 f"<ModuleThatHasTheRpcCalls>) ])",
             )
         )
 
-    names = ", ".join(c.__name__ for c in possible)
+    names = ", ".join(display(c) for c in possible)
     raise Exception(
         _ref_msg(
             m,
@@ -899,31 +938,32 @@ def _connect_module_refs(
             declared_spec[bp.name, module_ref.name] = module_ref.spec
             spec = mod_and_mod_ref_to_proxy.get((bp.name, module_ref.name), module_ref.spec)
 
-            if is_module_type(spec):
-                mod_and_mod_ref_to_proxy[bp.name, module_ref.name] = spec
-                continue
-
             result = _resolve_single_ref(
                 bp, module_ref, spec, blueprint, disabled_set, existing_modules
             )
             if result is None:
+                mod_and_mod_ref_to_proxy.pop((bp.name, module_ref.name), None)
                 continue
             if isinstance(result, DisabledModuleProxy):
                 disabled_ref_proxies[bp.name, module_ref.name] = result
+                mod_and_mod_ref_to_proxy.pop((bp.name, module_ref.name), None)
             else:
                 mod_and_mod_ref_to_proxy[bp.name, module_ref.name] = result
 
-    for (base_key, ref_name), target_module in mod_and_mod_ref_to_proxy.items():
+    for (base_key, ref_name), target in mod_and_mod_ref_to_proxy.items():
         base_instance = module_coordinator.get_instance(base_key)
-        target_instance: Any = module_coordinator.get_instance(target_module)  # type: ignore[arg-type]
+        target_instance: Any = module_coordinator.get_instance(target)  # type: ignore[arg-type]
         async_methods = _async_methods_of_spec(declared_spec.get((base_key, ref_name)))
         if async_methods:
             target_instance = AsyncSpecProxy(target_instance, async_methods)
         setattr(base_instance, ref_name, target_instance)
         base_instance.set_module_ref(ref_name, target_instance)
-        target_keys = module_coordinator._instance_keys_of(target_module)  # type: ignore[arg-type]
-        if target_keys:
-            module_coordinator._resolved_module_refs[base_key, ref_name] = target_keys[0]
+        if isinstance(target, str):
+            module_coordinator._resolved_module_refs[base_key, ref_name] = target
+        else:
+            target_keys = module_coordinator._instance_keys_of(cast("type[ModuleBase]", target))
+            if target_keys:
+                module_coordinator._resolved_module_refs[base_key, ref_name] = target_keys[0]
 
     for (base_key, ref_name), proxy in disabled_ref_proxies.items():
         base_instance = module_coordinator.get_instance(base_key)

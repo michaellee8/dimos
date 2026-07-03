@@ -208,7 +208,9 @@ def load_config_args(config: type[BaseModel], args: Iterable[str], path: Path) -
 
     for arg in args:
         k, _, v = arg.partition("=")
-        parts = k.split(".")
+        # Accept namespaced instance names in both forms: robot0/sensor.ip
+        # and robot0_sensor.ip (config keys escape "/" to "_").
+        parts = [p.replace("/", "_") for p in k.split(".")]
         d = kwargs
         for p in parts[:-1]:
             d = d.setdefault(p, {})

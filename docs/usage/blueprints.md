@@ -209,6 +209,63 @@ blueprint.remappings([
 })
 ```
 
+## Multi-robot blueprints (namespaces)
+
+`namespace(prefix, *blueprints, expose=...)` isolates a set of modules under a
+name prefix so several copies can coexist, e.g. one copy per robot. Because
+blueprints are plain Python values, a variable-size (and mixed-type) fleet is
+just a loop:
+
+```python
+from dimos.core.coordination.blueprints import autoconnect, namespace
+
+fleet = autoconnect(
+    AggregateMapper.blueprint(),   # shared: one instance for the whole fleet
+    *[
+        namespace(f"robot{i}", GO2Connection.blueprint(ip=ip), expose={"pointcloud"})
+        for i, ip in enumerate(robot_ips)
+    ],
+)
+```
+
+Inside a namespace everything is prefixed: instance names
+(`robot0/go2connection`), stream names and topics (`/robot0/lidar`), TF frames
+(`frame_id_prefix`, unless you set one yourself), and RPC topics
+(`robot0/go2connection/move`). Prefixed streams only connect within their
+namespace.
+
+Stream names listed in `expose` are left unprefixed, so they connect globally —
+that is how data crosses the boundary:
+
+- **Robots -> shared** (fan-in): every robot exposes `pointcloud`; the shared
+  `AggregateMapper` reads the one merged stream. Messages remain attributable
+  because TF frames carry the robot prefix.
+- **Shared -> one robot** (directed): remap the shared module's stream to a
+  namespaced name: `.remappings([(FleetPlanner, "cmd_r0", "robot0/cmd_vel")])`.
+- **Broadcast**: expose the input name in every namespace.
+
+Module references (Specs or direct classes) resolve within the consumer's
+namespace first, then enclosing namespaces, then globally, so per-robot
+consumers bind to their own robot's providers.
+
+Configuration addresses instances with `/` escaped to `_`:
+`-o robot0/go2connection.ip=10.0.0.5` (or `-o robot0_go2connection.ip=...`),
+env `ROBOT0_GO2CONNECTION__IP=...`. `.remappings` accepts an instance name
+string wherever it accepts a module class.
+
+Namespaces nest by composition: `namespace("a", namespace("b", bp))` gives
+`a/b/...` names. Per-robot values (like the IP) must be module kwargs, not
+GlobalConfig, since GlobalConfig is shared by all modules.
+
+Current limitations: robots are fixed at launch (no runtime add/remove),
+`disabled_modules` disables all instances of a class, module *references*
+cannot be remapped to a specific instance, and skills from duplicate instances
+collide in the MCP server.
+
+See `dimos/robot/unitree/go2/blueprints/basic/unitree_go2_multi.py`
+(`ROBOT_IPS=a,b dimos run unitree-go2-multi`) for a runnable example and
+`dimos/core/coordination/test_namespace.py` for the full wiring patterns.
+
 ## Overriding global configuration.
 
 Each module includes the global config available as `self.config.g`. E.g.:
