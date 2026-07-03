@@ -517,10 +517,12 @@ _static_rerun_entities.update(scene_package_static_entities(global_config.scene_
 
 _rerun_config = {
     # Cap the in-RAM recording so a late-connecting viewer replays a small
-    # recent slice instead of a multi-GB backlog. The "25%" default is ~3.9 GB
-    # on the onboard Jetson, which a viewer can never catch up to over the
-    # link. Matches the g1 nav blueprints.
-    "memory_limit": "512MB",
+    # recent slice instead of a multi-GB backlog; 512MB fits the onboard
+    # Jetson. This knob also sets the auto-spawned viewer's budget, and the
+    # 1 Hz full-snapshot nav streams (global map, costmaps) fill a small
+    # budget in minutes -- the viewer GC then evicts them between updates
+    # ("the map disappears"). Sim runs on the workstation, so give it room.
+    "memory_limit": "512MB" if global_config.simulation != "mujoco" else "8GB",
     "blueprint": _g1_groot_rerun_blueprint,
     "visual_override": {
         # This blueprint uses raycast lidar, so suppress raw camera streams
