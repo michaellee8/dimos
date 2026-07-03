@@ -133,8 +133,12 @@ async function _setupWebRTCInner(sessionId) {
         if ((c.type === 'srflx' || c.type === 'relay') && onUsableCandidate) onUsableCandidate();
     };
     pc.onicecandidateerror = (e) => {
-        // 701 = TURN/STUN server unreachable; 401 = bad creds; 300/600 = misc.
-        console.warn(`[ice] cand ERROR code=${e.errorCode} ${e.errorText || ''} ` +
+        // 701 = ONE (local addr × TURN url) allocation failed — routine noise on
+        // dual-stack networks (rotated IPv6 privacy addrs × tcp/tls variants);
+        // the gather summary reports whether relays were actually obtained, and
+        // warns if none were. 401 = bad creds; 300/600 = misc — those stay loud.
+        const log = e.errorCode === 701 ? console.debug : console.warn;
+        log(`[ice] cand ERROR code=${e.errorCode} ${e.errorText || ''} ` +
             `url=${e.url || ''} host=${e.address || ''}:${e.port || ''}`);
     };
 
@@ -174,6 +178,10 @@ async function _setupWebRTCInner(sessionId) {
     onUsableCandidate = null;  // stop settling on late candidates
     const candSummary = Object.entries(candTypes).map(([t, n]) => `${t}×${n}`).join(' ') || 'none';
     console.info(`[ice] gather ${(performance.now() - tGather).toFixed(0)}ms (${how}) — ${candSummary}`);
+    // Individual 701s log at debug; this is the signal that actually matters.
+    if (relayCount > 0 && !candTypes.relay) {
+        console.warn('[ice] TURN configured but NO relay candidates gathered — CGNAT/strict-NAT fallback unavailable');
+    }
 
     const data = await api('POST', `/sessions/${sessionId}/join`, {
         role: 'operator',
