@@ -176,7 +176,6 @@ unitree_go2_nav_3d = autoconnect(
         wall_clearance_m=0.1,
         wall_buffer_m=0.75,
         wall_buffer_weight=100.0,
-        # 0.2 / voxel_size(0.08) floors to 2 cells, so at most a 2-voxel step.
         step_threshold_m=0.16,
         step_penalty_weight=4.0,
         viz_publish_hz=0.0,

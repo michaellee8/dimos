@@ -51,12 +51,12 @@ impl MLSPlanner {
         voxel_size,
         robot_height,
         max_overhead_m = 2.0,
-        surface_closing_radius = 0.8,
+        surface_closing_radius = 0.3,
         node_spacing_m = 1.0,
-        wall_clearance_m = 0.3,
+        wall_clearance_m = 0.1,
         wall_buffer_m = 0.75,
         wall_buffer_weight = 100.0,
-        step_threshold_m = 0.15,
+        step_threshold_m = 0.16,
         step_penalty_weight = 4.0,
     ))]
     fn new(

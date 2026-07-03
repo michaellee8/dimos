@@ -32,7 +32,7 @@ pub struct Config {
     #[validate(range(min = 0.0, max = 1.0))]
     pub graze_cos: f32,
     /// Occupied neighbors a surface voxel needs to appear in the local map. Zero
-    /// emits all; higher drops isolated returns. The global map is unfiltered.
+    /// emits all. Higher drops isolated returns. The global map is unfiltered.
     #[validate(range(min = 0))]
     pub support_min: i32,
     /// Publish the accumulated local map and region bounds every Nth frame. Zero disables them.
@@ -393,8 +393,9 @@ pub fn iter_global_normals(
         })
 }
 
-/// Count of a voxel's 26-neighbors that are themselves surface (health > 0).
-fn surface_support(voxels: &AHashMap<VoxelKey, Voxel>, key: VoxelKey) -> i32 {
+/// Whether at least `support_min` of a voxel's 26 neighbors are surface
+/// (health > 0). Stops counting once the threshold is met.
+fn has_support(voxels: &AHashMap<VoxelKey, Voxel>, key: VoxelKey, support_min: i32) -> bool {
     let mut n = 0;
     for dx in -1..=1 {
         for dy in -1..=1 {
@@ -405,11 +406,14 @@ fn surface_support(voxels: &AHashMap<VoxelKey, Voxel>, key: VoxelKey) -> i32 {
                 let nk = (key.0 + dx, key.1 + dy, key.2 + dz);
                 if voxels.get(&nk).is_some_and(|c| c.health > 0) {
                     n += 1;
+                    if n >= support_min {
+                        return true;
+                    }
                 }
             }
         }
     }
-    n
+    false
 }
 
 /// Points for an emitted cloud, the single source of truth for both the live
@@ -445,7 +449,7 @@ pub fn emit_points(
         if !in_bounds(x, y, z) {
             continue;
         }
-        if support_min > 0 && surface_support(&map.voxels, key) < support_min {
+        if support_min > 0 && !has_support(&map.voxels, key, support_min) {
             continue;
         }
         out.push((x, y, z));

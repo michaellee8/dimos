@@ -64,7 +64,7 @@ impl VoxelRayMapper {
         shadow_depth = 0.1,
         grace_depth = 0.2,
         min_health = -1,
-        max_health = 1,
+        max_health = 5,
         graze_cos = 0.7,
         support_min = 4,
     ))]

@@ -24,12 +24,12 @@ class MLSPlanner:
         voxel_size: float,
         robot_height: float,
         max_overhead_m: float = 2.0,
-        surface_closing_radius: float = 0.8,
+        surface_closing_radius: float = 0.3,
         node_spacing_m: float = 1.0,
-        wall_clearance_m: float = 0.3,
+        wall_clearance_m: float = 0.1,
         wall_buffer_m: float = 0.75,
         wall_buffer_weight: float = 100.0,
-        step_threshold_m: float = 0.15,
+        step_threshold_m: float = 0.16,
         step_penalty_weight: float = 4.0,
     ) -> None: ...
     def update_global_map(self, points: NDArray[np.float32]) -> None:

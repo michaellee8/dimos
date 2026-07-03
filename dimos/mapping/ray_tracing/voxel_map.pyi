@@ -27,7 +27,7 @@ class VoxelRayMapper:
         shadow_depth: float = 0.1,
         grace_depth: float = 0.2,
         min_health: int = -1,
-        max_health: int = 1,
+        max_health: int = 5,
         graze_cos: float = 0.7,
         support_min: int = 4,
     ) -> None: ...
