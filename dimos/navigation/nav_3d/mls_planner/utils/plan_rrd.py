@@ -290,7 +290,7 @@ def main(
     max_range: float = typer.Option(30.0, "--max-range", help="Max ray cast distance (m)"),
     ray_subsample: int = typer.Option(1, "--ray-subsample", help="Keep every Nth ray"),
     shadow_depth: float = typer.Option(
-        0.2, "--shadow-depth", help="Extend rays past the endpoint to clear shadows (m)"
+        0.1, "--shadow-depth", help="Extend rays past the endpoint to clear shadows (m)"
     ),
     grace_depth: float = typer.Option(
         0.2, "--grace-depth", help="Skip clearing for voxels within this range of a point (m)"

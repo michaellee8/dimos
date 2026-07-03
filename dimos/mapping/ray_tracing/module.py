@@ -38,7 +38,7 @@ class RayTracingVoxelMapConfig(NativeModuleConfig):
     # Higher subsample means less tracing
     ray_subsample: int = 1
     # Extend rays past the end point to clear shadows
-    shadow_depth: float = 0.2
+    shadow_depth: float = 0.1
     # Ignore voxels within this range of points for ray tracing clearing
     grace_depth: float = 0.2
     # Bounds for the health of voxels. Positive health means voxel is occupied.

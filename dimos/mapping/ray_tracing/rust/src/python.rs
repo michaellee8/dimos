@@ -62,7 +62,7 @@ impl VoxelRayMapper {
         voxel_size,
         max_range,
         ray_subsample = 1,
-        shadow_depth = 0.2,
+        shadow_depth = 0.1,
         grace_depth = 0.2,
         min_health = -1,
         max_health = 1,

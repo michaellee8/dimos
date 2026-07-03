@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 
 logger = setup_logger()
 
-DEFAULT_SHADOW_DEPTH = 0.2
+DEFAULT_SHADOW_DEPTH = 0.1
 
 
 class RayTraceMap(Transformer[PointCloud2, PointCloud2]):

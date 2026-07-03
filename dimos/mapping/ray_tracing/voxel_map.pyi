@@ -24,7 +24,7 @@ class VoxelRayMapper:
         voxel_size: float,
         max_range: float,
         ray_subsample: int = 1,
-        shadow_depth: float = 0.2,
+        shadow_depth: float = 0.1,
         grace_depth: float = 0.2,
         min_health: int = -1,
         max_health: int = 1,
