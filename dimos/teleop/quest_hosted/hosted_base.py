@@ -35,18 +35,20 @@ Clock-sync pings never reach here — ``BrokerProvider`` answers them inline.
 
 from __future__ import annotations
 
+# Callable is a runtime import (not TYPE_CHECKING): the class-level
+# _handle_estop / _on_operator_lost hooks below are annotated with it, and
+# blueprint.config() runs get_type_hints() on this class, which evaluates
+# those annotations at runtime — an under-TYPE_CHECKING import NameErrors there.
+from collections.abc import Callable
 import json
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from dimos.teleop.utils.camera_mux import CameraMuxMixin
 from dimos.teleop.utils.stream_stats import LiveStreamStats
 from dimos.teleop.utils.video_stats import VideoStats
 from dimos.utils.logging_config import setup_logger
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 logger = setup_logger()
 
