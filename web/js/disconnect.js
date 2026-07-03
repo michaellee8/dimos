@@ -31,6 +31,8 @@ export async function disconnect() {
     if (state.stateChannel) { try { state.stateChannel.close(); } catch (_) {} state.stateChannel = null; }
     if (state.stateBackChannel) { try { state.stateBackChannel.close(); } catch (_) {} state.stateBackChannel = null; }
     if (state.mapChannel) { try { state.mapChannel.close(); } catch (_) {} state.mapChannel = null; }
+    // Release the mic device (kills the browser's recording indicator).
+    if (state.micTrack) { try { state.micTrack.stop(); } catch (_) {} state.micTrack = null; }
     const v = document.getElementById('robot-cam');
     if (v) {
         v.srcObject = null;

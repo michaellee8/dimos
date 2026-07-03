@@ -20,6 +20,7 @@ export const state = {
     stateChannel: null,
     stateBackChannel: null,
     mapChannel: null,       // robot → operator map (occupancy grid + odom), unreliable
+    micTrack: null,         // operator mic MediaStreamTrack (starts muted; cockpit toggles)
     xrSession: null,
     xrRefSpace: null,
     gl: null,
@@ -63,6 +64,7 @@ export const state = {
     onRobotState: null,     // optional view hook: (state) => void for robot_telemetry.state
     onMap: null,            // optional view hook: (msg) => void for {type:map,...} occupancy grid
     onOdom: null,           // optional view hook: (msg) => void for {type:odom,x,y,yaw,ts}
+    onMicReady: null,       // optional view hook: () => void once the mic track is captured
     driveEnabled: true,     // gates WASD; go2 cockpit sets false until Stand/Drive
     // Video-freshness drive gate (stall.js): stalled drives the overlay/HUD,
     // blocked suppresses twist sends (stall OR post-stall neutral gate).

@@ -111,6 +111,11 @@ export function renderGo2(c) {
                     <button id="view-swap" class="cmd-btn term-caps text-[11px] leading-none px-2 py-0.5" title="Swap camera / map">
                         ⇄ <span id="view-swap-label">MAP</span>
                     </button>
+                    <!-- Operator mic → robot. Track is captured muted at connect;
+                         this flips track.enabled. Greyed when no mic was granted. -->
+                    <button id="mic-toggle" class="cmd-btn term-caps text-[11px] leading-none px-2 py-0.5" title="Operator mic → robot">
+                        🎙 <span id="mic-toggle-label">OFF</span>
+                    </button>
                     <!-- Camera tabs: toggle which cameras the robot composites into
                          the single video. At least one stays selected. -->
                     <div class="flex items-center gap-1.5" id="cam-tabs"></div>
@@ -338,6 +343,7 @@ function wireGo2() {
     state.onMap = onMap;
     state.onOdom = onOdom;
     document.getElementById('view-swap').addEventListener('click', () => setMainView());
+    wireMicToggle();
     // Click the floating PiP to swap too. Both media elements are always in the
     // DOM; only the one with .is-pip is visually the PiP, so a click on either
     // (guarded to the PiP one) flips the view.
@@ -397,6 +403,30 @@ function bindPipResize() {
     };
     handle.addEventListener('pointerup', end);
     handle.addEventListener('pointercancel', end);
+}
+
+// Operator mic → robot. The track is captured MUTED at connect (webrtc.js);
+// this just flips track.enabled. No track (mic denied / robot side without
+// audio_in) → the button reads N/A and stays inert.
+function wireMicToggle() {
+    const btn = document.getElementById('mic-toggle');
+    const label = document.getElementById('mic-toggle-label');
+    if (!btn || !label) return;
+    const sync = () => {
+        const t = state.micTrack;
+        if (!t) { label.textContent = 'N/A'; btn.disabled = true; return; }
+        btn.disabled = false;
+        label.textContent = t.enabled ? 'ON' : 'OFF';
+        btn.classList.toggle('is-active', t.enabled);
+    };
+    btn.addEventListener('click', () => {
+        const t = state.micTrack;
+        if (t) t.enabled = !t.enabled;
+        sync();
+    });
+    // The view renders before webrtc.js captures the mic — re-sync when it lands.
+    state.onMicReady = sync;
+    sync();
 }
 
 // Scroll-to-zoom (about the cursor) + drag-to-pan on the minimap, active only

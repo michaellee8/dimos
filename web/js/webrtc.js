@@ -86,6 +86,24 @@ async function _setupWebRTCInner(sessionId) {
 
     // recvonly transceiver gives the offer a video m-section to bind to.
     pc.addTransceiver('video', { direction: 'recvonly' });
+
+    // Operator mic → robot: a sendonly m=audio in the offer, which the broker
+    // records and bridges onto the robot's session. Captured MUTED — the
+    // cockpit's mic toggle unmutes; never hot-mic on connect. No mic /
+    // permission denied degrades to a silent link (video + commands unaffected).
+    state.micTrack = null;
+    try {
+        const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
+        state.micTrack = mic.getAudioTracks()[0] || null;
+        if (state.micTrack) {
+            state.micTrack.enabled = false;
+            pc.addTransceiver(state.micTrack, { direction: 'sendonly', streams: [mic] });
+            console.info('[mic] captured (muted) — toggle in the cockpit to talk');
+            state.onMicReady?.();  // view rendered before capture — refresh its toggle
+        }
+    } catch (err) {
+        console.info('[mic] unavailable — audio uplink disabled:', err.name || err);
+    }
     pc.ontrack = (e) => {
         if (e.track.kind !== 'video') return;
         // Keyboard has a static <video>; VR uses a hidden one as a GL source.

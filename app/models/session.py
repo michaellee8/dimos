@@ -42,6 +42,11 @@ class TeleopSession(Base):
     state_back_channel_id: Mapped[int | None] = Column(Integer, nullable=True)
     # Same stale-push story as state_back for the robot→operator map channel.
     map_channel_id: Mapped[int | None] = Column(Integer, nullable=True)
+    # Operator mic track (m=audio sendonly in the operator's join offer) —
+    # published on the operator's CF session, pulled onto the robot's in the
+    # bridge. Cleared with the operator slot.
+    operator_audio_mid: Mapped[str | None] = Column(String, nullable=True)
+    operator_audio_track_name: Mapped[str | None] = Column(String, nullable=True)
 
     # Active operator (null = no one controlling)
     operator_id: Mapped[str | None] = Column(String, nullable=True)

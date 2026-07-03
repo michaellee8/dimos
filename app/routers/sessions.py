@@ -19,7 +19,7 @@ from services import livekit
 from services.auth import get_current_user, get_operator_or_robot, get_robot_owner
 from services.cloudflare import CloudflareRealtimeError, CloudflareSessionGoneError, cf_client
 from services.livekit import LiveKitError
-from services.sdp_utils import extract_video_track
+from services.sdp_utils import extract_audio_track, extract_video_track
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +41,11 @@ MAP_CHANNEL_NAME = "map_unreliable"
 # id for state_reliable_back (which the robot writes). Heartbeat surfaces each
 # id under a role-appropriate field name.
 _robot_channel_ids: dict[str, dict[str, int]] = {}
+
+# Pending CF renegotiation offers for the ROBOT (audio pull inverts the offerer
+# role). Set by the bridge's operator-audio pull, handed out exactly once on the
+# next heartbeat ack, answered via /renegotiate-robot. Transient per bridge.
+_pending_robot_renegotiations: dict[str, str] = {}
 
 # Serializes bridge writes against leave/delete per session. setdefault is
 # GIL-atomic; never deleted (sessions are bounded).
@@ -366,6 +371,9 @@ async def heartbeat(
         "state_channel_subscriber_id": chan_ids.get(STATE_CHANNEL_NAME),
         "state_back_channel_publisher_id": chan_ids.get(STATE_BACK_CHANNEL_NAME),
         "map_channel_publisher_id": chan_ids.get(MAP_CHANNEL_NAME),
+        # CF offer from the operator-audio pull, handed over exactly once; the
+        # robot answers via /renegotiate-robot.
+        "renegotiate_offer": _pending_robot_renegotiations.pop(session_id, None),
     }
 
 
@@ -401,8 +409,11 @@ async def delete_session(
         session.operator_cf_session_id = None
         session.state_back_channel_id = None
         session.map_channel_id = None
+        session.operator_audio_mid = None
+        session.operator_audio_track_name = None
         _robot_channel_ids.pop(session_id, None)
         _pending_video_renegotiations.discard(session_id)
+        _pending_robot_renegotiations.pop(session_id, None)
         await db.commit()
 
 
@@ -581,6 +592,12 @@ async def join_session(
 
     if body.role == "operator":
         session.operator_cf_session_id = operator_cf_id
+        # Operator mic (m=audio sendonly), if the offer carries one: recorded
+        # here, published + pulled onto the robot in the bridge — the exact
+        # mirror of the robot's video, reversed.
+        audio = extract_audio_track(body.sdp_offer)
+        session.operator_audio_mid = audio[0] if audio else None
+        session.operator_audio_track_name = audio[1] if audio else None
         try:
             await db.commit()
         except Exception:
@@ -664,6 +681,57 @@ async def _pull_robot_video(session: TeleopSession) -> tuple[str | None, str]:
         return None, "no_offer"
 
     return None, "no_offer"
+
+
+async def _pull_operator_audio(session: TeleopSession) -> str | None:
+    """Publish the operator's mic track, then pull it onto the ROBOT's session.
+
+    The reverse of _pull_robot_video. Returns CF's renegotiation offer for the
+    robot (handed to it via the next heartbeat ack) or None. Best-effort — no
+    operator audio just means a silent link, never a failed bridge.
+    """
+    if not session.operator_audio_track_name:
+        return None
+    try:
+        await cf_client.add_tracks(
+            session.operator_cf_session_id,
+            [{
+                "location": "local",
+                "mid": session.operator_audio_mid,
+                "trackName": session.operator_audio_track_name,
+            }],
+        )
+    except Exception as e:
+        log.error("audio: publish operator track failed session=%s: %r", session.id, e)
+        return None
+
+    for attempt in range(1 + len(_PULL_RETRY_DELAYS)):
+        try:
+            pull = await cf_client.add_tracks(
+                session.cf_session_id,
+                [{
+                    "location": "remote",
+                    "sessionId": session.operator_cf_session_id,
+                    "trackName": session.operator_audio_track_name,
+                }],
+            )
+        except Exception as e:
+            log.error("audio: pull onto robot failed session=%s: %r", session.id, e)
+            return None
+
+        sd = pull.get("sessionDescription") or {}
+        if sd.get("sdp"):
+            return sd["sdp"]
+
+        track_errs = [t.get("errorCode") for t in pull.get("tracks", []) if t.get("errorCode")]
+        if "not_found_track_error" in track_errs and attempt < len(_PULL_RETRY_DELAYS):
+            await asyncio.sleep(_PULL_RETRY_DELAYS[attempt])
+            continue
+
+        log.warning("audio: pull gave no offer session=%s errs=%s", session.id, track_errs)
+        return None
+
+    return None
 
 
 @router.post(
@@ -851,6 +919,14 @@ async def _bridge_datachannel_locked(
     else:
         _pending_video_renegotiations.discard(session.id)
 
+    # Best-effort operator-audio pull onto the robot. CF's renegotiation offer
+    # is for the ROBOT — stash it for the next heartbeat ack to hand over.
+    audio_offer = await _pull_operator_audio(session)
+    if audio_offer:
+        _pending_robot_renegotiations[session.id] = audio_offer
+    else:
+        _pending_robot_renegotiations.pop(session.id, None)
+
     return BridgeDatachannelResponse(
         cmd_channel_id=op_pub_ids[CMD_CHANNEL_NAME],
         state_channel_id=op_pub_ids[STATE_CHANNEL_NAME],
@@ -889,6 +965,32 @@ async def renegotiate_answer(
     _pending_video_renegotiations.discard(session_id)
     try:
         await cf_client.renegotiate(session.operator_cf_session_id, body.sdp_answer)
+    except CloudflareRealtimeError as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cloudflare renegotiate failed: {e.detail}",
+        )
+    return {"ok": True}
+
+
+@router.post("/{session_id}/renegotiate-robot")
+async def renegotiate_robot(
+    session_id: str,
+    body: RenegotiateAnswerRequest,
+    owner_id: str = Depends(get_robot_owner),
+    db: AsyncSession = Depends(get_db),
+):
+    """Robot submits its SDP answer to the operator-audio pull offer it received
+    on a heartbeat ack (the robot's only renegotiation path)."""
+    session = await db.get(TeleopSession, session_id)
+    if not session or session.owner_id != owner_id:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.transport != "cloudflare":
+        raise HTTPException(status_code=409, detail="renegotiate-robot is cloudflare-only")
+    if not session.cf_session_id:
+        raise HTTPException(status_code=409, detail="Robot CF session not ready")
+    try:
+        await cf_client.renegotiate(session.cf_session_id, body.sdp_answer)
     except CloudflareRealtimeError as e:
         raise HTTPException(
             status_code=502,
@@ -940,8 +1042,11 @@ async def leave_session(
         async with _session_lock(session_id):
             session.operator_id = None
             session.operator_cf_session_id = None
+            session.operator_audio_mid = None
+            session.operator_audio_track_name = None
             session.state = "idle"
             _robot_channel_ids.pop(session_id, None)
+            _pending_robot_renegotiations.pop(session_id, None)
             await db.commit()
 
     return {"session_id": session_id, "state": session.state}
@@ -993,10 +1098,13 @@ async def _reap_stale_operators() -> None:
                 )
                 s.operator_id = None
                 s.operator_cf_session_id = None
+                s.operator_audio_mid = None
+                s.operator_audio_track_name = None
                 s.state = "idle"
                 s.last_operator_heartbeat = None
                 _robot_channel_ids.pop(s.id, None)
                 _pending_video_renegotiations.discard(s.id)
+                _pending_robot_renegotiations.pop(s.id, None)
                 await db.commit()
                 OPERATOR_EVICTIONS.inc()
 
@@ -1031,9 +1139,12 @@ async def _reap_stale_robots() -> None:
                 s.operator_cf_session_id = None
                 s.state_back_channel_id = None
                 s.map_channel_id = None
+                s.operator_audio_mid = None
+                s.operator_audio_track_name = None
                 s.last_operator_heartbeat = None
                 _robot_channel_ids.pop(s.id, None)
                 _pending_video_renegotiations.discard(s.id)
+                _pending_robot_renegotiations.pop(s.id, None)
                 await db.commit()
                 ROBOT_EVICTIONS.inc()
 
