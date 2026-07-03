@@ -100,13 +100,14 @@ teleop_hosted_go2_transport = (
             ("telemetry_out", bytes): CloudflareTransport.spec("state_reliable_back"),
             ("cmd_raw", bytes): CloudflareTransport.spec("cmd_unreliable"),  # stats tap
             ("cmd_vel_stamped", TwistStamped): LCMTransport.spec("cmd_vel_stamped", TwistStamped),
-            # Map chain over LCM (in-process); global_costmap reaches the operator
-            # as a JSON "type" on telemetry_out — no new CF channel.
+            # Map chain over LCM (in-process); the compressed map + odom go to the
+            # operator on their own unreliable channel (room to grow to pointclouds).
             ("lidar", PointCloud2): LCMTransport.spec("lidar", PointCloud2),
             ("global_map", PointCloud2): LCMTransport.spec("global_map", PointCloud2),
             ("global_costmap", OccupancyGrid): LCMTransport.spec(
                 "global_costmap", OccupancyGrid
             ),
+            ("map_out", bytes): CloudflareTransport.spec("map_unreliable"),
         }
     )
     .global_config(viewer="none")
@@ -166,6 +167,7 @@ teleop_hosted_go2_multicam = (
             ("global_costmap", OccupancyGrid): LCMTransport.spec(
                 "global_costmap", OccupancyGrid
             ),
+            ("map_out", bytes): CloudflareTransport.spec("map_unreliable"),
         }
     )
     .global_config(viewer="none")

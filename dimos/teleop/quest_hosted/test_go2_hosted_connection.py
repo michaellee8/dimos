@@ -79,6 +79,7 @@ def _bare_connection() -> Go2HostedConnection:
     conn._last_map_pub = 0.0
     conn._last_odom_pub = 0.0
     conn.telemetry_out = MagicMock()
+    conn.map_out = MagicMock()
     # Command execution plane (normally built in start()).
     conn._cmd_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Go2CmdTest")
     conn._cmd_pending = 0
@@ -672,7 +673,7 @@ def test_costmap_encodes_and_publishes_map() -> None:
     grid = _occupancy([[-1, 0, 100], [0, 0, -1]])
     conn._on_costmap(grid)
 
-    msg = _published_json(conn.telemetry_out, "map")
+    msg = _published_json(conn.map_out, "map")
     assert msg is not None, "no map message published"
     assert msg["fmt"] == "png" and msg["png_b64"]
     assert msg["w"] == 3 and msg["h"] == 2
@@ -688,7 +689,7 @@ def test_costmap_png_round_trips_palette() -> None:
 
     conn = _bare_connection()
     conn._on_costmap(_occupancy([[-1, 0, 100]]))
-    msg = _published_json(conn.telemetry_out, "map")
+    msg = _published_json(conn.map_out, "map")
     assert msg is not None
     raw = base64.b64decode(msg["png_b64"])
     # BGRA (color + alpha) — the rerun palette baked in by the robot.
@@ -722,7 +723,7 @@ def test_block_max_preserves_obstacle_when_coarsening() -> None:
     cells = np.zeros((10, 10), dtype=np.int8)
     cells[3, 3] = 100
     conn._on_costmap(OccupancyGrid(grid=cells, resolution=0.02))
-    msg = _published_json(conn.telemetry_out, "map")
+    msg = _published_json(conn.map_out, "map")
     assert msg is not None
     assert msg["res"] == pytest.approx(0.1)  # coarsened 5×
     raw = base64.b64decode(msg["png_b64"])
@@ -746,7 +747,7 @@ def test_odom_publishes_planar_pose() -> None:
     )
     conn._on_odom(pose)
 
-    msg = _published_json(conn.telemetry_out, "odom")
+    msg = _published_json(conn.map_out, "odom")
     assert msg is not None
     assert msg["x"] == pytest.approx(1.5) and msg["y"] == pytest.approx(-2.0)
     assert msg["yaw"] == pytest.approx(math.pi / 2, abs=1e-3)
@@ -768,4 +769,4 @@ def test_empty_costmap_publishes_nothing() -> None:
 
     conn = _bare_connection()
     conn._on_costmap(OccupancyGrid())  # no-arg = empty 1D grid; must be skipped
-    assert _published_json(conn.telemetry_out, "map") is None
+    assert _published_json(conn.map_out, "map") is None

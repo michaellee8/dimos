@@ -23,6 +23,7 @@ Channel plan (topic == DataChannel name):
     cmd_unreliable      operator → robot   commands (unordered, lossy)
     state_reliable      operator → robot   control plane (reliable)
     state_reliable_back robot → operator   telemetry (reliable) — publishable
+    map_unreliable      robot → operator   map (unordered, lossy) — publishable
 
 Video: the robot's session offer always carries one sendonly video track
 (the broker stores its mid/track and the operator pulls it on join). Feed
@@ -96,7 +97,7 @@ class BrokerProvider(AsyncProviderBase):
     """
 
     INBOUND_CHANNELS = ("cmd_unreliable", "state_reliable")
-    OUTBOUND_CHANNELS = ("state_reliable_back",)
+    OUTBOUND_CHANNELS = ("state_reliable_back", "map_unreliable")
 
     def __init__(self, config: BrokerConfig | None = None) -> None:
         if not WEBRTC_AVAILABLE:
@@ -332,6 +333,7 @@ class BrokerProvider(AsyncProviderBase):
             "cmd_unreliable": ack.get("cmd_channel_subscriber_id"),
             "state_reliable_back": ack.get("state_back_channel_publisher_id"),
             "state_reliable": ack.get("state_channel_subscriber_id"),
+            "map_unreliable": ack.get("map_channel_publisher_id"),
         }
         # Track the broker's view: open on join, close on leave, re-open on
         # rejoin (the broker assigns fresh SCTP ids per operator session).
@@ -369,7 +371,7 @@ class BrokerProvider(AsyncProviderBase):
                 logger.exception("operator_lost subscriber callback error")
 
     def _channel_options(self, name: str) -> dict[str, Any]:
-        if name == "cmd_unreliable":
+        if name in ("cmd_unreliable", "map_unreliable"):
             return {"ordered": self._config.ordered, "maxRetransmits": self._config.max_retransmits}
         return {"ordered": True}  # state channels are reliable
 

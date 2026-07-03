@@ -77,8 +77,8 @@ class Go2HostedConnectionConfig(ConnectionConfig):
     # show up as encoder drops/freezes on a constrained uplink.
     video_max_width: int = 0
     video_max_fps: float = 0.0
-    # Map/odom overlay on state_reliable_back. Map is slow + few-KB; odom is
-    # fast + tiny so the marker moves smoothly. Coarsen keeps the PNG < 16 KB.
+    # Map/odom overlay on the map_unreliable channel. Map is slow + few-KB; odom
+    # is fast + tiny so the marker moves smoothly. Coarsen keeps the PNG < 16 KB.
     map_hz: float = 2.0  # occupancy-grid push rate (0 = off)
     map_min_resolution: float = 0.1  # coarsen finer grids to this m/cell before encode
     odom_hz: float = 15.0  # robot-pose push rate (0 = off)
@@ -102,9 +102,11 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
     cam2_in: In[Image]
     mux_image: Out[Image]
     cmd_vel_stamped: Out[TwistStamped]
-    # Map overlay input. Odom is not a stream — we tap connection.odom_stream()
-    # in start() (the source the base uses for TF), so no transport/remap needed.
+    # Map overlay input (occupancy grid) + output (compressed map/odom on the
+    # dedicated map_unreliable channel). Odom is not a stream — we tap
+    # connection.odom_stream() in start() (the source the base uses for TF).
     global_costmap: In[OccupancyGrid]
+    map_out: Out[bytes]
 
     # Queued (non-urgent) commands beyond this are busy-rejected — bounds the
     # backlog a spamming/laggy operator can build behind a slow command.
@@ -488,12 +490,12 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         self._cmd_stats.record(cmd.ts, nbytes=len(data))
         self.cmd_vel_stamped.publish(cmd)
 
-    # ─── Map overlay (robot → operator minimap, on state_reliable_back) ──
+    # ─── Map overlay (robot → operator minimap, on map_unreliable) ──
 
     def _on_costmap(self, grid: OccupancyGrid) -> None:
         """Throttle, coarsen, colorize, and push an occupancy grid to the operator.
 
-        Rides telemetry_out (state_reliable_back). Coarsen + PNG keeps the payload
+        Rides map_out (map_unreliable channel). Coarsen + PNG keeps the payload
         under the 16 KB CF datachannel ceiling. Best-effort — dropped downstream
         while no operator is connected.
         """
@@ -541,7 +543,7 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
             "png_b64": png_b64,
         }
         try:
-            self.telemetry_out.publish(json.dumps(payload).encode())
+            self.map_out.publish(json.dumps(payload).encode())
         except Exception:
             logger.debug("map publish failed", exc_info=True)
             return
@@ -550,9 +552,9 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
     def _on_odom(self, pose: PoseStamped) -> None:
         """Throttle the Go2 pose and push a compact 2D pose to the operator.
 
-        Separate "type" from the map (same channel) so the marker moves at odom
-        rate between the slower map frames. Only x/y/yaw — planar yaw is derived
-        here so the browser needs no quaternion math; keeps the msg ~80 bytes.
+        Rides map_unreliable alongside the map (same channel, distinct "type") so
+        the marker moves at odom rate between the slower map frames. Only x/y/yaw
+        — planar yaw is derived here so the browser needs no quaternion math.
         """
         now = time.monotonic()
         if now - self._last_odom_pub < 1.0 / self.config.odom_hz:
@@ -566,7 +568,7 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
             "ts": float(pose.ts),
         }
         try:
-            self.telemetry_out.publish(json.dumps(payload).encode())
+            self.map_out.publish(json.dumps(payload).encode())
         except Exception:
             logger.debug("odom publish failed", exc_info=True)
             return
