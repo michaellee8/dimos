@@ -72,7 +72,13 @@ def _bare_connection() -> Go2HostedConnection:
         latency_stamp=False,
         video_max_width=0,
         video_max_fps=0.0,
+        map_hz=2.0,
+        map_min_resolution=0.1,
+        odom_hz=15.0,
     )
+    conn._last_map_pub = 0.0
+    conn._last_odom_pub = 0.0
+    conn.telemetry_out = MagicMock()
     # Command execution plane (normally built in start()).
     conn._cmd_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Go2CmdTest")
     conn._cmd_pending = 0
@@ -633,3 +639,133 @@ def test_damp_bypasses_busy_queue(monkeypatch: pytest.MonkeyPatch) -> None:
     assert damped.wait(1.0), "Damp must not queue behind a blocking command"
     wedge.set()
     _wait_for(lambda: len(acks) == 2)
+
+
+# ─── map + odom overlay (robot → operator minimap) ───────────────────
+
+
+def _published_json(mock: MagicMock, msg_type: str) -> dict[str, Any] | None:
+    """Return the last JSON payload of the given type published on a mock."""
+    import json
+
+    for call in reversed(mock.publish.call_args_list):
+        (data,) = call.args
+        try:
+            msg = json.loads(data)
+        except (ValueError, TypeError):
+            continue
+        if msg.get("type") == msg_type:
+            return msg
+    return None
+
+
+def _occupancy(grid: Any) -> Any:
+    import numpy as np
+
+    from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
+
+    return OccupancyGrid(grid=np.asarray(grid, dtype=np.int8), resolution=0.1)
+
+
+def test_costmap_encodes_and_publishes_map() -> None:
+    conn = _bare_connection()
+    grid = _occupancy([[-1, 0, 100], [0, 0, -1]])
+    conn._on_costmap(grid)
+
+    msg = _published_json(conn.telemetry_out, "map")
+    assert msg is not None, "no map message published"
+    assert msg["fmt"] == "png" and msg["png_b64"]
+    assert msg["w"] == 3 and msg["h"] == 2
+    assert msg["res"] == pytest.approx(0.1)
+    assert len(msg["origin"]) == 2
+
+
+def test_costmap_png_round_trips_palette() -> None:
+    import base64
+
+    import cv2
+    import numpy as np
+
+    conn = _bare_connection()
+    conn._on_costmap(_occupancy([[-1, 0, 100]]))
+    msg = _published_json(conn.telemetry_out, "map")
+    assert msg is not None
+    raw = base64.b64decode(msg["png_b64"])
+    # BGRA (color + alpha) — the rerun palette baked in by the robot.
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
+    assert img.shape[2] == 4  # has alpha
+    row = [tuple(int(v) for v in px) for px in img[0]]
+    # unknown → transparent; free → cyan-slate; occupied(100) → rose lethal.
+    assert row[0] == (0, 0, 0, 0)  # unknown transparent
+    assert row[1] == (77, 64, 36, 255)  # free #24404d in BGRA
+    assert row[2] == (180, 160, 224, 255)  # 100 = lethal #e0a0b4 in BGRA
+
+
+def test_costmap_rate_gated() -> None:
+    conn = _bare_connection()
+    conn._on_costmap(_occupancy([[0, 0]]))
+    first = len(conn.telemetry_out.publish.call_args_list)
+    conn._on_costmap(_occupancy([[0, 0]]))  # immediately again → gated out
+    assert len(conn.telemetry_out.publish.call_args_list) == first
+
+
+def test_block_max_preserves_obstacle_when_coarsening() -> None:
+    import base64
+
+    import cv2
+    import numpy as np
+
+    conn = _bare_connection()
+    # 0.02 m/cell → coarsen by 5× to reach 0.1. A lone obstacle must survive.
+    from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
+
+    cells = np.zeros((10, 10), dtype=np.int8)
+    cells[3, 3] = 100
+    conn._on_costmap(OccupancyGrid(grid=cells, resolution=0.02))
+    msg = _published_json(conn.telemetry_out, "map")
+    assert msg is not None
+    assert msg["res"] == pytest.approx(0.1)  # coarsened 5×
+    raw = base64.b64decode(msg["png_b64"])
+    img = cv2.imdecode(np.frombuffer(raw, np.uint8), cv2.IMREAD_UNCHANGED)
+    # Lethal (100) survives as an opaque rose pixel (BGRA #e0a0b4).
+    lethal = np.all(img == (180, 160, 224, 255), axis=-1)
+    assert lethal.any(), "obstacle erased by coarsening"
+
+
+def test_odom_publishes_planar_pose() -> None:
+    import math
+
+    from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+    from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+    from dimos.types.vector import Vector3
+
+    conn = _bare_connection()
+    q = Quaternion.from_euler(Vector3(0.0, 0.0, math.pi / 2))  # yaw = 90°
+    pose = PoseStamped(
+        ts=123.0, position=[1.5, -2.0, 0.3], orientation=[q.x, q.y, q.z, q.w]
+    )
+    conn._on_odom(pose)
+
+    msg = _published_json(conn.telemetry_out, "odom")
+    assert msg is not None
+    assert msg["x"] == pytest.approx(1.5) and msg["y"] == pytest.approx(-2.0)
+    assert msg["yaw"] == pytest.approx(math.pi / 2, abs=1e-3)
+    assert msg["ts"] == pytest.approx(123.0)
+
+
+def test_odom_rate_gated() -> None:
+    from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+
+    conn = _bare_connection()
+    conn._on_odom(PoseStamped(ts=1.0, position=[0, 0, 0]))
+    first = len(conn.telemetry_out.publish.call_args_list)
+    conn._on_odom(PoseStamped(ts=1.0, position=[0, 0, 0]))  # gated
+    assert len(conn.telemetry_out.publish.call_args_list) == first
+
+
+def test_empty_costmap_publishes_nothing() -> None:
+    from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
+
+    conn = _bare_connection()
+    conn._on_costmap(OccupancyGrid())  # no-arg = empty 1D grid; must be skipped
+    assert _published_json(conn.telemetry_out, "map") is None

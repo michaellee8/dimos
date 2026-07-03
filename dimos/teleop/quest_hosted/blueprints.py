@@ -24,10 +24,14 @@ from dimos.core.transport import (
     LiveKitVideoTransport,
 )
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
+from dimos.mapping.costmapper import CostMapper
+from dimos.mapping.voxels import VoxelGridMapper
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
+from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
 from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic import unitree_go2_basic
 from dimos.robot.unitree.go2.connection import GO2Connection
 from dimos.teleop.quest.quest_types import Buttons
@@ -76,10 +80,15 @@ teleop_hosted_go2 = autoconnect(
 ).global_config(n_workers=8, viewer="none")
 
 # Hosted teleop over CF Realtime. Run with -o transports.broker.api_key=dtk_live_...
+# VoxelGridMapper → CostMapper build the OccupancyGrid; Go2HostedConnection
+# encodes it (+ odom) onto state_reliable_back for the operator minimap.
+# VoxelGridMapper (not the old Map module) keeps per-frame cost flat.
 teleop_hosted_go2_transport = (
     autoconnect(
         unitree_go2_basic.disabled_modules(GO2Connection),
         Go2HostedConnection.blueprint(),
+        VoxelGridMapper.blueprint(emit_every=5),
+        CostMapper.blueprint(),
     )
     .transports(
         {
@@ -91,6 +100,13 @@ teleop_hosted_go2_transport = (
             ("telemetry_out", bytes): CloudflareTransport.spec("state_reliable_back"),
             ("cmd_raw", bytes): CloudflareTransport.spec("cmd_unreliable"),  # stats tap
             ("cmd_vel_stamped", TwistStamped): LCMTransport.spec("cmd_vel_stamped", TwistStamped),
+            # Map chain over LCM (in-process); global_costmap reaches the operator
+            # as a JSON "type" on telemetry_out — no new CF channel.
+            ("lidar", PointCloud2): LCMTransport.spec("lidar", PointCloud2),
+            ("global_map", PointCloud2): LCMTransport.spec("global_map", PointCloud2),
+            ("global_costmap", OccupancyGrid): LCMTransport.spec(
+                "global_costmap", OccupancyGrid
+            ),
         }
     )
     .global_config(viewer="none")
@@ -122,11 +138,14 @@ teleop_hosted_go2_livekit = (
 
 # Adds a RealSense as cam2 (mux'd into the video track by Go2HostedConnection).
 # Needs the RealSense wired in; use teleop-hosted-go2-transport otherwise.
+# Same map overlay as teleop_hosted_go2_transport.
 teleop_hosted_go2_multicam = (
     autoconnect(
         unitree_go2_basic.disabled_modules(GO2Connection),
         Go2HostedConnection.blueprint(),
         RealSenseCamera.blueprint(enable_depth=False, enable_pointcloud=False),
+        VoxelGridMapper.blueprint(emit_every=5),
+        CostMapper.blueprint(),
     )
     .remappings([(RealSenseCamera, "color_image", "cam2_in")])
     .transports(
@@ -137,8 +156,15 @@ teleop_hosted_go2_multicam = (
             ("state_json", bytes): CloudflareTransport.spec("state_reliable"),
             ("telemetry_out", bytes): CloudflareTransport.spec("state_reliable_back"),
             ("cmd_raw", bytes): CloudflareTransport.spec("cmd_unreliable"),
-            ("cmd_vel_stamped", TwistStamped): CloudflareTransport.spec(
-                "cmd_unreliable", TwistStamped
+            # LCM, not CF: cmd_vel_stamped is the robot re-publishing the decoded
+            # operator cmd for the local recorder. cmd_unreliable is an
+            # operator→robot channel; publishing there raises in the broker.
+            ("cmd_vel_stamped", TwistStamped): LCMTransport.spec("cmd_vel_stamped", TwistStamped),
+            # Map chain over LCM (same as the transport blueprint).
+            ("lidar", PointCloud2): LCMTransport.spec("lidar", PointCloud2),
+            ("global_map", PointCloud2): LCMTransport.spec("global_map", PointCloud2),
+            ("global_costmap", OccupancyGrid): LCMTransport.spec(
+                "global_costmap", OccupancyGrid
             ),
         }
     )

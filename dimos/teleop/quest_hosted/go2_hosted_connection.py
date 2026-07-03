@@ -23,8 +23,10 @@ the operator can't see. Opt-in subclass; plain ``GO2Connection`` is unchanged.
 
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+import json
 import threading
 import time
 from typing import Any
@@ -33,8 +35,11 @@ from reactivex.disposable import Disposable
 
 from dimos.core.core import rpc
 from dimos.core.stream import In, Out
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
+from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
 from dimos.msgs.sensor_msgs.Image import Image
+from dimos.protocol.pubsub.impl.webrtc.providers.spec import shutdown_all_providers
 from dimos.robot.unitree.go2.connection import ConnectionConfig, GO2Connection
 from dimos.teleop.quest_hosted.hosted_base import HostedConnectionMixin
 from dimos.teleop.utils.video_stats import VideoStats
@@ -72,6 +77,11 @@ class Go2HostedConnectionConfig(ConnectionConfig):
     # show up as encoder drops/freezes on a constrained uplink.
     video_max_width: int = 0
     video_max_fps: float = 0.0
+    # Map/odom overlay on state_reliable_back. Map is slow + few-KB; odom is
+    # fast + tiny so the marker moves smoothly. Coarsen keeps the PNG < 16 KB.
+    map_hz: float = 2.0  # occupancy-grid push rate (0 = off)
+    map_min_resolution: float = 0.1  # coarsen finer grids to this m/cell before encode
+    odom_hz: float = 15.0  # robot-pose push rate (0 = off)
 
 
 class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
@@ -92,6 +102,9 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
     cam2_in: In[Image]
     mux_image: Out[Image]
     cmd_vel_stamped: Out[TwistStamped]
+    # Map overlay input. Odom is not a stream — we tap connection.odom_stream()
+    # in start() (the source the base uses for TF), so no transport/remap needed.
+    global_costmap: In[OccupancyGrid]
 
     # Queued (non-urgent) commands beyond this are busy-rejected — bounds the
     # backlog a spamming/laggy operator can build behind a slow command.
@@ -126,6 +139,9 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         self._posture = "StandReady"
         self._obstacle_avoidance = True  # corrected from config.g in start()
         self._light = 0.0  # head-LED brightness 0..1, assumed off until set
+        # Map/odom throttle gates (monotonic stamps, cf. the mux's _last_mux_pub).
+        self._last_map_pub = 0.0
+        self._last_odom_pub = 0.0
 
     @rpc
     def start(self) -> None:
@@ -157,6 +173,16 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         self.register_disposable(
             Disposable(self.cam2_in.subscribe(lambda i: self._on_cam("cam2", i)))
         )
+        # Map overlay → operator minimap; throttled + compressed in the handlers.
+        if self.config.map_hz > 0:
+            self.register_disposable(
+                Disposable(self.global_costmap.subscribe(self._on_costmap))
+            )
+        # Odom: tap the raw stream the base consumes for TF (no stream port).
+        if self.config.odom_hz > 0:
+            self.register_disposable(
+                self.connection.odom_stream().subscribe(self._on_odom)
+            )
         self._start_telemetry()
 
     @rpc
@@ -166,6 +192,9 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
             self._cmd_executor.shutdown(wait=False, cancel_futures=True)
             self._cmd_executor = None
         self._stop_telemetry()
+        # Graceful broker disconnect so the worker exits promptly instead of
+        # being force-killed and reaped ~30s later. See shutdown_all_providers.
+        shutdown_all_providers()
         super().stop()
 
     # ─── Go2-specific state-plane types (rest handled by the mixin) ──
@@ -458,6 +487,136 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
             return  # foreign / undecodable frame — skip
         self._cmd_stats.record(cmd.ts, nbytes=len(data))
         self.cmd_vel_stamped.publish(cmd)
+
+    # ─── Map overlay (robot → operator minimap, on state_reliable_back) ──
+
+    def _on_costmap(self, grid: OccupancyGrid) -> None:
+        """Throttle, coarsen, colorize, and push an occupancy grid to the operator.
+
+        Rides telemetry_out (state_reliable_back). Coarsen + PNG keeps the payload
+        under the 16 KB CF datachannel ceiling. Best-effort — dropped downstream
+        while no operator is connected.
+        """
+        now = time.monotonic()
+        if now - self._last_map_pub < 1.0 / self.config.map_hz:
+            return
+
+        cells = grid.grid
+        if cells is None or cells.size == 0:
+            return
+
+        # Coarsen to >= map_min_resolution (block-max preserves obstacles).
+        res = grid.resolution
+        img_cells = cells
+        if 0 < res < self.config.map_min_resolution:
+            factor = max(1, round(self.config.map_min_resolution / res))
+            if factor > 1:
+                img_cells = self._block_max(cells, factor)
+                res = res * factor
+
+        # Colorize + PNG-encode; colors are baked in so the browser just blits it.
+        png_bgra = self._occupancy_to_bgra(img_cells)
+        try:
+            import cv2
+
+            ok, buf = cv2.imencode(".png", png_bgra)
+        except Exception:
+            logger.debug("map encode failed", exc_info=True)
+            return
+        if not ok:
+            return
+        png_b64 = base64.b64encode(buf.tobytes()).decode("ascii")
+
+        # origin lets the browser place map + robot: cell = (world_xy - origin)/res.
+        h, w = img_cells.shape[:2]
+        origin = grid.origin.position
+        payload = {
+            "type": "map",
+            "fmt": "png",
+            "w": int(w),
+            "h": int(h),
+            "res": float(res),
+            "origin": [float(origin.x), float(origin.y)],
+            "stamp": float(grid.ts),
+            "png_b64": png_b64,
+        }
+        try:
+            self.telemetry_out.publish(json.dumps(payload).encode())
+        except Exception:
+            logger.debug("map publish failed", exc_info=True)
+            return
+        self._last_map_pub = now
+
+    def _on_odom(self, pose: PoseStamped) -> None:
+        """Throttle the Go2 pose and push a compact 2D pose to the operator.
+
+        Separate "type" from the map (same channel) so the marker moves at odom
+        rate between the slower map frames. Only x/y/yaw — planar yaw is derived
+        here so the browser needs no quaternion math; keeps the msg ~80 bytes.
+        """
+        now = time.monotonic()
+        if now - self._last_odom_pub < 1.0 / self.config.odom_hz:
+            return
+        yaw = float(pose.orientation.to_euler().yaw)
+        payload = {
+            "type": "odom",
+            "x": float(pose.position.x),
+            "y": float(pose.position.y),
+            "yaw": yaw,
+            "ts": float(pose.ts),
+        }
+        try:
+            self.telemetry_out.publish(json.dumps(payload).encode())
+        except Exception:
+            logger.debug("odom publish failed", exc_info=True)
+            return
+        self._last_odom_pub = now
+
+    @staticmethod
+    def _block_max(cells: Any, factor: int) -> Any:
+        """Downsample an int8 occupancy grid by `factor` via block maximum.
+
+        Max (not mean) so coarsening never erases an obstacle. Unknown (-1) is
+        lowest priority — a block with any known cell reports the known state.
+        """
+        import numpy as np
+
+        h, w = cells.shape[:2]
+        new_h, new_w = h // factor, w // factor
+        if new_h == 0 or new_w == 0:
+            return cells
+        trimmed = cells[: new_h * factor, : new_w * factor]
+        blocks = trimmed.reshape(new_h, factor, new_w, factor)
+        # Sink unknown below every known value for the max, then map it back.
+        as_int = blocks.astype(np.int16)
+        as_int[as_int < 0] = -1
+        known = np.where(as_int < 0, -1000, as_int)
+        reduced = known.max(axis=(1, 3))
+        reduced[reduced == -1000] = -1
+        return reduced.astype(np.int8)
+
+    @staticmethod
+    def _occupancy_to_bgra(cells: Any) -> Any:
+        """Colorize occupancy int8 {-1,0,1..100} → BGRA for a color PNG.
+
+        Cool cyan family matching the cockpit accent: deep cyan-slate free,
+        bright cyan obstacles, rose lethal. Unknown is transparent so the map
+        floats over the canvas. BGRA because cv2.imencode uses OpenCV order.
+        """
+        import numpy as np
+
+        # (B, G, R, A) — RGB reversed for OpenCV.
+        c_unknown = (0, 0, 0, 0)  # transparent
+        c_free = (77, 64, 36, 255)  # #24404d deep cyan-slate
+        c_occupied = (212, 184, 95, 255)  # #5fb8d4 bright cyan
+        c_lethal = (180, 160, 224, 255)  # #e0a0b4 rose
+
+        out = np.empty((*cells.shape, 4), dtype=np.uint8)
+        out[...] = c_unknown  # default; -1 stays transparent
+        out[cells == 0] = c_free
+        out[cells >= 1] = c_occupied
+        out[cells >= 100] = c_lethal
+        return out
 
     def _battery_soc(self) -> int | None:
         """Battery SOC from the cached lowstate, without invoking the logged
