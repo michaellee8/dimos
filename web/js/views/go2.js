@@ -294,6 +294,10 @@ function wireGo2() {
         showPlaceholder(false);
     });
     cam.addEventListener('emptied', () => showPlaceholder(true)); // stream cleared on disconnect
+    // The frame dimensions change when the robot switches cameras (e.g. dual-cam
+    // is wider). Re-crop the benchmark strip the instant that happens, so it
+    // never flashes into view between the switch and the next 1Hz stats tick.
+    cam.addEventListener('resize', applyStampCrop);
 
     document.querySelectorAll('.cmd-btn[data-cmd]').forEach((b) =>
         b.addEventListener('click', () => sendCommand(b.dataset.cmd, b)));
@@ -329,8 +333,8 @@ function wireGo2() {
     state.onCmdAck = onCmdAck;
     // Reconcile controls from robot-authoritative telemetry state (3Hz).
     state.onRobotState = onRobotState;
-    // Minimap: occupancy grid (slow) + robot pose (fast), both on
-    // state_reliable_back. SKELETON — handlers below.
+    // Minimap: occupancy grid (slow) + robot pose (fast), both on the
+    // map_unreliable channel; handlers below.
     state.onMap = onMap;
     state.onOdom = onOdom;
     document.getElementById('view-swap').addEventListener('click', () => setMainView());
@@ -350,14 +354,15 @@ function wireGo2() {
     selectSpeed(ui.speedMode, /*sendToRobot=*/ false);  // reflect default selection
 }
 
-// Drag the bottom-left handle to resize the floating PiP. Free ratio (width and
-// height independent). Size lives in ui.pipW/pipH and is applied by setMainView.
+// Drag the bottom-left handle to resize the floating PiP. Aspect ratio is
+// LOCKED — dragging scales the window uniformly (only the scale changes, the
+// video/map shape doesn't). Size lives in ui.pipW/pipH, applied by setMainView.
 function bindPipResize() {
     const handle = document.getElementById('pip-resize');
     const stage = document.getElementById('stage');
     if (!handle || !stage) return;
-    const MIN = 96, MAX_W = 640, MAX_H = 480;
-    let resizing = false, startX = 0, startY = 0, startW = 0, startH = 0;
+    const MIN_W = 96, MAX_W = 560;
+    let resizing = false, startX = 0, startY = 0, startW = 0, ratio = 1;
 
     handle.addEventListener('pointerdown', (e) => {
         const pip = pipEl();
@@ -365,18 +370,21 @@ function bindPipResize() {
         e.preventDefault(); e.stopPropagation();
         resizing = true;
         startX = e.clientX; startY = e.clientY;
-        startW = pip.getBoundingClientRect().width;
-        startH = pip.getBoundingClientRect().height;
+        const r = pip.getBoundingClientRect();
+        startW = r.width;
+        ratio = r.height / r.width;  // lock the current aspect
         handle.setPointerCapture(e.pointerId);
     });
     handle.addEventListener('pointermove', (e) => {
         if (!resizing) return;
         const pip = pipEl();
         if (!pip) return;
-        // PiP is anchored top-right; the handle is bottom-left, so dragging left
-        // grows width and dragging down grows height.
-        ui.pipW = Math.max(MIN, Math.min(MAX_W, startW + (startX - e.clientX)));
-        ui.pipH = Math.max(MIN, Math.min(MAX_H, startH + (e.clientY - startY)));
+        // Handle is bottom-left (PiP anchored top-right): dragging left OR down
+        // grows it. Drive width off the larger of the two deltas, derive height
+        // from the locked ratio so the shape never changes.
+        const grow = Math.max(startX - e.clientX, e.clientY - startY);
+        ui.pipW = Math.max(MIN_W, Math.min(MAX_W, startW + grow));
+        ui.pipH = Math.round(ui.pipW * ratio);
         pip.style.width = ui.pipW + 'px';
         pip.style.height = ui.pipH + 'px';
         positionPipHandle();
@@ -500,8 +508,8 @@ function positionPipHandle() {
     if (!handle || !pip || !stage) return;
     const pr = pip.getBoundingClientRect(), sr = stage.getBoundingClientRect();
     handle.style.display = 'block';
-    handle.style.left = (pr.left - sr.left - 2) + 'px';
-    handle.style.top = (pr.bottom - sr.top - 14) + 'px';
+    handle.style.left = (pr.left - sr.left) + 'px';
+    handle.style.top = (pr.bottom - sr.top - 11) + 'px';
 }
 
 // Occupancy grid (~2Hz). Decode the PNG once here (off the fast odom path),

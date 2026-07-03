@@ -48,13 +48,13 @@
             overflow: hidden; box-shadow: 0 4px 14px rgba(0,0,0,.5);
             cursor: pointer; object-fit: contain;
         }
-        /* PiP resize handle (bottom-left, since PiP sits top-right). */
+        /* PiP resize handle (bottom-left, since PiP sits top-right). One small
+           diagonal line; aspect ratio locks on drag. */
         #pip-resize {
-            position: absolute; z-index: 4; width: 16px; height: 16px;
+            position: absolute; z-index: 4; width: 11px; height: 11px;
             cursor: nesw-resize; display: none;
             background:
-              linear-gradient(45deg, transparent 6px, #b0e1f0 6px, #b0e1f0 8px, transparent 8px,
-                              transparent 10px, #b0e1f0 10px, #b0e1f0 12px, transparent 12px);
+              linear-gradient(45deg, transparent 4px, #b0e1f0 4px, #b0e1f0 6px, transparent 6px);
             opacity: .55;
         }
         #pip-resize:hover { opacity: 1; }

@@ -348,7 +348,10 @@ function readLatencyStamp() {
     };
     for (let i = 0; i < STAMP_SYNC.length; i++) {
         if (bitAt(i) !== STAMP_SYNC[i]) {
-            state.liveStats.stampStripPx = 0;  // no stamp → nothing to crop
+            // Sync missed. DON'T clear stampStripPx here — a camera switch briefly
+            // changes frame dimensions and the read transiently fails, which would
+            // un-crop and flash the strip. Once we've seen a stamp this session the
+            // robot is stamping every frame, so keep cropping; disconnect resets it.
             return 0;
         }
     }
