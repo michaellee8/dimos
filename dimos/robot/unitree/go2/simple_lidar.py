@@ -12,35 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Go2 WebRTC lidar re-expressed in the base_link frame.
+"""GO2Connection variant that re-expresses the Go2's onboard lidar in base_link.
 
-The Go2's onboard stack already transforms its lidar into the odom/world frame
-(``pointcloud2_from_webrtc_lidar`` stamps it ``world``). This module undoes that:
-it tracks the robot's current world pose from the odom stream and applies the
-inverse to each cloud, so the points land back in ``base_link``.
+Drop-in replacement for ``GO2Connection`` — it inherits the whole connection
+(movement, odom, camera, tf, skills) and changes only how the lidar cloud is
+published. The Go2's onboard stack transforms its lidar into the odom/world
+frame (``pointcloud2_from_webrtc_lidar`` stamps it ``world``) and accumulates
+scans. This undoes both: it applies the inverse of the robot's current world
+pose so points land back in ``base_link``, and with ``un_accumulate`` on it
+subtracts the prior cloud (in the stable world frame, where accumulated points
+keep identical coordinates) so only the new points are published.
 
-The Go2 also accumulates its scans, so each cloud is the previous one plus a few
-new points. With ``un_accumulate`` on, this subtracts the prior cloud (in the
-stable world frame, where accumulated points keep identical coordinates) and
-publishes only the new points — turning the accumulating stream back into
-per-scan deltas.
+An optional rigid ``transform`` (row-major 4x4, 16 floats) is applied to the
+base_link cloud before publishing — mirrors PointLio's ``transform`` and lets
+the cloud be re-expressed as if it came from another sensor (e.g. mid360_link).
 """
 
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
-from pydantic import Field, field_validator
+from pydantic import field_validator
 
-from dimos.constants import DEFAULT_ROBOT_FRAME
-from dimos.core.core import rpc
-from dimos.core.module import Module, ModuleConfig
-from dimos.core.stream import Out
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Transform import Transform
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
-from dimos.robot.unitree.go2.connection import Go2ConnectionProtocol, make_connection
+from dimos.robot.unitree.go2.connection import ConnectionConfig, GO2Connection
 
 
 def _rows_not_in(points: np.ndarray, reference: np.ndarray) -> np.ndarray:
@@ -53,15 +49,12 @@ def _rows_not_in(points: np.ndarray, reference: np.ndarray) -> np.ndarray:
     return points[~np.isin(points_view, reference_view)]
 
 
-class SimpleLidarConfig(ModuleConfig):
-    ip: str = Field(default_factory=lambda m: m["g"].robot_ip)
-    aes_128_key: str | None = Field(default_factory=lambda m: m["g"].unitree_aes_128_key)
-    base_frame: str = DEFAULT_ROBOT_FRAME
+class SimpleLidarConfig(ConnectionConfig):
     # Optional rigid transform applied to the base_link cloud before publishing:
     # row-major 4x4 (16 floats), None = identity. Mirrors PointLio's transform.
     transform: list[float] | None = None
-    # Frame the transformed cloud is stamped with. None keeps base_frame; set it to
-    # re-express the cloud as if it came from another sensor (e.g. "mid360_link").
+    # Frame the transformed cloud is stamped with. None keeps the body frame; set
+    # it to re-express the cloud as if it came from another sensor (e.g. mid360_link).
     output_frame: str | None = None
     # Subtract the previous (accumulated) cloud and publish only the new points.
     un_accumulate: bool = True
@@ -74,50 +67,38 @@ class SimpleLidarConfig(ModuleConfig):
         return value
 
 
-class SimpleLidar(Module):
-    """Publishes the Go2 lidar un-transformed back into the base_link frame."""
-
-    dedicated_worker = True
+class SimpleLidar(GO2Connection):
+    """GO2Connection that publishes the onboard lidar back in the base_link frame."""
 
     config: SimpleLidarConfig
-    lidar: Out[PointCloud2]
 
-    connection: Go2ConnectionProtocol
     _latest_pose: PoseStamped | None = None
     _transform: Transform | None = None
     _previous_points: np.ndarray | None = None
 
-    def __init__(self, **kwargs: Any) -> None:
+    def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)
-        self.connection = make_connection(
-            self.config.ip, self.config.g, aes_128_key=self.config.aes_128_key
-        )
         if self.config.transform is not None:
             matrix = np.array(self.config.transform, dtype=float).reshape(4, 4)
-            output_frame = self.config.output_frame or self.config.base_frame
+            output_frame = self.config.output_frame or self.frame_mapping["body"]
             self._transform = Transform.from_matrix(
                 matrix, frame_id=output_frame, child_frame_id=output_frame
             )
 
-    @rpc
-    def start(self) -> None:
-        super().start()
-        self.connection.start()
-        self.register_disposable(self.connection.odom_stream().subscribe(self._on_odom))
-        self.register_disposable(self.connection.lidar_stream().subscribe(self._on_lidar))
+    def _publish_tf(self, msg: PoseStamped) -> None:
+        self._latest_pose = msg
+        super()._publish_tf(msg)
 
-    def _on_odom(self, pose: PoseStamped) -> None:
-        self._latest_pose = pose
-
-    def _on_lidar(self, cloud: PointCloud2) -> None:
+    def _publish_lidar(self, cloud: PointCloud2) -> None:
         pose = self._latest_pose
         if pose is None:
             return
         if self.config.un_accumulate:
             cloud = self._only_new_points(cloud)
+        base_frame = self.frame_mapping["body"]
         # from_pose gives base_link's pose in world; its inverse maps the world
         # cloud back into base_link.
-        world_to_base = Transform.from_pose(self.config.base_frame, pose).inverse()
+        world_to_base = Transform.from_pose(base_frame, pose).inverse()
         base_cloud = cloud.transform(world_to_base)
         if self._transform is not None:
             base_cloud = base_cloud.transform(self._transform)
