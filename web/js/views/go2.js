@@ -108,17 +108,17 @@ export function renderGo2(c) {
                 <div class="flex items-center gap-1.5 px-2 py-1 border-b border-[#2a2a2a] shrink-0">
                     <!-- Swap button — LEFT of the camera tabs (per spec). Flips
                          which of {camera, map} is the main stage vs the PiP. -->
-                    <button id="view-swap" class="cmd-btn term-caps text-[11px] leading-none px-2 py-0.5" title="Swap camera / map">
+                    <button id="view-swap" class="cmd-btn term-caps text-[10px] leading-none px-1.5 py-0.5" title="Swap camera / map">
                         ⇄ <span id="view-swap-label">MAP</span>
                     </button>
                     <!-- Operator mic → robot. Track is captured muted at connect;
                          this flips track.enabled. Greyed when no mic was granted. -->
-                    <button id="mic-toggle" class="cmd-btn term-caps text-[11px] leading-none px-2 py-0.5" title="Operator mic → robot">
+                    <button id="mic-toggle" class="cmd-btn term-caps text-[10px] leading-none px-1.5 py-0.5" title="Operator mic → robot">
                         🎙 <span id="mic-toggle-label">OFF</span>
                     </button>
                     <!-- Camera tabs: toggle which cameras the robot composites into
                          the single video. At least one stays selected. -->
-                    <div class="flex items-center gap-1.5" id="cam-tabs"></div>
+                    <div class="flex items-center gap-1.5 ml-auto" id="cam-tabs"></div>
                 </div>
                 <div class="relative flex-1 bg-black flex items-center justify-center min-h-0" id="stage">
                     <!-- Camera + map are BOTH always in the DOM; setMainView()
@@ -271,7 +271,7 @@ function wireGo2() {
     // Camera tabs: render toggles, wire selection.
     const tabs = document.getElementById('cam-tabs');
     tabs.innerHTML = CAMS.map((c) =>
-        `<button data-cam="${c.id}" class="px-2 py-0.5 rounded text-[11px] leading-none border border-[#2a2a2a] text-gray-400">${c.label}</button>`
+        `<button data-cam="${c.id}" class="px-3 py-1 rounded text-xs border border-[#2a2a2a] text-gray-400">${c.label}</button>`
     ).join('');
     tabs.querySelectorAll('[data-cam]').forEach((b) =>
         b.addEventListener('click', () => toggleCam(b.dataset.cam)));
@@ -681,7 +681,7 @@ function toggleCam(id) {
 function renderCamTabs() {
     document.querySelectorAll('#cam-tabs [data-cam]').forEach((b) => {
         const on = ui.selectedCams.includes(b.dataset.cam);
-        b.className = 'px-2 py-0.5 rounded text-[11px] leading-none border ' +
+        b.className = 'px-3 py-1 rounded text-xs border ' +
             (on ? 'bg-dim-500 text-bg-950 border-dim-500' : 'border-[#2a2a2a] text-gray-400');
     });
 }
