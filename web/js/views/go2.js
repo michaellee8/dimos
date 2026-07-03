@@ -68,6 +68,7 @@ const ui = {
     mainView: 'camera',       // 'camera' | 'map' — which is the big stage; other → PiP
     lastMap: null,            // latest decoded {type:map,...} for redraw between frames
     lastOdom: null,           // latest {x,y,yaw,ts} for the robot marker
+    navGoal: null,            // last clicked nav goal {x,y} world coords
     mapZoom: 1,               // pan/zoom view transform on the minimap
     mapPanX: 0, mapPanY: 0,   // canvas-px pan offset (applied before letterbox/flip)
     pipW: 192, pipH: 120,     // floating PiP size in px (user-resizable, free ratio)
@@ -430,6 +431,37 @@ function wireMicToggle() {
     sync();
 }
 
+// Click-to-navigate: canvas px → world metres (exact inverse of drawMap's
+// pan/zoom → letterbox → y-flip chain) → {type:'nav_goal'} on state_reliable.
+// The robot publishes it as a goal_request for the planner; live WASD input
+// always overrides the planner's twists robot-side.
+function sendNavGoal(e) {
+    const m = ui.lastMap;
+    const canvas = document.getElementById('map-canvas');
+    if (!m || !m.img || !canvas) return;
+    if (!state.stateChannel || state.stateChannel.readyState !== 'open') return;
+    const rect = canvas.getBoundingClientRect();
+    const cw = rect.width, ch = rect.height;
+    const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
+    // undo pan + zoom-about-centre
+    const ux = (cx - ui.mapPanX - cw / 2) / ui.mapZoom + cw / 2;
+    const uy = (cy - ui.mapPanY - ch / 2) / ui.mapZoom + ch / 2;
+    // undo letterbox + y-flip (world y-up)
+    const scale = Math.min(cw / m.w, ch / m.h);
+    const dw = m.w * scale, dh = m.h * scale;
+    const dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+    const col = (ux - dx) / scale;
+    const row = ((dy + dh) - uy) / scale;
+    if (col < 0 || col > m.w || row < 0 || row > m.h) return;  // letterbox click
+    const wx = m.origin[0] + col * m.res;
+    const wy = m.origin[1] + row * m.res;
+    ui.navGoal = { x: wx, y: wy };
+    state.stateChannel.send(JSON.stringify(
+        { type: 'nav_goal', x: wx, y: wy, nonce: ++ui.nonce }));
+    console.info(`[nav] goal → (${wx.toFixed(2)}, ${wy.toFixed(2)})`);
+    drawMap();
+}
+
 // Scroll-to-zoom (about the cursor) + drag-to-pan on the minimap, active only
 // while the map is the MAIN view (the PiP keeps its click-to-swap). Double-click
 // resets. All in canvas px; drawMap applies ui.mapZoom / mapPan{X,Y}.
@@ -475,9 +507,8 @@ function bindMapPanZoom() {
         if (!dragging) return;
         dragging = false; canvas.style.cursor = '';
         try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
-        // A real drag shouldn't also fire the click-to-swap; the click handler is
-        // on 'click', which still fires, so suppress swap when the map is main
-        // (handled there via is-pip guard) — nothing extra needed here.
+        // A tap (no real drag) on the main map = click-to-navigate.
+        if (moved < 5) sendNavGoal(e);
     };
     canvas.addEventListener('pointerup', endDrag);
     canvas.addEventListener('pointercancel', endDrag);
@@ -652,6 +683,26 @@ function drawMap() {
             ctx.strokeStyle = '#0d0e0e';
             ctx.lineWidth = 2;
             ctx.stroke();
+            ctx.restore();
+        }
+    }
+    // Nav goal marker (same flipped frame): ring + dot at the clicked point.
+    const g = ui.navGoal;
+    if (g && m.res > 0) {
+        const gx = ((g.x - m.origin[0]) / m.res) * scale;
+        const gy = ((g.y - m.origin[1]) / m.res) * scale;
+        if (gx >= 0 && gx <= dw && gy >= 0 && gy <= dh) {
+            ctx.save();
+            ctx.translate(gx, gy);
+            ctx.strokeStyle = '#b0e1f0';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.arc(0, 0, 7, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.fillStyle = '#b0e1f0';
+            ctx.beginPath();
+            ctx.arc(0, 0, 2, 0, Math.PI * 2);
+            ctx.fill();
             ctx.restore();
         }
     }
