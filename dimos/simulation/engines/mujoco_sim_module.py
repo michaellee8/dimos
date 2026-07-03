@@ -30,7 +30,7 @@ import math
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import Any, Literal
 
 import mujoco
 import numpy as np
@@ -255,6 +255,12 @@ class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     mujoco_lidar_max_range: float = MAX_RANGE
     mujoco_lidar_max_height: float = MAX_HEIGHT
     mujoco_lidar_robot_exclusion_radius: float = 0.0
+    # Frame for the published mujoco-lidar cloud. "world" (default) keeps the
+    # raycast points as registered world-frame data. "base" expresses them in
+    # the free-joint base frame (pairing with the ``odometry`` output), which
+    # is the contract a real LIO front-end publishes -- consumers like
+    # RayTracingVoxelMap can then be wired identically in sim and on hardware.
+    mujoco_lidar_frame: Literal["world", "base"] = "world"
     # Inject menagerie/dimos-bundled mesh bytes (via
     # dimos.simulation.mujoco.model.get_assets) into MjModel.from_xml_string.
     # MJCFs that reference meshes by bare filename (G1 GR00T, Go2) need this;
@@ -998,6 +1004,18 @@ class MujocoSimModule(
         except Exception as exc:
             logger.error("Pointcloud generation error", error=str(exc))
 
+    def _base_pose(self) -> tuple[NDArray[Any], NDArray[Any]] | None:
+        """Free-joint base position and rotation matrix, or None without one."""
+        engine = self._engine
+        if engine is None or self._root_base_qpos_adr is None:
+            return None
+        qpos = engine.data.qpos
+        adr = self._root_base_qpos_adr
+        position = np.asarray(qpos[adr : adr + 3], dtype=np.float64).copy()
+        w, x, y, z = qpos[adr + 3 : adr + 7]
+        rotation = Quaternion(float(x), float(y), float(z), float(w)).to_rotation_matrix()
+        return position, rotation
+
     def _mujoco_lidar_camera_names(self) -> list[str]:
         names = self.config.mujoco_lidar_camera_names
         return list(names) if names else [self.config.camera_name]
@@ -1021,9 +1039,19 @@ class MujocoSimModule(
             return
 
         try:
+            points = np.vstack(all_points)
+            frame_id = "world"
+            if self.config.mujoco_lidar_frame == "base":
+                base = self._base_pose()
+                if base is not None:
+                    position, rotation = base
+                    # World -> base: R^T (p - t). The exact inverse of the
+                    # odometry pose consumers apply to re-register the scan.
+                    points = (points - position) @ rotation
+                    frame_id = "base_link"
             pcd = PointCloud2.from_numpy(
-                np.vstack(all_points),
-                frame_id="world",
+                points,
+                frame_id=frame_id,
                 timestamp=latest_ts or time.time(),
             )
             pcd = pcd.voxel_downsample(self.config.mujoco_lidar_voxel_size)

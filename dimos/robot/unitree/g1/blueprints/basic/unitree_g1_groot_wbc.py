@@ -125,6 +125,9 @@ _MUJOCO_LIDAR_BASE_KWARGS: dict[str, Any] = {
     "mujoco_lidar_raycast_width": 64,
     "mujoco_lidar_raycast_height": 32,
     "mujoco_lidar_robot_exclusion_radius": G1.width_clearance,
+    # Base-frame scans + the odometry output = the LIO contract, so the
+    # raytracing mapper wires identically in sim and on real hardware.
+    "mujoco_lidar_frame": "base",
 }
 _G1_COMPOSED_MJB_KEY = "unitree-g1-groot-wbc_spawn_9p2_11p8_yaw_m1p57_static_only_lidar"
 _G1_COMPOSED_MJB_ROBOT = "unitree-g1-groot-wbc"
@@ -280,14 +283,13 @@ if global_config.simulation == "mujoco":
         auto_start=True,
         params={"default_positions": ARM_DEFAULT_POSE},
     )
-    # Same mapper as real hardware for sim/real parity. MuJoCo's raycast
-    # lidar publishes world-registered clouds and the sim module publishes
-    # ground-truth Odometry, so the raytracer only uses odometry for the
-    # ray-cast origin (world_frame_points). Lidar frames arrive at ~1 Hz, so
-    # emit per frame.
+    # Same mapper as real hardware for sim/real parity: the sim lidar is
+    # configured to publish base-frame scans (mujoco_lidar_frame below) and
+    # the sim module publishes ground-truth Odometry, so the raytracer gets
+    # exactly the contract the LIO provides on the robot. Lidar frames
+    # arrive at ~1 Hz, so emit per frame.
     _mapper = RayTracingVoxelMap.blueprint(
         voxel_size=_G1_NAV_VOXEL_RESOLUTION,
-        world_frame_points=True,
         emit_every=0,
         global_emit_every=1,
     )
@@ -524,6 +526,10 @@ _rerun_config = {
         # This blueprint uses raycast lidar, so suppress raw camera streams
         # in Rerun.
         "world/color_image": None,
+        # Raw scans are in the sensor/base frame (LIO contract), not world --
+        # the voxel map is the live view. Same rationale as world/lidar on
+        # real hardware below.
+        "world/pointcloud": None,
         "world/camera_info": None,
         "world/depth_image": None,
         "world/depth_camera_info": None,
