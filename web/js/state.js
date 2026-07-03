@@ -66,6 +66,7 @@ export const state = {
     onOdom: null,           // optional view hook: (msg) => void for {type:odom,x,y,yaw,ts}
     onMicReady: null,       // optional view hook: () => void once the mic track is captured
     driveEnabled: true,     // gates WASD; go2 cockpit sets false until Stand/Drive
+    poseMode: false,        // PoseStand: buildTwist maps keys to body-pose axes
     // Video-freshness drive gate (stall.js): stalled drives the overlay/HUD,
     // blocked suppresses twist sends (stall OR post-stall neutral gate).
     videoStall: { stalled: false, blocked: false, armed: false },

@@ -68,7 +68,7 @@ angular.z = 0</pre>
 function trackedKey(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return null;
     const k = e.key.toLowerCase();
-    if ('wasdqe'.includes(k)) return k;  // drive: WASD + Q/E strafe
+    if (k.length === 1 && 'wasdqerf'.includes(k)) return k;  // drive: WASD + Q/E strafe; pose adds R/F height
     if (e.key === 'Shift') return e.key;  // 2× fast
     // Space = hold-to-slow. Deliberately NOT Ctrl (Ctrl+W closes the tab and
     // JS cannot block it) and NOT Alt (Alt+D steals the address bar, bare Alt
@@ -127,6 +127,23 @@ function buildTwist() {
     const kb = state.kbKeys;
     const shift = kb.has('Shift') && !kb.has('Space');
     const slow  = kb.has('Space') && !kb.has('Shift');
+
+    if (state.poseMode) {
+        // PoseStand (go2 cockpit): same keys, body-pose axes about the COM —
+        // angular.x/y = roll/pitch, angular.z = yaw, linear.z = height. The
+        // robot feeds these to the firmware's stick posing, which saturates at
+        // 1.0, so amplitude is fixed here (speed bar is a locomotion concept).
+        const amp = shift ? 0.9 : (slow ? 0.2 : 0.45);
+        return {
+            linear_x:  0,
+            linear_y:  0,
+            linear_z:  ((kb.has('r') ? 1 : 0) - (kb.has('f') ? 1 : 0)) * amp,
+            angular_x: ((kb.has('q') ? 1 : 0) - (kb.has('e') ? 1 : 0)) * amp,
+            angular_y: ((kb.has('w') ? 1 : 0) - (kb.has('s') ? 1 : 0)) * amp,
+            angular_z: ((kb.has('a') ? 1 : 0) - (kb.has('d') ? 1 : 0)) * amp,
+        };
+    }
+
     const fwd    = (kb.has('w') ? 1 : 0) - (kb.has('s') ? 1 : 0);
     const turn   = (kb.has('a') ? 1 : 0) - (kb.has('d') ? 1 : 0);
     const strafe = (kb.has('q') ? 1 : 0) - (kb.has('e') ? 1 : 0);
@@ -140,6 +157,8 @@ function buildTwist() {
         linear_x:  fwd * scale * sp.lin,
         linear_y:  strafe * scale * sp.lin,
         linear_z:  0,
+        angular_x: 0,
+        angular_y: 0,
         angular_z: turn * scale * sp.ang,
     };
 }
@@ -153,7 +172,7 @@ function updateKeyVisuals() {
     }
 }
 
-const DRIVE_KEYS = ['w', 'a', 's', 'd', 'q', 'e'];
+const DRIVE_KEYS = ['w', 'a', 's', 'd', 'q', 'e', 'r', 'f'];
 
 export function startKeyboardLoop() {
     // Idempotent — callers re-render and would otherwise stack listeners.
@@ -182,7 +201,7 @@ export function startKeyboardLoop() {
             header: new std_msgs.Header({ stamp: ts, frame_id: 'keyboard', seq: twistSeq }),
             twist: new geometry_msgs.Twist({
                 linear: new geometry_msgs.Vector3({ x: t.linear_x, y: t.linear_y, z: t.linear_z }),
-                angular: new geometry_msgs.Vector3({ x: 0, y: 0, z: t.angular_z }),
+                angular: new geometry_msgs.Vector3({ x: t.angular_x || 0, y: t.angular_y || 0, z: t.angular_z }),
             }),
         });
         state.cmdChannel.send(twist.encode());

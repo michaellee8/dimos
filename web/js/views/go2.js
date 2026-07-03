@@ -17,8 +17,11 @@ import { startKeyboardLoop } from './keyboard.js';
 // so there's no separate Stand Up / Balance. No Recovery button either:
 // Stand/Drive already ends in RecoveryStand robot-side, so it doubles as the
 // recovery action — one less thing on the panel.
+// PoseStand = plain BalanceStand: WASD poses the body about the COM
+// (pitch/roll/yaw/height) with the feet planted instead of driving.
 const POSTURE = [
     { name: 'StandReady', label: 'Stand / Drive' },
+    { name: 'PoseStand', label: 'Pose' },
     { name: 'StandDown', label: 'Sit' },
 ];
 // Robot actions. Hello/Stretch verified working; Pounce/Jump are acrobatic and
@@ -215,7 +218,7 @@ export function renderGo2(c) {
                 <!-- WASD drive indicator: lights up keys as they're pressed
                      (updateKeyVisuals() in keyboard.js toggles .pressed by id). -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0">
-                    <div class="term-caps text-xs text-gray-500 mb-2">Drive</div>
+                    <div class="term-caps text-xs text-gray-500 mb-2" id="drive-title">Drive</div>
                     <div class="flex flex-col items-center gap-2">
                         <div class="flex gap-2">
                             <div id="key-q" class="kb-key kb-key-secondary">Q</div>
@@ -228,7 +231,7 @@ export function renderGo2(c) {
                             <div id="key-d" class="kb-key">D</div>
                         </div>
                     </div>
-                    <div class="mt-3 text-[11px] text-gray-500 leading-relaxed">
+                    <div class="mt-3 text-[11px] text-gray-500 leading-relaxed" id="drive-hints">
                         <div><span class="text-gray-300">W/S</span> forward · back &nbsp; <span class="text-gray-300">A/D</span> turn left · right</div>
                         <div><span class="text-gray-300">Q/E</span> strafe left · right</div>
                         <div><span class="text-gray-300">Shift</span> 2× fast &nbsp; <span class="text-gray-300">Space</span> ½× slow</div>
@@ -874,7 +877,7 @@ function resolveAck(nonce, ok) {
     const btn = p.el;
     // Track posture optimistically on a confirmed posture command. StandReady
     // is an action (stand+balance), not a latched state — map it to standing.
-    const POSTURE_STATE = { StandReady: 'StandReady', StandDown: 'StandDown', RecoveryStand: 'RecoveryStand', Sit: 'Sit' };
+    const POSTURE_STATE = { StandReady: 'StandReady', PoseStand: 'PoseStand', StandDown: 'StandDown', RecoveryStand: 'RecoveryStand', Sit: 'Sit' };
     if (ok && POSTURE_STATE[p.name]) ui.posture = POSTURE_STATE[p.name];
     // Range inputs (light slider) flash via the cmd-* classes; buttons via
     // data-status. 700ms flash → idle; bail if the cockpit unmounted.
@@ -936,23 +939,45 @@ function refreshControls() {
     document.getElementById('estop').classList.toggle('latched', ui.estopped);
     document.getElementById('rearm').classList.toggle('hidden', !ui.estopped);
 
-    // Drive is live only in Stand/Drive (StandReady) and not e-stopped. Other
-    // postures (Recovery/Sit/StandDown) change pose but don't accept WASD —
-    // press Stand/Drive to start moving. Gates the keyboard loop's send.
-    state.driveEnabled = ui.posture === 'StandReady' && !ui.estopped;
+    // Drive is live in Stand/Drive (WASD walks) and Pose (WASD poses the body)
+    // and not e-stopped. Other postures (Recovery/Sit/StandDown) change pose
+    // but don't accept WASD. Gates the keyboard loop's send; poseMode flips
+    // buildTwist's key mapping to the body-pose axes.
+    state.poseMode = ui.posture === 'PoseStand' && !ui.estopped;
+    state.driveEnabled = (ui.posture === 'StandReady' || state.poseMode) && !ui.estopped;
 
     const kb = document.getElementById('kb-live');
     const stalled = state.videoStall.stalled;
     kb.className = 'pill ' + (state.driveEnabled && !stalled ? 'pill-good' : 'pill-bad');
     kb.querySelector('.dot').nextSibling.textContent =
         stalled ? 'DRIVE OFF — video stalled'
+        : state.poseMode ? 'POSE LIVE'
         : state.driveEnabled ? 'DRIVE LIVE' : 'DRIVE OFF — press Stand/Drive';
 
     document.getElementById('posture-chip').textContent =
-        ({ StandReady: 'STANDING', StandDown: 'SITTING', RecoveryStand: 'RECOVERY', Damp: 'STOPPED' }[ui.posture]) ||
+        ({ StandReady: 'STANDING', PoseStand: 'POSING', StandDown: 'SITTING', RecoveryStand: 'RECOVERY', Damp: 'STOPPED' }[ui.posture]) ||
         ui.posture;
+    renderDriveHints();
 
     renderBattery();
+}
+
+// Drive panel doubles as the pose panel: same keys, different axes.
+function renderDriveHints() {
+    const title = document.getElementById('drive-title');
+    const hints = document.getElementById('drive-hints');
+    if (!title || !hints) return;
+    const mode = state.poseMode ? 'pose' : 'drive';
+    if (hints.dataset.mode === mode) return;  // refreshControls runs per telemetry tick
+    hints.dataset.mode = mode;
+    title.textContent = state.poseMode ? 'Pose' : 'Drive';
+    hints.innerHTML = state.poseMode
+        ? `<div><span class="text-gray-300">W/S</span> pitch down · up &nbsp; <span class="text-gray-300">A/D</span> yaw left · right</div>
+           <div><span class="text-gray-300">Q/E</span> roll left · right &nbsp; <span class="text-gray-300">R/F</span> body up · down</div>
+           <div><span class="text-gray-300">Shift</span> stronger &nbsp; <span class="text-gray-300">Space</span> gentle</div>`
+        : `<div><span class="text-gray-300">W/S</span> forward · back &nbsp; <span class="text-gray-300">A/D</span> turn left · right</div>
+           <div><span class="text-gray-300">Q/E</span> strafe left · right</div>
+           <div><span class="text-gray-300">Shift</span> 2× fast &nbsp; <span class="text-gray-300">Space</span> ½× slow</div>`;
 }
 
 function renderBattery() {
