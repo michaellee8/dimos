@@ -60,7 +60,6 @@ const ui = {
     speedMode: 'normal',      // speed bar selection
     selectedCams: ['cam1'],   // active camera tabs (default Go2)
     obstacleAvoid: true,      // onboard obstacle avoidance on/off (robot boots ON)
-    speakerOn: true,          // operator-mic playback on the dog (robot boots ON)
     light: 0,                 // head-LED brightness 0..1 (robot boots off; telemetry reconciles)
     lightDragging: false,     // don't let reconcile fight an in-progress drag
     robotVideoStalled: false, // robot-confirmed no-frames watchdog (telemetry)
@@ -175,11 +174,6 @@ export function renderGo2(c) {
                     <button id="obstacle-toggle" class="px-3 py-1 text-xs term-caps rounded border border-dim-700 text-dim-400">ON</button>
                 </section>
 
-                <!-- Robot speaker (plays the operator mic; mic itself is the 🎙 toggle) -->
-                <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0 flex items-center justify-between">
-                    <span class="text-sm text-gray-400">🔊 Speaker</span>
-                    <button id="speaker-toggle" class="px-3 py-1 text-xs term-caps rounded border border-dim-700 text-dim-400">ON</button>
-                </section>
 
                 <!-- Head light brightness (0..1 → firmware levels 0-10) -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0 flex items-center gap-3">
@@ -292,7 +286,6 @@ function wireGo2() {
         b.addEventListener('click', () => selectSpeed(b.dataset.speed)));
 
     document.getElementById('obstacle-toggle').addEventListener('click', toggleObstacleAvoid);
-    document.getElementById('speaker-toggle').addEventListener('click', toggleSpeaker);
     renderObstacleToggle();
     wireLightSlider();
 
@@ -725,24 +718,6 @@ function toggleObstacleAvoid() {
         { type: 'obstacle_avoidance', enabled: ui.obstacleAvoid, nonce: ++ui.nonce }));
 }
 
-// Robot speaker: gates operator-mic playback on the dog (robot-side flag).
-function toggleSpeaker() {
-    if (!state.stateChannel || state.stateChannel.readyState !== 'open') return;
-    ui.speakerOn = !ui.speakerOn;
-    renderSpeakerToggle();
-    state.stateChannel.send(JSON.stringify(
-        { type: 'speaker', enabled: ui.speakerOn, nonce: ++ui.nonce }));
-}
-
-function renderSpeakerToggle() {
-    const b = document.getElementById('speaker-toggle');
-    if (!b) return;
-    const on = ui.speakerOn;
-    b.textContent = on ? 'ON' : 'OFF';
-    b.classList.toggle('text-dim-400', on);
-    b.classList.toggle('border-dim-700', on);
-    b.classList.toggle('text-gray-500', !on);
-}
 
 function renderObstacleToggle() {
     const b = document.getElementById('obstacle-toggle');
@@ -820,10 +795,6 @@ function onRobotState(s) {
     if (typeof s.obstacle_avoidance === 'boolean' && s.obstacle_avoidance !== ui.obstacleAvoid) {
         ui.obstacleAvoid = s.obstacle_avoidance;
         renderObstacleToggle();
-    }
-    if (typeof s.speaker === 'boolean' && s.speaker !== ui.speakerOn) {
-        ui.speakerOn = s.speaker;
-        renderSpeakerToggle();
     }
     if (typeof s.light === 'number' && !ui.lightDragging && Math.abs(s.light - ui.light) > 0.01) {
         ui.light = s.light;
