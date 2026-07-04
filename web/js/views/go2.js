@@ -17,11 +17,12 @@ import { startKeyboardLoop } from './keyboard.js';
 // so there's no separate Stand Up / Balance. No Recovery button either:
 // Stand/Drive already ends in RecoveryStand robot-side, so it doubles as the
 // recovery action — one less thing on the panel.
-// PoseStand = plain BalanceStand: WASD poses the body about the COM
+// PoseStand = firmware Pose mode: WASD poses the body about the COM
 // (pitch/roll/yaw/height) with the feet planted instead of driving.
+// Button shelved until the axis mapping is verified on hardware — re-add
+// { name: 'PoseStand', label: 'Pose' } here; the full pipeline stays wired.
 const POSTURE = [
     { name: 'StandReady', label: 'Stand / Drive' },
-    { name: 'PoseStand', label: 'Pose' },
     { name: 'StandDown', label: 'Sit' },
 ];
 // Robot actions. Hello/Stretch verified working; Pounce/Jump are acrobatic and
