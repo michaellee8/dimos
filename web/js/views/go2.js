@@ -878,6 +878,7 @@ function resolveAck(nonce, ok) {
     // Track posture optimistically on a confirmed posture command. StandReady
     // is an action (stand+balance), not a latched state — map it to standing.
     const POSTURE_STATE = { StandReady: 'StandReady', PoseStand: 'PoseStand', StandDown: 'StandDown', RecoveryStand: 'RecoveryStand', Sit: 'Sit' };
+    if (POSTURE_STATE[p.name]) console.log(`[cockpit] ack ${p.name} ok=${ok}`);
     if (ok && POSTURE_STATE[p.name]) ui.posture = POSTURE_STATE[p.name];
     // Range inputs (light slider) flash via the cmd-* classes; buttons via
     // data-status. 700ms flash → idle; bail if the cockpit unmounted.
@@ -970,6 +971,7 @@ function renderDriveHints() {
     const mode = state.poseMode ? 'pose' : 'drive';
     if (hints.dataset.mode === mode) return;  // refreshControls runs per telemetry tick
     hints.dataset.mode = mode;
+    console.log(`[cockpit] key mapping → ${mode} (posture=${ui.posture})`);
     title.textContent = state.poseMode ? 'Pose' : 'Drive';
     hints.innerHTML = state.poseMode
         ? `<div><span class="text-gray-300">W/S</span> pitch down · up &nbsp; <span class="text-gray-300">A/D</span> yaw left · right</div>
