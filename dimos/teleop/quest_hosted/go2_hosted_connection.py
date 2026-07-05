@@ -206,16 +206,12 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         )
         # Map overlay → operator minimap; throttled + compressed in the handlers.
         if self.config.map_hz > 0:
-            self.register_disposable(
-                Disposable(self.global_costmap.subscribe(self._on_costmap))
-            )
+            self.register_disposable(Disposable(self.global_costmap.subscribe(self._on_costmap)))
         # Planner nav twists → move(), yielding to live operator input.
         self.register_disposable(Disposable(self.nav_cmd_vel.subscribe(self._on_nav_cmd)))
         # Odom: tap the raw stream the base consumes for TF (no stream port).
         if self.config.odom_hz > 0:
-            self.register_disposable(
-                self.connection.odom_stream().subscribe(self._on_odom)
-            )
+            self.register_disposable(self.connection.odom_stream().subscribe(self._on_odom))
         # Operator mic → audio_out. The subscribes above already forced the
         # broker provider into existence, so the registry sweep finds it; frames
         # only arrive when it runs with audio_in=true.
@@ -573,9 +569,7 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         self._last_cmd_ts = ts
         now = time.time()
         steering = (
-            abs(twist.linear.x) > 1e-3
-            or abs(twist.linear.y) > 1e-3
-            or abs(twist.angular.z) > 1e-3
+            abs(twist.linear.x) > 1e-3 or abs(twist.linear.y) > 1e-3 or abs(twist.angular.z) > 1e-3
         )
         if steering:
             self._last_drive_ts = now
@@ -713,9 +707,7 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
             logger.debug("speaker: connection has no WebRTC PC (sim/replay) — skipped")
             return
         try:
-            sender = next(
-                (t.sender for t in pc.getTransceivers() if t.kind == "audio"), None
-            )
+            sender = next((t.sender for t in pc.getTransceivers() if t.kind == "audio"), None)
             if sender is None:
                 logger.warning("speaker: dog PC has no audio transceiver")
                 return

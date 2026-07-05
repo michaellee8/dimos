@@ -749,9 +749,7 @@ def test_odom_publishes_planar_pose() -> None:
 
     conn = _bare_connection()
     q = Quaternion.from_euler(Vector3(0.0, 0.0, math.pi / 2))  # yaw = 90°
-    pose = PoseStamped(
-        ts=123.0, position=[1.5, -2.0, 0.3], orientation=[q.x, q.y, q.z, q.w]
-    )
+    pose = PoseStamped(ts=123.0, position=[1.5, -2.0, 0.3], orientation=[q.x, q.y, q.z, q.w])
     conn._on_odom(pose)
 
     msg = _published_json(conn.map_out, "odom")
