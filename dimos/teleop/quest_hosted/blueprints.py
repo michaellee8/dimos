@@ -108,9 +108,7 @@ teleop_hosted_go2_transport = (
             # operator on their own unreliable channel (room to grow to pointclouds).
             ("lidar", PointCloud2): LCMTransport.spec("lidar", PointCloud2),
             ("global_map", PointCloud2): LCMTransport.spec("global_map", PointCloud2),
-            ("global_costmap", OccupancyGrid): LCMTransport.spec(
-                "global_costmap", OccupancyGrid
-            ),
+            ("global_costmap", OccupancyGrid): LCMTransport.spec("global_costmap", OccupancyGrid),
             ("map_out", bytes): CloudflareTransport.spec("map_unreliable"),
         }
     )
@@ -169,9 +167,7 @@ teleop_hosted_go2_multicam = (
             # Map chain over LCM (same as the transport blueprint).
             ("lidar", PointCloud2): LCMTransport.spec("lidar", PointCloud2),
             ("global_map", PointCloud2): LCMTransport.spec("global_map", PointCloud2),
-            ("global_costmap", OccupancyGrid): LCMTransport.spec(
-                "global_costmap", OccupancyGrid
-            ),
+            ("global_costmap", OccupancyGrid): LCMTransport.spec("global_costmap", OccupancyGrid),
             ("map_out", bytes): CloudflareTransport.spec("map_unreliable"),
         }
     )

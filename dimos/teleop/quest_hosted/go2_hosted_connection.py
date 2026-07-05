@@ -337,7 +337,11 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         with self._cmd_lock:
             self._nonce_results.clear()
         try:
-            self.connection.stop_movement()
+            # Not on the connection protocol — the webrtc deadman stop; sim
+            # connections don't have it and the 0.2s cmd_vel timeout covers them.
+            stop = getattr(self.connection, "stop_movement", None)
+            if stop is not None:
+                stop()
         except Exception:
             logger.exception("stop_movement on operator loss failed")
         if self.config.damp_on_operator_lost:
@@ -701,11 +705,11 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         the dog connection's loop. Best-effort: replay/mock connections have no
         PC, and a failed attach just means no speaker, never a failed start.
         """
-        try:
-            drv = self.connection.conn  # unitree_webrtc_connect driver
-            loop = self.connection.loop
-            pc = drv.pc
-        except AttributeError:
+        # Driver internals, not on the connection protocol — narrow via getattr.
+        drv = getattr(self.connection, "conn", None)  # unitree_webrtc_connect driver
+        loop = getattr(self.connection, "loop", None)
+        pc = getattr(drv, "pc", None)
+        if drv is None or pc is None or loop is None:
             logger.debug("speaker: connection has no WebRTC PC (sim/replay) — skipped")
             return
         try:

@@ -264,12 +264,11 @@ class ModuleCoordinator(Resource):
 
         for remapped_name, stream_type in streams.keys():
             key = (remapped_name, stream_type)
-            if key in self._transport_registry:
-                transport = self._transport_registry[key]
-            else:
+            transport = self._transport_registry.get(key)
+            if transport is None:
                 transport = transports.get(key)
-                if transport is None:
-                    transport = _get_transport_for(blueprint, remapped_name, stream_type)
+            if transport is None:
+                transport = _get_transport_for(blueprint, remapped_name, stream_type)
             self._transport_registry[key] = transport
             for module, original_name in streams[key]:
                 instance = self.get_instance(module)  # type: ignore[assignment]

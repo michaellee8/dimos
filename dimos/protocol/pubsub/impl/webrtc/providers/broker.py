@@ -286,9 +286,7 @@ class BrokerProvider(AsyncProviderBase):
 
     # ─── Operator → robot audio ──────────────────────────────────────
 
-    def set_audio_frame_callback(
-        self, cb: Callable[[bytes, int, int], None] | None
-    ) -> None:
+    def set_audio_frame_callback(self, cb: Callable[[bytes, int, int], None] | None) -> None:
         """Register a sink for received operator audio: cb(pcm_bytes, sample_rate,
         channels). Thread-safe to set; frames are dropped until it's wired."""
         self._audio_frame_cb = cb
@@ -303,9 +301,7 @@ class BrokerProvider(AsyncProviderBase):
             if track.kind != "audio":
                 return
             logger.debug("operator audio track received")
-            self._audio_task = asyncio.get_event_loop().create_task(
-                self._read_audio_track(track)
-            )
+            self._audio_task = asyncio.get_event_loop().create_task(self._read_audio_track(track))
 
     async def _read_audio_track(self, track: Any) -> None:
         """Pull av.AudioFrames off the track → PCM bytes → sink callback.
@@ -443,9 +439,7 @@ class BrokerProvider(AsyncProviderBase):
         if self._pc is None or self._http is None or self.session_id is None:
             return
         try:
-            await self._pc.setRemoteDescription(
-                RTCSessionDescription(sdp=offer_sdp, type="offer")
-            )
+            await self._pc.setRemoteDescription(RTCSessionDescription(sdp=offer_sdp, type="offer"))
             answer = await self._pc.createAnswer()
             await self._pc.setLocalDescription(answer)
             r = await self._http.post(
@@ -454,9 +448,7 @@ class BrokerProvider(AsyncProviderBase):
                 json={"sdp_answer": self._pc.localDescription.sdp},
             )
             if r.status_code not in (200, 201):
-                logger.warning(
-                    "renegotiate-robot failed: %d %s", r.status_code, r.text[:200]
-                )
+                logger.warning("renegotiate-robot failed: %d %s", r.status_code, r.text[:200])
             else:
                 logger.info("Robot renegotiation complete (operator audio bridged)")
         except Exception:
