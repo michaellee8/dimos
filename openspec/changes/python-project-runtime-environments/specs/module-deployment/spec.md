@@ -20,12 +20,12 @@ The coordinator SHALL expose placed modules by their Module Contract identity ev
 - **THEN** coordinator lookup by `DetectorContract` returns the actor proxy
 - **AND** callers do not need to know the implementation class to call contract-declared behavior.
 
-### Requirement: Deployment failures roll back new runtime managers
-If deploying a runtime-aware deployment slice fails, deployment SHALL not leave partially registered worker managers or placement state that affects later deployments.
+### Requirement: Deployment failures roll back new runtime pools
+If deploying a runtime-aware deployment slice fails, deployment SHALL not leave partially registered worker pools or placement state that affects later deployments.
 
 #### Scenario: Runtime placement deployment fails
-- **GIVEN** deployment creates a runtime worker manager for a placed module
+- **GIVEN** deployment creates a runtime worker pool for a placed module
 - **AND** the placed module fails to deploy
 - **WHEN** deployment reports failure
-- **THEN** newly created runtime managers and placement state for the failed deployment slice are cleaned up or made inert
+- **THEN** newly created runtime pools and placement state for the failed deployment slice are cleaned up or made inert
 - **AND** existing workers from earlier successful deployments remain unaffected.

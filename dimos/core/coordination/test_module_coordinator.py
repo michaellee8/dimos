@@ -129,6 +129,14 @@ class _FakeManager:
         self.fail_stop = fail_stop
         self.workers = [object()]
         self.deployments: list[tuple[list[type[Module]], dict[type[Module], RuntimePlacement]]] = []
+        self.registered_runtime_names: list[set[str]] = []
+        self.runtime_placements_by_module: dict[type[Module], RuntimePlacement] = {}
+
+    def register_runtime_environments(self, registry) -> None:
+        self.registered_runtime_names.append(set(registry.environments))
+
+    def runtime_placement_for(self, module_class) -> RuntimePlacement | None:
+        return self.runtime_placements_by_module.get(module_class)
 
     def start(self) -> None:
         self.calls.append(f"start:{self.key}")
@@ -149,6 +157,7 @@ class _FakeManager:
             raise RuntimeError(f"boom:{self.key}")
         placements = dict(runtime_placements or {})
         modules = [spec[0] for spec in specs]
+        self.runtime_placements_by_module.update(placements)
         self.deployments.append((modules, placements))
         self.calls.append(f"deploy:{self.key}:{','.join(module.__name__ for module in modules)}")
         return [_FakeProxy() for _ in modules]
@@ -272,22 +281,16 @@ def test_build_happy_path() -> None:
         coordinator.stop()
 
 
-def test_deploy_parallel_routes_runtime_and_default_managers() -> None:
+def test_deploy_parallel_passes_runtime_dispatch_to_python_manager() -> None:
     calls: list[str] = []
     coordinator = ModuleCoordinator(g=GlobalConfig(n_workers=1, viewer="none"))
-    default_manager = _FakeManager("python", calls)
-    runtime_manager = _FakeManager("python:runtime-a", calls)
-    coordinator._managers = {"python": default_manager}
+    manager = _FakeManager("python", calls)
+    coordinator._managers = {"python": manager}
     coordinator._started = True
-    runtime = PythonProjectRuntimeEnvironment(name="runtime-a", project="/tmp/runtime-a")
     placement = RuntimePlacement(
         runtime="runtime-a",
         implementation="dimos.core.coordination.test_module_coordinator.RuntimeModuleA",
     )
-    coordinator._runtime_environment_registry = coordinator._runtime_environment_registry.register(
-        runtime
-    )
-    coordinator._create_runtime_manager = lambda _runtime: runtime_manager  # type: ignore[method-assign]
 
     results = coordinator.deploy_parallel(
         [
@@ -299,52 +302,20 @@ def test_deploy_parallel_routes_runtime_and_default_managers() -> None:
     )
 
     assert len(results) == 2
-    assert set(calls) == {
-        "deploy:python:RuntimeModuleB",
-        "deploy:python:runtime-a:RuntimeModuleA",
-    }
-    assert default_manager.deployments[0][0] == [RuntimeModuleB]
-    assert runtime_manager.deployments[0] == ([RuntimeModuleA], {RuntimeModuleA: placement})
-    assert coordinator._module_manager_keys[RuntimeModuleA] == "python:runtime-a"
-    assert coordinator._module_manager_keys[RuntimeModuleB] == "python"
+    assert calls == ["deploy:python:RuntimeModuleA,RuntimeModuleB"]
+    assert manager.deployments[0] == (
+        [RuntimeModuleA, RuntimeModuleB],
+        {RuntimeModuleA: placement},
+    )
+    assert set(coordinator._deployed_modules) == {RuntimeModuleA, RuntimeModuleB}
 
 
-def test_failed_runtime_deployment_cleans_up_manager_and_placement_state() -> None:
+def test_failed_python_deployment_does_not_commit_modules() -> None:
     calls: list[str] = []
     coordinator = ModuleCoordinator(g=GlobalConfig(n_workers=1, viewer="none"))
-    coordinator._managers = {"python": _FakeManager("python", calls)}
+    coordinator._managers = {"python": _FakeManager("python", calls, fail=True)}
     coordinator._started = True
-    runtime = PythonProjectRuntimeEnvironment(name="runtime-a", project="/tmp/runtime-a")
     placement = RuntimePlacement(runtime="runtime-a", implementation="impl.RuntimeModuleA")
-    failing_manager = _FakeManager("python:runtime-a", calls, fail=True)
-    previous_registry = coordinator._runtime_environment_registry
-    previous_placements = dict(coordinator._runtime_placement_map)
-    coordinator._create_runtime_manager = lambda _runtime: failing_manager  # type: ignore[method-assign]
-
-    with pytest.raises(ExceptionGroup):
-        coordinator.deploy_parallel(
-            [(RuntimeModuleA, coordinator._global_config, {})],
-            {},
-            runtime_environment_registry=previous_registry.register(runtime),
-            runtime_placement_map={RuntimeModuleA: placement},
-        )
-
-    assert "python:runtime-a" not in coordinator._managers
-    assert coordinator._runtime_environment_registry == previous_registry
-    assert coordinator._runtime_placement_map == previous_placements
-    assert calls == ["stop:python:runtime-a"]
-
-
-def test_failed_runtime_deployment_rolls_back_existing_manager_successes() -> None:
-    calls: list[str] = []
-    coordinator = ModuleCoordinator(g=GlobalConfig(n_workers=1, viewer="none"))
-    default_manager = _FakeManager("python", calls)
-    failing_runtime_manager = _FakeManager("python:runtime-a", calls, fail=True, fail_delay=0.05)
-    coordinator._managers = {"python": default_manager, "python:runtime-a": failing_runtime_manager}
-    coordinator._started = True
-    runtime = PythonProjectRuntimeEnvironment(name="runtime-a", project="/tmp/runtime-a")
-    placement = RuntimePlacement(runtime="runtime-a", implementation="impl.RuntimeModuleA")
-    previous_registry = coordinator._runtime_environment_registry
 
     with pytest.raises(ExceptionGroup):
         coordinator.deploy_parallel(
@@ -353,67 +324,11 @@ def test_failed_runtime_deployment_rolls_back_existing_manager_successes() -> No
                 (RuntimeModuleA, coordinator._global_config, {}),
             ],
             {},
-            runtime_environment_registry=previous_registry.register(runtime),
             runtime_placement_map={RuntimeModuleA: placement},
         )
 
-    assert "undeploy:python" in calls
     assert RuntimeModuleB not in coordinator._deployed_modules
     assert RuntimeModuleA not in coordinator._deployed_modules
-    assert coordinator._runtime_environment_registry == previous_registry
-
-
-def test_runtime_deployment_restores_state_when_rollback_cleanup_fails() -> None:
-    calls: list[str] = []
-    coordinator = ModuleCoordinator(g=GlobalConfig(n_workers=1, viewer="none"))
-    default_manager = _FakeManager("python", calls, fail_undeploy=True)
-    failing_runtime_manager = _FakeManager("python:runtime-a", calls, fail=True, fail_delay=0.05)
-    coordinator._managers = {"python": default_manager, "python:runtime-a": failing_runtime_manager}
-    coordinator._started = True
-    runtime = PythonProjectRuntimeEnvironment(name="runtime-a", project="/tmp/runtime-a")
-    placement = RuntimePlacement(runtime="runtime-a", implementation="impl.RuntimeModuleA")
-    previous_registry = coordinator._runtime_environment_registry
-    previous_placements = dict(coordinator._runtime_placement_map)
-
-    with pytest.raises(ExceptionGroup, match="rollback cleanup also failed"):
-        coordinator.deploy_parallel(
-            [
-                (RuntimeModuleB, coordinator._global_config, {}),
-                (RuntimeModuleA, coordinator._global_config, {}),
-            ],
-            {},
-            runtime_environment_registry=previous_registry.register(runtime),
-            runtime_placement_map={RuntimeModuleA: placement},
-        )
-
-    assert "undeploy:python" in calls
-    assert coordinator._runtime_environment_registry == previous_registry
-    assert coordinator._runtime_placement_map == previous_placements
-
-
-def test_runtime_deployment_restores_state_when_new_manager_stop_fails() -> None:
-    calls: list[str] = []
-    coordinator = ModuleCoordinator(g=GlobalConfig(n_workers=1, viewer="none"))
-    coordinator._managers = {"python": _FakeManager("python", calls)}
-    coordinator._started = True
-    runtime = PythonProjectRuntimeEnvironment(name="runtime-a", project="/tmp/runtime-a")
-    placement = RuntimePlacement(runtime="runtime-a", implementation="impl.RuntimeModuleA")
-    failing_manager = _FakeManager("python:runtime-a", calls, fail=True, fail_stop=True)
-    previous_registry = coordinator._runtime_environment_registry
-    previous_placements = dict(coordinator._runtime_placement_map)
-    coordinator._create_runtime_manager = lambda _runtime: failing_manager  # type: ignore[method-assign]
-
-    with pytest.raises(ExceptionGroup, match="rollback cleanup also failed"):
-        coordinator.deploy_parallel(
-            [(RuntimeModuleA, coordinator._global_config, {})],
-            {},
-            runtime_environment_registry=previous_registry.register(runtime),
-            runtime_placement_map={RuntimeModuleA: placement},
-        )
-
-    assert "python:runtime-a" not in coordinator._managers
-    assert coordinator._runtime_environment_registry == previous_registry
-    assert coordinator._runtime_placement_map == previous_placements
 
 
 def test_load_blueprint_reconciles_before_runtime_manager_launch(monkeypatch) -> None:
@@ -429,9 +344,6 @@ def test_load_blueprint_reconciles_before_runtime_manager_launch(monkeypatch) ->
         "dimos.core.coordination.module_coordinator.reconcile_blueprint_runtimes",
         fake_reconcile,
     )
-    coordinator._create_runtime_manager = (  # type: ignore[method-assign]
-        lambda _runtime: _FakeManager("python:runtime-a", calls)
-    )
 
     runtime = PythonProjectRuntimeEnvironment(name="runtime-a", project="/tmp/runtime-a")
     placement = RuntimePlacement(runtime="runtime-a", implementation="impl.RuntimeModuleA")
@@ -443,7 +355,11 @@ def test_load_blueprint_reconciles_before_runtime_manager_launch(monkeypatch) ->
 
     coordinator.load_blueprint(blueprint)
 
-    assert calls.index("reconcile") < calls.index("deploy:python:runtime-a:RuntimeModuleA")
+    assert calls.index("reconcile") < calls.index("deploy:python:RuntimeModuleA")
+    manager = coordinator._managers["python"]
+    assert isinstance(manager, _FakeManager)
+    assert manager.registered_runtime_names == [{"runtime-a"}]
+    assert manager.deployments[0] == ([RuntimeModuleA], {RuntimeModuleA: placement})
 
 
 def test_name_conflicts_are_reported() -> None:

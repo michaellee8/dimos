@@ -24,6 +24,10 @@ _Avoid_: setup registration, env setup
 A Python worker process launched from a registered runtime environment while preserving normal DimOS Python module semantics.
 _Avoid_: native module, subprocess module
 
+**Python Worker Pool**:
+A homogeneous set of Python workers launched with the same interpreter, working directory, environment, and launcher.
+_Avoid_: deployment registry, mixed-env worker group
+
 **Deployment Slice**:
 The set of modules being deployed by one coordinator entrypoint, such as an initial build or a later blueprint load.
 _Avoid_: whole app, reload batch

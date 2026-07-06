@@ -13,7 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -25,7 +25,7 @@ class PythonProjectLaunchMaterial:
     env: Mapping[str, str] = field(default_factory=dict)
     runtime_name: str = ""
     project: Path = Path()
-    convention: str = "uv"
+    has_pixi: bool = False
     prepared_python: Path = Path()
 
 
@@ -37,41 +37,6 @@ class RuntimePlacement:
 
 class RuntimeEnvironmentError(RuntimeError):
     pass
-
-
-class RuntimeEnvironmentRegistrationError(RuntimeEnvironmentError):
-    pass
-
-
-class UnknownRuntimeEnvironmentError(RuntimeEnvironmentError):
-    def __init__(self, name: str, known: Iterable[str]) -> None:
-        known_names = ", ".join(sorted(known)) or "<none>"
-        super().__init__(f"Unknown runtime environment {name!r}. Known runtimes: {known_names}")
-        self.name = name
-
-
-class PythonProjectRuntimeEnvironmentError(RuntimeEnvironmentError):
-    pass
-
-
-class MissingPythonProjectFileError(PythonProjectRuntimeEnvironmentError):
-    pass
-
-
-class MissingPythonProjectLockfileError(PythonProjectRuntimeEnvironmentError):
-    pass
-
-
-class MissingPreparedPythonProjectError(PythonProjectRuntimeEnvironmentError):
-    def __init__(self, runtime_name: str, project: Path, prepared_python: Path) -> None:
-        super().__init__(
-            f"Runtime project {runtime_name!r} at {project} is not prepared: "
-            f"missing {prepared_python}. Deployment reconciliation should create or update "
-            "runtime environment state without changing project files."
-        )
-        self.runtime_name = runtime_name
-        self.project = project
-        self.prepared_python = prepared_python
 
 
 class RuntimeEnvironment:
@@ -118,22 +83,22 @@ class PythonProjectRuntimeEnvironment(RuntimeEnvironment):
         return self.project_path / ".venv" / "bin" / "python"
 
     @property
-    def convention(self) -> str:
-        return "pixi-backed-uv" if self.pixi_toml_path.exists() else "uv"
+    def has_pixi(self) -> bool:
+        return self.pixi_toml_path.exists()
 
     def validate_project_files(self) -> None:
         if not self.pyproject_path.exists():
-            raise MissingPythonProjectFileError(
+            raise RuntimeEnvironmentError(
                 f"Runtime project {self.name!r} is missing {self.pyproject_path}"
             )
         if not self.uv_lock_path.exists():
-            raise MissingPythonProjectLockfileError(
+            raise RuntimeEnvironmentError(
                 f"Runtime project {self.name!r} is missing committed lockfile {self.uv_lock_path}. "
                 "Run a manual package-manager lock/update command or future DimOS build/update "
                 "command; deployment reconciliation will not rewrite lockfiles."
             )
         if self.pixi_toml_path.exists() and not self.pixi_lock_path.exists():
-            raise MissingPythonProjectLockfileError(
+            raise RuntimeEnvironmentError(
                 f"Runtime project {self.name!r} is missing committed lockfile {self.pixi_lock_path}. "
                 "Run `pixi lock` or a future DimOS build/update command; deployment "
                 "reconciliation will not rewrite lockfiles."
@@ -142,12 +107,14 @@ class PythonProjectRuntimeEnvironment(RuntimeEnvironment):
     def resolve_python_project(self) -> PythonProjectLaunchMaterial:
         self.validate_project_files()
         if not self.prepared_python.exists():
-            raise MissingPreparedPythonProjectError(
-                self.name, self.project_path, self.prepared_python
+            raise RuntimeEnvironmentError(
+                f"Runtime project {self.name!r} at {self.project_path} is not prepared: "
+                f"missing {self.prepared_python}. Deployment reconciliation should create or update "
+                "runtime environment state without changing project files."
             )
         argv_prefix = (
             ("pixi", "run", "uv", "run", "--no-sync", "python")
-            if self.convention == "pixi-backed-uv"
+            if self.has_pixi
             else ("uv", "run", "--no-sync", "python")
         )
         return PythonProjectLaunchMaterial(
@@ -156,7 +123,7 @@ class PythonProjectRuntimeEnvironment(RuntimeEnvironment):
             env=dict(self.env),
             runtime_name=self.name,
             project=self.project_path,
-            convention=self.convention,
+            has_pixi=self.has_pixi,
             prepared_python=self.prepared_python,
         )
 
@@ -169,7 +136,7 @@ class RuntimeEnvironmentRegistry:
         merged = dict(self.environments)
         for environment in environments:
             if environment.name in merged:
-                raise RuntimeEnvironmentRegistrationError(
+                raise RuntimeEnvironmentError(
                     f"Runtime environment {environment.name!r} is already registered"
                 )
             merged[environment.name] = environment
@@ -181,7 +148,7 @@ class RuntimeEnvironmentRegistry:
         for name, environment in other.environments.items():
             if name in merged:
                 if merged[name] != environment:
-                    raise RuntimeEnvironmentRegistrationError(
+                    raise RuntimeEnvironmentError(
                         f"Runtime environment {name!r} is registered more than once"
                     )
                 continue
@@ -193,7 +160,10 @@ class RuntimeEnvironmentRegistry:
         try:
             return self.environments[name]
         except KeyError as e:
-            raise UnknownRuntimeEnvironmentError(name, self.environments) from e
+            known_names = ", ".join(sorted(self.environments)) or "<none>"
+            raise RuntimeEnvironmentError(
+                f"Unknown runtime environment {name!r}. Known runtimes: {known_names}"
+            ) from e
 
 
 def _validate_unique_project_paths(environments: Mapping[str, RuntimeEnvironment]) -> None:
@@ -204,7 +174,7 @@ def _validate_unique_project_paths(environments: Mapping[str, RuntimeEnvironment
             continue
         if project_path in paths:
             other_name = paths[project_path]
-            raise RuntimeEnvironmentRegistrationError(
+            raise RuntimeEnvironmentError(
                 f"Runtime environments {other_name!r} and {name!r} use duplicate "
                 f"Runtime Project path {project_path}"
             )

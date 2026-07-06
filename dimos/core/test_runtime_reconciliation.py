@@ -25,8 +25,8 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.module import ModuleBase
 from dimos.core.runtime_environment import (
     PythonProjectRuntimeEnvironment,
+    RuntimeEnvironmentError,
     RuntimePlacement,
-    UnknownRuntimeEnvironmentError,
 )
 from dimos.core.runtime_reconciliation import (
     RuntimeReconciliationCommand,
@@ -77,9 +77,7 @@ def test_runtime_placement_validation_rejects_unknown_runtime(tmp_path: Path) ->
     runtime = _write_project_files(tmp_path)
     blueprint = RuntimeModule.blueprint().runtime_environments(runtime)
 
-    with pytest.raises(
-        UnknownRuntimeEnvironmentError, match="Unknown runtime environment 'missing'"
-    ):
+    with pytest.raises(RuntimeEnvironmentError, match="Unknown runtime environment 'missing'"):
         reconcile_blueprint_runtimes(
             replace(
                 blueprint,

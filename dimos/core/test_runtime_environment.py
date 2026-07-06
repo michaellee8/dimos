@@ -18,13 +18,9 @@ from pathlib import Path
 import pytest
 
 from dimos.core.runtime_environment import (
-    MissingPreparedPythonProjectError,
-    MissingPythonProjectFileError,
-    MissingPythonProjectLockfileError,
     PythonProjectRuntimeEnvironment,
-    RuntimeEnvironmentRegistrationError,
+    RuntimeEnvironmentError,
     RuntimeEnvironmentRegistry,
-    UnknownRuntimeEnvironmentError,
 )
 
 
@@ -37,7 +33,7 @@ def test_register_and_merge_reject_duplicate_names() -> None:
     conflicting_current = RuntimeEnvironmentRegistry(
         {"project": PythonProjectRuntimeEnvironment(name="project", project="/tmp/other")}
     )
-    with pytest.raises(RuntimeEnvironmentRegistrationError, match="registered more than once"):
+    with pytest.raises(RuntimeEnvironmentError, match="registered more than once"):
         registry.merge(conflicting_current)
 
     assert registry.merge(RuntimeEnvironmentRegistry({"project": runtime})) == registry
@@ -47,26 +43,26 @@ def test_duplicate_python_project_runtime_environment_project_path_rejected(tmp_
     first = PythonProjectRuntimeEnvironment(name="first", project=tmp_path)
     second = PythonProjectRuntimeEnvironment(name="second", project=tmp_path / ".")
 
-    with pytest.raises(RuntimeEnvironmentRegistrationError, match="duplicate Runtime Project path"):
+    with pytest.raises(RuntimeEnvironmentError, match="duplicate Runtime Project path"):
         RuntimeEnvironmentRegistry().register(first, second)
 
 
 def test_unknown_runtime_error_lists_known_runtime_names() -> None:
     registry = RuntimeEnvironmentRegistry()
 
-    with pytest.raises(UnknownRuntimeEnvironmentError, match="Known runtimes: <none>"):
+    with pytest.raises(RuntimeEnvironmentError, match="Known runtimes: <none>"):
         registry.resolve("missing")
 
 
 def test_python_project_requires_pyproject_and_uv_lock(tmp_path: Path) -> None:
     runtime = PythonProjectRuntimeEnvironment(name="project", project=tmp_path)
 
-    with pytest.raises(MissingPythonProjectFileError, match="pyproject.toml"):
+    with pytest.raises(RuntimeEnvironmentError, match="pyproject.toml"):
         runtime.validate_project_files()
 
     runtime.pyproject_path.write_text("[project]\nname = 'example'\n", encoding="utf-8")
 
-    with pytest.raises(MissingPythonProjectLockfileError, match="uv.lock"):
+    with pytest.raises(RuntimeEnvironmentError, match="uv.lock"):
         runtime.validate_project_files()
 
 
@@ -76,7 +72,7 @@ def test_pixi_toml_requires_pixi_lock(tmp_path: Path) -> None:
     runtime.uv_lock_path.write_text("version = 1\n", encoding="utf-8")
     runtime.pixi_toml_path.write_text("[workspace]\n", encoding="utf-8")
 
-    with pytest.raises(MissingPythonProjectLockfileError, match="pixi.lock"):
+    with pytest.raises(RuntimeEnvironmentError, match="pixi.lock"):
         runtime.validate_project_files()
 
 
@@ -85,7 +81,7 @@ def test_resolve_python_project_requires_prepared_python_after_validation(tmp_pa
     runtime.pyproject_path.write_text("[project]\nname = 'example'\n", encoding="utf-8")
     runtime.uv_lock_path.write_text("version = 1\n", encoding="utf-8")
 
-    with pytest.raises(MissingPreparedPythonProjectError, match=r"\.venv/bin/python"):
+    with pytest.raises(RuntimeEnvironmentError, match=r"\.venv/bin/python"):
         runtime.resolve_python_project()
 
     runtime.prepared_python.parent.mkdir(parents=True)
@@ -93,4 +89,5 @@ def test_resolve_python_project_requires_prepared_python_after_validation(tmp_pa
 
     material = runtime.resolve_python_project()
     assert material.argv_prefix == ("uv", "run", "--no-sync", "python")
+    assert material.has_pixi is False
     assert material.prepared_python == runtime.prepared_python

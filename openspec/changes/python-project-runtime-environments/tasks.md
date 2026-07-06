@@ -25,7 +25,7 @@
 - [x] 3.4 Run Runtime Reconciliation before worker launch in `ModuleCoordinator.build()` for initial deployment slices.
 - [x] 3.5 Run Runtime Reconciliation before worker launch in `ModuleCoordinator.load_blueprint()` for dynamic deployment slices.
 - [x] 3.6 Ensure disabled placed modules do not create active runtime reconciliation demand.
-- [x] 3.7 Ensure failed runtime-aware deployment slices clean up newly created runtime managers or placement state without disturbing existing workers.
+- [x] 3.7 Ensure failed runtime-aware deployment slices clean up newly created runtime worker pools or placement state without disturbing existing workers.
 
 ## 4. Example runtime project
 

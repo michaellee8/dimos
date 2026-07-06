@@ -22,10 +22,13 @@ import sys
 
 import pytest
 
-from dimos.core.coordination.worker_launcher import CommandWorkerLauncher
 from dimos.core.coordination.worker_manager_python import WorkerManagerPython
 from dimos.core.global_config import GlobalConfig, global_config
-from dimos.core.runtime_environment import PythonProjectRuntimeEnvironment, RuntimePlacement
+from dimos.core.runtime_environment import (
+    PythonProjectRuntimeEnvironment,
+    RuntimeEnvironmentRegistry,
+    RuntimePlacement,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_ROOT = REPO_ROOT / "examples" / "dimos-demo-worker-module"
@@ -78,11 +81,10 @@ def test_demo_runtime_project_executes_with_project_worker(monkeypatch) -> None:
         runtime=runtime.name,
         implementation="dimos_demo_worker_module.runtime.DemoWorkerRuntimeModule",
     )
-    launcher = CommandWorkerLauncher(runtime.resolve_python_project())
     manager = WorkerManagerPython(
         g=GlobalConfig(n_workers=1, viewer="none"),
-        worker_launcher=launcher,
     )
+    manager.register_runtime_environments(RuntimeEnvironmentRegistry().register(runtime))
     module = None
 
     try:

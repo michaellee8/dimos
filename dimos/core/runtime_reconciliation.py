@@ -165,7 +165,7 @@ def _commands_for_project_runtime(
 ) -> Sequence[RuntimeReconciliationCommand]:
     project = runtime.project_path
     env = dict(runtime.env)
-    if runtime.convention == "pixi-backed-uv":
+    if runtime.has_pixi:
         return (
             RuntimeReconciliationCommand(
                 argv=("pixi", "install", "--locked"),
