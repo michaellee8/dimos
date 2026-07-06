@@ -334,7 +334,9 @@ def test_failed_python_deployment_does_not_commit_modules() -> None:
 def test_load_blueprint_reconciles_before_runtime_manager_launch(monkeypatch) -> None:
     calls: list[str] = []
     coordinator = ModuleCoordinator(g=GlobalConfig(n_workers=1, viewer="none"))
-    coordinator._managers = {"python": _FakeManager("python", calls)}
+    manager = _FakeManager("python", calls)
+    coordinator._python_manager = manager
+    coordinator._managers = {"python": manager}
     coordinator._started = True
 
     def fake_reconcile(_blueprint) -> None:
@@ -356,8 +358,6 @@ def test_load_blueprint_reconciles_before_runtime_manager_launch(monkeypatch) ->
     coordinator.load_blueprint(blueprint)
 
     assert calls.index("reconcile") < calls.index("deploy:python:RuntimeModuleA")
-    manager = coordinator._managers["python"]
-    assert isinstance(manager, _FakeManager)
     assert manager.registered_runtime_names == [{"runtime-a"}]
     assert manager.deployments[0] == ([RuntimeModuleA], {RuntimeModuleA: placement})
 
@@ -824,7 +824,7 @@ def test_restart_module_shuts_down_empty_worker(dynamic_coordinator) -> None:
     """Restart shuts down the old worker (when empty) and spawns a new one."""
 
     dynamic_coordinator.load_module(ModuleA)
-    python_wm = dynamic_coordinator._managers["python"]
+    python_wm = dynamic_coordinator._python_manager
     assert isinstance(python_wm, WorkerManagerPython)
 
     old_worker_ids = {w.worker_id for w in python_wm.workers}

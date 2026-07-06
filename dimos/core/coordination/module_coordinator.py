@@ -65,8 +65,10 @@ class ModuleCoordinator(Resource):
         g: GlobalConfig = global_config,
     ) -> None:
         self._global_config = g
-        manager_types: list[type[WorkerManager]] = [WorkerManagerPython]
-        self._managers = {cls.deployment_identifier: cls(g=g) for cls in manager_types}
+        self._python_manager = WorkerManagerPython(g=g)
+        self._managers: dict[str, WorkerManager] = {
+            self._python_manager.deployment_identifier: self._python_manager
+        }
         self._deployed_modules = {}
         self._deployed_atoms: dict[type[ModuleBase], BlueprintAtom] = {}
         self._resolved_module_refs: dict[tuple[type[ModuleBase], str], type[ModuleBase]] = {}
@@ -388,11 +390,10 @@ class ModuleCoordinator(Resource):
         # Scale worker pool only after runtime reconciliation succeeds, so this
         # deployment slice does not launch any new workers before the barrier.
         n_extra = int(blueprint.global_config_overrides.get("n_workers", 0))
-        python_wm = cast("WorkerManagerPython", self._managers["python"])
         if n_extra:
-            python_wm.add_workers(n_extra)
-        if not python_wm.workers and blueprint.active_blueprints:
-            python_wm.add_workers(1)
+            self._python_manager.add_workers(n_extra)
+        if not self._python_manager.workers and blueprint.active_blueprints:
+            self._python_manager.add_workers(1)
 
         # Reject duplicate modules.
         for bp in blueprint.active_blueprints:
@@ -454,7 +455,7 @@ class ModuleCoordinator(Resource):
                 exc_info=True,
             )
 
-        manager = cast("WorkerManagerPython", self._managers[module_class.deployment])
+        manager = self._managers[module_class.deployment]
         try:
             manager.undeploy(proxy, module_class)
         except Exception:
@@ -533,8 +534,7 @@ class ModuleCoordinator(Resource):
             for (consumer, ref_name), target in self._resolved_module_refs.items()
             if consumer is module_class
         ]
-        python_wm = cast("WorkerManagerPython", self._managers[module_class.deployment])
-        placement = python_wm.runtime_placement_for(module_class)
+        placement = self._python_manager.runtime_placement_for(module_class)
 
         self.unload_module(module_class)
 
@@ -553,7 +553,7 @@ class ModuleCoordinator(Resource):
                     self._class_aliases[old_cls] = new_class
             self._class_aliases[module_class] = new_class
 
-        new_proxy = python_wm.deploy_fresh(
+        new_proxy = self._python_manager.deploy_fresh(
             new_class, self._global_config, kwargs, runtime_placement=placement
         )
         self._deployed_modules[new_class] = new_proxy
@@ -733,8 +733,9 @@ def _deploy_all_modules(
     for bp in blueprint.active_blueprints:
         module_specs.append((bp.module, gc, bp.kwargs.copy()))
 
-    python_wm = cast("WorkerManagerPython", module_coordinator._managers["python"])
-    python_wm.register_runtime_environments(blueprint.runtime_environment_registry)
+    module_coordinator._python_manager.register_runtime_environments(
+        blueprint.runtime_environment_registry
+    )
     module_coordinator.deploy_parallel(
         module_specs,
         blueprint_args,
