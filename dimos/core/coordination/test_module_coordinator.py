@@ -34,7 +34,6 @@ from dimos.core.coordination.module_coordinator import (
     _verify_no_conflicts_with_existing,
     _verify_no_name_conflicts,
 )
-from dimos.core.coordination.worker_manager_python import WorkerManagerPython
 from dimos.core.core import rpc
 from dimos.core.global_config import GlobalConfig
 from dimos.core.module import Module
@@ -781,12 +780,12 @@ def test_restart_module_preserves_stream_wiring(dynamic_coordinator) -> None:
     c = dynamic_coordinator.get_instance(ModuleC)
     assert c is not None
     topic_before = c.data3.transport.topic
-    registry_before = dynamic_coordinator._transport_registry[("data3", Data3)]
+    registry_before = dynamic_coordinator.transport_for("data3", Data3)
 
     dynamic_coordinator.restart_module(ModuleC, reload_source=False)
 
     # Transport in the registry is the same parent-side object.
-    assert dynamic_coordinator._transport_registry[("data3", Data3)] is registry_before
+    assert dynamic_coordinator.transport_for("data3", Data3) is registry_before
 
     c_after = dynamic_coordinator.get_instance(ModuleC)
     assert c_after is not None
@@ -824,15 +823,13 @@ def test_restart_module_shuts_down_empty_worker(dynamic_coordinator) -> None:
     """Restart shuts down the old worker (when empty) and spawns a new one."""
 
     dynamic_coordinator.load_module(ModuleA)
-    python_wm = dynamic_coordinator._python_manager
-    assert isinstance(python_wm, WorkerManagerPython)
 
-    old_worker_ids = {w.worker_id for w in python_wm.workers}
+    old_worker_ids = dynamic_coordinator.worker_ids()
     assert len(old_worker_ids) == 1
 
     dynamic_coordinator.restart_module(ModuleA, reload_source=False)
 
-    new_worker_ids = {w.worker_id for w in python_wm.workers}
+    new_worker_ids = dynamic_coordinator.worker_ids()
     assert len(new_worker_ids) == 1
     assert new_worker_ids.isdisjoint(old_worker_ids)
 
