@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
 # Agent worktree provisioning hook: set this tree up (uv venv/sync, .envrc, direnv).
-exec "$(dirname "$0")/../bin/worktree" provision "$@"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$SCRIPT_DIR/../bin/worktree" provision "$@"
