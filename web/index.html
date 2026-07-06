@@ -148,6 +148,12 @@
     <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.20.0/dist/livekit-client.umd.min.js"
         integrity="sha384-s/eoT8qpr81c6c9MG5V7GA5xi5IzfEUQLyk3liFfzu9seBzZ3beFVjsD3pXTRmUc"
         crossorigin="anonymous"></script>
+    <!-- Three.js for the VR scene (vr.js). Pinned exact version; import maps
+         don't support SRI everywhere yet, so the pin + CSP host allowlist is
+         the supply-chain control here. -->
+    <script type="importmap">
+    { "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.min.js" } }
+    </script>
     <script type="module" src="js/main.js"></script>
 </body>
 </html>

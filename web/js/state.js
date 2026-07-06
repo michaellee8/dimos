@@ -23,7 +23,6 @@ export const state = {
     micTrack: null,         // operator mic MediaStreamTrack (starts muted; cockpit toggles)
     xrSession: null,
     xrRefSpace: null,
-    gl: null,
     lastSendTime: 0,
     activeRobot: null,
 
@@ -73,18 +72,7 @@ export const state = {
     cmdSendCount: 0,        // rolling counter; sampled into cmdHz once/sec
     hudTimer: null,
 
-    // VR stats quad (canvas → texture).
-    statsCanvas: null,
-    statsCtx: null,
-    statsTex: null,
-    statsBuf: null,
-
-    // Video quad (WebGL).
-    quadProgram: null,
-    quadBuf: null,
-    quadTex: null,
-    quadUniforms: null,
-
+    // (VR rendering state lives in vr.js — three.js renderer/scene singletons.)
     xrSupported: false,
 };
 
