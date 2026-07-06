@@ -292,6 +292,15 @@ class ModuleCoordinator(Resource):
     def get_instance(self, module: type[ModuleBase]) -> ModuleProxy:
         return self._deployed_modules.get(self._resolve_class(module))  # type: ignore[return-value]
 
+    def transport_for(self, name: str, stream_type: type) -> PubSubTransport[Any] | None:
+        return self._transport_registry.get((name, stream_type))
+
+    def worker_ids(self, deployment_identifier: str = "python") -> set[int]:
+        manager = self._managers[deployment_identifier]
+        if not isinstance(manager, WorkerManagerPython):
+            raise TypeError(f"Deployment {deployment_identifier!r} does not use Python workers")
+        return {worker.worker_id for worker in manager.workers}
+
     def _send_on_system_modules(self) -> None:
         modules = list(self._deployed_modules.values())
         for module in modules:
