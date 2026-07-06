@@ -14,8 +14,9 @@ import { send } from './webrtc.js';
 import { buildCockpit, onCmdAck, onMap, onOdom, onRobotState, vui } from './vrui.js';
 
 const HEAD = new THREE.Vector3(0, 1.55, 0);  // nominal eye point panels face
-// Camera panel — front centre, 16:9.
-const CAM = { w: 1.4, h: 0.7875, x: 0, y: 1.55, z: -1.7 };
+// Camera panel — front centre, 16:9. Cluster geometry must agree with
+// buildCockpit's CAM_HALF_W / PANEL_Y / PANEL_Z (map + stats sit flush).
+const CAM = { w: 1.4, h: 0.7875, x: 0, y: 1.52, z: -1.6 };
 const STICK_DEADZONE = 0.12;
 
 let renderer = null, scene = null, camera = null;

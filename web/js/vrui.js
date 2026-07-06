@@ -90,6 +90,12 @@ class Panel {
         this.mesh.position.copy(pos);
         this.mesh.lookAt(headPos);  // plane front (+Z) faces the user
     }
+    // Console placement: fixed tilt about X (top edge away), no lookAt — a
+    // desk panel angled up toward the operator's eyes.
+    placeFlat(pos, rotX) {
+        this.mesh.position.copy(pos);
+        this.mesh.rotation.set(rotX, 0, 0);
+    }
     markDirty() { this.dirty = true; }
     // UV (three) → canvas px. VideoTexture/CanvasTexture are flipY, so v=0 is
     // the bottom row; canvas y grows down → row = (1-v)*ch.
@@ -265,64 +271,91 @@ export function onOdom(msg) { if (msg) { vui.lastOdom = msg; _mapPanel?.markDirt
 // Panel renderers
 // ─────────────────────────────────────────────────────────────────────
 
-function renderButtons(p) {
+// Horizontal operator console (tilted shelf under the camera panel).
+// Two bands of grouped chips + a full-height E-STOP block on the right:
+//   band 1: POSTURE ·· SPEED ·· CAMERAS ·· OBSTACLE
+//   band 2: ACTIONS ·········· LIGHT
+function renderConsole(p) {
     p.bg();
+    const x = p.ctx;
     const st = (region, active) => {
         const s = (p._rstate && p._rstate[region]) || 'idle';
         return s !== 'idle' ? s : (active ? 'active' : 'idle');
     };
-    let y = 60;
-    const W = p.cw, PAD = 24, GAP = 12;
-    const row = (items, h, render) => {
-        const bw = (W - 2 * PAD - GAP * (items.length - 1)) / items.length;
-        items.forEach((it, i) => render(it, PAD + i * (bw + GAP), y, bw, h));
-        y += h + 18;
-    };
-    const sect = (t) => { p.ctx.fillStyle = C.dim; p.ctx.font = '600 18px ui-monospace,monospace'; p.ctx.fillText(t.toUpperCase(), PAD, y - 6); y += 8; };
 
-    sect('Posture');
-    row(POSTURE, 56, (it, bx, by, bw, bh) => {
-        const active = vui.posture === it.name || (it.name === 'StandReady' && vui.posture === 'StandReady');
+    // Status strip (top-left): drive state + posture, like the cockpit pills.
+    const driving = state.driveEnabled && !vui.estopped;
+    x.fillStyle = driving ? C.good : C.bad;
+    x.beginPath(); x.arc(34, 34, 7, 0, Math.PI * 2); x.fill();
+    x.fillStyle = driving ? C.good : '#f3b4b4';
+    x.font = '600 19px ui-monospace,monospace';
+    x.fillText(vui.estopped ? 'E-STOPPED' : driving ? 'DRIVE LIVE' : 'DRIVE OFF — press Stand / Drive', 50, 41);
+    x.fillStyle = C.dim; x.textAlign = 'right';
+    x.fillText(({ StandReady: 'STANDING', StandDown: 'SITTING', Damp: 'STOPPED', Sit: 'SITTING' }[vui.posture]) || vui.posture, 900, 41);
+    x.textAlign = 'left';
+
+    const header = (t, hx, hy) => {
+        x.fillStyle = C.dim; x.font = '600 16px ui-monospace,monospace';
+        x.fillText(t.toUpperCase(), hx, hy);
+    };
+    // Lay a group of chips horizontally; returns x after the group.
+    const group = (label, items, gx, gy, bw, bh, render) => {
+        header(label, gx, gy - 10);
+        items.forEach((it, i) => render(it, gx + i * (bw + 10), gy, bw, bh));
+        return gx + items.length * (bw + 10) - 10 + 26;
+    };
+
+    // ── band 1 ──
+    let gx = 24;
+    const B1 = 86, H = 62;
+    gx = group('Posture', POSTURE, gx, B1, 128, H, (it, bx, by, bw, bh) => {
+        const active = vui.posture === it.name;
         p.chip('sport:' + it.name, bx, by, bw, bh, it.label, st('sport:' + it.name, active));
     });
-    sect('Actions');
-    // 2×2
-    for (let r = 0; r < 2; r++) {
-        row(ACTIONS.slice(r * 2, r * 2 + 2), 50, (it, bx, by, bw, bh) => {
-            const confirming = vui.confirm && vui.confirm.name === it.name && performance.now() < vui.confirm.expiry;
-            const label = confirming ? 'Confirm?' : it.label;
-            const s = confirming ? 'confirm' : st('sport:' + it.name, false);
-            p.chip('sport:' + it.name, bx, by, bw, bh, label, s);
-        });
-    }
-    sect('Speed');
-    row(SPEEDS, 48, (it, bx, by, bw, bh) =>
+    gx = group('Speed', SPEEDS, gx, B1, 84, H, (it, bx, by, bw, bh) =>
         p.chip('speed:' + it.mode, bx, by, bw, bh, it.label, vui.speedMode === it.mode ? 'active' : 'idle'));
-    sect('Cameras');
-    row(CAMS, 46, (it, bx, by, bw, bh) =>
+    gx = group('Cameras', CAMS, gx, B1, 84, H, (it, bx, by, bw, bh) =>
         p.chip('cam:' + it.id, bx, by, bw, bh, it.label, vui.selectedCams.includes(it.id) ? 'active' : 'idle'));
-    sect('Obstacle avoidance');
-    row([{}], 46, (it, bx, by, bw, bh) =>
+    group('Obstacle', [{}], gx, B1, 84, H, (it, bx, by, bw, bh) =>
         p.chip('obstacle', bx, by, bw, bh, vui.obstacleAvoid ? 'ON' : 'OFF', st('obstacle', vui.obstacleAvoid)));
-    sect('Light');
-    row(LIGHTS, 46, (it, bx, by, bw, bh) => {
+
+    // ── band 2 ──
+    gx = 24;
+    const B2 = 216;
+    gx = group('Actions', ACTIONS, gx, B2, 115, H, (it, bx, by, bw, bh) => {
+        const confirming = vui.confirm && vui.confirm.name === it.name && performance.now() < vui.confirm.expiry;
+        p.chip('sport:' + it.name, bx, by, bw, bh,
+            confirming ? 'Confirm?' : it.label,
+            confirming ? 'confirm' : st('sport:' + it.name, false));
+    });
+    group('Light', LIGHTS, gx, B2, 84, H, (it, bx, by, bw, bh) => {
         const active = Math.abs(vui.light - it.v) < 0.08;
         p.chip('light:' + it.v, bx, by, bw, bh, it.label, active ? 'active' : 'idle');
     });
 
-    // E-STOP — big, always at the bottom; re-arm appears when latched.
-    y = p.ch - (vui.estopped ? 130 : 74);
-    const ex = PAD, ew = W - 2 * PAD;
-    p.ctx.fillStyle = vui.estopped ? C.estopBorder : C.estopBg;
-    roundRect(p.ctx, ex, y, ew, 58, 12); p.ctx.fill();
-    p.ctx.lineWidth = 2.5; p.ctx.strokeStyle = vui.estopped ? '#fff' : C.estopBorder; p.ctx.stroke();
-    p.ctx.fillStyle = '#fff'; p.ctx.font = '700 24px ui-monospace,monospace';
-    p.ctx.textAlign = 'center'; p.ctx.textBaseline = 'middle';
-    p.ctx.fillText(vui.estopped ? 'STOPPED' : '■ EMERGENCY STOP', ex + ew / 2, y + 30);
-    p.ctx.textAlign = 'left'; p.ctx.textBaseline = 'alphabetic';
-    p.regions.push({ id: 'estop', x: ex, y, w: ew, h: 58 });
+    // Drive hint (bottom edge, small).
+    x.fillStyle = C.dim; x.font = '15px ui-monospace,monospace';
+    x.fillText('left stick drive · right stick turn · grip boost/slow · B/Y = E-STOP', 24, p.ch - 16);
+
+    // ── E-STOP block: full-height, far right, always in reach ──
+    const ex = 940, ey = 28, ew = p.cw - ex - 24, eh = p.ch - 56;
+    x.fillStyle = vui.estopped ? C.estopBorder : C.estopBg;
+    roundRect(x, ex, ey, ew, eh, 14); x.fill();
+    x.lineWidth = 3; x.strokeStyle = vui.estopped ? '#fff' : C.estopBorder; x.stroke();
+    x.fillStyle = '#fff'; x.textAlign = 'center'; x.textBaseline = 'middle';
     if (vui.estopped) {
-        p.chip('rearm', ex, y + 66, ew, 44, 're-arm →', 'idle');
+        x.font = '700 30px ui-monospace,monospace';
+        x.fillText('STOPPED', ex + ew / 2, ey + eh / 2 - 40);
+        x.textAlign = 'left'; x.textBaseline = 'alphabetic';
+        p.regions.push({ id: 'estop', x: ex, y: ey, w: ew, h: eh - 90 });
+        p.chip('rearm', ex + 14, ey + eh - 72, ew - 28, 54, 're-arm →', 'idle');
+    } else {
+        x.font = '700 34px ui-monospace,monospace';
+        x.fillText('■', ex + ew / 2, ey + eh / 2 - 26);
+        x.font = '700 24px ui-monospace,monospace';
+        x.fillText('E-STOP', ex + ew / 2, ey + eh / 2 + 16);
+        x.textAlign = 'left'; x.textBaseline = 'alphabetic';
+        p.regions.push({ id: 'estop', x: ex, y: ey, w: ew, h: eh });
     }
 }
 
@@ -443,19 +476,25 @@ let _allPanels = [];
 let _mapPanel = null;
 
 export function buildCockpit(scene, headPos) {
-    const buttons = new Panel({ wM: 0.7, hM: 1.15, cw: 512, ch: 900, opacity: 0.97 });
-    const stats = new Panel({ wM: 0.5, hM: 1.0, cw: 380, ch: 820, opacity: 0.95 });
-    const map = new Panel({ wM: 0.85, hM: 0.85, cw: 640, ch: 640, opacity: 0.97 });
+    // One tight cluster around the camera panel (1.4m wide, centre z=-1.6):
+    //   MAP flush left · CAMERA centre · STATS flush right, all at the same
+    //   height/depth; CONSOLE below as a tilted operator shelf.
+    const CAM_HALF_W = 0.7, PANEL_Y = 1.52, PANEL_Z = -1.58, GAP = 0.03;
+
+    const stats = new Panel({ wM: 0.44, hM: 0.7875, cw: 380, ch: 680, opacity: 0.96 });
+    const map = new Panel({ wM: 0.9, hM: 0.7875, cw: 640, ch: 560, opacity: 0.97 });
+    const console_ = new Panel({ wM: 1.5, hM: 0.52, cw: 1180, ch: 410, opacity: 0.97 });
     _mapPanel = map;
 
-    // Arc facing the user: map left, buttons right, stats far-right column.
-    map.place(new THREE.Vector3(-1.35, 1.5, -1.2), headPos);
-    buttons.place(new THREE.Vector3(1.3, 1.45, -1.15), headPos);
-    stats.place(new THREE.Vector3(2.0, 1.4, -0.35), headPos);
-    for (const p of [map, buttons, stats]) { scene.add(p.mesh); p.mesh.renderOrder = 3; }
+    stats.place(new THREE.Vector3(CAM_HALF_W + GAP + 0.22, PANEL_Y, PANEL_Z + 0.02), headPos);
+    map.place(new THREE.Vector3(-(CAM_HALF_W + GAP + 0.45), PANEL_Y, PANEL_Z + 0.02), headPos);
+    // Console: below the camera, pulled toward the operator, tilted up ~34°
+    // like a desk panel (top edge away). No lookAt — fixed shelf orientation.
+    console_.placeFlat(new THREE.Vector3(0, 0.98, -1.28), -0.6);
+    for (const p of [map, console_, stats]) { scene.add(p.mesh); p.mesh.renderOrder = 3; }
 
-    _allPanels = [map, buttons, stats];
-    buttons._render = renderButtons;
+    _allPanels = [map, console_, stats];
+    console_._render = renderConsole;
     stats._render = renderStats;
     map._render = renderMap;
 
