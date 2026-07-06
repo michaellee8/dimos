@@ -18,9 +18,9 @@
 from datetime import datetime
 import math
 import os
-from pathlib import Path
 from typing import Any
 
+from dimos.constants import STATE_DIR
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.global_config import global_config
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
@@ -46,6 +46,8 @@ _sensor_mount_rotation = list(base_link_from_mid360().rotation.to_tuple())
 
 # Body-frame axis-triad length (m).
 _axis_len = 0.5
+# Arrow radius as a fraction of the triad length.
+_AXIS_RADIUS_RATIO = 25
 
 
 # Opt-in recording: set DIMOS_NAV_RECORD=1 to capture pointlio_lidar +
@@ -62,7 +64,7 @@ def _recording_db_path() -> str:
     stamp = (
         now.strftime("%Y-%m-%d") + "_" + now.strftime("%I-%M%p").lower() + "-" + now.strftime("%Z")
     )
-    return str(Path("recordings") / stamp / "mem2.db")
+    return str(STATE_DIR / "recordings" / stamp / "mem2.db")
 
 
 def _render_global_map(msg: Any) -> Any:
@@ -98,7 +100,7 @@ def _axis_triad(rr: Any) -> Any:
             [0.0, 0.0, _axis_len],
         ],
         colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
-        radii=_axis_len / 25,
+        radii=_axis_len / _AXIS_RADIUS_RATIO,
     )
 
 

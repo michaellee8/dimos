@@ -1212,4 +1212,63 @@ mod tests {
             "path stepped backward: {xs:?}"
         );
     }
+
+    #[test]
+    fn back_off_tail_trims_from_the_goal_end() {
+        let path = vec![
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (2.0, 0.0, 0.0),
+            (3.0, 0.0, 0.0),
+        ];
+        // Trim within the last segment.
+        assert_eq!(*back_off_tail(&path, 0.5).last().unwrap(), (2.5, 0.0, 0.0));
+        // Trim exactly to a vertex without leaving a duplicate point.
+        let to_vertex = back_off_tail(&path, 1.0);
+        assert_eq!(*to_vertex.last().unwrap(), (2.0, 0.0, 0.0));
+        assert_eq!(to_vertex.len(), 3);
+        // Trimming more than the path length stops (empty).
+        assert!(back_off_tail(&path, 5.0).is_empty());
+    }
+
+    #[test]
+    fn snap_picks_in_column_cell() {
+        let mut lookup = SurfaceLookup::new();
+        build_surface_lookup(&strip(20), &mut lookup);
+        let cell = snap_pose_to_cell(&lookup, (0.5, 0.0, 0.1), VOXEL, Z_TOL).unwrap();
+        assert_eq!(cell, (5, 0, 0));
+    }
+
+    #[test]
+    fn snap_falls_back_to_nearby_column() {
+        let mut cells = strip(20);
+        cells.retain(|c| c.0 != 2);
+        let mut lookup = SurfaceLookup::new();
+        build_surface_lookup(&cells, &mut lookup);
+        let cell = snap_pose_to_cell(&lookup, (0.25, 0.0, 0.1), VOXEL, Z_TOL).unwrap();
+        assert!(cell == (1, 0, 0) || cell == (3, 0, 0));
+    }
+
+    #[test]
+    fn snap_rejects_outside_z_tolerance() {
+        let mut lookup = SurfaceLookup::new();
+        build_surface_lookup(&strip(20), &mut lookup);
+        assert!(snap_pose_to_cell(&lookup, (0.5, 0.0, 2.0), VOXEL, 1.5).is_none());
+    }
+
+    #[test]
+    fn segment_metrics_rejects_vertical_chord() {
+        let plg = PlannerGraph::new();
+        let wc = WallCost {
+            clearance_m: 0.2,
+            buffer_m: 0.3,
+            buffer_weight: 4.0,
+            voxel_size: VOXEL,
+        };
+        assert!(segment_metrics(&plg, (5, 5, 0), (5, 5, 4), 2, &wc).is_none());
+        assert_eq!(
+            segment_metrics(&plg, (5, 5, 0), (5, 5, 0), 2, &wc),
+            Some((1.0, 0.0))
+        );
+    }
 }

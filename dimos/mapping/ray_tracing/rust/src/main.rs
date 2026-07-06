@@ -47,16 +47,16 @@ impl RayTracingVoxelMap {
     async fn on_odometry(&mut self, msg: Odometry) {
         let p = &msg.pose.pose.position;
         let q = &msg.pose.pose.orientation;
-        self.poses.push_back((
-            time_secs(&msg.header.stamp),
-            Vector3::new(p.x as f32, p.y as f32, p.z as f32),
-            UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
-                q.w as f32, q.x as f32, q.y as f32, q.z as f32,
-            )),
-        ));
-        if self.poses.len() > POSE_BUFFER_LEN {
-            self.poses.pop_front();
-        }
+        push_pose(
+            &mut self.poses,
+            (
+                time_secs(&msg.header.stamp),
+                Vector3::new(p.x as f32, p.y as f32, p.z as f32),
+                UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(
+                    q.w as f32, q.x as f32, q.y as f32, q.z as f32,
+                )),
+            ),
+        );
     }
 
     async fn on_lidar(&mut self, msg: PointCloud2) {
@@ -166,12 +166,12 @@ impl RayTracingVoxelMap {
         let stamp = msg.header.stamp;
         let support_min = self.config.support_min;
         if global_due {
-            let points = emit_points(&self.map, voxel_size, None, 0, Some(&live));
+            let points = emit_points(&self.map, voxel_size, None, 0, &live);
             let global = points_to_cloud(&points, out_frame_id, stamp.clone());
             publish_cloud(&self.global_map, &global).await;
         }
         if let Some(cyl) = &cylinder {
-            let points = emit_points(&self.map, voxel_size, Some(cyl), support_min, Some(&live));
+            let points = emit_points(&self.map, voxel_size, Some(cyl), support_min, &live);
             let local = points_to_cloud(&points, out_frame_id, stamp);
             publish_cloud(&self.local_map, &local).await;
         }
@@ -191,6 +191,17 @@ const POSE_MATCH_TOLERANCE_S: f64 = 0.1;
 
 fn time_secs(t: &Time) -> f64 {
     t.sec as f64 + t.nsec as f64 * 1e-9
+}
+
+/// Append a pose sample, evicting the oldest to keep the buffer bounded.
+fn push_pose(
+    poses: &mut VecDeque<(f64, Vector3<f32>, UnitQuaternion<f32>)>,
+    sample: (f64, Vector3<f32>, UnitQuaternion<f32>),
+) {
+    poses.push_back(sample);
+    if poses.len() > POSE_BUFFER_LEN {
+        poses.pop_front();
+    }
 }
 
 /// The buffered pose with the stamp nearest the cloud stamp, within tolerance.
@@ -367,6 +378,24 @@ mod tests {
         assert!(nearest_pose(&VecDeque::new(), 1.0).is_none());
     }
 
+    #[test]
+    fn push_pose_evicts_oldest_beyond_capacity() {
+        let mut poses: VecDeque<(f64, Vector3<f32>, UnitQuaternion<f32>)> = VecDeque::new();
+        for i in 0..(POSE_BUFFER_LEN + 10) {
+            push_pose(
+                &mut poses,
+                (i as f64, Vector3::zeros(), UnitQuaternion::identity()),
+            );
+        }
+        assert_eq!(
+            poses.len(),
+            POSE_BUFFER_LEN,
+            "buffer capped at POSE_BUFFER_LEN"
+        );
+        assert_eq!(poses.front().unwrap().0, 10.0, "oldest 10 evicted");
+        assert_eq!(poses.back().unwrap().0, (POSE_BUFFER_LEN + 9) as f64);
+    }
+
     fn cloud_points(c: &PointCloud2) -> AHashSet<(u32, u32, u32)> {
         let mut out = AHashSet::new();
         let step = c.point_step as usize;
@@ -414,12 +443,12 @@ mod tests {
             z_max: 1.0,
         };
         let global = points_to_cloud(
-            &emit_points(&map, 1.0, None, 0, Some(&live)),
+            &emit_points(&map, 1.0, None, 0, &live),
             "world",
             Time::default(),
         );
         let local = points_to_cloud(
-            &emit_points(&map, 1.0, Some(&cylinder), 0, Some(&live)),
+            &emit_points(&map, 1.0, Some(&cylinder), 0, &live),
             "world",
             Time::default(),
         );
@@ -440,12 +469,12 @@ mod tests {
             z_max: 10.0,
         };
         let global = points_to_cloud(
-            &emit_points(&map, 1.0, None, 0, Some(&live)),
+            &emit_points(&map, 1.0, None, 0, &live),
             "world",
             Time::default(),
         );
         let local = points_to_cloud(
-            &emit_points(&map, 1.0, Some(&cylinder), 0, Some(&live)),
+            &emit_points(&map, 1.0, Some(&cylinder), 0, &live),
             "world",
             Time::default(),
         );
@@ -467,12 +496,12 @@ mod tests {
             z_max: 1.0,
         };
         let global = points_to_cloud(
-            &emit_points(&map, 1.0, None, 0, Some(&live)),
+            &emit_points(&map, 1.0, None, 0, &live),
             "world",
             Time::default(),
         );
         let local = points_to_cloud(
-            &emit_points(&map, 1.0, Some(&cylinder), 0, Some(&live)),
+            &emit_points(&map, 1.0, Some(&cylinder), 0, &live),
             "world",
             Time::default(),
         );
@@ -495,12 +524,12 @@ mod tests {
             z_max: 1.0,
         };
         let global = points_to_cloud(
-            &emit_points(&map, 1.0, None, 0, Some(&live)),
+            &emit_points(&map, 1.0, None, 0, &live),
             "world",
             Time::default(),
         );
         let local = points_to_cloud(
-            &emit_points(&map, 1.0, Some(&cylinder), 0, Some(&live)),
+            &emit_points(&map, 1.0, Some(&cylinder), 0, &live),
             "world",
             Time::default(),
         );
@@ -531,7 +560,7 @@ mod tests {
             z_max: 10.0,
         };
         let local = points_to_cloud(
-            &emit_points(&map, 1.0, Some(&cylinder), 3, Some(&live)),
+            &emit_points(&map, 1.0, Some(&cylinder), 3, &live),
             "world",
             Time::default(),
         );

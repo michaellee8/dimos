@@ -415,17 +415,15 @@ fn has_support(voxels: &AHashMap<VoxelKey, Voxel>, key: VoxelKey, support_min: i
     false
 }
 
-/// Points for an emitted cloud, shared by the live module and the offline
-/// wrapper. Healthy surface voxels within `bounds` (the whole map when `None`)
-/// are kept only with at least `support_min` occupied neighbors, counted over
-/// the whole map. This frame's `live` voxels within `bounds` are added
-/// unfiltered, skipping any already healthy.
+/// Points for an emitted cloud: healthy surface voxels within `bounds` (all
+/// when `None`) with at least `support_min` occupied neighbors, plus this
+/// frame's not-yet-healthy `live` voxels within `bounds`.
 pub fn emit_points(
     map: &VoxelMap,
     voxel_size: f32,
     bounds: Option<&LocalBounds>,
     support_min: i32,
-    live: Option<&AHashSet<VoxelKey>>,
+    live: &AHashSet<VoxelKey>,
 ) -> Vec<(f32, f32, f32)> {
     let half = voxel_size * 0.5;
     let center = |(kx, ky, kz): VoxelKey| {
@@ -437,7 +435,7 @@ pub fn emit_points(
     };
     let in_bounds = |x, y, z| bounds.is_none_or(|b| b.contains(x, y, z));
 
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(map.voxels.len() + live.len());
     for (&key, c) in map.voxels.iter() {
         if c.health <= 0 {
             continue;
@@ -451,17 +449,15 @@ pub fn emit_points(
         }
         out.push((x, y, z));
     }
-    if let Some(live) = live {
-        for &key in live.iter() {
-            if matches!(map.voxels.get(&key), Some(c) if c.health > 0) {
-                continue;
-            }
-            let (x, y, z) = center(key);
-            if !in_bounds(x, y, z) {
-                continue;
-            }
-            out.push((x, y, z));
+    for &key in live.iter() {
+        if matches!(map.voxels.get(&key), Some(c) if c.health > 0) {
+            continue;
         }
+        let (x, y, z) = center(key);
+        if !in_bounds(x, y, z) {
+            continue;
+        }
+        out.push((x, y, z));
     }
     out
 }
@@ -489,21 +485,18 @@ pub fn update_map(
     };
 
     // Drop invalid returns and out-of-range points before they enter the map.
-    let points: Vec<(f32, f32, f32)> = points
-        .iter()
-        .copied()
-        .filter(|&(x, y, z)| {
-            if !(x.is_finite() && y.is_finite() && z.is_finite()) {
-                return false;
-            }
-            let dx = x - origin.0;
-            let dy = y - origin.1;
-            let dz = z - origin.2;
-            let d2 = dx * dx + dy * dy + dz * dz;
-            d2 > 0.0 && d2 <= max_range_sq
-        })
-        .collect();
-    let points = &points[..];
+    let mut filtered: Vec<(f32, f32, f32)> = Vec::with_capacity(points.len());
+    filtered.extend(points.iter().copied().filter(|&(x, y, z)| {
+        if !(x.is_finite() && y.is_finite() && z.is_finite()) {
+            return false;
+        }
+        let dx = x - origin.0;
+        let dy = y - origin.1;
+        let dz = z - origin.2;
+        let d2 = dx * dx + dy * dy + dz * dz;
+        d2 > 0.0 && d2 <= max_range_sq
+    }));
+    let points = &filtered[..];
 
     let hits = live_voxels(points, cfg.voxel_size);
 
@@ -1389,15 +1382,16 @@ mod tests {
             z_max: 10.0,
         };
 
+        let no_live = AHashSet::new();
         // support_min 0 emits every surface voxel.
         assert_eq!(
-            emit_points(&map, voxel_size, Some(&bounds), 0, None).len(),
+            emit_points(&map, voxel_size, Some(&bounds), 0, &no_live).len(),
             10
         );
 
         // Every patch cell has at least 3 surface neighbors (the corners exactly
         // 3), so support_min 3 keeps the patch and drops only the isolated voxel.
-        let gated = emit_points(&map, voxel_size, Some(&bounds), 3, None);
+        let gated = emit_points(&map, voxel_size, Some(&bounds), 3, &no_live);
         assert_eq!(gated.len(), 9);
         let half = voxel_size * 0.5;
         let isolated = (20.0 + half, 20.0 + half, half);

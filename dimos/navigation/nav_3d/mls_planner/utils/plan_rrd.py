@@ -40,6 +40,8 @@ TIMELINE = "ts"
 
 # Body-frame axis-triad length for the odometry transform (m).
 ODOM_AXIS_LEN = 0.5
+# Arrow radius as a fraction of the triad length.
+AXIS_RADIUS_RATIO = 25
 
 # Distinct path colors for overlaid configurations, config 0 first.
 PATH_PALETTE = [
@@ -413,7 +415,7 @@ def main(
                     [0.0, 0.0, ODOM_AXIS_LEN],
                 ],
                 colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
-                radii=ODOM_AXIS_LEN / 25,
+                radii=ODOM_AXIS_LEN / AXIS_RADIUS_RATIO,
             ),
             static=True,
         )

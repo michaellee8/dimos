@@ -122,7 +122,7 @@ pub fn dijkstra_region(
     state.ensure_capacity(n_slots);
     state.heap.clear();
 
-    // Dense membership mask, faster than a hash lookup in the relax loop.
+    // Dense membership mask over the window cells.
     for &w in window {
         let i = w as usize;
         state.in_window[i] = true;

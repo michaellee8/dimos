@@ -129,7 +129,7 @@ impl VoxelRayMapper {
         let live = &self.live;
         let positions: Vec<f32> = py.allow_threads(|| {
             let mut out: Vec<f32> = Vec::with_capacity(map.voxels.len() * 3);
-            for (x, y, z) in emit_points(map, voxel_size, None, 0, Some(live)) {
+            for (x, y, z) in emit_points(map, voxel_size, None, 0, live) {
                 out.push(x);
                 out.push(y);
                 out.push(z);
@@ -192,7 +192,7 @@ impl VoxelRayMapper {
         let live = &self.live;
         let positions: Vec<f32> = py.allow_threads(|| {
             let mut out: Vec<f32> = Vec::new();
-            for (x, y, z) in emit_points(map, voxel_size, Some(&bounds), support_min, Some(live)) {
+            for (x, y, z) in emit_points(map, voxel_size, Some(&bounds), support_min, live) {
                 out.push(x);
                 out.push(y);
                 out.push(z);

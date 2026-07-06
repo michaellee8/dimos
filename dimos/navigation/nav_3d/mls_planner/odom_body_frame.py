@@ -57,6 +57,5 @@ class OdomBodyFrame(Module):
                 frame_id=msg.frame_id,
                 child_frame_id=self.config.body_frame_id,
                 pose=Pose(msg.position, leveled),
-                twist=msg.twist,
             )
         )

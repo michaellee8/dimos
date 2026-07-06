@@ -265,8 +265,7 @@ fn apply_wall_safe_penalty_region(
     window: &AHashSet<CellId>,
     scratch: &mut NodeScratch,
 ) {
-    // The window and its boundary, deduped via a dense mask reset only over the
-    // cells it touched rather than reallocated across the whole map per frame.
+    // The window and its boundary, deduped via the dense seen mask.
     scratch.ensure_capacity(cells.slot_capacity());
     let mut affected: Vec<CellId> = Vec::with_capacity(window.len() * 2);
     {
@@ -287,8 +286,6 @@ fn apply_wall_safe_penalty_region(
     for &id in &affected {
         scratch.seen[id as usize] = false;
     }
-    // Rescale only the affected cells. Their count is bounded by the window, so
-    // this stays region-sized rather than scanning the whole accumulated graph.
     for &id in &affected {
         scale_edges(
             cells.edges_mut(id),
