@@ -107,6 +107,27 @@ pub struct RegionBounds {
 }
 
 impl RegionBounds {
+    /// Region cylinder with its ceiling capped to `max_overhead_m` above the
+    /// sensor, so surface far overhead never enters the map. The single place
+    /// both the live worker and the offline wrapper derive bounds.
+    pub fn capped(
+        origin_x: f32,
+        origin_y: f32,
+        radius: f32,
+        z_min: f32,
+        z_max: f32,
+        sensor_z: f32,
+        max_overhead_m: f32,
+    ) -> Self {
+        RegionBounds {
+            origin_x,
+            origin_y,
+            radius,
+            z_min,
+            z_max: z_max.min(sensor_z + max_overhead_m),
+        }
+    }
+
     fn contains_voxel(&self, (kx, ky, kz): VoxelKey, voxel_size: f32) -> bool {
         let half = voxel_size * 0.5;
         let z = kz as f32 * voxel_size + half;
@@ -608,6 +629,18 @@ mod region_tests {
             goal_tolerance: 0.3,
             viz_publish_hz: 2.0,
         }
+    }
+
+    #[test]
+    fn region_bounds_capped_clamps_ceiling_to_sensor_overhead() {
+        // A ceiling above sensor_z + max_overhead is pulled down to the cap.
+        let capped = RegionBounds::capped(0.0, 0.0, 1.0, -1.0, 5.0, 0.5, 2.0);
+        assert_eq!(capped.z_max, 2.5, "ceiling capped to sensor_z + overhead");
+        // A ceiling already below the cap is left untouched.
+        let low = RegionBounds::capped(0.0, 0.0, 1.0, -1.0, 1.0, 0.5, 2.0);
+        assert_eq!(low.z_max, 1.0, "cap never raises a lower ceiling");
+        assert_eq!(low.z_min, -1.0);
+        assert_eq!(low.radius, 1.0);
     }
 
     #[test]
