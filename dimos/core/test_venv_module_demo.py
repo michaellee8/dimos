@@ -100,6 +100,7 @@ def test_demo_runtime_project_executes_with_project_worker(monkeypatch) -> None:
     runtime = PythonProjectRuntimeEnvironment(
         name="demo-worker-test-runtime",
         project=EXAMPLE_ROOT,
+        env={"PYTHONPATH": _example_pythonpath()},
     )
     subprocess.run(
         ("uv", "sync", "--locked"),

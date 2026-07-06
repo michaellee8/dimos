@@ -14,6 +14,8 @@
 
 """Blueprint snippet demonstrating Runtime Project registration and placement."""
 
+import os
+import sys
 from pathlib import Path
 
 from dimos.core.coordination.blueprints import autoconnect
@@ -22,10 +24,21 @@ from dimos_demo_worker_module.contract import DemoWorkerModule
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = PROJECT_ROOT.parents[1]
+EXAMPLE_SRC = PROJECT_ROOT / "src"
+
+
+def _worker_pythonpath() -> str:
+    paths = [str(EXAMPLE_SRC), str(REPO_ROOT)]
+    paths.extend(path for path in sys.path if path)
+    if existing := os.environ.get("PYTHONPATH"):
+        paths.append(existing)
+    return os.pathsep.join(paths)
 
 demo_worker_runtime = PythonProjectRuntimeEnvironment(
     name="demo-worker-runtime",
     project=PROJECT_ROOT,
+    env={"PYTHONPATH": _worker_pythonpath()},
 )
 
 demo_worker_runtime_blueprint = (

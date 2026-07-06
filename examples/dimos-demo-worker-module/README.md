@@ -13,12 +13,12 @@ Contract from a worker-only Runtime Implementation.
 
 The project intentionally keeps dependencies minimal, but includes `inflection`
 as a runtime-only dependency to prove the contract can be imported without the
-worker dependency stack. Generate and commit a `uv.lock` before using it as a
-locked Runtime Project:
+worker dependency stack. The demo points the worker at the local repository
+checkout via `PYTHONPATH`, so the example lockfile only captures the runtime-only
+dependency closure. Sync from the checked-in lockfile before running it:
 
 ```bash
 cd examples/dimos-demo-worker-module
-uv lock
 uv sync --locked
 ```
 
