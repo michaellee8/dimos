@@ -22,7 +22,7 @@ import open3d as o3d  # type: ignore[import-untyped]
 
 from dimos.agents.annotation import skill
 from dimos.core.core import rpc
-from dimos.core.module import Module
+from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.perception_msgs.RegisteredObject import RegisteredObject
@@ -53,8 +53,20 @@ _REGISTERED_BOUNDS_MIN_POINTS = 20
 _REGISTERED_BOUNDS_MIN_EXTENT_M = 0.01
 
 
+class ObjectSceneRegistrationConfig(ModuleConfig):
+    target_frame: str = "map"
+    prompt_mode: YoloePromptMode = YoloePromptMode.LRPC
+    distance_threshold: float = 0.2
+    min_detections_for_permanent: int = 6
+    max_distance: float = 0.0
+    use_aabb: bool = False
+    max_obstacle_width: float = 0.0
+
+
 class ObjectSceneRegistrationModule(Module):
     """Module for detecting objects in camera images using YOLO-E with 2D and 3D detection."""
+
+    config: ObjectSceneRegistrationConfig
 
     color_image: In[Image]
     depth_image: In[Image]
@@ -356,6 +368,15 @@ class ObjectSceneRegistrationModule(Module):
                 color_image.ts,
                 0.1,
             )
+            if camera_transform is None:
+                # The camera can be mounted under a moving robot link (for example
+                # world -> link7 -> wrist_camera_color_optical_frame).  The image,
+                # robot-link TF, and camera-link TF publishers do not always share
+                # exactly the same timestamp, so a strict image-time chain lookup can
+                # miss even when the latest TF tree is valid.  Falling back to the
+                # latest composed transform keeps the single-parent TF tree intact
+                # while allowing perception to proceed in simulation.
+                camera_transform = self.tf.get(self._target_frame, color_image.frame_id)
             if camera_transform is None:
                 logger.info("Failed to lookup transform from camera frame to target frame")
                 return
