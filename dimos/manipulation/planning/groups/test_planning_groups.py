@@ -20,7 +20,6 @@ from pathlib import Path
 
 import pytest
 
-from dimos.manipulation.planning.groups import utils as planning_group_utils
 from dimos.manipulation.planning.groups.discovery import (
     FALLBACK_PLANNING_GROUP_NAME,
     PlanningGroupDiscoveryError,
@@ -33,6 +32,7 @@ from dimos.manipulation.planning.groups.models import PlanningGroup, PlanningGro
 from dimos.manipulation.planning.groups.registry import PlanningGroupRegistry
 from dimos.manipulation.planning.groups.utils import (
     filter_joint_state_to_selected_joints,
+    joint_state_to_ordered_positions,
     joint_target_to_global_names,
     matching_global_joint_name,
     planning_group_id_from_selector,
@@ -474,21 +474,35 @@ def test_matching_global_joint_name_requires_unique_suffix_match() -> None:
     assert matching_global_joint_name({"left/j1": 1.0}, "j2") is None
 
 
-def test_matching_global_joint_name_warns_when_suffix_match_is_not_unique(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    messages: list[str] = []
+def test_filter_joint_state_to_selected_joints_uses_local_fallbacks() -> None:
+    state = JointState(name=["j2", "arm/j1"], position=[2.0, 1.0])
 
-    def capture_warning(message: str) -> None:
-        messages.append(message)
+    filtered = filter_joint_state_to_selected_joints(
+        state,
+        ["arm/j1", "arm/j2"],
+        ["j1", "j2"],
+    )
 
-    monkeypatch.setattr(planning_group_utils.logger, "warning", capture_warning)
+    assert filtered.name == ["arm/j1", "arm/j2"]
+    assert filtered.position == [1.0, 2.0]
 
-    assert matching_global_joint_name({"left/j1": 1.0, "right/j1": 2.0}, "j1") is None
-    assert messages == [
-        "Expected exactly one global joint ending with local joint name 'j1', "
-        "found 2 matches: ['left/j1', 'right/j1']"
-    ]
+
+def test_joint_target_to_global_names_accepts_unnamed_positions_in_group_order() -> None:
+    target = joint_target_to_global_names(
+        PlanningGroup(
+            id="left/arm",
+            robot_name="left",
+            group_name="arm",
+            joint_names=("left/j2", "left/j1"),
+            local_joint_names=("j2", "j1"),
+            base_link="base",
+            tip_link="ee",
+        ),
+        JointState(name=[], position=[2.0, 1.0]),
+    )
+
+    assert target.name == ["left/j2", "left/j1"]
+    assert target.position == [2.0, 1.0]
 
 
 def test_planning_group_id_from_selector_accepts_id_or_group() -> None:
@@ -569,3 +583,76 @@ def test_robot_model_config_end_effector_link_rejects_ambiguous_pose_groups() ->
 
     with pytest.raises(ValueError, match="multiple pose-target planning groups"):
         _ = config.end_effector_link
+
+
+def test_joint_state_to_ordered_positions_accepts_all_supported_name_forms() -> None:
+    joint_names = ["joint1", "joint2", "joint3"]
+    mapping = {"hw1": "joint1", "hw2": "joint2", "hw3": "joint3"}
+
+    unnamed = joint_state_to_ordered_positions(
+        JointState(name=[], position=[1.0, 2.0, 3.0]),
+        joint_names=joint_names,
+        joint_name_mapping=mapping,
+    )
+    local = joint_state_to_ordered_positions(
+        JointState(name=["joint3", "joint1", "joint2"], position=[30.0, 10.0, 20.0]),
+        joint_names=joint_names,
+        joint_name_mapping=mapping,
+    )
+    coordinator = joint_state_to_ordered_positions(
+        JointState(name=["hw2", "hw3", "hw1"], position=[200.0, 300.0, 100.0]),
+        joint_names=joint_names,
+        joint_name_mapping=mapping,
+    )
+    global_names = joint_state_to_ordered_positions(
+        JointState(name=["arm/joint2", "arm/joint1", "arm/joint3"], position=[2.0, 1.0, 3.0]),
+        joint_names=joint_names,
+        joint_name_mapping=mapping,
+    )
+
+    assert unnamed.tolist() == [1.0, 2.0, 3.0]
+    assert local.tolist() == [10.0, 20.0, 30.0]
+    assert coordinator.tolist() == [100.0, 200.0, 300.0]
+    assert global_names.tolist() == [1.0, 2.0, 3.0]
+
+
+def test_joint_state_to_ordered_positions_rejects_invalid_inputs() -> None:
+    joint_names = ["joint1", "joint2"]
+    mapping = {"hw1": "joint1"}
+
+    with pytest.raises(ValueError, match="position length"):
+        joint_state_to_ordered_positions(
+            JointState(name=[], position=[1.0]),
+            joint_names=joint_names,
+            joint_name_mapping=mapping,
+        )
+    with pytest.raises(ValueError, match="name and position"):
+        joint_state_to_ordered_positions(
+            JointState(name=["joint1", "joint2"], position=[1.0]),
+            joint_names=joint_names,
+            joint_name_mapping=mapping,
+        )
+    with pytest.raises(ValueError, match="duplicate"):
+        joint_state_to_ordered_positions(
+            JointState(name=["joint1", "hw1"], position=[1.0, 2.0]),
+            joint_names=joint_names,
+            joint_name_mapping=mapping,
+        )
+    with pytest.raises(ValueError, match="Unknown global"):
+        joint_state_to_ordered_positions(
+            JointState(name=["arm/joint3", "joint2"], position=[1.0, 2.0]),
+            joint_names=joint_names,
+            joint_name_mapping=mapping,
+        )
+    with pytest.raises(ValueError, match="missing joints"):
+        joint_state_to_ordered_positions(
+            JointState(name=["joint1"], position=[1.0]),
+            joint_names=joint_names,
+            joint_name_mapping=mapping,
+        )
+    with pytest.raises(ValueError, match="Unrecognized joint name"):
+        joint_state_to_ordered_positions(
+            JointState(name=["mystery", "joint2"], position=[1.0, 2.0]),
+            joint_names=joint_names,
+            joint_name_mapping=mapping,
+        )
