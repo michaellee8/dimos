@@ -45,7 +45,7 @@ class PGOConfig(NativeModuleConfig):
     cwd: str | None = str(Path(__file__).resolve().parent)
     executable: str = "result/bin/pgo"
     build_command: str | None = (
-        'nix build "github:jeff-hykin/gsc_pgo/v1.0.0#default" --no-write-lock-file'
+        'nix build "github:jeff-hykin/gsc_pgo/v1.1.0#default" --no-write-lock-file'
     )
 
     frame_id: str = "map"
