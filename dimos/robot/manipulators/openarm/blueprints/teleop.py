@@ -28,6 +28,7 @@ from dimos.robot.manipulators.common.blueprints import cartesian_ik_task
 from dimos.robot.manipulators.openarm.config import (
     LEFT_CAN,
     OPENARM_ADAPTER_KWARGS,
+    OPENARM_DUAL_GAIN_ADAPTER_KWARGS,
     OPENARM_V10_FK_MODEL,
     RIGHT_CAN,
     openarm_hardware,
@@ -125,7 +126,7 @@ def _openarm_mini_right_teleop_hardware() -> HardwareComponent:
         side="right",
         address=global_config.can_port,
         adapter_type=adapter_type,
-        adapter_kwargs=OPENARM_ADAPTER_KWARGS if global_config.can_port else None,
+        adapter_kwargs=OPENARM_DUAL_GAIN_ADAPTER_KWARGS if global_config.can_port else None,
     )
     return replace(hardware, joints=_openarm_mini_right_teleop_joint_names())
 

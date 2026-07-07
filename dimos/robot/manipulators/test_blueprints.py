@@ -253,6 +253,8 @@ def test_openarm_mini_right_teleop_uses_real_follower_when_can_port_is_set() -> 
     assert hardware.address == "can-test"
     assert hardware.adapter_kwargs["side"] == "right"
     assert hardware.adapter_kwargs["auto_set_mit_mode"] is True
+    assert hardware.adapter_kwargs["kp"] == [70.0, 70.0, 70.0, 60.0, 10.0, 10.0, 10.0]
+    assert hardware.adapter_kwargs["kd"] == [2.75, 2.5, 2.0, 2.0, 0.7, 0.6, 0.5]
 
 
 def test_existing_quest_teleop_blueprints_still_use_quest_modules() -> None:
