@@ -45,6 +45,8 @@ TIMELINE = "ts"
 
 # Body-frame axis-triad length for the odometry transform (m).
 ODOM_AXIS_LEN = 0.5
+# Arrow radius as a fraction of the triad length.
+AXIS_RADIUS_RATIO = 25
 
 # Mount frames as recorded on the tf stream.
 BASE_FRAME = "base_link"
@@ -176,13 +178,17 @@ def _log_odometry(
     )
 
 
-def _clearance_colors(clearance: NDArray[np.float32], clamp_m: float) -> NDArray[np.uint8]:
-    """Map per-cell wall clearance to a blue ramp, clamped so it resolves near walls."""
+def _clearance_colors(
+    clearance: NDArray[np.float32], clamp_m: float, hard_clearance: float
+) -> NDArray[np.uint8]:
+    """Color surface cells by wall clearance, red inside the hard clearance."""
     norm = np.clip(np.nan_to_num(clearance / clamp_m, nan=1.0, posinf=1.0), 0.0, 1.0)
     blocked = np.array([4.0, 8.0, 48.0], dtype=np.float64)
     clear = np.array([150.0, 200.0, 255.0], dtype=np.float64)
     rgb: NDArray[np.float64] = blocked + norm[:, None] * (clear - blocked)
-    return rgb.astype(np.uint8)
+    out = rgb.astype(np.uint8)
+    out[clearance < hard_clearance] = (255, 0, 0)
+    return out
 
 
 def _log_shared(
@@ -190,6 +196,7 @@ def _log_shared(
     planner: MLSPlanner,
     render_voxel: float,
     clearance_clamp: float,
+    hard_clearance: float,
 ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.float32]]:
     """Log the map artifacts shared by every config from a reference planner.
 
@@ -210,7 +217,7 @@ def _log_shared(
             "world/surface_map",
             rr.Points3D(
                 surface[:, :3],
-                colors=_clearance_colors(surface[:, 3], clearance_clamp),
+                colors=_clearance_colors(surface[:, 3], clearance_clamp, hard_clearance),
                 radii=render_voxel / 2,
             ),
         )
@@ -241,6 +248,7 @@ def _build_planners(
     configs: list[tuple[float, float, float]],
     voxel_size: float,
     robot_height: float,
+    max_overhead: float,
     surface_closing_radius: float,
     node_spacing: float,
     step_height: float,
@@ -251,6 +259,7 @@ def _build_planners(
         planner = MLSPlanner(
             voxel_size=voxel_size,
             robot_height=robot_height,
+            max_overhead_m=max_overhead,
             surface_closing_radius=surface_closing_radius,
             node_spacing_m=node_spacing,
             wall_clearance_m=clr,
@@ -273,6 +282,7 @@ def _process_frame(
     robot_height: float,
     render_voxel: float,
     clearance_clamp: float,
+    hard_clearance: float,
 ) -> dict[str, float]:
     """Plan every config for one frame, log paths/map/metrics, return the ref timing."""
     assert ray_obs.pose_tuple is not None
@@ -287,7 +297,7 @@ def _process_frame(
     surface = nodes = edges = np.empty((0,), dtype=np.float32)
     for j, (label, color, planner) in enumerate(planners):
         t0 = perf_counter()
-        planner.update_region(pts, (ox, oy), radius, z_min, z_max)
+        planner.update_region(pts, (ox, oy), radius, z_min, z_max, float(pz))
         t1 = perf_counter()
         waypoints = planner.plan(start, goal)
         t2 = perf_counter()
@@ -298,7 +308,9 @@ def _process_frame(
                 "plan_ms": (t2 - t1) * 1000,
                 "total_ms": (t2 - t0) * 1000,
             }
-            surface, nodes, edges = _log_shared(start, planner, render_voxel, clearance_clamp)
+            surface, nodes, edges = _log_shared(
+                start, planner, render_voxel, clearance_clamp, hard_clearance
+            )
 
     for key, value in ref_timing.items():
         rr.log(f"metrics/timing/{key}", rr.Scalars(value))
@@ -319,17 +331,38 @@ def main(
         None, "--out", help="Output .rrd path. If omitted, spawn rerun live."
     ),
     lidar_stream: str = typer.Option(
-        "fastlio_lidar", "--lidar-stream", help="Lidar stream in the recording"
+        "pointlio_lidar", "--lidar-stream", help="Lidar stream in the recording"
     ),
     odom_stream: str = typer.Option(
-        "fastlio_odometry", "--odom-stream", help="Odometry stream in the recording"
+        "pointlio_odometry", "--odom-stream", help="Odometry stream in the recording"
     ),
     align_tol: float = typer.Option(0.05, "--align-tol", help="Lidar/odom alignment tolerance (s)"),
-    voxel_size: float = typer.Option(0.1, "--voxel-size", help="Voxel edge length (m)"),
+    voxel_size: float = typer.Option(0.08, "--voxel-size", help="Voxel edge length (m)"),
     max_range: float = typer.Option(30.0, "--max-range", help="Max ray cast distance (m)"),
     ray_subsample: int = typer.Option(1, "--ray-subsample", help="Keep every Nth ray"),
+    shadow_depth: float = typer.Option(
+        0.1, "--shadow-depth", help="Extend rays past the endpoint to clear shadows (m)"
+    ),
+    grace_depth: float = typer.Option(
+        0.2, "--grace-depth", help="Skip clearing for voxels within this range of a point (m)"
+    ),
     emit_every: int = typer.Option(1, "--emit-every", help="Replan every N lidar frames"),
-    robot_height: float = typer.Option(1.0, "--robot-height", help="Robot height (m)"),
+    min_health: int = typer.Option(
+        -1,
+        "--min-health",
+        help="Voxel health floor; more negative needs more hits to appear and more misses to clear",
+    ),
+    max_health: int = typer.Option(5, "--max-health", help="Voxel health ceiling"),
+    support_min: int = typer.Option(
+        4,
+        "--support-min",
+        help="Min occupied neighbors a surface voxel needs to be emitted; "
+        "0 emits all, higher drops isolated returns",
+    ),
+    robot_height: float = typer.Option(0.3, "--robot-height", help="Robot height (m)"),
+    max_overhead: float = typer.Option(
+        2.0, "--max-overhead", help="Ignore surface more than this far above the sensor (m)"
+    ),
     surface_closing_radius: float = typer.Option(
         0.3,
         "--surface-closing-radius",
@@ -337,7 +370,7 @@ def main(
     ),
     node_spacing: float = typer.Option(1.0, "--node-spacing", help="Graph node spacing (m)"),
     wall_clearance: float = typer.Option(
-        0.3,
+        0.1,
         "--wall-clearance",
         help="Hard clearance; cells closer to a wall or edge are impassable (m)",
     ),
@@ -348,7 +381,7 @@ def main(
         100.0, "--wall-buffer-weight", help="Peak soft wall penalty at the clearance edge"
     ),
     step_height: float = typer.Option(
-        0.25,
+        0.16,
         "--step-height",
         help="Max traversable vertical step (m); taller steps are impassable",
     ),
@@ -398,15 +431,22 @@ def main(
                 voxel_size=voxel_size,
                 max_range=max_range,
                 ray_subsample=ray_subsample,
+                shadow_depth=shadow_depth,
+                grace_depth=grace_depth,
                 emit_every=emit_every,
+                min_health=min_health,
+                max_health=max_health,
+                support_min=support_min,
             )
         )
 
         configs = _parse_configs(config, wall_clearance, wall_buffer, wall_buffer_weight)
+        ref_clearance = configs[0][0]
         planners = _build_planners(
             configs,
             voxel_size,
             robot_height,
+            max_overhead,
             surface_closing_radius,
             node_spacing,
             step_height,
@@ -430,7 +470,7 @@ def main(
                         [0.0, 0.0, ODOM_AXIS_LEN],
                     ],
                     colors=[[255, 0, 0], [0, 255, 0], [0, 0, 255]],
-                    radii=ODOM_AXIS_LEN / 25,
+                    radii=ODOM_AXIS_LEN / AXIS_RADIUS_RATIO,
                 ),
                 static=True,
             )
@@ -442,7 +482,13 @@ def main(
                 if ray_obs.pose_tuple is None:
                     continue
                 ref_timing = _process_frame(
-                    ray_obs, planners, goal, robot_height, render_voxel, clearance_clamp
+                    ray_obs,
+                    planners,
+                    goal,
+                    robot_height,
+                    render_voxel,
+                    clearance_clamp,
+                    ref_clearance,
                 )
                 _log_odometry(ray_obs.pose_tuple, ray_obs.ts, odom_trail, base_from_body)
                 frame += 1
