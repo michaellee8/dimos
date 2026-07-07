@@ -22,7 +22,6 @@ from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.runtime_environment import PythonProjectRuntimeEnvironment, RuntimePlacement
 from dimos_demo_worker_module.contract import DemoWorkerModule
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REPO_ROOT = PROJECT_ROOT.parents[1]
 EXAMPLE_SRC = PROJECT_ROOT / "src"
@@ -30,15 +29,18 @@ EXAMPLE_SRC = PROJECT_ROOT / "src"
 
 def _worker_pythonpath() -> str:
     paths = [str(EXAMPLE_SRC), str(REPO_ROOT)]
-    paths.extend(path for path in sys.path if path)
+    paths.extend(
+        path for path in sys.path if path and ("site-packages" in path or "dist-packages" in path)
+    )
     if existing := os.environ.get("PYTHONPATH"):
         paths.append(existing)
-    return os.pathsep.join(paths)
+    return os.pathsep.join(dict.fromkeys(paths))
+
 
 demo_worker_runtime = PythonProjectRuntimeEnvironment(
     name="demo-worker-runtime",
     project=PROJECT_ROOT,
-    env={"PYTHONPATH": _worker_pythonpath()},
+    env={"PYTHONPATH": _worker_pythonpath(), "UV_PYTHON": sys.executable},
 )
 
 demo_worker_runtime_blueprint = (

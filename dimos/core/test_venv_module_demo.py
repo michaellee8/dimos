@@ -37,10 +37,12 @@ EXAMPLE_SRC = EXAMPLE_ROOT / "src"
 
 def _example_pythonpath() -> str:
     paths = [str(EXAMPLE_SRC), str(REPO_ROOT)]
-    paths.extend(path for path in sys.path if path)
+    paths.extend(
+        path for path in sys.path if path and ("site-packages" in path or "dist-packages" in path)
+    )
     if existing := os.environ.get("PYTHONPATH"):
         paths.append(existing)
-    return os.pathsep.join(paths)
+    return os.pathsep.join(dict.fromkeys(paths))
 
 
 @pytest.fixture
@@ -51,11 +53,12 @@ def demo_runtime_worker(monkeypatch):
     runtime = PythonProjectRuntimeEnvironment(
         name="demo-worker-test-runtime",
         project=EXAMPLE_ROOT,
-        env={"PYTHONPATH": _example_pythonpath()},
+        env={"PYTHONPATH": _example_pythonpath(), "UV_PYTHON": sys.executable},
     )
     subprocess.run(
         ("uv", "sync", "--locked"),
         cwd=EXAMPLE_ROOT,
+        env={**os.environ, **runtime.env},
         check=True,
         capture_output=True,
         text=True,
@@ -97,6 +100,20 @@ def test_demo_runtime_project_contract_import_does_not_import_runtime(monkeypatc
         blueprint_module.DemoWorkerModule
     ]
     assert placement.implementation == "dimos_demo_worker_module.runtime.DemoWorkerRuntimeModule"
+
+
+def test_example_pythonpath_excludes_host_stdlib(monkeypatch) -> None:
+    site_packages = "/host/.venv/lib/python3.12/site-packages"
+    stdlib = "/usr/lib/python3.12"
+    monkeypatch.setattr(sys, "path", [stdlib, site_packages, ""])
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    entries = _example_pythonpath().split(os.pathsep)
+
+    assert str(EXAMPLE_SRC) in entries
+    assert str(REPO_ROOT) in entries
+    assert site_packages in entries
+    assert stdlib not in entries
 
 
 @pytest.mark.skipif_macos_bug

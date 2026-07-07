@@ -21,6 +21,7 @@ from pathlib import Path
 import queue
 import secrets
 import signal
+import socket
 import subprocess
 import tempfile
 import threading
@@ -198,6 +199,18 @@ def _launch_subprocess_worker(
 
 
 def _accept_worker_connection(listener: Listener, timeout: float) -> Connection | None:
+    socket_listener = getattr(listener, "_listener", None)
+    listener_socket = getattr(socket_listener, "_socket", None)
+    if isinstance(listener_socket, socket.socket):
+        previous_timeout = listener_socket.gettimeout()
+        listener_socket.settimeout(timeout)
+        try:
+            return listener.accept()
+        except TimeoutError:
+            return None
+        finally:
+            listener_socket.settimeout(previous_timeout)
+
     results: queue.Queue[Connection | Exception] = queue.Queue(maxsize=1)
 
     def _accept() -> None:
