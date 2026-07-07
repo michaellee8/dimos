@@ -29,7 +29,7 @@ from dimos.teleop.openarm_mini.calibration import (
     OpenArmMiniMotorCalibration,
     save_calibration,
 )
-from dimos.teleop.openarm_mini.joint_tui_openarm_mini import (
+from dimos.teleop.openarm_mini.tools.joint_tui import (
     _build_joint_dashboard,
     _read_side_rows,
 )

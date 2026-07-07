@@ -17,7 +17,6 @@ from __future__ import annotations
 import pytest
 
 from dimos.teleop.openarm_mini.mapping import (
-    OpenArmMiniMappingError,
     combine_side_commands,
     map_side_readings,
 )
@@ -86,7 +85,7 @@ def test_jump_threshold_rejects_large_leader_discontinuity_after_clamp() -> None
     readings = _readings()
     readings["joint_2"] = -1.0
 
-    with pytest.raises(OpenArmMiniMappingError, match="exceeds"):
+    with pytest.raises(ValueError, match="exceeds"):
         map_side_readings(
             "left",
             readings,
@@ -99,7 +98,7 @@ def test_missing_leader_arm_joint_reading_is_rejected() -> None:
     readings = _readings()
     del readings["joint_4"]
 
-    with pytest.raises(OpenArmMiniMappingError, match="missing"):
+    with pytest.raises(ValueError, match="missing"):
         map_side_readings("left", readings)
 
 

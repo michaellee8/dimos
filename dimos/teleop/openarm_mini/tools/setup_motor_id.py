@@ -21,12 +21,13 @@ device when IDs collide.
 
 from __future__ import annotations
 
-import argparse
 from collections.abc import Sequence
-from typing import Protocol, cast
+from typing import Any
 
-from dimos.teleop.openarm_mini.adapter import _load_scservo_sdk
+import typer
+
 from dimos.teleop.openarm_mini.config import OpenArmMiniTeleopConfig
+from dimos.teleop.openarm_mini.feetech import _load_scservo_sdk
 
 FEETECH_ID_ADDRESS = 5
 FEETECH_TORQUE_ENABLE_ADDRESS = 40
@@ -35,50 +36,27 @@ FEETECH_MAX_MOTOR_ID = 253
 FEETECH_COMM_SUCCESS = 0
 
 
-class _MotorIdPacketHandler(Protocol):
-    def ping(self, scs_id: int) -> tuple[int, int, int]: ...
-
-    def write1ByteTxRx(self, scs_id: int, address: int, value: int) -> object: ...
-
-    def unLockEprom(self, scs_id: int) -> object: ...
-
-    def LockEprom(self, scs_id: int) -> object: ...
-
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Set one connected OpenArm Mini Feetech motor's ID and exit."
-    )
-    parser.add_argument("--port", required=True, help="Feetech serial port, e.g. /dev/ttyUSB1")
-    parser.add_argument("--new-id", type=int, required=True, help="Target Feetech motor ID")
-    parser.add_argument(
+def main(
+    port: str = typer.Option(..., help="Feetech serial port, e.g. /dev/ttyUSB1"),
+    new_id: int = typer.Option(..., "--new-id", help="Target Feetech motor ID"),
+    old_id: int | None = typer.Option(
+        None,
         "--old-id",
-        type=int,
-        help=("Current motor ID. If omitted, the script scans for exactly one connected motor."),
-    )
-    parser.add_argument("--baudrate", type=int, default=OpenArmMiniTeleopConfig.baudrate)
-    parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="Skip the safety confirmation prompt.",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = _parse_args()
-    old_id = args.old_id
-    new_id = args.new_id
+        help="Current motor ID. If omitted, scan for exactly one connected motor.",
+    ),
+    baudrate: int = typer.Option(OpenArmMiniTeleopConfig.baudrate),
+    yes: bool = typer.Option(False, "--yes", help="Skip the safety confirmation prompt."),
+) -> None:
     _validate_motor_id(new_id, "new-id")
     if old_id is not None:
         _validate_motor_id(old_id, "old-id")
 
-    if not args.yes:
+    if not yes:
         print("Connect exactly ONE Feetech motor to the controller before continuing.")
         print("If multiple motors share an ID, this write can affect the wrong motor(s).")
         input("Press Enter to continue or Ctrl-C to abort.")
 
-    setup_motor_id(port=args.port, baudrate=args.baudrate, new_id=new_id, old_id=old_id)
+    setup_motor_id(port=port, baudrate=baudrate, new_id=new_id, old_id=old_id)
 
 
 def setup_motor_id(port: str, baudrate: int, new_id: int, old_id: int | None = None) -> int:
@@ -92,7 +70,7 @@ def setup_motor_id(port: str, baudrate: int, new_id: int, old_id: int | None = N
 
     sdk = _load_scservo_sdk()
     port_handler = sdk.PortHandler(port)
-    packet_handler = cast("_MotorIdPacketHandler", sdk.sms_sts(port_handler))
+    packet_handler = sdk.sms_sts(port_handler)
     if not port_handler.openPort():
         raise RuntimeError(f"failed to open Feetech port {port}")
     try:
@@ -107,7 +85,7 @@ def setup_motor_id(port: str, baudrate: int, new_id: int, old_id: int | None = N
     return motor_id
 
 
-def find_single_motor_id(packet_handler: _MotorIdPacketHandler) -> int:
+def find_single_motor_id(packet_handler: Any) -> int:
     """Scan the Feetech bus and return the only responding motor ID."""
     found_ids = [
         motor_id
@@ -124,14 +102,14 @@ def find_single_motor_id(packet_handler: _MotorIdPacketHandler) -> int:
     return found_ids[0]
 
 
-def ping_motor_id(packet_handler: _MotorIdPacketHandler, motor_id: int) -> bool:
+def ping_motor_id(packet_handler: Any, motor_id: int) -> bool:
     """Return whether ``motor_id`` responds successfully to Feetech ping."""
     _validate_motor_id(motor_id, "motor-id")
     model_number, comm_result, error = packet_handler.ping(motor_id)
-    return comm_result == FEETECH_COMM_SUCCESS and error == 0 and model_number != 0
+    return bool(comm_result == FEETECH_COMM_SUCCESS and error == 0 and model_number != 0)
 
 
-def write_motor_id(packet_handler: _MotorIdPacketHandler, old_id: int, new_id: int) -> None:
+def write_motor_id(packet_handler: Any, old_id: int, new_id: int) -> None:
     """Disable torque, unlock EEPROM, write the new ID, lock, and verify."""
     _validate_motor_id(old_id, "old-id")
     _validate_motor_id(new_id, "new-id")
@@ -178,4 +156,4 @@ def _validate_motor_id(motor_id: int, label: str) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    typer.run(main)

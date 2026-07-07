@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Manual OpenArm Mini leader zero-calibration demo.
+"""Manual OpenArm Mini leader zero-calibration utility.
 
 This script intentionally talks only to the OpenArm Mini leader Feetech bus. It
 does not import or start ControlCoordinator, ManipulationModule, or follower
@@ -21,18 +21,15 @@ OpenArm hardware.
 
 from __future__ import annotations
 
-import argparse
 from collections.abc import Callable
 from pathlib import Path
 import time
-from typing import Protocol
+from typing import Any, Literal
+
+import typer
 
 from dimos.teleop.openarm_mini.adapter import (
     _calibrated_motor_radians,
-    _load_scservo_sdk,
-    _read_motor_position,
-    _ScservoPacketHandler,
-    _ScservoPortHandler,
 )
 from dimos.teleop.openarm_mini.calibration import (
     OPENARM_MINI_ARM_JOINT_NAMES,
@@ -42,6 +39,7 @@ from dimos.teleop.openarm_mini.calibration import (
     save_calibration,
 )
 from dimos.teleop.openarm_mini.config import OpenArmMiniTeleopConfig, default_calibration_path
+from dimos.teleop.openarm_mini.feetech import FeetechLeaderReader
 from dimos.teleop.openarm_mini.mapping import map_side_readings
 
 DEFAULT_MOTOR_IDS = {
@@ -53,100 +51,51 @@ DEFAULT_FLIPS_BY_SIDE: dict[str, frozenset[str]] = {
 }
 
 
-class _RawPositionReader(Protocol):
-    def connect(self) -> None: ...
-
-    def disconnect(self) -> None: ...
-
-    def read_raw_positions(self) -> dict[str, int]: ...
+class _RawFeetechReader(FeetechLeaderReader):
+    def read_raw_positions(self) -> dict[str, int]:  # type: ignore[override]
+        return super().read_raw_positions(DEFAULT_MOTOR_IDS)
 
 
-class _RawFeetechReader:
-    def __init__(self, port: str, baudrate: int) -> None:
-        self._port = port
-        self._baudrate = baudrate
-        self._port_handler: _ScservoPortHandler | None = None
-        self._packet_handler: _ScservoPacketHandler | None = None
-
-    def connect(self) -> None:
-        sdk = _load_scservo_sdk()
-        port_handler = sdk.PortHandler(self._port)
-        packet_handler = sdk.sms_sts(port_handler)
-        if not port_handler.openPort():
-            raise RuntimeError(f"failed to open Feetech port {self._port}")
-        if not port_handler.setBaudRate(self._baudrate):
-            port_handler.closePort()
-            raise RuntimeError(f"failed to set Feetech baudrate {self._baudrate}")
-        self._port_handler = port_handler
-        self._packet_handler = packet_handler
-
-    def disconnect(self) -> None:
-        if self._port_handler is None:
-            return
-        close_port = getattr(self._port_handler, "closePort", None)
-        if callable(close_port):
-            close_port()
-        self._port_handler = None
-        self._packet_handler = None
-
-    def read_raw_positions(self) -> dict[str, int]:
-        if self._packet_handler is None:
-            raise RuntimeError("Feetech reader is not connected")
-        return {
-            joint_name: _read_motor_position(self._packet_handler, motor_id)
-            for joint_name, motor_id in DEFAULT_MOTOR_IDS.items()
-        }
-
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Zero-calibrate OpenArm Mini leader teleop.")
-    parser.add_argument("--side", choices=("left", "right", "both"), default="both")
-    parser.add_argument("--port-left", default=OpenArmMiniTeleopConfig.port_left)
-    parser.add_argument("--port-right", default=OpenArmMiniTeleopConfig.port_right)
-    parser.add_argument("--baudrate", type=int, default=OpenArmMiniTeleopConfig.baudrate)
-    parser.add_argument(
-        "--left-calibration-path", type=Path, default=default_calibration_path("left")
-    )
-    parser.add_argument(
-        "--right-calibration-path", type=Path, default=default_calibration_path("right")
-    )
-    parser.add_argument(
-        "--left-flips",
+def main(
+    side: Literal["left", "right", "both"] = typer.Option("both"),
+    port_left: str = typer.Option(OpenArmMiniTeleopConfig.port_left),
+    port_right: str = typer.Option(OpenArmMiniTeleopConfig.port_right),
+    baudrate: int = typer.Option(OpenArmMiniTeleopConfig.baudrate),
+    left_calibration_path: Path = typer.Option(default_calibration_path("left")),
+    right_calibration_path: Path = typer.Option(default_calibration_path("right")),
+    left_flips: str | None = typer.Option(
+        None,
         help=(
             "Comma-separated left-side semantic joints to flip. Defaults to the "
             "known OpenArm Mini left leader orientation. Use 'none' for no flips."
         ),
-    )
-    parser.add_argument(
-        "--right-flips",
+    ),
+    right_flips: str | None = typer.Option(
+        None,
         help=(
             "Comma-separated right-side semantic joints to flip. Defaults to the "
             "known OpenArm Mini right leader orientation. Use 'none' for no flips."
         ),
-    )
-    parser.add_argument(
-        "--live-readout",
-        action="store_true",
+    ),
+    live_readout: bool = typer.Option(
+        False,
         help="Print calibrated arm-joint radians using existing calibration artifacts.",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = _parse_args()
-    sides = ("left", "right") if args.side == "both" else (args.side,)
+    ),
+) -> None:
+    """Zero-calibrate OpenArm Mini leader teleop."""
+    sides = ("left", "right") if side == "both" else (side,)
     print("OpenArm Mini leader calibration only connects to Feetech leader ports.")
     print("It never starts ControlCoordinator or connects follower OpenArm hardware.")
     print("Place each selected leader side in its natural zero pose before calibration.")
-    for side in sides:
-        port = args.port_left if side == "left" else args.port_right
-        path = args.left_calibration_path if side == "left" else args.right_calibration_path
-        flip_arg = args.left_flips if side == "left" else args.right_flips
-        flips = _parse_flip_overrides(flip_arg, side)
-        if args.live_readout:
-            _live_readout(side, port, path, args.baudrate)
+    for selected_side in sides:
+        port = port_left if selected_side == "left" else port_right
+        path = left_calibration_path if selected_side == "left" else right_calibration_path
+        flip_arg = left_flips if selected_side == "left" else right_flips
+        flips = _parse_flip_overrides(flip_arg, selected_side)
+        if live_readout:
+            _live_readout(selected_side, port, path, baudrate)
         else:
-            _calibrate_side(side, port, path, args.baudrate, flips=flips)
+            _calibrate_side(selected_side, port, path, baudrate, flips=flips)
 
 
 def _calibrate_side(
@@ -156,7 +105,7 @@ def _calibrate_side(
     baudrate: int,
     *,
     flips: set[str] | frozenset[str] | None = None,
-    reader_factory: Callable[[str, int], _RawPositionReader] = _RawFeetechReader,
+    reader_factory: Callable[[str, int], Any] = _RawFeetechReader,
 ) -> None:
     reader = reader_factory(port, baudrate)
     reader.connect()
@@ -260,4 +209,4 @@ def _validate_raw_positions(raw_positions: dict[str, int]) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    typer.run(main)

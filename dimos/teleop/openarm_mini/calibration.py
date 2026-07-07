@@ -16,11 +16,12 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-import json
 from pathlib import Path
-from typing import Any
+from typing import Literal, Self
 
+from pydantic import StrictBool, StrictInt, ValidationError, model_validator
+
+from dimos.protocol.service.spec import BaseConfig
 from dimos.teleop.openarm_mini.config import OpenArmMiniCalibrationError, validate_side
 
 CALIBRATION_FILENAME = "calibration.json"
@@ -39,29 +40,30 @@ OPENARM_MINI_ARM_JOINT_NAMES = (
 OPENARM_MINI_MOTOR_NAMES = OPENARM_MINI_ARM_JOINT_NAMES
 
 
-@dataclass(frozen=True)
-class OpenArmMiniMotorCalibration:
+class OpenArmMiniMotorCalibration(BaseConfig):
     """Calibration values for one arm-joint Feetech motor."""
 
-    id: int
-    homing_offset: int
-    flip: bool = False
+    id: StrictInt
+    homing_offset: StrictInt
+    flip: StrictBool = False
+
+    @model_validator(mode="after")
+    def _validate_motor(self) -> Self:
+        if self.id <= 0:
+            raise OpenArmMiniCalibrationError(f"motor has invalid id {self.id}")
+        return self
 
 
-@dataclass(frozen=True)
-class OpenArmMiniCalibration:
+class OpenArmMiniCalibration(BaseConfig):
     """Side-specific OpenArm Mini calibration artifact."""
 
     side: str
     motors: dict[str, OpenArmMiniMotorCalibration]
-    schema_version: int = 1
+    schema_version: Literal[1] = 1
 
-    def __post_init__(self) -> None:
+    @model_validator(mode="after")
+    def _validate_calibration(self) -> Self:
         validate_side(self.side)
-        if self.schema_version != 1:
-            raise OpenArmMiniCalibrationError(
-                f"unsupported OpenArm Mini calibration schema_version {self.schema_version}"
-            )
         missing = set(OPENARM_MINI_ARM_JOINT_NAMES) - set(self.motors)
         extra = set(self.motors) - set(OPENARM_MINI_ARM_JOINT_NAMES)
         if missing or extra:
@@ -72,57 +74,19 @@ class OpenArmMiniCalibration:
         for motor_name, motor in self.motors.items():
             if motor.id <= 0:
                 raise OpenArmMiniCalibrationError(f"{motor_name} has invalid id {motor.id}")
+        return self
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> OpenArmMiniCalibration:
+    def from_dict(cls, data: dict[str, object]) -> OpenArmMiniCalibration:
         """Build a calibration artifact from decoded JSON data."""
-        side = data.get("side")
-        motors_data = data.get("motors")
-        schema_version = data.get("schema_version", 1)
-        if not isinstance(side, str):
-            raise OpenArmMiniCalibrationError("calibration side must be a string")
-        if not isinstance(schema_version, int):
-            raise OpenArmMiniCalibrationError("calibration schema_version must be an integer")
-        if not isinstance(motors_data, dict):
-            raise OpenArmMiniCalibrationError("calibration motors must be an object")
-
-        motors: dict[str, OpenArmMiniMotorCalibration] = {}
-        for motor_name, motor_data in motors_data.items():
-            if not isinstance(motor_name, str) or not isinstance(motor_data, dict):
-                raise OpenArmMiniCalibrationError("calibration motor entries must be objects")
-            motors[motor_name] = _motor_calibration_from_dict(motor_name, motor_data)
-        return cls(side=side, motors=motors, schema_version=schema_version)
+        try:
+            return cls.model_validate(data)
+        except (OpenArmMiniCalibrationError, ValidationError) as exc:
+            raise OpenArmMiniCalibrationError(str(exc)) from exc
 
     def to_dict(self) -> dict[str, object]:
         """Return a JSON-serializable representation."""
-        return asdict(self)
-
-
-def _motor_calibration_from_dict(
-    motor_name: str, data: dict[Any, Any]
-) -> OpenArmMiniMotorCalibration:
-    required_fields = {"id", "homing_offset", "flip"}
-    missing = required_fields - set(data)
-    extra = set(data) - required_fields
-    if missing or extra:
-        raise OpenArmMiniCalibrationError(
-            f"{motor_name} must contain only {sorted(required_fields)}; "
-            f"missing={sorted(missing)}, extra={sorted(extra)}"
-        )
-    motor_id = data["id"]
-    homing_offset = data["homing_offset"]
-    flip = data["flip"]
-    if not isinstance(motor_id, int) or isinstance(motor_id, bool):
-        raise OpenArmMiniCalibrationError(f"{motor_name}.id must be an integer")
-    if not isinstance(homing_offset, int) or isinstance(homing_offset, bool):
-        raise OpenArmMiniCalibrationError(f"{motor_name}.homing_offset must be an integer")
-    if not isinstance(flip, bool):
-        raise OpenArmMiniCalibrationError(f"{motor_name}.flip must be a boolean")
-    return OpenArmMiniMotorCalibration(
-        id=motor_id,
-        homing_offset=homing_offset,
-        flip=flip,
-    )
+        return self.model_dump(mode="json")
 
 
 def calibration_file(path: Path) -> Path:
@@ -139,20 +103,15 @@ def load_calibration(path: Path, side: str) -> OpenArmMiniCalibration:
     if not artifact_path.exists():
         raise OpenArmMiniCalibrationError(
             f"Missing OpenArm Mini {side} calibration at {artifact_path}. "
-            "Run `python -m dimos.teleop.openarm_mini.calibrate_openarm_mini` "
+            "Run `python -m dimos.teleop.openarm_mini.tools.calibrate` "
             "to create calibration artifacts before starting teleop."
         )
     try:
-        raw_data = json.loads(artifact_path.read_text())
-    except json.JSONDecodeError as exc:
+        calibration = OpenArmMiniCalibration.model_validate_json(artifact_path.read_text())
+    except (OpenArmMiniCalibrationError, ValidationError, ValueError) as exc:
         raise OpenArmMiniCalibrationError(
-            f"Invalid OpenArm Mini {side} calibration JSON at {artifact_path}: {exc}"
+            f"Invalid OpenArm Mini {side} calibration at {artifact_path}: {exc}"
         ) from exc
-    if not isinstance(raw_data, dict):
-        raise OpenArmMiniCalibrationError(
-            f"Invalid OpenArm Mini {side} calibration at {artifact_path}: expected JSON object"
-        )
-    calibration = OpenArmMiniCalibration.from_dict(raw_data)
     if calibration.side != side:
         raise OpenArmMiniCalibrationError(
             f"OpenArm Mini calibration side mismatch at {artifact_path}: "
@@ -165,5 +124,5 @@ def save_calibration(path: Path, calibration: OpenArmMiniCalibration) -> Path:
     """Write a side-specific calibration artifact and return its file path."""
     artifact_path = calibration_file(path)
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
-    artifact_path.write_text(json.dumps(calibration.to_dict(), indent=2, sort_keys=True) + "\n")
+    artifact_path.write_text(calibration.model_dump_json(indent=2) + "\n")
     return artifact_path

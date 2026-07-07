@@ -19,8 +19,9 @@ from pathlib import Path
 
 import pytest
 
+from dimos.msgs.sensor_msgs.JointState import JointState
+import dimos.teleop.openarm_mini.adapter as adapter_module
 from dimos.teleop.openarm_mini.adapter import (
-    OpenArmMiniSideBus,
     OpenArmMiniTeleopAdapter,
     _calibrated_motor_radians,
     _normalize_motor_position,
@@ -62,6 +63,13 @@ class _FailingBus:
         raise ValueError("read failure")
 
 
+def _payload(command: object) -> JointState:
+    assert command is not None
+    payload = command.payload  # type: ignore[attr-defined]
+    assert isinstance(payload, JointState)
+    return payload
+
+
 def _calibration(side: str) -> OpenArmMiniCalibration:
     return OpenArmMiniCalibration(
         side=side,
@@ -98,6 +106,7 @@ def _readings() -> dict[str, float]:
 
 def test_adapter_loads_calibration_connects_both_buses_and_returns_joint_command(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     left_path, right_path = _write_calibrations(tmp_path)
     buses = {"left": _FakeBus(_readings()), "right": _FakeBus(_readings())}
@@ -107,12 +116,14 @@ def test_adapter_loads_calibration_connects_both_buses_and_returns_joint_command
         port: str,
         calibration: OpenArmMiniCalibration,
         baudrate: int,
-    ) -> OpenArmMiniSideBus:
+    ) -> _FakeBus:
         assert port in ("left-port", "right-port")
         assert baudrate == 123
         assert calibration.side == side
         assert "gripper" not in calibration.motors
         return buses[side]
+
+    monkeypatch.setattr(adapter_module, "_ScservoSideBus", bus_factory)
 
     adapter = OpenArmMiniTeleopAdapter(
         OpenArmMiniTeleopConfig(
@@ -121,18 +132,15 @@ def test_adapter_loads_calibration_connects_both_buses_and_returns_joint_command
             left_calibration_path=left_path,
             right_calibration_path=right_path,
             baudrate=123,
-        ),
-        bus_factory=bus_factory,
+        )
     )
 
     adapter.connect()
     command = adapter.get_current_command()
     adapter.disconnect()
 
-    assert command is not None
-    assert command.metadata.primary_output == "joint"
-    assert command.joint is not None
-    assert command.joint.name == [
+    joint = _payload(command)
+    assert joint.name == [
         *[f"openarm_left_joint{i}" for i in range(1, 8)],
         *[f"openarm_right_joint{i}" for i in range(1, 8)],
     ]
@@ -142,7 +150,10 @@ def test_adapter_loads_calibration_connects_both_buses_and_returns_joint_command
     assert buses["right"].disconnected
 
 
-def test_adapter_left_only_connects_left_bus_and_emits_left_joints(tmp_path: Path) -> None:
+def test_adapter_left_only_connects_left_bus_and_emits_left_joints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     left_path, right_path = _write_calibrations(tmp_path)
     left_bus = _FakeBus(_readings())
     created_sides: list[str] = []
@@ -152,12 +163,14 @@ def test_adapter_left_only_connects_left_bus_and_emits_left_joints(tmp_path: Pat
         port: str,
         calibration: OpenArmMiniCalibration,
         baudrate: int,
-    ) -> OpenArmMiniSideBus:
+    ) -> _FakeBus:
         created_sides.append(side)
         assert side == "left"
         assert port == "left-port"
         assert calibration.side == "left"
         return left_bus
+
+    monkeypatch.setattr(adapter_module, "_ScservoSideBus", bus_factory)
 
     adapter = OpenArmMiniTeleopAdapter(
         OpenArmMiniTeleopConfig(
@@ -166,8 +179,7 @@ def test_adapter_left_only_connects_left_bus_and_emits_left_joints(tmp_path: Pat
             left_calibration_path=left_path,
             right_calibration_path=right_path,
             enabled_sides=("left",),
-        ),
-        bus_factory=bus_factory,
+        )
     )
 
     adapter.connect()
@@ -175,9 +187,8 @@ def test_adapter_left_only_connects_left_bus_and_emits_left_joints(tmp_path: Pat
     adapter.disconnect()
 
     assert created_sides == ["left"]
-    assert command is not None
-    assert command.joint is not None
-    assert command.joint.name == [f"openarm_left_joint{i}" for i in range(1, 8)]
+    joint = _payload(command)
+    assert joint.name == [f"openarm_left_joint{i}" for i in range(1, 8)]
     assert left_bus.connected
     assert left_bus.disconnected
 
@@ -204,7 +215,10 @@ def test_config_rejects_wrong_target_joint_name_count() -> None:
         OpenArmMiniTeleopConfig(target_joint_names_by_side={"right": ("only_one",)})
 
 
-def test_adapter_returns_none_without_authority(tmp_path: Path) -> None:
+def test_adapter_returns_none_without_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     left_path, right_path = _write_calibrations(tmp_path)
     buses = {"left": _FakeBus(_readings()), "right": _FakeBus(_readings())}
 
@@ -213,16 +227,17 @@ def test_adapter_returns_none_without_authority(tmp_path: Path) -> None:
         port: str,
         calibration: OpenArmMiniCalibration,
         baudrate: int,
-    ) -> OpenArmMiniSideBus:
+    ) -> _FakeBus:
         return buses[side]
+
+    monkeypatch.setattr(adapter_module, "_ScservoSideBus", bus_factory)
 
     adapter = OpenArmMiniTeleopAdapter(
         OpenArmMiniTeleopConfig(
             left_calibration_path=left_path,
             right_calibration_path=right_path,
             authority_active=False,
-        ),
-        bus_factory=bus_factory,
+        )
     )
 
     adapter.connect()
@@ -232,7 +247,10 @@ def test_adapter_returns_none_without_authority(tmp_path: Path) -> None:
     assert command is None
 
 
-def test_adapter_emits_configured_global_target_joint_names(tmp_path: Path) -> None:
+def test_adapter_emits_configured_global_target_joint_names(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     left_path, right_path = _write_calibrations(tmp_path)
     right_bus = _FakeBus(_readings())
     target_names = tuple(f"right_arm/openarm_right_joint{i}" for i in range(1, 8))
@@ -242,9 +260,11 @@ def test_adapter_emits_configured_global_target_joint_names(tmp_path: Path) -> N
         port: str,
         calibration: OpenArmMiniCalibration,
         baudrate: int,
-    ) -> OpenArmMiniSideBus:
+    ) -> _FakeBus:
         assert side == "right"
         return right_bus
+
+    monkeypatch.setattr(adapter_module, "_ScservoSideBus", bus_factory)
 
     adapter = OpenArmMiniTeleopAdapter(
         OpenArmMiniTeleopConfig(
@@ -252,20 +272,21 @@ def test_adapter_emits_configured_global_target_joint_names(tmp_path: Path) -> N
             right_calibration_path=right_path,
             enabled_sides=("right",),
             target_joint_names_by_side={"right": target_names},
-        ),
-        bus_factory=bus_factory,
+        )
     )
 
     adapter.connect()
     command = adapter.get_current_command()
     adapter.disconnect()
 
-    assert command is not None
-    assert command.joint is not None
-    assert command.joint.name == list(target_names)
+    joint = _payload(command)
+    assert joint.name == list(target_names)
 
 
-def test_adapter_rejects_jump_threshold_by_returning_no_command(tmp_path: Path) -> None:
+def test_adapter_rejects_jump_threshold_by_returning_no_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     left_path, right_path = _write_calibrations(tmp_path)
     left_bus = _FakeBus(_readings())
     right_bus = _FakeBus(_readings())
@@ -276,16 +297,17 @@ def test_adapter_rejects_jump_threshold_by_returning_no_command(tmp_path: Path) 
         port: str,
         calibration: OpenArmMiniCalibration,
         baudrate: int,
-    ) -> OpenArmMiniSideBus:
+    ) -> _FakeBus:
         return buses[side]
+
+    monkeypatch.setattr(adapter_module, "_ScservoSideBus", bus_factory)
 
     adapter = OpenArmMiniTeleopAdapter(
         OpenArmMiniTeleopConfig(
             left_calibration_path=left_path,
             right_calibration_path=right_path,
             max_joint_jump_radians=0.1,
-        ),
-        bus_factory=bus_factory,
+        )
     )
 
     adapter.connect()
@@ -313,7 +335,10 @@ def test_calibrated_motor_radians_uses_zero_offset_full_encoder_span_and_flip() 
     )
 
 
-def test_adapter_clamps_over_limit_sender_side(tmp_path: Path) -> None:
+def test_adapter_clamps_over_limit_sender_side(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     left_path, right_path = _write_calibrations(tmp_path)
     buses = {"left": _FakeBus({**_readings(), "joint_1": 5.0}), "right": _FakeBus(_readings())}
 
@@ -322,24 +347,24 @@ def test_adapter_clamps_over_limit_sender_side(tmp_path: Path) -> None:
         port: str,
         calibration: OpenArmMiniCalibration,
         baudrate: int,
-    ) -> OpenArmMiniSideBus:
+    ) -> _FakeBus:
         return buses[side]
+
+    monkeypatch.setattr(adapter_module, "_ScservoSideBus", bus_factory)
 
     adapter = OpenArmMiniTeleopAdapter(
         OpenArmMiniTeleopConfig(
             left_calibration_path=left_path,
             right_calibration_path=right_path,
-        ),
-        bus_factory=bus_factory,
+        )
     )
 
     adapter.connect()
     command = adapter.get_current_command()
     adapter.disconnect()
 
-    assert command is not None
-    assert command.joint is not None
-    assert command.joint.position[0] == pytest.approx(1.35)
+    joint = _payload(command)
+    assert joint.position[0] == pytest.approx(1.35)
 
 
 def test_calibration_can_assign_semantic_joint_to_nondefault_motor_id() -> None:
@@ -355,7 +380,10 @@ def test_calibration_can_assign_semantic_joint_to_nondefault_motor_id() -> None:
     )
 
 
-def test_adapter_returns_none_when_bus_reports_invalid_reading(tmp_path: Path) -> None:
+def test_adapter_returns_none_when_bus_reports_invalid_reading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     left_path, right_path = _write_calibrations(tmp_path)
 
     def bus_factory(
@@ -363,15 +391,16 @@ def test_adapter_returns_none_when_bus_reports_invalid_reading(tmp_path: Path) -
         port: str,
         calibration: OpenArmMiniCalibration,
         baudrate: int,
-    ) -> OpenArmMiniSideBus:
+    ) -> _FailingBus | _FakeBus:
         return _FailingBus() if side == "left" else _FakeBus(_readings())
+
+    monkeypatch.setattr(adapter_module, "_ScservoSideBus", bus_factory)
 
     adapter = OpenArmMiniTeleopAdapter(
         OpenArmMiniTeleopConfig(
             left_calibration_path=left_path,
             right_calibration_path=right_path,
-        ),
-        bus_factory=bus_factory,
+        )
     )
 
     adapter.connect()

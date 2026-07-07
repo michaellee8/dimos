@@ -16,59 +16,34 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Literal, Protocol
+from typing import Protocol, TypeAlias
 
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.JointState import JointState
 
-TeleopPrimaryOutput = Literal["joint", "cartesian", "twist"]
-
-
-@dataclass(frozen=True)
-class TeleopCommandMetadata:
-    """Metadata attached to a teleop command."""
-
-    primary_output: TeleopPrimaryOutput
-    timestamp: float = field(default_factory=time.monotonic)
+TeleopPayload: TypeAlias = JointState | PoseStamped | Twist
 
 
 @dataclass(frozen=True)
 class TeleopCommand:
-    """Command envelope containing an active command or explicit stop."""
+    """Command envelope containing one typed payload or an explicit stop."""
 
-    metadata: TeleopCommandMetadata
-    joint: JointState | None = None
-    cartesian: PoseStamped | None = None
-    twist: Twist | None = None
+    payload: TeleopPayload | None = None
+    timestamp: float = field(default_factory=time.monotonic)
     stop: bool = False
 
     def __post_init__(self) -> None:
-        active_outputs = [
-            output
-            for output, payload in (
-                ("joint", self.joint),
-                ("cartesian", self.cartesian),
-                ("twist", self.twist),
-            )
-            if payload is not None
-        ]
         if self.stop:
-            if len(active_outputs) > 1:
-                raise ValueError("TeleopCommand stop envelope must not contain multiple payloads")
-            if active_outputs and active_outputs[0] != self.metadata.primary_output:
-                raise ValueError("TeleopCommand payload must match metadata.primary_output")
+            if self.payload is not None:
+                raise ValueError("TeleopCommand stop envelope must not contain a payload")
             return
-        if len(active_outputs) != 1:
-            raise ValueError("TeleopCommand must contain exactly one primary command payload")
-        if active_outputs[0] != self.metadata.primary_output:
-            raise ValueError("TeleopCommand payload must match metadata.primary_output")
+        if self.payload is None:
+            raise ValueError("TeleopCommand must contain a payload unless stop=True")
 
 
 class TeleopAdapter(Protocol):
     """Adapter interface for generic teleop command sources."""
-
-    primary_output: TeleopPrimaryOutput
 
     def connect(self) -> None: ...
 

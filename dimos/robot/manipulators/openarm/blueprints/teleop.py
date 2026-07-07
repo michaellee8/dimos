@@ -46,14 +46,6 @@ def _openarm_mini_teleop_config(*sides: str) -> OpenArmMiniTeleopConfig:
     return OpenArmMiniTeleopConfig(enabled_sides=tuple(sides))
 
 
-def _openarm_mini_teleop_kwargs(*sides: str) -> dict[str, OpenArmMiniTeleopConfig]:
-    config = _openarm_mini_teleop_config(*sides)
-    return {
-        "openarm_mini": config,
-        "openarm_mini_defaults": config,
-    }
-
-
 _teleop_hw = openarm_single_hardware()
 
 keyboard_teleop_openarm_mock = autoconnect(
@@ -91,7 +83,7 @@ keyboard_teleop_openarm = autoconnect(
 _openarm_mini_left_hw = openarm_hardware("left", adapter_type="mock")
 
 openarm_mini_left_teleop_viser = autoconnect(
-    OpenArmMiniTeleopModule.blueprint(**_openarm_mini_teleop_kwargs("left")),
+    OpenArmMiniTeleopModule.blueprint(openarm_mini=_openarm_mini_teleop_config("left")),
     ControlCoordinator.blueprint(
         hardware=[_openarm_mini_left_hw],
         tasks=[
@@ -110,7 +102,7 @@ openarm_mini_left_teleop_viser = autoconnect(
 _openarm_mini_right_hw = openarm_hardware("right", adapter_type="mock")
 
 openarm_mini_right_teleop_viser = autoconnect(
-    OpenArmMiniTeleopModule.blueprint(**_openarm_mini_teleop_kwargs("right")),
+    OpenArmMiniTeleopModule.blueprint(openarm_mini=_openarm_mini_teleop_config("right")),
     ControlCoordinator.blueprint(
         hardware=[_openarm_mini_right_hw],
         tasks=[
@@ -130,7 +122,7 @@ _openarm_mini_dual_left_hw = openarm_hardware("left", adapter_type="mock")
 _openarm_mini_dual_right_hw = openarm_hardware("right", adapter_type="mock")
 
 openarm_mini_dual_teleop_viser = autoconnect(
-    OpenArmMiniTeleopModule.blueprint(**_openarm_mini_teleop_kwargs("left", "right")),
+    OpenArmMiniTeleopModule.blueprint(openarm_mini=_openarm_mini_teleop_config("left", "right")),
     ControlCoordinator.blueprint(
         hardware=[_openarm_mini_dual_left_hw, _openarm_mini_dual_right_hw],
         tasks=[

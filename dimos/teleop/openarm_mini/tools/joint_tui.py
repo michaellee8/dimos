@@ -20,22 +20,23 @@ ControlCoordinator and does not connect follower OpenArm hardware.
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 from pathlib import Path
 import time
+from typing import Literal
 
 from rich.console import Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+import typer
 
 from dimos.teleop.openarm_mini.adapter import _calibrated_motor_radians
-from dimos.teleop.openarm_mini.calibrate_openarm_mini import _RawFeetechReader
 from dimos.teleop.openarm_mini.calibration import OPENARM_MINI_ARM_JOINT_NAMES, load_calibration
 from dimos.teleop.openarm_mini.config import OpenArmMiniTeleopConfig, default_calibration_path
 from dimos.teleop.openarm_mini.mapping import map_side_readings
+from dimos.teleop.openarm_mini.tools.calibrate import _RawFeetechReader
 
 
 @dataclass(frozen=True)
@@ -50,46 +51,40 @@ class OpenArmMiniJointRow:
     flip: bool
 
 
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Display OpenArm Mini leader joints in a Rich TUI."
-    )
-    parser.add_argument("--side", choices=("left", "right", "both"), default="both")
-    parser.add_argument("--port-left", default=OpenArmMiniTeleopConfig.port_left)
-    parser.add_argument("--port-right", default=OpenArmMiniTeleopConfig.port_right)
-    parser.add_argument("--baudrate", type=int, default=OpenArmMiniTeleopConfig.baudrate)
-    parser.add_argument(
-        "--left-calibration-path", type=Path, default=default_calibration_path("left")
-    )
-    parser.add_argument(
-        "--right-calibration-path", type=Path, default=default_calibration_path("right")
-    )
-    parser.add_argument("--refresh-hz", type=float, default=10.0)
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = _parse_args()
-    refresh_seconds = 1.0 / args.refresh_hz
-    sides = ("left", "right") if args.side == "both" else (args.side,)
+def main(
+    side: Literal["left", "right", "both"] = typer.Option("both"),
+    port_left: str = typer.Option(OpenArmMiniTeleopConfig.port_left),
+    port_right: str = typer.Option(OpenArmMiniTeleopConfig.port_right),
+    baudrate: int = typer.Option(OpenArmMiniTeleopConfig.baudrate),
+    left_calibration_path: Path = typer.Option(default_calibration_path("left")),
+    right_calibration_path: Path = typer.Option(default_calibration_path("right")),
+    refresh_hz: float = typer.Option(10.0),
+) -> None:
+    """Display OpenArm Mini leader joints in a Rich TUI."""
+    refresh_seconds = 1.0 / refresh_hz
+    sides = ("left", "right") if side == "both" else (side,)
     readers: dict[str, _RawFeetechReader] = {}
     calibration_paths: dict[str, Path] = {
-        "left": args.left_calibration_path,
-        "right": args.right_calibration_path,
+        "left": left_calibration_path,
+        "right": right_calibration_path,
     }
     try:
-        for side in sides:
-            port = args.port_left if side == "left" else args.port_right
-            reader = _RawFeetechReader(port, args.baudrate)
+        for selected_side in sides:
+            port = port_left if selected_side == "left" else port_right
+            reader = _RawFeetechReader(port, baudrate)
             reader.connect()
-            readers[side] = reader
+            readers[selected_side] = reader
 
-        with Live(refresh_per_second=args.refresh_hz, screen=True) as live:
+        with Live(refresh_per_second=refresh_hz, screen=True) as live:
             while True:
                 rows: list[OpenArmMiniJointRow] = []
-                for side, reader in readers.items():
+                for selected_side, reader in readers.items():
                     rows.extend(
-                        _read_side_rows(side, calibration_paths[side], reader.read_raw_positions())
+                        _read_side_rows(
+                            selected_side,
+                            calibration_paths[selected_side],
+                            reader.read_raw_positions(),
+                        )
                     )
                 live.update(_build_joint_dashboard(rows))
                 time.sleep(refresh_seconds)
@@ -163,4 +158,4 @@ def _build_joint_dashboard(rows: list[OpenArmMiniJointRow]) -> Group:
 
 
 if __name__ == "__main__":
-    main()
+    typer.run(main)

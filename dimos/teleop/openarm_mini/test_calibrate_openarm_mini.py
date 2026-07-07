@@ -18,16 +18,16 @@ from pathlib import Path
 
 import pytest
 
-from dimos.teleop.openarm_mini.calibrate_openarm_mini import (
+from dimos.teleop.openarm_mini.calibration import (
+    OPENARM_MINI_ARM_JOINT_NAMES,
+    load_calibration,
+)
+from dimos.teleop.openarm_mini.tools.calibrate import (
     DEFAULT_FLIPS_BY_SIDE,
     _calibrate_side,
     _capture_zero_calibration,
     _format_calibration_confirmation,
     _parse_flip_overrides,
-)
-from dimos.teleop.openarm_mini.calibration import (
-    OPENARM_MINI_ARM_JOINT_NAMES,
-    load_calibration,
 )
 
 

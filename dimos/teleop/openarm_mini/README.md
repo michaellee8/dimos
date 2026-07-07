@@ -22,7 +22,7 @@ controller and run the one-shot setup helper. Do not leave multiple motors on
 the bus when changing IDs, especially if they may share the same current ID.
 
 ```bash
-python -m dimos.teleop.openarm_mini.setup_motor_id \
+python -m dimos.teleop.openarm_mini.tools.setup_motor_id \
   --port /dev/ttyUSB1 \
   --new-id 3
 ```
@@ -30,7 +30,7 @@ python -m dimos.teleop.openarm_mini.setup_motor_id \
 If the current ID is known, skip scanning:
 
 ```bash
-python -m dimos.teleop.openarm_mini.setup_motor_id \
+python -m dimos.teleop.openarm_mini.tools.setup_motor_id \
   --port /dev/ttyUSB1 \
   --old-id 1 \
   --new-id 3
@@ -53,7 +53,7 @@ the teleop blueprint. Defaults are side-specific directories:
 
 ## Manual calibration
 
-Run the demo script with the OpenArm Mini leader connected. The script only
+Run the calibration utility with the OpenArm Mini leader connected. The utility only
 opens the leader Feetech serial ports; it never starts `ControlCoordinator` and
 never connects follower OpenArm hardware.
 
@@ -65,7 +65,7 @@ read or stored in v1 because the OpenArm follower gripper is not yet exposed as 
 formal coordinator-controllable API.
 
 ```bash
-python -m dimos.teleop.openarm_mini.calibrate_openarm_mini \
+python -m dimos.teleop.openarm_mini.tools.calibrate \
   --side both \
   --port-left /dev/ttyUSB1 \
   --port-right /dev/ttyUSB0
@@ -84,7 +84,7 @@ Default flip sets match the known OpenArm Mini leader orientation. Override them
 when needed:
 
 ```bash
-python -m dimos.teleop.openarm_mini.calibrate_openarm_mini \
+python -m dimos.teleop.openarm_mini.tools.calibrate \
   --side left \
   --port-left /dev/ttyUSB1 \
   --left-flips joint_1,joint_3,joint_4,joint_5,joint_6,joint_7
@@ -103,7 +103,7 @@ v1.
 To inspect calibrated leader readings without starting robot control:
 
 ```bash
-python -m dimos.teleop.openarm_mini.calibrate_openarm_mini \
+python -m dimos.teleop.openarm_mini.tools.calibrate \
   --side left \
   --port-left /dev/ttyUSB1 \
   --live-readout
@@ -113,7 +113,7 @@ For a Rich terminal UI that continuously displays raw ticks, calibrated radians,
 sender-side clamped follower radians, motor ids, and flip values:
 
 ```bash
-python -m dimos.teleop.openarm_mini.joint_tui_openarm_mini \
+python -m dimos.teleop.openarm_mini.tools.joint_tui \
   --side both \
   --port-left /dev/ttyUSB1 \
   --port-right /dev/ttyUSB0
@@ -143,19 +143,17 @@ The blueprint requires:
 - a valid left calibration artifact
 - Viser dependencies from `uv sync --extra manipulation` or `uv sync --extra all`
 
-This workflow is visualization-only on the follower side. It renders the left
-OpenArm follower model in Viser from the leader-derived `joint_command`, but it
-does not start `ControlCoordinator`, does not connect OpenArm follower hardware,
-does not use mock follower hardware, and does not validate physical follower
-execution or coordinator routing. Use the production OpenArm Mini teleop
-blueprint and hardware validation separately for physical execution bring-up.
+This workflow is visualization-only on the follower side. It routes the
+leader-derived `joint_command` through `ControlCoordinator` into mock follower
+hardware, then renders `coordinator_joint_state` in `ManipulationModule`'s Viser
+backend. It never connects real OpenArm follower hardware.
 
 ## Right-arm coordinator + Viser bring-up
 
 Use `openarm-mini-right-teleop-viser` to route a real OpenArm Mini right leader
 through `ControlCoordinator` and render the right follower state in
 `ManipulationModule`'s Viser backend. The leader is always physical; the follower
-is mock by default and becomes real only when `--can-port` is provided.
+is always mock in this blueprint.
 
 Mock follower, safe for coordinator/Viser validation without a connected OpenArm
 follower:
@@ -164,20 +162,13 @@ follower:
 uv run dimos run openarm-mini-right-teleop-viser
 ```
 
-Real right OpenArm follower over CAN:
-
-```bash
-uv run dimos --can-port can0 run openarm-mini-right-teleop-viser
-```
-
 The blueprint requires:
 
 - a real OpenArm Mini right leader connected to the configured right Feetech
-  serial port (default `/dev/ttyACM0`)
+  serial port (default `/dev/ttyUSB0`)
 - a valid right calibration artifact at the default right calibration path, or a
   configured `right_calibration_path`
 - Viser dependencies from `uv sync --extra manipulation` or `uv sync --extra all`
-- `--can-port` only when intentionally enabling the real right follower
 
 Override the right leader serial port with a module option:
 
@@ -190,10 +181,8 @@ The right blueprint publishes ManipulationModule-compatible global coordinator
 joint names (`right_arm/openarm_right_joint1` through
 `right_arm/openarm_right_joint7`). Viser renders follower-observed
 `coordinator_joint_state`, not the raw sender-side command, so mock mode validates
-the same coordinator routing used before real hardware is connected. Before using
-`--can-port`, align the physical follower near the leader-implied command and be
-ready to stop the process; automatic startup alignment gating is out of scope for
-v1.
+the same coordinator routing used before real hardware is connected. Real
+follower hardware is intentionally out of scope for these Viser demo blueprints.
 
 ## Dual-arm coordinator + Viser bring-up
 
@@ -207,12 +196,6 @@ followers:
 
 ```bash
 uv run dimos run openarm-mini-dual-teleop-viser
-```
-
-Real left and right OpenArm followers over explicit CAN ports:
-
-```bash
-uv run dimos --left-can-port can1 --right-can-port can0 run openarm-mini-dual-teleop-viser
 ```
 
 Override leader serial ports with module options:
@@ -229,6 +212,5 @@ joint names for both arms:
 - `left_arm/openarm_left_joint1` through `left_arm/openarm_left_joint7`
 - `right_arm/openarm_right_joint1` through `right_arm/openarm_right_joint7`
 
-Each follower side remains mocked unless its side-specific CAN port is provided.
-Before running with real followers, align both physical arms near the
-leader-implied command and be ready to stop the process.
+Each follower side remains mocked. Real follower hardware is intentionally out of
+scope for these Viser demo blueprints.

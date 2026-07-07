@@ -52,10 +52,6 @@ OPENARM_FOLLOWER_JOINT_LIMITS: dict[str, tuple[tuple[float, float], ...]] = {
 }
 
 
-class OpenArmMiniMappingError(ValueError):
-    """Raised when OpenArm Mini leader readings cannot be mapped safely."""
-
-
 @dataclass(frozen=True)
 class OpenArmMiniSideCommand:
     """Mapped command for one OpenArm follower side."""
@@ -78,7 +74,7 @@ def map_side_readings(
 
     follower_joint_names = tuple(target_joint_names or openarm_joints(side))
     if len(follower_joint_names) != len(LEADER_JOINT_NAMES):
-        raise OpenArmMiniMappingError(
+        raise ValueError(
             f"target_joint_names must contain {len(LEADER_JOINT_NAMES)} names, "
             f"got {len(follower_joint_names)}"
         )
@@ -112,9 +108,7 @@ def combine_side_commands(commands: list[OpenArmMiniSideCommand]) -> JointState:
 def _validate_readings(readings: dict[str, float]) -> None:
     missing = set(LEADER_MOTOR_NAMES) - set(readings)
     if missing:
-        raise OpenArmMiniMappingError(
-            f"OpenArm Mini readings missing arm joints: {sorted(missing)}"
-        )
+        raise ValueError(f"OpenArm Mini readings missing arm joints: {sorted(missing)}")
 
 
 def _clamp(position: float, lower: float, upper: float) -> float:
@@ -134,7 +128,7 @@ def _validate_jump_threshold(
             continue
         jump = abs(position - previous_position)
         if jump > max_joint_jump_radians:
-            raise OpenArmMiniMappingError(
+            raise ValueError(
                 f"Mapped OpenArm Mini {joint_name} jump {jump:.3f} rad exceeds "
                 f"threshold {max_joint_jump_radians:.3f} rad"
             )

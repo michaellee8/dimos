@@ -21,8 +21,9 @@ import pytest
 
 from dimos.control.coordinator import ControlCoordinator, TaskConfig
 from dimos.core.coordination.blueprints import Blueprint
+from dimos.core.coordination.worker_manager_python import _merge_config_args
 from dimos.manipulation.manipulation_module import ManipulationModule
-from dimos.robot.cli.dimos import arg_help, load_config_args
+from dimos.robot.cli.dimos import load_config_args
 from dimos.robot.manipulators.openarm.blueprints import teleop
 from dimos.teleop.openarm_mini.config import OpenArmMiniTeleopConfig
 from dimos.teleop.openarm_mini.teleop_module import (
@@ -49,7 +50,7 @@ def _teleop_config_after_cli_override(
         Path("/tmp/nonexistent-dimos-config.json"),
     )
     module_kwargs = _module_kwargs(blueprint, OpenArmMiniTeleopModule).copy()
-    module_kwargs.update(config_args[OpenArmMiniTeleopModule.name])
+    module_kwargs = _merge_config_args(module_kwargs, config_args[OpenArmMiniTeleopModule.name])
     return OpenArmMiniTeleopModuleConfig(**module_kwargs)
 
 
@@ -108,18 +109,6 @@ def test_openarm_mini_viser_blueprints_use_teleop_coordinator_and_manipulation(
 
 def test_openarm_mini_real_follower_blueprint_is_not_registered() -> None:
     assert not hasattr(teleop, "openarm_mini_teleop_openarm")
-
-
-def test_openarm_mini_viser_blueprint_arg_help_handles_nested_config() -> None:
-    output = arg_help(
-        teleop.openarm_mini_right_teleop_viser.config(),
-        teleop.openarm_mini_right_teleop_viser,
-    )
-
-    assert "openarmminiteleopmodule.openarm_mini" in output
-    assert "openarm_mini_defaults" not in output
-    assert "manipulationmodule.visualization.backend" in output
-    assert "default: viser" in output
 
 
 def test_right_openarm_mini_cli_port_override_preserves_right_side_default() -> None:

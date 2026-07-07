@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import pytest
@@ -22,7 +23,7 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.teleop.runtime.teleop_module import TeleopModule
-from dimos.teleop.runtime.types import TeleopCommand, TeleopCommandMetadata, TeleopPrimaryOutput
+from dimos.teleop.runtime.types import TeleopCommand
 
 
 class _PublishedCommands:
@@ -34,13 +35,8 @@ class _PublishedCommands:
 
 
 class _Adapter:
-    def __init__(
-        self,
-        commands: list[TeleopCommand | None] | None = None,
-        primary_output: TeleopPrimaryOutput = "joint",
-    ) -> None:
-        self.primary_output: TeleopPrimaryOutput = primary_output
-        self.commands = commands if commands is not None else []
+    def __init__(self, commands: Sequence[TeleopCommand | None] | None = None) -> None:
+        self.commands = list(commands) if commands is not None else []
         self.connected = False
         self.disconnected = False
 
@@ -64,37 +60,19 @@ def _module(adapter: _Adapter) -> TeleopModule:
     return module
 
 
-def test_command_envelope_requires_exactly_one_matching_primary_output() -> None:
+def test_command_envelope_requires_payload_unless_stopping() -> None:
     joint = JointState({"name": ["j0"], "position": [1.0]})
 
-    assert TeleopCommand(TeleopCommandMetadata("joint"), joint=joint).joint is joint
-    assert TeleopCommand(TeleopCommandMetadata("joint"), stop=True).stop
-    with pytest.raises(ValueError, match="exactly one"):
-        TeleopCommand(TeleopCommandMetadata("joint"))
-    with pytest.raises(ValueError, match="exactly one"):
-        TeleopCommand(TeleopCommandMetadata("joint"), joint=joint, twist=Twist())
-    with pytest.raises(ValueError, match="multiple"):
-        TeleopCommand(TeleopCommandMetadata("joint"), joint=joint, twist=Twist(), stop=True)
-    with pytest.raises(ValueError, match="match"):
-        TeleopCommand(TeleopCommandMetadata("twist"), joint=joint)
-
-
-def test_adapter_primary_output_must_match_commands(mocker: Any) -> None:
-    adapter = _Adapter(
-        [TeleopCommand(TeleopCommandMetadata("cartesian", timestamp=1.0), cartesian=PoseStamped())]
-    )
-    module = _module(adapter)
-    mocker.patch.object(module, "_now", return_value=1.0)
-
-    try:
-        with pytest.raises(ValueError, match="does not match"):
-            module.tick()
-    finally:
-        module.stop()
+    assert TeleopCommand(joint).payload is joint
+    assert TeleopCommand(stop=True).stop
+    with pytest.raises(ValueError, match="payload"):
+        TeleopCommand()
+    with pytest.raises(ValueError, match="payload"):
+        TeleopCommand(joint, stop=True)
 
 
 def test_explicit_stop_command_is_not_published(mocker: Any) -> None:
-    adapter = _Adapter([TeleopCommand(TeleopCommandMetadata("joint", timestamp=1.0), stop=True)])
+    adapter = _Adapter([TeleopCommand(timestamp=1.0, stop=True)])
     module = _module(adapter)
     mocker.patch.object(module, "_now", return_value=1.0)
 
@@ -111,28 +89,9 @@ def test_tick_routes_only_active_primary_output(mocker: Any) -> None:
     cartesian = PoseStamped(position=[1.0, 2.0, 3.0])
     twist = Twist(linear=[1.0, 0.0, 0.0], angular=[0.0, 0.0, 0.0])
     modules = [
-        _module(
-            _Adapter(
-                [TeleopCommand(TeleopCommandMetadata("joint", timestamp=1.0), joint=joint)],
-                primary_output="joint",
-            )
-        ),
-        _module(
-            _Adapter(
-                [
-                    TeleopCommand(
-                        TeleopCommandMetadata("cartesian", timestamp=1.0), cartesian=cartesian
-                    )
-                ],
-                primary_output="cartesian",
-            )
-        ),
-        _module(
-            _Adapter(
-                [TeleopCommand(TeleopCommandMetadata("twist", timestamp=1.0), twist=twist)],
-                primary_output="twist",
-            )
-        ),
+        _module(_Adapter([TeleopCommand(joint, timestamp=1.0)])),
+        _module(_Adapter([TeleopCommand(cartesian, timestamp=1.0)])),
+        _module(_Adapter([TeleopCommand(twist, timestamp=1.0)])),
     ]
     for module in modules:
         mocker.patch.object(module, "_now", return_value=1.0)
@@ -151,7 +110,7 @@ def test_tick_routes_only_active_primary_output(mocker: Any) -> None:
 
 def test_stale_commands_are_not_published(mocker: Any) -> None:
     joint = JointState({"name": ["j0"], "position": [1.0]})
-    adapter = _Adapter([TeleopCommand(TeleopCommandMetadata("joint", timestamp=1.0), joint=joint)])
+    adapter = _Adapter([TeleopCommand(joint, timestamp=1.0)])
     module = _module(adapter)
     mocker.patch.object(module, "_now", return_value=2.01)
 
@@ -168,8 +127,8 @@ def test_rate_limiting_skips_commands(mocker: Any) -> None:
     second = JointState({"name": ["j0"], "position": [2.0]})
     adapter = _Adapter(
         [
-            TeleopCommand(TeleopCommandMetadata("joint", timestamp=1.0), joint=first),
-            TeleopCommand(TeleopCommandMetadata("joint", timestamp=1.0), joint=second),
+            TeleopCommand(first, timestamp=1.0),
+            TeleopCommand(second, timestamp=1.0),
         ]
     )
     module = TeleopModule(adapter, max_publish_rate_hz=10.0, stale_command_timeout_s=1.0)
@@ -191,7 +150,7 @@ def test_start_stop_connect_disconnect_and_no_publish_after_stop(
     mocker: Any,
 ) -> None:
     joint = JointState({"name": ["j0"], "position": [1.0]})
-    adapter = _Adapter([TeleopCommand(TeleopCommandMetadata("joint", timestamp=1.0), joint=joint)])
+    adapter = _Adapter([TeleopCommand(joint, timestamp=1.0)])
     module = _module(adapter)
     mocker.patch("dimos.teleop.runtime.teleop_module.threading.Thread.start")
     mocker.patch("dimos.teleop.runtime.teleop_module.threading.Thread.join")
