@@ -19,9 +19,8 @@
     a second broker session next to any transport-bound streams. The current
     pattern binds ``Cloudflare*``/``LiveKit*`` transports (including video —
     ``BrokerProvider`` has media support) directly to the streams of ONE
-    module per robot: see ``go2_hosted_connection.py`` and
-    ``arm_hosted_connection.py``. Kept only because ``teleop-hosted-go2`` /
-    ``teleop-hosted-xarm7`` still run on it; deleted once those migrate.
+    module per robot: see ``go2_hosted_connection.py``. Kept only because
+    ``teleop-hosted-go2`` still runs on it; deleted once that migrates.
 """
 
 from __future__ import annotations
@@ -109,7 +108,7 @@ class HostedTeleopModule(Module):
         warnings.warn(
             "HostedTeleopModule is deprecated: bind Cloudflare*/LiveKit* "
             "transports to your module's streams instead (video included) — "
-            "see go2_hosted_connection.py / arm_hosted_connection.py.",
+            "see go2_hosted_connection.py.",
             DeprecationWarning,
             stacklevel=2,
         )

@@ -17,9 +17,8 @@
 .. deprecated::
     DO NOT USE for new work — these subclass the deprecated
     ``HostedTeleopModule`` (see its docstring). Use the transport-swap
-    modules instead: ``go2_hosted_connection.py`` for the base,
-    ``arm_hosted_connection.py`` for arms. Kept only for the legacy
-    ``teleop-hosted-go2`` / ``teleop-hosted-xarm7`` blueprints.
+    module instead: ``go2_hosted_connection.py``. Kept only for the legacy
+    ``teleop-hosted-go2`` blueprint.
 """
 
 import time

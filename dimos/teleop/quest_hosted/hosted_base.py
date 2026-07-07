@@ -16,8 +16,8 @@
 
 Camera mux (via ``CameraMuxMixin``), state_json dispatch, cmd_ack, E-STOP
 latch storage, and the telemetry push loop — everything hosted teleop needs
-regardless of robot shape. See ``Go2HostedConnection`` / ``ArmHostedConnection``
-for the two existing shapes; a new robot implements the same hooks.
+regardless of robot shape. See ``Go2HostedConnection`` for the reference
+shape; a new robot implements the same hooks.
 
 Host contract: declare ``state_json``/``telemetry_out``/``mux_image``/
 ``video_stats`` streams (all broker-bound streams on ONE module = one broker

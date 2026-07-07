@@ -14,7 +14,6 @@
 
 """Hosted teleop blueprints (WebRTC transport)."""
 
-from dimos.control.blueprints.teleop import coordinator_teleop_xarm7
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.transport import (
     CloudflareTransport,
@@ -26,7 +25,6 @@ from dimos.core.transport import (
 from dimos.hardware.sensors.camera.realsense.camera import RealSenseCamera
 from dimos.mapping.costmapper import CostMapper
 from dimos.mapping.voxels import VoxelGridMapper
-from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
@@ -35,44 +33,8 @@ from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic import unitree_go2_basic
 from dimos.robot.unitree.go2.connection import GO2Connection
-from dimos.teleop.quest.quest_types import Buttons
-from dimos.teleop.quest_hosted.arm_hosted_connection import ArmHostedConnection
 from dimos.teleop.quest_hosted.go2_hosted_connection import Go2HostedConnection
-from dimos.teleop.quest_hosted.hosted_extensions import (
-    HostedArmTeleopModule,
-    HostedTwistTeleopModule,
-)
-
-
-# Distinct classes so two RealSense units coexist in one blueprint: module
-# identity is the class throughout the stack (blueprint dedup, coordinator
-# registries, remap keys, RPC topics, config namespace). Configure serials
-# with -o frontcamera.serial_number=... -o wristcamera.serial_number=...
-class FrontCamera(RealSenseCamera):
-    pass
-
-
-class WristCamera(RealSenseCamera):
-    pass
-
-
-# Single XArm7 hosted teleop. Pass `--simulation` to run in MuJoCo.
-teleop_hosted_xarm7 = (
-    autoconnect(
-        HostedArmTeleopModule.blueprint(task_names={"right": "teleop_xarm"}),
-        coordinator_teleop_xarm7,
-    )
-    .transports(
-        {
-            ("right_controller_output", PoseStamped): LCMTransport.spec(
-                "/coordinator/cartesian_command", PoseStamped
-            ),
-            ("buttons", Buttons): LCMTransport.spec("/teleop/buttons", Buttons),
-        }
-    )
-    .global_config(rerun_open="none")
-)
-
+from dimos.teleop.quest_hosted.hosted_extensions import HostedTwistTeleopModule
 
 # Hosted teleop via the legacy module wrapper (the transport swap is preferred).
 teleop_hosted_go2 = autoconnect(
@@ -175,48 +137,9 @@ teleop_hosted_go2_multicam = (
 )
 
 
-# XArm7 hosted teleop over CF Realtime with two RealSense cams (front + wrist),
-# operator-selectable via camera_select, mux'd by ArmHostedConnection into one
-# video track. Run with -o transports.broker.api_key=dtk_live_...
-teleop_hosted_xarm7_multicam = (
-    autoconnect(
-        ArmHostedConnection.blueprint(task_names={"right": "teleop_xarm"}),
-        coordinator_teleop_xarm7,
-        FrontCamera.blueprint(camera_name="front", enable_depth=False, enable_pointcloud=False),
-        WristCamera.blueprint(camera_name="wrist", enable_depth=False, enable_pointcloud=False),
-    )
-    .remappings(
-        [
-            (FrontCamera, "color_image", "cam1_in"),
-            (WristCamera, "color_image", "cam2_in"),
-        ]
-    )
-    .transports(
-        {
-            # Broker-bound streams — all live on ArmHostedConnection (one session).
-            ("cmd_raw", bytes): CloudflareTransport.spec("cmd_unreliable"),
-            ("state_json", bytes): CloudflareTransport.spec("state_reliable"),
-            ("telemetry_out", bytes): CloudflareTransport.spec("state_reliable_back"),
-            ("mux_image", Image): CloudflareVideoTransport.spec(),
-            # Cameras → station over LCM (cameras run in other workers).
-            ("cam1_in", Image): LCMTransport.spec("cam1_in", Image),
-            ("cam2_in", Image): LCMTransport.spec("cam2_in", Image),
-            # Station → coordinator control plane.
-            ("right_controller_output", PoseStamped): LCMTransport.spec(
-                "/coordinator/cartesian_command", PoseStamped
-            ),
-            ("buttons", Buttons): LCMTransport.spec("/teleop/buttons", Buttons),
-        }
-    )
-    .global_config(rerun_open="none", viewer="none")
-)
-
-
 __all__ = [
     "teleop_hosted_go2",
     "teleop_hosted_go2_livekit",
     "teleop_hosted_go2_multicam",
     "teleop_hosted_go2_transport",
-    "teleop_hosted_xarm7",
-    "teleop_hosted_xarm7_multicam",
 ]
