@@ -15,7 +15,7 @@ Dimensional is a fast-moving, pre-release robotics OS maintained by a small team
 - [AI usage](#ai-usage)
 - [Safety first](#safety-first)
 - [First-time contributors](#first-time-contributors)
-- [Issues vs. discussions](#issues-vs-discussions)
+- [Issues vs discussions](#issues-vs-discussions)
 - [How to](#how-to)
 - [Contributor License Agreement](#contributor-license-agreement)
 - [Code of conduct](#code-of-conduct)
@@ -47,7 +47,7 @@ dimOS controls physical robots. Contributions that affect control loops, motor d
 
 ## First-time contributors
 
-We want people to use Dimensional, learn it, and help us building it. You do not need robotics hardware or prior experience with every part of the stack to make a useful contribution.
+We want people to use Dimensional, learn it, and help us build it. You do not need robotics hardware or prior experience with every part of the stack to make a useful contribution.
 
 **Start here.**
 Browse [open issues labeled `good first issue`](https://github.com/dimensionalOS/dimos/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22). These are scoped tasks that maintainers have marked as approachable for newcomers. Pick one, read the description, and comment if you want to work on it or need clarification. Maintainers are happy to point you in the right direction.
@@ -56,7 +56,7 @@ Browse [open issues labeled `good first issue`](https://github.com/dimensionalOS
 Follow [`AGENTS.md`](AGENTS.md) for install (`uv sync --extra all`), running blueprints in simulation or replay, and the test workflow (`uv run pytest`). Most changes can be developed and validated without a physical robot.
 
 **This still applies to you.**
-The [critical rule](#the-critical-rule) and [AI policy](AI_POLICY.md) apply to everyone. Use AI tools if they help you learn the codebase, but understand what you submit. Link your PR to the issue you are working on.
+The [critical rule](#the-critical-rule) and [AI policy](AI_POLICY.md) apply to every outside contribution, including yours. Use AI tools if they help you learn the codebase, but understand what you submit. Link your PR to the issue you are working on.
 
 ## Issues vs Discussions
 
@@ -67,37 +67,41 @@ We keep a clean separation so maintainers can find work that is actually ready.
 
 This means most contributions start as a discussion, not an issue or a PR.
 
-## How to report a bug:
+## How to
+
+### Report a bug
 
 1. Search [existing issues](https://github.com/dimensionalOS/dimos/issues) and [discussions](https://github.com/dimensionalOS/dimos/discussions) first, including closed ones. Your bug may already be known or fixed.
-2. If it is new, open a discussion describing the problem. Include your OS, install method (`uv`, Nix, Docker), the robot or blueprint involved, the exact command you ran, and the full error or unexpected behavior.
+2. If it is new, open a [GitHub discussion](https://github.com/dimensionalOS/dimos/discussions) describing the problem. Include your OS, install method (`uv`, Nix, Docker), the robot or blueprint involved, the exact command you ran, and the full error or unexpected behavior.
 3. If an open issue or discussion already matches, do not add a "+1" comment, use an emoji reaction or the upvote button instead. Comments notify everyone subscribed. Reactions do not.
 
 ### Propose a feature
 
 1. Search issues and discussions to make sure it has not been proposed already.
-2. Open a **discussion** in the feature or ideas category describing what you want and why. Keep it focused.
+2. Open a [discussion](https://github.com/dimensionalOS/dimos/discussions) in the feature or ideas category describing what you want and why. Keep it focused.
 3. If maintainers accept it, it becomes an issue. That is your green light to implement.
 
-## How to submit a pull request:
+### Submit a pull request
 
-1. **PRs should map to an accepted issue:** If you open a PR for something that was not discussed and accepted first, it may sit unreviewed or be closed. This is not because the idea is bad, but because unscoped PRs are expensive to review. When in doubt, open a discussion and link your branch.
+1. **Match the PR to its weight:** Small, safe changes like typo and doc fixes can go straight to a PR. Anything non-trivial should map to an accepted issue first. Core architecture changes — modules, streams, transports, blueprints, agents, public APIs, robot or platform support, and major dependency changes — should start as a [discussion](https://github.com/dimensionalOS/dimos/discussions) before any code. Unscoped PRs are expensive to review, so they may sit unreviewed or be closed. When in doubt, open a discussion and link your branch.
 2. **Sign the CLA:** All contributions require a signed [Contributor License Agreement](CLA.md). See [Contributor License Agreement](#contributor-license-agreement) below.
 3. **Follow the build and style conventions in [`AGENTS.md`](AGENTS.md):** Use branch prefixes (`feat/`, `fix/`, `docs/`, and so on), target `main`, run the fast test suite (`uv run pytest`), pass pre-commit, and do not force-push or spam pushes. Every push triggers roughly an hour of CI.
 4. **Fill out the PR description template:** GitHub pre-fills it when you open the pull request. Do not clear it. Complete every section:
 
+   - Contribution path: Link the issue or discussion, or tick the small-safe-change box.
    - Problem: What is broken or missing.
    - Solution: What your change does.
    - How to Test: The sim, replay, or hardware steps a reviewer can follow.
-   - AI assistance: What was AI-assisted, as required by the [AI policy](AI_POLICY.md).
-   - CLA checkbox: Confirm you have signed.
+   - AI assistance: The tool and model used and how much, as required by the [AI policy](AI_POLICY.md).
+   - Checklist: Including the CLA confirmation.
 
    If you strip out the template, maintainers may close the PR without reviewing it.
-5. **PRs are not the place to debate design.** If a feature needs discussion, use a discussion and link your branch.
+5. **Your PR description is the first thing we judge.** A clear, specific description is our first heuristic for whether a change was understood or slopped together. Write a good one, and ideally ping us on [Discord](https://discord.gg/dimos) before you start and after you push. If the PR is not yet ready for human review, keep it as a draft.
+6. **PRs are not the place to debate design.** If a feature needs discussion, use a discussion and link your branch.
 
 ### Ask a question
 
-Open a Q&A discussion, or join the [Discord](https://discord.gg/dimos) and ask in the help channel. Questions do not need the detail a bug report does.
+Open a [Q&A discussion](https://github.com/dimensionalOS/dimos/discussions), or join the [Discord](https://discord.gg/dimos) and ask in the help channel. Questions do not need the detail a bug report does.
 
 ## Contributor License Agreement
 

@@ -7,13 +7,17 @@ This policy exists for one reason. Contributing to dimOS carries a quality and s
 ## The Rules
 
 - **Disclose all AI usage**
-If AI assisted your contribution in any form, say so. Name the tool (for example Claude Code, Cursor, Codex, or Copilot) and describe how much it was involved. A one-line note in the PR or issue is enough.
+If AI assisted your contribution in any form, say so. Name the tool and the model (for example Claude Code with Opus 4.8, or Cursor with GPT-5) and describe how much they were involved. A one-line note in the PR or issue is enough.
 
 - **You must fully understand your PR**
-If you cannot explain what your code changes do and how they interact with the rest of the system without the aid of an AI tool, do not submit them. Feel free to *gain* that understanding by interrogating an agent with access to the codebase before contributing.
+If you cannot explain what your code changes do and how they interact with the rest of the system without the aid of an AI tool, do not submit them. Feel free to *gain* that understanding by interrogating an agent with access to the codebase before contributing. Before you submit, make sure you can explain in your own words:
+  - what changed and why
+  - which issue or discussion scope the PR follows
+  - what checks you ran and their results
+  - any risks, assumptions, or follow-up work
 
 - **Hardware changes demand extra scrutiny**
-Control loops, motor drivers, planners, and anything that produces motion can damage equipment or hurt people. AI-assisted changes to these areas must be understood line by line and tested in simulation or replay before any hardware claim is made. See the safety section of [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Control loops, motor drivers, planners, and anything that produces motion can damage equipment or hurt people. Understanding your change line by line is the bar for every PR, AI-assisted or not; for these areas you must also test in simulation or replay before making any hardware claim. See the safety section of [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 - **Issues and discussions may use AI, but a human must review and edit the output**
 AI tends to be verbose and to pad text with noise. Do your own research, trim it down, and write in your own voice, especially for feature proposals and bug reports.
@@ -25,13 +29,13 @@ Text and code are the only acceptable AI-generated contributions. Please do not 
 
 It is worth being explicit, because dimOS lives on both sides of this line.
 
-- **Go wild with AI while using dimOS -** Vibecode your robot, point your favorite agent at [`AGENTS.md`](AGENTS.md), generate skills and blueprints in natural language, and let an LLM drive the CLI and MCP tools. This is the product working as intended.
+- **Go wild with AI while using dimOS.** Vibecode your robot, point your favorite agent at [`AGENTS.md`](AGENTS.md), generate skills and blueprints in natural language, and let an LLM drive the CLI and MCP tools. This is the product working as intended.
 
-- **Contributing to dimOS must be AI-assisted and human-understood -** The same tools are welcome, but the bar is that a human reviews, understands, and stands behind every line going into the shared codebase.
+- **Contributions may be AI-assisted, but must be human-understood.** The same tools are welcome, but the bar is that a human reviews, understands, and stands behind every line going into the shared codebase.
 
 ## Maintainers
 
-These rules apply to outside contributions, maintainers may use AI tools at their discretion. They have earned the trust to apply good judgment about when and how.
+These rules apply to outside contributions; maintainers may use AI tools at their discretion. They have earned the trust to apply good judgment about when and how.
 
 ## Reviews Cost Maintainer Time
 
