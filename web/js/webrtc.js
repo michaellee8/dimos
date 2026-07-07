@@ -10,7 +10,7 @@ import {
     VIDEO_STATS_INTERVAL_MS,
     state,
 } from './state.js';
-import { computeVideoStats, findVideoInbound, selectedIceType } from './statscore.js';
+import { computeVideoStats, findVideoInbound, selectedIceType, videoCodec } from './statscore.js';
 
 const STUN_ONLY = [{ urls: 'stun:stun.cloudflare.com:3478' }];
 
@@ -106,6 +106,17 @@ async function _setupWebRTCInner(sessionId) {
     }
     pc.ontrack = (e) => {
         if (e.track.kind !== 'video') return;
+        // Minimise the receiver's jitter buffer: teleop wants freshest-frame,
+        // not smooth-playback. Chrome defaults to a several-hundred-ms buffer
+        // that dominates glass-to-glass latency at our 15fps source; 0 tells it
+        // to hold as little as possible. Both are hints (browser clamps to what
+        // the link tolerates) and non-standard, so guard the assignment.
+        try {
+            if ('playoutDelayHint' in e.receiver) e.receiver.playoutDelayHint = 0;
+            if ('jitterBufferTarget' in e.receiver) e.receiver.jitterBufferTarget = 0;
+        } catch (err) {
+            console.debug('[video] playout-delay hint unsupported:', err?.name || err);
+        }
         // Keyboard has a static <video>; VR uses a hidden one as a GL source.
         const existed = !!document.getElementById('robot-cam');
         const v = ensureRobotCam();
@@ -424,7 +435,9 @@ export function startVideoStats(channel, getReport = null) {
         state.videoStatsPrev = inbound;
         // Stamp decode draws the video to a canvas — skip it on ticks that
         // can't produce a payload anyway (first sample).
-        const payload = prev ? computeVideoStats(prev, inbound, readLatencyStamp()) : null;
+        const payload = prev
+            ? computeVideoStats(prev, inbound, readLatencyStamp(), videoCodec(report, inbound))
+            : null;
         if (payload) {
             try { channel.send(JSON.stringify(payload)); } catch (_) {}
             state.liveStats.video = payload;  // latest sample for the HUD/VR quad

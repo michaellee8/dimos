@@ -31,10 +31,21 @@ export function findVideoInbound(report) {
     return inbound;
 }
 
+// Negotiated video codec short name ('H264' / 'VP8' / ...) from the inbound
+// entry's linked codec stats, or '' when unavailable. Lets the operator confirm
+// the robot's H.264-first offer actually won the negotiation (VP8 falls back to
+// software decode on most browsers and adds latency).
+export function videoCodec(report, inbound) {
+    if (!inbound?.codecId) return '';
+    const codec = report.get?.(inbound.codecId);
+    const mime = codec?.mimeType || '';  // e.g. 'video/H264'
+    return mime.includes('/') ? mime.split('/')[1] : mime;
+}
+
 // Delta two consecutive inbound-rtp samples into the video_stats payload the
 // robot logs and the HUD renders. Returns null when a delta isn't computable
 // yet (first sample, or non-advancing stats clock — callers just skip a tick).
-export function computeVideoStats(prev, inbound, e2eLatencyMs = 0) {
+export function computeVideoStats(prev, inbound, e2eLatencyMs = 0, codec = '') {
     if (!prev || !inbound) return null;
     const dt = (inbound.timestamp - prev.timestamp) / 1000;
     if (dt <= 0) return null;
@@ -65,5 +76,8 @@ export function computeVideoStats(prev, inbound, e2eLatencyMs = 0) {
                 : 0,
         decode_ms: decodeMs,
         e2e_latency_ms: e2eLatencyMs,  // glass-to-glass, 0 if not stamping
+        codec,  // 'H264' / 'VP8' — confirms which codec the session negotiated
+        // 'ExternalDecoder'/HW name vs 'libvpx' (software) — the latency tell.
+        decoder: inbound.decoderImplementation ?? '',
     };
 }

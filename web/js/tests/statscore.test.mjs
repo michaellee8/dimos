@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { computeVideoStats, findVideoInbound, selectedIceType } from '../statscore.js';
+import { computeVideoStats, findVideoInbound, selectedIceType, videoCodec } from '../statscore.js';
 
 function sample(overrides = {}) {
     return {
@@ -110,4 +110,25 @@ test('findVideoInbound picks the video inbound-rtp entry only', () => {
     ]);
     assert.equal(findVideoInbound(r), inbound);
     assert.equal(findVideoInbound(fakeReport([])), null);
+});
+
+test('videoCodec resolves the linked codec short name', () => {
+    const inbound = { id: 'v', type: 'inbound-rtp', kind: 'video', codecId: 'cod' };
+    const r = fakeReport([inbound, { id: 'cod', type: 'codec', mimeType: 'video/H264' }]);
+    assert.equal(videoCodec(r, inbound), 'H264');
+    // Missing codec entry, no codecId, or no inbound → '' (never throws).
+    assert.equal(videoCodec(fakeReport([inbound]), inbound), '');
+    assert.equal(videoCodec(r, { type: 'inbound-rtp' }), '');
+    assert.equal(videoCodec(r, null), '');
+});
+
+test('computeVideoStats carries codec and decoder implementation', () => {
+    const prev = sample({ timestamp: 0 });
+    const cur = sample({ timestamp: 1000, decoderImplementation: 'ExternalDecoder' });
+    const s = computeVideoStats(prev, cur, 0, 'H264');
+    assert.equal(s.codec, 'H264');
+    assert.equal(s.decoder, 'ExternalDecoder');
+    // Defaults stay backward-compatible when omitted.
+    assert.equal(computeVideoStats(prev, sample({ timestamp: 1000 })).codec, '');
+    assert.equal(computeVideoStats(prev, sample({ timestamp: 1000 })).decoder, '');
 });

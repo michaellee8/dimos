@@ -64,7 +64,7 @@ export function hudDetailLines() {
     const ice = iceTypeLabel();
     return [
         `Link   ${transportLabel()}${ice ? `  ·  ${ice}` : ''}`,
-        `Video  ${(v.fps ?? 0).toFixed(0)}fps  ${(((v.kbps ?? 0) / 1000)).toFixed(1)}mbps  ${v.width ?? '—'}x${v.height ?? '—'}`,
+        `Video  ${(v.fps ?? 0).toFixed(0)}fps  ${(((v.kbps ?? 0) / 1000)).toFixed(1)}mbps  ${v.width ?? '—'}x${v.height ?? '—'}${v.codec ? '  ' + v.codec : ''}`,
         `       loss ${(v.loss_pct ?? 0).toFixed(1)}%  jbuf ${(v.jitter_buffer_ms ?? 0).toFixed(0)}ms`,
         `       decode ${(v.decode_ms ?? 0).toFixed(0)}ms  e2e ${v.e2e_latency_ms ? v.e2e_latency_ms.toFixed(0) + 'ms' : '—'}  freezes ${v.freezes ?? 0}`,
         `Cmd    ${cmdLine}`,
@@ -97,6 +97,9 @@ export function hudDetailRows() {
             { label: 'FPS', value: fmt(fps), health: band(fps, 18, 8, true) },
             { label: 'Bitrate', value: `${fmt((v.kbps ?? 0) / 1000, 1)} mbps`, health: null },
             { label: 'Resolution', value: `${v.width ?? '—'}×${v.height ?? '—'}`, health: null },
+            // H.264 → hardware decode (green); VP8 → usually software (warn).
+            { label: 'Codec', value: v.codec || '—',
+              health: v.codec ? (v.codec === 'H264' ? 'good' : 'warn') : null },
             { label: 'Loss', value: `${fmt(v.loss_pct, 1)} %`, health: band(v.loss_pct, 1, 3) },
             { label: 'Jitter buf', value: `${fmt(v.jitter_buffer_ms)} ms`, health: null },
             { label: 'Decode', value: `${fmt(v.decode_ms)} ms`, health: null },
