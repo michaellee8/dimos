@@ -350,6 +350,148 @@ def test_broker_provider_requires_credentials() -> None:
     assert BrokerConfig(api_key="key")._create() is not None
 
 
+def test_backend_coercion_leaves_webrtc_untouched() -> None:
+    """The global lcm<->zenoh transport switch must never rebuild a webrtc
+    transport (deliberate non-default choice, like JpegLcmTransport)."""
+    if not WEBRTC_AVAILABLE:
+        pytest.skip("aiortc not installed")
+    from dimos.core.coordination.module_coordinator import _coerce_transport_to_backend
+    from dimos.core.global_config import global_config
+    from dimos.core.transport import CloudflareTransport, CloudflareVideoTransport
+
+    dc = CloudflareTransport("cmd_unreliable", TwistStamped, api_key="k")
+    video = CloudflareVideoTransport(api_key="k")
+    original = global_config.transport
+    try:
+        for backend in ("lcm", "zenoh"):
+            global_config.update(transport=backend)
+            assert _coerce_transport_to_backend(dc) is dc
+            assert _coerce_transport_to_backend(video) is video
+    finally:
+        global_config.update(transport=original)
+
+
+def test_webrtc_deps_required_in_ci() -> None:
+    """A missing aiortc/httpx must not silently skip the webrtc suite in CI
+    (review: tests should fail, not \"pass\", when CI forgets a dependency).
+    Downstream/no-network installs still skip everything — no CI env var."""
+    import os
+
+    if not os.environ.get("CI"):
+        pytest.skip("dependency guard only enforced in CI")
+    assert WEBRTC_AVAILABLE, (
+        "aiortc/httpx not installed in CI, so the whole webrtc suite silently "
+        "skipped — restore dimos[webrtc] in the project-deps dependency group"
+    )
+
+
+def test_dc_name_no_collisions() -> None:
+    """Sanitized OR truncated topics must stay distinct (<=64 char CF limit)."""
+    if not WEBRTC_AVAILABLE:
+        pytest.skip("aiortc not installed")
+    from dimos.protocol.pubsub.impl.webrtc.providers.cloudflare import _dc_name
+
+    assert _dc_name("cmd_unreliable") == "cmd_unreliable"  # safe short names untouched
+    assert _dc_name("cmd/vel") != _dc_name("cmd_vel")  # sanitization can't collide
+    long_x, long_y = "a" * 64 + "x", "a" * 64 + "y"  # differ only past the cap
+    assert _dc_name(long_x) != _dc_name(long_y)
+    assert len(_dc_name(long_x)) <= 64
+
+
+# ─── Provider lifecycle error paths ──────────────────────────────────
+
+
+def test_failed_connect_runs_disconnect_and_allows_retry() -> None:
+    """A failed _connect() must release provider resources (_disconnect) and
+    tear the loop thread down so the next start() retries cleanly."""
+    from dimos.protocol.pubsub.impl.webrtc.providers.spec import AsyncProviderBase
+
+    class FlakyProvider(AsyncProviderBase):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail = True
+            self.disconnects = 0
+
+        async def _connect(self) -> None:
+            if self.fail:
+                raise RuntimeError("connect boom")
+
+        async def _disconnect(self) -> None:
+            self.disconnects += 1
+
+    p = FlakyProvider()
+    with pytest.raises(RuntimeError, match="connect boom"):
+        p.start()
+    assert p.disconnects == 1, "cleanup must run on failed connect"
+    assert p._thread is None and p._loop is None and not p.is_connected
+
+    p.fail = False
+    p.start()
+    assert p.is_connected
+    p.stop()
+    assert p.disconnects == 2 and p._thread is None
+
+
+def test_broker_failed_channel_open_retries_next_heartbeat() -> None:
+    """The broker id must be recorded only after a successful open — otherwise
+    a createDataChannel failure is never retried (id matches, _dcs empty)."""
+    if not WEBRTC_AVAILABLE:
+        pytest.skip("aiortc not installed")
+
+    provider = BrokerConfig(api_key="key")._create()
+    # _pc is None, so _open_channel's assert fires — a stand-in for any
+    # createDataChannel failure inside the heartbeat.
+    with pytest.raises(AssertionError):
+        provider._reconcile_channels({"cmd_unreliable": 5})
+    assert "cmd_unreliable" not in provider._dc_ids, "failed open must not record the id"
+
+    opened: list[tuple[str, int]] = []
+    provider._open_channel = lambda name, sctp_id: opened.append((name, sctp_id))  # type: ignore[method-assign]
+    provider._reconcile_channels({"cmd_unreliable": 5})
+    assert opened == [("cmd_unreliable", 5)], "next heartbeat must retry the open"
+    assert provider._dc_ids["cmd_unreliable"] == 5
+
+
+def test_broker_disconnect_clears_channel_ids() -> None:
+    """Stale _dc_ids after stop() would make the reconnect heartbeat skip
+    _open_channel when the broker hands out the same SCTP ids."""
+    if not WEBRTC_AVAILABLE:
+        pytest.skip("aiortc not installed")
+    import asyncio
+
+    provider = BrokerConfig(api_key="key")._create()
+    provider._dc_ids = {"cmd_unreliable": 5, "state_reliable": 6}
+    asyncio.run(provider._disconnect())
+    assert provider._dc_ids == {}
+
+
+def test_cloudflare_failed_subscribe_deregisters_callback() -> None:
+    """If _ensure_sub fails, the callback must not stay registered (the caller
+    has no unsub handle, and a later subscribe would revive it)."""
+    if not WEBRTC_AVAILABLE:
+        pytest.skip("aiortc not installed")
+    from dimos.protocol.pubsub.impl.webrtc.providers.cloudflare import (
+        CloudflareConfig,
+        CloudflareProvider,
+    )
+
+    provider = CloudflareProvider(CloudflareConfig(app_id="a", app_secret="s"))
+    provider._started = True  # skip auto-start; no network in this test
+
+    def _boom(coro, timeout=30.0):  # type: ignore[no-untyped-def]
+        coro.close()
+        raise RuntimeError("ensure_sub boom")
+
+    provider._run_sync = _boom  # type: ignore[method-assign]
+
+    def _cb(data: bytes, topic: str) -> None:
+        pass
+
+    with pytest.raises(RuntimeError, match="ensure_sub boom"):
+        provider.subscribe("some_topic", _cb)
+    assert _cb not in provider._callbacks["some_topic"]
+
+
 # ─── subscribe_all dedup ─────────────────────────────────────────────
 
 

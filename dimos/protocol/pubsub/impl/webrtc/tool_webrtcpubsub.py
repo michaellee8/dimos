@@ -20,7 +20,7 @@ the standard harness instead::
 
     pytest -m tool dimos/protocol/pubsub/benchmark/test_benchmark.py -k webrtc
 
-Run with: ``pytest -m tool dimos/protocol/pubsub/impl/webrtc/test_webrtcpubsub.py``
+Run with: ``pytest dimos/protocol/pubsub/impl/webrtc/tool_webrtcpubsub.py``
 """
 
 from __future__ import annotations
@@ -52,7 +52,11 @@ def pubsub() -> Iterator[WebRTCPubSub]:
         CloudflareProvider,
     )
 
-    ps = WebRTCPubSub(provider=CloudflareProvider(CloudflareConfig()))
+    config = CloudflareConfig(
+        app_id=os.environ["CF_TELEOP_APP_ID"],
+        app_secret=os.environ["CF_TELEOP_APP_SECRET"],
+    )
+    ps = WebRTCPubSub(provider=CloudflareProvider(config))
     ps.start()
     try:
         yield ps
@@ -60,7 +64,6 @@ def pubsub() -> Iterator[WebRTCPubSub]:
         ps.stop()
 
 
-@pytest.mark.tool
 @skip_unless_cf
 @pytest.mark.timeout(60)
 def test_basic_pub_sub(pubsub: WebRTCPubSub) -> None:

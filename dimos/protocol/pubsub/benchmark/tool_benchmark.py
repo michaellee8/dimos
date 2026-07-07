@@ -93,8 +93,10 @@ def test_throughput(
     benchmark_results: BenchmarkResults,
 ) -> None:
     """Measure throughput for publishing and receiving messages over a fixed duration."""
+    # Generate (or skip on) the message before connecting: webrtc sizes over
+    # the CF DataChannel cap skip here, and shouldn't pay a live CF session.
+    topic, msg = msggen(msg_size)
     with pubsub_context() as pubsub:
-        topic, msg = msggen(msg_size)
         received_count = 0
         target_count = [0]  # Use list to allow modification after publish loop
         lock = threading.Lock()

@@ -19,7 +19,7 @@ transport swapped to WebRTC — exercising transport pickling into the worker
 process, per-process provider sharing, typed LCM encode/decode, and a real
 Cloudflare Realtime round trip. Skipped without CF credentials.
 
-Run with: ``pytest -m tool dimos/protocol/pubsub/impl/webrtc/test_blueprint_e2e.py``
+Run with: ``pytest dimos/protocol/pubsub/impl/webrtc/tool_blueprint_e2e.py``
 """
 
 from __future__ import annotations
@@ -71,7 +71,6 @@ class TwistSink(Module):
         return list(self._received)
 
 
-@pytest.mark.tool
 @skip_unless_cf
 @pytest.mark.timeout(120)
 def test_blueprint_stream_over_cloudflare() -> None:
@@ -83,7 +82,12 @@ def test_blueprint_stream_over_cloudflare() -> None:
     blueprint = autoconnect(TwistSource.blueprint(), TwistSink.blueprint()).transports(
         {
             ("cmd_webrtc", TwistStamped): WebRTCTransport.spec(
-                "cmd_webrtc", TwistStamped, config=CloudflareConfig()
+                "cmd_webrtc",
+                TwistStamped,
+                config=CloudflareConfig(
+                    app_id=os.environ["CF_TELEOP_APP_ID"],
+                    app_secret=os.environ["CF_TELEOP_APP_SECRET"],
+                ),
             )
         }
     )

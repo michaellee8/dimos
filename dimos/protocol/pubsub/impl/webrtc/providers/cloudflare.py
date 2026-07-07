@@ -70,7 +70,9 @@ MAX_MSG_SIZE = 16 * 1024
 def _dc_name(topic: str) -> str:
     """CF DataChannel name for a topic (ASCII, <=64 chars, collision-safe)."""
     safe = re.sub(r"[^a-zA-Z0-9_-]", "_", topic)
-    if safe != topic:
+    # Hash-suffix on sanitization OR truncation: names differing only past
+    # char 64 must not map to the same channel.
+    if safe != topic or len(safe) > 64:
         safe = f"{safe[:55]}_{hashlib.sha1(topic.encode()).hexdigest()[:8]}"
     return safe[:64] or "dc"
 
@@ -308,7 +310,15 @@ class CloudflareProvider(AsyncProviderBase):
             self.start()
         with self._lock:
             self._callbacks[topic].append(callback)
-        self._run_sync(self._ensure_sub(topic))
+        try:
+            self._run_sync(self._ensure_sub(topic))
+        except BaseException:
+            # Failed subscribe returns no unsub handle — deregister, or the
+            # callback would start firing once a later subscribe succeeds.
+            with self._lock:
+                if callback in self._callbacks[topic]:
+                    self._callbacks[topic].remove(callback)
+            raise
 
         def _unsub() -> None:
             with self._lock:
@@ -318,6 +328,3 @@ class CloudflareProvider(AsyncProviderBase):
                     pass
 
         return _unsub
-
-
-__all__ = ["MAX_MSG_SIZE", "CloudflareConfig", "CloudflareProvider"]

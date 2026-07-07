@@ -343,13 +343,21 @@ class BrokerProvider(AsyncProviderBase):
                 await self._audio_task
             self._audio_task = None
         if self._http and self.session_id:
-            with contextlib.suppress(Exception):  # best-effort deregistration
+            import httpx
+
+            # Best-effort deregistration: swallow network errors only — a
+            # non-network exception here is a bug we want to hear about.
+            with contextlib.suppress(httpx.HTTPError):
                 await self._http.delete(
                     f"{self._broker_url}/api/v1/sessions/{self.session_id}",
                     headers=self._headers,
                 )
         for name in list(self._dcs):
             self._close_channel(name)
+        # Forget the broker's channel ids: after a reconnect the heartbeat
+        # must re-open channels even if the broker hands out the same SCTP
+        # ids (stale entries would make it skip _open_channel with _dcs empty).
+        self._dc_ids.clear()
         if self._pc:
             await self._pc.close()
             self._pc = None
@@ -419,9 +427,9 @@ class BrokerProvider(AsyncProviderBase):
                 ):
                     self._notify_operator_lost()
                 self._close_channel(name)
-                self._dc_ids[name] = sctp_id
                 if sctp_id is not None:
                     self._open_channel(name, sctp_id)
+                self._dc_ids[name] = sctp_id
 
         # CF renegotiation offer (operator audio pulled onto our session): answer
         # it. The broker hands each offer exactly once — a failed answer is
@@ -602,6 +610,3 @@ class BrokerProvider(AsyncProviderBase):
                     pass
 
         return _unsub
-
-
-__all__ = ["BrokerConfig", "BrokerProvider"]

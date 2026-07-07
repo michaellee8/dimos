@@ -497,11 +497,70 @@ try:
 except ImportError:
     WEBRTC_AVAILABLE = False
 
+if WEBRTC_AVAILABLE:
+    # WebRTC pubsub stack over an in-memory loopback provider: measures the
+    # WebRTCPubSub/provider dispatch overhead with no network or SCTP — the
+    # keyless upper bound to read the WebrtcCloudflare row against.
+
+    class _LoopbackProvider:
+        def __init__(self) -> None:
+            self._subs: dict[str, list[Callable[[bytes, str], None]]] = {}
+            self._started = False
+
+        @property
+        def is_connected(self) -> bool:
+            return self._started
+
+        def start(self) -> None:
+            self._started = True
+
+        def stop(self) -> None:
+            self._started = False
+
+        def publish(self, topic: str, data: bytes) -> None:
+            for cb in self._subs.get(topic, ()):
+                cb(data, topic)
+
+        def subscribe(
+            self, topic: str, callback: Callable[[bytes, str], None]
+        ) -> Callable[[], None]:
+            self._subs.setdefault(topic, []).append(callback)
+
+            def _unsub() -> None:
+                if callback in self._subs.get(topic, ()):
+                    self._subs[topic].remove(callback)
+
+            return _unsub
+
+    @contextmanager
+    def webrtc_loopback_pubsub_channel() -> Generator[WebRTCPubSub, None, None]:
+        pubsub = WebRTCPubSub(provider=_LoopbackProvider())
+        pubsub.start()
+        try:
+            yield pubsub
+        finally:
+            pubsub.stop()
+
+    def webrtc_loopback_msggen(size: int) -> tuple[str, bytes]:
+        return ("benchmark/webrtc_local", make_data_bytes(size))
+
+    testcases.append(
+        Case(
+            pubsub_context=webrtc_loopback_pubsub_channel,
+            msg_gen=webrtc_loopback_msggen,
+        )
+    )
+
+
 if WEBRTC_AVAILABLE and os.environ.get("CF_TELEOP_APP_ID"):
 
     @contextmanager
     def webrtc_cloudflare_pubsub_channel() -> Generator[WebRTCPubSub, None, None]:
-        pubsub = WebRTCPubSub(provider=CloudflareProvider(CloudflareConfig()))
+        config = CloudflareConfig(
+            app_id=os.environ["CF_TELEOP_APP_ID"],
+            app_secret=os.environ["CF_TELEOP_APP_SECRET"],
+        )
+        pubsub = WebRTCPubSub(provider=CloudflareProvider(config))
         pubsub.start()
         try:
             yield pubsub
