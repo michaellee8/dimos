@@ -274,9 +274,9 @@ class ModuleCoordinator(Resource):
             if key in self._transport_registry:
                 transport = self._transport_registry[key]
             else:
-                transport = transports.get(key)
-                if transport is None:
-                    transport = _get_transport_for(blueprint, remapped_name, stream_type)
+                transport = transports.get(key) or _get_transport_for(
+                    blueprint, remapped_name, stream_type
+                )
             self._transport_registry[key] = transport
             for module, original_name in streams[key]:
                 instance = self.get_instance(module)  # type: ignore[assignment]
@@ -606,7 +606,9 @@ def _coerce_transport_to_backend(transport: Transport[Any]) -> Transport[Any]:
     is_pickled = type(transport) in (pLCMTransport, pZenohTransport)
     is_lcm = type(transport) in (LCMTransport, pLCMTransport)
     is_zenoh = type(transport) in (ZenohTransport, pZenohTransport)
-    if not ((want == "zenoh" and is_lcm) or (want == "lcm" and is_zenoh)):
+    if not isinstance(transport, PubSubTransport) or not (
+        (want == "zenoh" and is_lcm) or (want == "lcm" and is_zenoh)
+    ):
         return transport
 
     if is_pickled:
