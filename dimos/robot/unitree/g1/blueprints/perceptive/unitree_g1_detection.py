@@ -108,5 +108,3 @@ unitree_g1_detection = (
         }
     )
 )
-
-__all__ = ["unitree_g1_detection"]

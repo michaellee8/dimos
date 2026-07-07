@@ -69,11 +69,7 @@ unitree_g1_coordinator = (
             ("motor_command", MotorCommandArray): LCMTransport.spec(
                 "/g1/motor_command", MotorCommandArray
             ),
-            ("joint_state", JointState): LCMTransport.spec("/coordinator/joint_state", JointState),
             ("joint_command", JointState): LCMTransport.spec("/g1/joint_command", JointState),
         }
     )
 )
-
-
-__all__ = ["unitree_g1_coordinator"]
