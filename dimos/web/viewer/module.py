@@ -133,6 +133,7 @@ class BabylonViewerModule(Module):
         *,
         port: int = _DEFAULT_PORT,
         assets: dict[str, bytes] | None = None,
+        mesh_dir: str | Path | None = None,
         scene_path: str | Path | None = None,
         splat_path: str | Path | None = None,
         splat_alignment: dict[str, Any] | None = None,
@@ -147,6 +148,10 @@ class BabylonViewerModule(Module):
         super().__init__(**kwargs)
         self._mjcf_path = Path(mjcf_path) if mjcf_path else None
         self._assets = assets
+        # Deferred alternative to `assets`: a directory of mesh files read
+        # at start() so blueprint import stays cheap (and LFS-backed dirs
+        # download lazily).
+        self._mesh_dir = mesh_dir
         self._port = port
         self._scene_path = Path(scene_path) if scene_path else None
         self._splat_path = Path(splat_path) if splat_path else None
@@ -195,7 +200,14 @@ class BabylonViewerModule(Module):
             # a robotless viewer must not require the sim extra.
             from dimos.web.viewer.robot_meshes import load_robot_meshes
 
-            self._robot = load_robot_meshes(self._mjcf_path, assets=self._assets)
+            assets = self._assets
+            if assets is None and self._mesh_dir is not None:
+                assets = {
+                    mesh.name: mesh.read_bytes()
+                    for mesh in Path(self._mesh_dir).iterdir()
+                    if mesh.is_file()
+                }
+            self._robot = load_robot_meshes(self._mjcf_path, assets=assets)
 
         config = uvicorn.Config(
             self._create_app(), host="0.0.0.0", port=self._port, log_level="warning"

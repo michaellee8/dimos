@@ -1037,7 +1037,10 @@ async function ensureSupportFloor(config) {
 function focusRobot() {
   if (!latestRootPosition) return;
   camera.setTarget(latestRootPosition);
-  camera.radius = Math.max(4, camera.radius);
+  // Clamp INTO a useful orbit: the scene auto-frame can leave the camera
+  // tens of metres out (outside the building, roof occluding everything),
+  // and only-growing the radius kept it there.
+  camera.radius = Math.min(8, Math.max(4, camera.radius));
 }
 
 async function loadConfig() {
