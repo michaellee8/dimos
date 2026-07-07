@@ -110,6 +110,3 @@ class WebRTCPubSub(AllPubSub[str, bytes]):
                 pass
 
         return _unsub
-
-
-__all__ = ["WebRTCPubSub"]

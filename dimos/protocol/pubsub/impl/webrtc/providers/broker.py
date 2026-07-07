@@ -377,6 +377,3 @@ class BrokerProvider(AsyncProviderBase):
                     pass
 
         return _unsub
-
-
-__all__ = ["BrokerConfig", "BrokerProvider"]
