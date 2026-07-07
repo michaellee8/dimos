@@ -75,7 +75,6 @@ def _api(method: str, path: str, body: dict | None = None) -> dict:
 
 
 @skip_unless_broker
-@pytest.mark.tool
 @pytest.mark.timeout(120)
 def test_operator_to_transport_e2e() -> None:
     from aiortc import (
