@@ -22,10 +22,7 @@ from __future__ import annotations
 
 import math
 import time
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from dimos.hardware.manipulators.registry import AdapterRegistry
+from typing import Any
 
 from dimos.hardware.manipulators.spec import (
     ControlMode,
@@ -134,6 +131,14 @@ class PiperAdapter(ManipulatorAdapter):
             return status is not None
         except Exception:
             return False
+
+    def activate(self) -> bool:
+        return self.write_enable(True)
+
+    def deactivate(self) -> bool:
+        stopped = self.write_stop()
+        disabled = self.write_enable(False)
+        return stopped and disabled
 
     def get_info(self) -> ManipulatorInfo:
         """Get Piper information."""
@@ -482,11 +487,3 @@ class PiperAdapter(ManipulatorAdapter):
         Note: Piper doesn't typically have F/T sensor.
         """
         return None
-
-
-def register(registry: AdapterRegistry) -> None:
-    """Register this adapter with the registry."""
-    registry.register("piper", PiperAdapter)
-
-
-__all__ = ["PiperAdapter"]

@@ -1,4 +1,18 @@
-use std::collections::HashMap;
+// Copyright 2026 Dimensional Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Debug;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,21 +24,27 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use validator::Validate;
 
 use crate::transport::Transport;
 
+/// Marker trait for a config checked by `#[native_config]`: every field required,
+/// no Rust-side defaults, no unknown fields. Implemented only by the macro.
+pub trait NativeConfig {}
+
 /// Trait required by `Module::Config`s to ensure that configurations are
 /// validated correctly.
-pub trait ModuleConfig: DeserializeOwned + Debug + Validate {}
-impl<T: DeserializeOwned + Debug + Validate> ModuleConfig for T {}
+pub trait ModuleConfig: DeserializeOwned + Serialize + Debug + Validate + NativeConfig {}
+impl<T: DeserializeOwned + Serialize + Debug + Validate + NativeConfig> ModuleConfig for T {}
 
 /// Default config type used by `#[derive(Module)]` when no `#[config]` field
 /// is used. Just a stand in for modules that don't use configurations.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct NoConfig;
+
+impl NativeConfig for NoConfig {}
 
 impl Validate for NoConfig {
     fn validate(&self) -> Result<(), validator::ValidationErrors> {
@@ -115,7 +135,9 @@ impl<T> Output<T> {
 
 /// Parse a JSON config line as written by the Python NativeModule coordinator.
 /// Returns `(topics, config)`. Extracted so it can be unit-tested without stdin.
-fn parse_config_json<C: DeserializeOwned>(line: &str) -> io::Result<(HashMap<String, String>, C)> {
+fn parse_config_json<C: DeserializeOwned + Serialize>(
+    line: &str,
+) -> io::Result<(HashMap<String, String>, C)> {
     let json: serde_json::Value = serde_json::from_str(line.trim())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
@@ -128,20 +150,50 @@ fn parse_config_json<C: DeserializeOwned>(line: &str) -> io::Result<(HashMap<Str
         }
     }
 
-    let config: C = match json.get("config") {
-        None => return Err(io::Error::new(
+    let config_value = json.get("config").ok_or_else(|| {
+        io::Error::new(
             io::ErrorKind::InvalidData,
             "missing 'config' field in stdin JSON — coordinator must always send a config object",
-        )),
-        Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("failed to deserialize config: {e}"),
-            )
-        })?,
-    };
+        )
+    })?;
+
+    let config: C = serde_json::from_value(config_value.clone()).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to deserialize config: {e}"),
+        )
+    })?;
+
+    enforce_one_to_one(config_value, &config)?;
 
     Ok((topics, config))
+}
+
+fn object_keys(value: &serde_json::Value) -> BTreeSet<String> {
+    value
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+fn enforce_one_to_one<C: Serialize>(provided: &serde_json::Value, config: &C) -> io::Result<()> {
+    let expected_value = serde_json::to_value(config).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to re-serialize config: {e}"),
+        )
+    })?;
+    let provided_keys = object_keys(provided);
+    let expected_keys = object_keys(&expected_value);
+    if provided_keys == expected_keys {
+        return Ok(());
+    }
+    let missing: Vec<&String> = expected_keys.difference(&provided_keys).collect();
+    let unexpected: Vec<&String> = provided_keys.difference(&expected_keys).collect();
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("config keys do not match struct fields: missing {missing:?}, unexpected {unexpected:?}"),
+    ))
 }
 
 fn with_field(field: &str, message: String) -> String {
@@ -391,7 +443,7 @@ mod tests {
     use super::*;
     use serde::Deserialize;
     use std::collections::VecDeque;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
     use tokio::sync::Notify;
@@ -457,7 +509,15 @@ mod tests {
         notify.notify_one();
     }
 
-    #[derive(Debug, Deserialize, Default, PartialEq)]
+    async fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !cond() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[derive(Debug, Deserialize, Serialize, Default, PartialEq)]
     #[serde(deny_unknown_fields)]
     struct TestConfig {
         value: i64,
@@ -540,6 +600,45 @@ mod tests {
         let json = r#"{"topics": {}, "config": {"value": 1, "name": "x", "unexpected": true}}"#;
         let result = parse_config_json::<TestConfig>(json);
         assert!(result.is_err());
+    }
+
+    // one-to-one key check: serde alone would accept a missing Option field as None.
+
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct OptionalConfig {
+        required: i64,
+        maybe: Option<i64>,
+    }
+
+    type MaybeI = Option<i64>;
+
+    #[derive(Debug, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct AliasedConfig {
+        required: i64,
+        maybe: MaybeI,
+    }
+
+    #[test]
+    fn missing_optional_field_is_rejected() {
+        let json = r#"{"config": {"required": 1}}"#;
+        let err = parse_config_json::<OptionalConfig>(json)
+            .expect_err("a missing Option field must be rejected, not defaulted to None");
+        assert!(err.to_string().contains("maybe"), "{err}");
+    }
+
+    #[test]
+    fn missing_aliased_option_field_is_rejected() {
+        let json = r#"{"config": {"required": 1}}"#;
+        assert!(parse_config_json::<AliasedConfig>(json).is_err());
+    }
+
+    #[test]
+    fn optional_field_sent_explicitly_succeeds() {
+        let json = r#"{"config": {"required": 1, "maybe": null}}"#;
+        let (_topics, config) = parse_config_json::<OptionalConfig>(json).unwrap();
+        assert_eq!(config.maybe, None);
     }
 
     // validate_config
@@ -627,6 +726,7 @@ mod tests {
     async fn slow_publish_does_not_block_recv() {
         let transport = ControllableMockTransport::new();
         let recv_log = transport.recv_log.clone();
+        let publish_log = transport.publish_log.clone();
         let inbound = transport.inbound.clone();
         let inbound_notify = transport.inbound_notify.clone();
         let publish_delay_ms = transport.publish_delay_ms.clone();
@@ -651,12 +751,16 @@ mod tests {
 
         inject_inbound(&inbound, &inbound_notify, "/data", vec![42u8]);
 
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        wait_for("recv to fire and publish to complete", || {
+            !recv_log.lock().unwrap().is_empty() && !publish_log.lock().unwrap().is_empty()
+        })
+        .await;
 
-        let recv_count = recv_log.lock().unwrap().len();
+        let recv_time = recv_log.lock().unwrap()[0];
+        let publish_time = publish_log.lock().unwrap()[0];
         assert!(
-            recv_count >= 1,
-            "expected recv to fire during slow publish; got {recv_count} events. \
+            recv_time < publish_time,
+            "expected recv to fire during the slow publish, not after it. \
              The recv path should be independent of publish latency."
         );
     }
@@ -672,9 +776,14 @@ mod tests {
         let (publish_tx, publish_rx) = mpsc::channel(PUBLISH_CHANNEL_CAPACITY);
         let mut builder = Builder::new(topics(&[("slow", "/slow"), ("out", "/out")]), publish_tx);
 
-        // simulate slow processing function in a receive
+        // block the recv worker until the test releases it
+        static RECV_RELEASE: AtomicBool = AtomicBool::new(false);
+        RECV_RELEASE.store(false, Ordering::SeqCst);
         let _input = builder.input("slow", |b| {
-            std::thread::sleep(Duration::from_millis(200));
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !RECV_RELEASE.load(Ordering::SeqCst) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(1));
+            }
             Ok(b.to_vec())
         });
         let output = builder.output("out", |b: &Vec<u8>| b.clone());
@@ -690,16 +799,14 @@ mod tests {
 
         output.publish(&vec![42u8]).await.ok();
 
-        // receive should still be processing, but publish should go through by now
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // publish must complete while the recv worker stays blocked
+        wait_for("publish to complete while recv dispatch is blocked", || {
+            !publish_log.lock().unwrap().is_empty()
+        })
+        .await;
 
-        let publish_count = publish_log.lock().unwrap().len();
-        assert!(
-            publish_count >= 1,
-            "expected publish to fire during slow recv dispatch; got \
-             {publish_count} events. The publish path should be independent \
-             of recv-side CPU work."
-        );
+        // release the blocked decode so the runtime can shut down
+        RECV_RELEASE.store(true, Ordering::SeqCst);
     }
 
     // propagate_task_failure

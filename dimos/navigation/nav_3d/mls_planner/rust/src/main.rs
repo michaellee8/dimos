@@ -1,58 +1,60 @@
 // Copyright 2026 Dimensional Inc.
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-mod adjacency;
-mod dijkstra;
-mod edges;
-mod nodes;
-mod planner;
-mod surfaces;
-mod voxel;
-
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use dimos_mls_planner::edges::{edges_to_segments, PlannerGraph};
+use dimos_mls_planner::mls_planner::{Config, Planner, RegionBounds};
+use dimos_mls_planner::voxel::surface_point_xyz;
 use dimos_module::{error_throttled, run, warn_throttled, Input, LcmTransport, Module, Output};
 use lcm_msgs::geometry_msgs::{Point, Pose, PoseStamped, Quaternion};
 use lcm_msgs::nav_msgs::Path;
 use lcm_msgs::sensor_msgs::{PointCloud2, PointField};
 use lcm_msgs::std_msgs::{Header, Time};
-use serde::Deserialize;
-use tracing::info;
-use validator::Validate;
+use tokio::sync::Notify;
+use tracing::debug;
 
-use ahash::AHashSet;
+/// A point in the planner's world frame.
+type Xyz = (f32, f32, f32);
 
-use crate::adjacency::{build_surface_cells, build_surface_lookup};
-use crate::edges::{build_node_edges, edges_to_segments, PlannerGraph};
-use crate::nodes::place_nodes;
-use crate::surfaces::{extract_surfaces, ColumnIz};
-use crate::voxel::{surface_point_xyz, voxelize, VoxelKey};
+/// State shared between the handle loop and the worker.
+type Shared<T> = Arc<Mutex<Option<T>>>;
 
-#[derive(Debug, Deserialize, Validate)]
-#[serde(deny_unknown_fields)]
-struct Config {
-    world_frame: String,
-    #[validate(range(exclusive_min = 0.0))]
-    voxel_size: f32,
-    #[validate(range(exclusive_min = 0.0))]
-    robot_height: f32,
-    #[validate(range(min = 0))]
-    surface_dilation_passes: u32,
-    #[validate(range(min = 0))]
-    surface_erosion_passes: u32,
-    #[validate(range(exclusive_min = 0.0))]
-    node_spacing_m: f32,
-    #[validate(range(min = 0.0))]
-    node_wall_buffer_m: f32,
-    #[validate(range(min = 0.0))]
-    node_step_threshold_m: f32,
+/// A map input handed from the handle loop to the worker. Only the newest is
+/// kept, so a dropped intermediate frame is harmless.
+enum MapUpdate {
+    Region {
+        cloud: PointCloud2,
+        bounds: PoseStamped,
+    },
+    Global {
+        cloud: PointCloud2,
+    },
 }
 
 #[derive(Module)]
-#[module(setup = setup)]
+#[module(setup = spawn_worker, teardown = stop_worker)]
 struct MlsPlanner {
     #[input(decode = PointCloud2::decode, handler = on_global_map)]
     global_map: Input<PointCloud2>,
+
+    #[input(decode = PointCloud2::decode, handler = on_local_map)]
+    local_map: Input<PointCloud2>,
+
+    #[input(decode = PoseStamped::decode, handler = on_region_bounds)]
+    region_bounds: Input<PoseStamped>,
 
     #[input(decode = PoseStamped::decode, handler = on_start_pose)]
     start_pose: Input<PoseStamped>,
@@ -75,191 +77,291 @@ struct MlsPlanner {
     #[config]
     config: Config,
 
-    clearance_cells: i32,
-    step_cells: i32,
-    planner_graph: Option<PlannerGraph>,
-    latest_start: Option<(f32, f32, f32)>,
+    // Held on the handle loop until stamps match, then handed off paired.
+    pending_local: Option<PointCloud2>,
+    pending_bounds: Option<PoseStamped>,
 
-    voxel_map_buf: AHashSet<VoxelKey>,
-    by_col_buf: ColumnIz,
-    surface_buf: Vec<VoxelKey>,
+    // Written by the handle loop, read by the worker, so the loop never blocks
+    // on map processing.
+    pending: Shared<MapUpdate>,
+    latest_start: Shared<Xyz>,
+    active_goal: Shared<Xyz>,
+    wake: Arc<Notify>,
+
+    worker: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl MlsPlanner {
-    async fn setup(&mut self) {
-        let cfg = &self.config;
-        self.clearance_cells = (cfg.robot_height / cfg.voxel_size).ceil() as i32;
-        self.step_cells = (cfg.node_step_threshold_m / cfg.voxel_size).floor() as i32;
+    async fn spawn_worker(&mut self) {
+        let worker = Worker {
+            pending: Arc::clone(&self.pending),
+            latest_start: Arc::clone(&self.latest_start),
+            active_goal: Arc::clone(&self.active_goal),
+            wake: Arc::clone(&self.wake),
+            config: self.config.clone(),
+            surface_map: self.surface_map.clone(),
+            nodes: self.nodes.clone(),
+            node_edges: self.node_edges.clone(),
+            path: self.path.clone(),
+        };
+        self.worker = Some(tokio::spawn(worker.run()));
+    }
 
-        info!(
-            world_frame = %cfg.world_frame,
-            voxel_size = cfg.voxel_size,
-            robot_height = cfg.robot_height,
-            clearance_cells = self.clearance_cells,
-            step_cells = self.step_cells,
-            "mls_planner ready",
-        );
+    async fn stop_worker(&mut self) {
+        if let Some(handle) = self.worker.take() {
+            handle.abort();
+        }
     }
 
     async fn on_global_map(&mut self, msg: PointCloud2) {
-        let points = match extract_xyz(&msg) {
-            Ok(p) => p,
-            Err(e) => {
-                warn_throttled!(
-                    Duration::from_secs(1),
-                    error = %e,
-                    "Failed to extract lidar points, dropped a cloud.",
-                );
-                return;
-            }
-        };
-        if points.is_empty() {
-            return;
-        }
-
-        let voxel_size = self.config.voxel_size;
-        let step_cells = self.step_cells;
-        let clearance_cells = self.clearance_cells;
-        let dil = self.config.surface_dilation_passes;
-        let ero = self.config.surface_erosion_passes;
-        let spacing = self.config.node_spacing_m;
-        let wall_buf = self.config.node_wall_buffer_m;
-        let frame = self.config.world_frame.clone();
-
-        let t_surface = Instant::now();
-        self.voxel_map_buf.clear();
-        for &p in &points {
-            self.voxel_map_buf.insert(voxelize(p, voxel_size));
-        }
-        let voxels_count = self.voxel_map_buf.len();
-
-        extract_surfaces(
-            &self.voxel_map_buf,
-            clearance_cells,
-            dil,
-            ero,
-            &mut self.by_col_buf,
-            &mut self.surface_buf,
-        );
-        let surface_count = self.surface_buf.len();
-
-        let plg = self.planner_graph.get_or_insert_with(PlannerGraph::new);
-        build_surface_lookup(&self.surface_buf, &mut plg.surface_lookup);
-        build_surface_cells(&mut plg.cells, &plg.surface_lookup, voxel_size, step_cells);
-        let surface_ms = ms(t_surface.elapsed());
-
-        let surface_points: Vec<(f32, f32, f32)> = self
-            .surface_buf
-            .iter()
-            .map(|&(ix, iy, iz)| surface_point_xyz(ix, iy, iz, voxel_size))
-            .collect();
-        publish_cloud(&self.surface_map, &surface_points, &frame, now()).await;
-
-        let t_nodes = Instant::now();
-        let plg = self.planner_graph.as_mut().expect("just inserted");
-        place_nodes(
-            &mut plg.cells,
-            voxel_size,
-            spacing,
-            wall_buf,
-            &mut plg.cell_state,
-            &mut plg.nodes,
-        );
-        let nodes_ms = ms(t_nodes.elapsed());
-        let nodes_count = plg.nodes.len();
-
-        let node_points: Vec<(f32, f32, f32)> = plg.nodes.iter().map(|n| n.pos).collect();
-        publish_cloud(&self.nodes, &node_points, &frame, now()).await;
-
-        let t_edges = Instant::now();
-        let plg = self.planner_graph.as_mut().expect("just inserted");
-        build_node_edges(
-            &plg.cells,
-            &plg.nodes,
-            &mut plg.cell_state,
-            &mut plg.node_edges,
-            &mut plg.node_adj,
-        );
-        let edges_ms = ms(t_edges.elapsed());
-        let edges_count = plg.node_edges.len();
-
-        let edges_path = build_segments_path(plg, voxel_size, &frame, now());
-        publish_path(&self.node_edges, &edges_path).await;
-
-        info!(
-            global_map_points = points.len(),
-            voxels = voxels_count,
-            surface_cells = surface_count,
-            nodes = nodes_count,
-            edges = edges_count,
-            surface_ms,
-            nodes_ms,
-            edges_ms,
-            "global_map processed",
-        );
+        self.hand_off(MapUpdate::Global { cloud: msg });
     }
 
+    async fn on_local_map(&mut self, msg: PointCloud2) {
+        self.pending_local = Some(msg);
+        self.try_pair();
+    }
+
+    async fn on_region_bounds(&mut self, msg: PoseStamped) {
+        self.pending_bounds = Some(msg);
+        self.try_pair();
+    }
+
+    /// Hand off the local map and bounds once their stamps match.
+    fn try_pair(&mut self) {
+        if !stamps_paired(self.pending_bounds.as_ref(), self.pending_local.as_ref()) {
+            return;
+        }
+        let bounds = self.pending_bounds.take().expect("checked above");
+        let cloud = self.pending_local.take().expect("checked above");
+        self.hand_off(MapUpdate::Region { cloud, bounds });
+    }
+
+    fn hand_off(&self, update: MapUpdate) {
+        *self.pending.lock().expect("pending mutex") = Some(update);
+        self.wake.notify_one();
+    }
+
+    /// Record the latest start pose. No wake here, so odometry never drives
+    /// replanning.
     async fn on_start_pose(&mut self, msg: PoseStamped) {
         let p = &msg.pose.position;
-        self.latest_start = Some((p.x as f32, p.y as f32, p.z as f32));
-        // Drop any previous plan so the visualizer doesn't show a stale path
-        // rooted at the old start.
-        publish_path(&self.path, &empty_path(&self.config.world_frame, now())).await;
+        *self.latest_start.lock().expect("start mutex") =
+            Some((p.x as f32, p.y as f32, p.z as f32));
     }
 
+    /// Set or cancel the active goal from a click, then wake the worker.
     async fn on_goal_pose(&mut self, msg: PoseStamped) {
-        let Some(start) = self.latest_start else {
-            tracing::warn!("MLSPlanner received goal before start; skipping");
-            return;
-        };
-        let Some(plg) = self.planner_graph.as_ref() else {
-            tracing::warn!("MLSPlanner received goal before graph was built; skipping");
-            return;
-        };
-        if plg.nodes.is_empty() {
-            tracing::warn!("MLSPlanner received goal before graph had nodes; skipping");
-            return;
+        *self.active_goal.lock().expect("goal mutex") = goal_position(&msg.pose.position);
+        self.wake.notify_one();
+    }
+}
+
+/// True when bounds and a local cloud are both present with matching stamps.
+fn stamps_paired(bounds: Option<&PoseStamped>, cloud: Option<&PointCloud2>) -> bool {
+    match (bounds, cloud) {
+        (Some(b), Some(c)) => same_stamp(&b.header.stamp, &c.header.stamp),
+        _ => false,
+    }
+}
+
+/// The goal position, or None when any coordinate is non-finite, which is the
+/// cancel signal.
+fn goal_position(p: &Point) -> Option<Xyz> {
+    let goal = (p.x as f32, p.y as f32, p.z as f32);
+    (goal.0.is_finite() && goal.1.is_finite() && goal.2.is_finite()).then_some(goal)
+}
+
+/// Owns the planner graph and does map mutation, publishing, and replanning
+/// off the handle loop. Woken by the handlers.
+struct Worker {
+    pending: Shared<MapUpdate>,
+    latest_start: Shared<Xyz>,
+    active_goal: Shared<Xyz>,
+    wake: Arc<Notify>,
+    config: Config,
+    surface_map: Output<PointCloud2>,
+    nodes: Output<PointCloud2>,
+    node_edges: Output<Path>,
+    path: Output<Path>,
+}
+
+impl Worker {
+    async fn run(self) {
+        let mut planner = Planner::default();
+        let mut last_path_at: Option<Instant> = None;
+        let mut last_viz_at: Option<Instant> = None;
+        loop {
+            self.wake.notified().await;
+            let update = self.pending.lock().expect("pending mutex").take();
+            if let Some(update) = update {
+                self.apply_update(&mut planner, update, &mut last_viz_at)
+                    .await;
+            }
+            self.maybe_replan(&mut planner, &mut last_path_at).await;
         }
+    }
 
-        let p = &msg.pose.position;
-        let goal = (p.x as f32, p.y as f32, p.z as f32);
+    /// Update the graph every cycle, but rate-cap viz publishing to
+    /// viz_publish_hz since building those clouds is costly and unread by planning.
+    async fn apply_update(
+        &self,
+        planner: &mut Planner,
+        update: MapUpdate,
+        last_viz_at: &mut Option<Instant>,
+    ) {
+        let now = Instant::now();
+        let viz_due = self.config.viz_publish_hz > 0.0 && {
+            let viz_interval = Duration::from_secs_f32(1.0 / self.config.viz_publish_hz);
+            last_viz_at.is_none_or(|t| now.duration_since(t) >= viz_interval)
+        };
 
-        let t_plan = Instant::now();
-        let waypoints = match planner::plan(
-            plg,
-            start,
-            goal,
-            self.config.voxel_size,
-            self.config.robot_height,
-        ) {
-            Some(wp) => wp,
-            None => {
-                tracing::warn!(?start, ?goal, "no path between start and goal");
-                publish_path(&self.path, &empty_path(&self.config.world_frame, now())).await;
+        let messages = tokio::task::block_in_place(|| {
+            let updated = self.ingest(planner, update);
+            (updated && viz_due).then(|| self.build_graph_messages(planner))
+        });
+
+        if let Some((surface, node_cloud, edges)) = messages {
+            publish_cloud(&self.surface_map, &surface).await;
+            publish_cloud(&self.nodes, &node_cloud).await;
+            publish_path(&self.node_edges, &edges).await;
+            *last_viz_at = Some(now);
+        }
+    }
+
+    /// Mutate the graph from a map update. Returns false if the cloud was
+    /// unusable.
+    fn ingest(&self, planner: &mut Planner, update: MapUpdate) -> bool {
+        match update {
+            MapUpdate::Region { cloud, bounds } => {
+                let points = match extract_xyz(&cloud) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn_throttled!(
+                            Duration::from_secs(1),
+                            error = %e,
+                            "Failed to extract local map points, dropped a region update.",
+                        );
+                        return false;
+                    }
+                };
+                let z_max = bounds.pose.orientation.z as f32;
+                let sensor_z = self
+                    .latest_start
+                    .lock()
+                    .expect("start mutex")
+                    .map_or(z_max, |(_, _, z)| z);
+                let bounds = RegionBounds::capped(
+                    bounds.pose.position.x as f32,
+                    bounds.pose.position.y as f32,
+                    bounds.pose.orientation.x as f32,
+                    bounds.pose.orientation.y as f32,
+                    z_max,
+                    sensor_z,
+                    self.config.max_overhead_m,
+                );
+
+                let update_start = Instant::now();
+                planner.update_region(&points, &bounds, &self.config);
+                debug!(
+                    update_ms = update_start.elapsed().as_secs_f64() * 1e3,
+                    local_points = points.len(),
+                    "local region processed"
+                );
+            }
+            MapUpdate::Global { cloud } => {
+                let points = match extract_xyz(&cloud) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn_throttled!(
+                            Duration::from_secs(1),
+                            error = %e,
+                            "Failed to extract lidar points, dropped a cloud.",
+                        );
+                        return false;
+                    }
+                };
+                if points.is_empty() {
+                    return false;
+                }
+                planner.update_global_map(&points, &self.config);
+                debug!(global_map_points = points.len(), "global_map processed");
+            }
+        }
+        true
+    }
+
+    fn build_graph_messages(&self, planner: &Planner) -> (PointCloud2, PointCloud2, Path) {
+        let voxel_size = self.config.voxel_size;
+        let frame = &self.config.world_frame;
+        let graph = planner.graph();
+
+        let surface_points: Vec<Xyz> = planner
+            .surface()
+            .map(|(ix, iy, iz)| surface_point_xyz(ix, iy, iz, voxel_size))
+            .collect();
+        let surface = build_pc2_xyz(&surface_points, frame, now());
+
+        let node_points: Vec<Xyz> = graph.nodes.iter().map(|n| n.pos).collect();
+        let node_cloud = build_pc2_xyz(&node_points, frame, now());
+
+        let edges = build_segments_path(graph, voxel_size, frame, now());
+        (surface, node_cloud, edges)
+    }
+
+    /// Gate and publish a replan. The planning itself lives in Planner::plan.
+    async fn maybe_replan(&self, planner: &mut Planner, last_path_at: &mut Option<Instant>) {
+        let Some(start) = *self.latest_start.lock().expect("start mutex") else {
+            return;
+        };
+        // Ground-project the sensor pose so the start snaps to the supporting surface.
+        let start = (start.0, start.1, start.2 - self.config.robot_height);
+        let goal = {
+            let mut guard = self.active_goal.lock().expect("goal mutex");
+            let Some(goal) = *guard else {
+                return;
+            };
+            if is_at_goal(start, goal, self.config.goal_tolerance) {
+                *guard = None;
                 return;
             }
+            goal
         };
-        let plan_ms = ms(t_plan.elapsed());
+
+        let plan_start = Instant::now();
+        let waypoints =
+            tokio::task::block_in_place(|| planner.plan_or_truncate(start, goal, &self.config));
+        if waypoints.is_empty() {
+            // No full path and nothing safe ahead on the cached path, so stop.
+            publish_path(&self.path, &empty_path(&self.config.world_frame, now())).await;
+            return;
+        }
+        let plan_ms = plan_start.elapsed().as_secs_f64() * 1e3;
+        let produced = Instant::now();
+        let since_last_ms = last_path_at.map_or(-1.0, |t| (produced - t).as_secs_f64() * 1e3);
+        *last_path_at = Some(produced);
 
         let stamp = now();
         let path_msg = build_path_from_waypoints(&waypoints, &self.config.world_frame, stamp);
-        info!(waypoints = waypoints.len(), plan_ms, "path planned");
+        debug!(
+            waypoints = waypoints.len(),
+            plan_ms, since_last_ms, "path planned"
+        );
         publish_path(&self.path, &path_msg).await;
     }
 }
 
-fn ms(d: Duration) -> f64 {
-    d.as_secs_f64() * 1000.0
+/// True if within tolerance of the goal on the ground plane.
+fn is_at_goal(start: Xyz, goal: Xyz, tol: f32) -> bool {
+    (start.0 - goal.0).hypot(start.1 - goal.1) < tol
 }
 
-async fn publish_cloud(
-    out: &Output<PointCloud2>,
-    points: &[(f32, f32, f32)],
-    frame_id: &str,
-    stamp: Time,
-) {
-    let cloud = build_pc2_xyz(points, frame_id, stamp);
-    if let Err(e) = out.publish(&cloud).await {
+fn same_stamp(a: &Time, b: &Time) -> bool {
+    a.sec == b.sec && a.nsec == b.nsec
+}
+
+async fn publish_cloud(out: &Output<PointCloud2>, cloud: &PointCloud2) {
+    if let Err(e) = out.publish(cloud).await {
         error_throttled!(
             Duration::from_secs(1),
             error = %e,
@@ -455,4 +557,63 @@ async fn main() {
         .await
         .expect("failed to create LCM transport");
     run::<MlsPlanner, _>(transport).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_at_goal_respects_tolerance_and_ignores_z() {
+        assert!(is_at_goal((0.0, 0.0, 0.0), (0.05, 0.0, 9.0), 0.1));
+        assert!(!is_at_goal((0.0, 0.0, 0.0), (0.2, 0.0, 0.0), 0.1));
+    }
+
+    fn stamped(stamp: Time) -> Header {
+        Header {
+            stamp,
+            ..Default::default()
+        }
+    }
+
+    fn bounds_at(stamp: Time) -> PoseStamped {
+        PoseStamped {
+            header: stamped(stamp),
+            ..Default::default()
+        }
+    }
+
+    fn cloud_at(stamp: Time) -> PointCloud2 {
+        PointCloud2 {
+            header: stamped(stamp),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn stamps_paired_only_when_both_present_and_stamps_match() {
+        let s = Time { sec: 2, nsec: 3 };
+        let b = bounds_at(s.clone());
+        let c = cloud_at(s);
+        assert!(stamps_paired(Some(&b), Some(&c)));
+
+        let other = cloud_at(Time { sec: 2, nsec: 4 });
+        assert!(!stamps_paired(Some(&b), Some(&other)));
+
+        assert!(!stamps_paired(Some(&b), None));
+        assert!(!stamps_paired(None, Some(&c)));
+        assert!(!stamps_paired(None, None));
+    }
+
+    fn point(x: f64, y: f64, z: f64) -> Point {
+        Point { x, y, z }
+    }
+
+    #[test]
+    fn goal_position_passes_finite_and_cancels_on_non_finite() {
+        assert_eq!(goal_position(&point(1.0, 2.0, 3.0)), Some((1.0, 2.0, 3.0)));
+        assert_eq!(goal_position(&point(f64::NAN, 0.0, 0.0)), None);
+        assert_eq!(goal_position(&point(0.0, f64::INFINITY, 0.0)), None);
+        assert_eq!(goal_position(&point(0.0, 0.0, f64::NEG_INFINITY)), None);
+    }
 }
