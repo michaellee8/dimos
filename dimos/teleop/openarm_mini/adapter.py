@@ -19,7 +19,11 @@ from __future__ import annotations
 from dimos.teleop.openarm_mini.calibration import (
     load_calibration,
 )
-from dimos.teleop.openarm_mini.config import OpenArmMiniTeleopConfig
+from dimos.teleop.openarm_mini.config import (
+    OpenArmMiniCalibrationError,
+    OpenArmMiniDependencyError,
+    OpenArmMiniTeleopConfig,
+)
 from dimos.teleop.openarm_mini.feetech import OpenArmMiniLeaderReader
 from dimos.teleop.openarm_mini.mapping import combine_side_commands, map_side_readings
 from dimos.teleop.runtime.types import TeleopCommand
@@ -40,14 +44,19 @@ class OpenArmMiniTeleopAdapter:
             return
         buses: dict[str, OpenArmMiniLeaderReader] = {}
         try:
+            baudrate = self.config.connection_baudrate()
             for side in self.config.sides():
                 calibration = load_calibration(self.config.calibration_path(side), side)
-                bus = OpenArmMiniLeaderReader(
-                    side, self.config.port(side), calibration, self.config.baudrate
-                )
+                bus = OpenArmMiniLeaderReader(side, self.config.port(side), calibration, baudrate)
                 bus.connect()
                 buses[side] = bus
-        except Exception:
+        except (
+            OpenArmMiniCalibrationError,
+            OpenArmMiniDependencyError,
+            ValueError,
+            RuntimeError,
+            OSError,
+        ):
             for bus in buses.values():
                 bus.disconnect()
             raise
