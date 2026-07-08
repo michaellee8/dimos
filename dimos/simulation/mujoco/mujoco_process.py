@@ -144,6 +144,11 @@ def _run_simulation(config: GlobalConfig, shm: ShmReader) -> None:
         depth_right_renderer.enable_depth_rendering()
 
         scene_option = mujoco.MjvOption()
+        # Cooked scene packages put their collision hulls in geom group 3,
+        # which default render options hide; enable it so the depth cameras
+        # (lidar), RGB camera, and viewer can see the scene.
+        scene_option.geomgroup[3] = 1
+        m_viewer.opt.geomgroup[3] = 1
 
         # Timing control
         last_video_time = 0.0
