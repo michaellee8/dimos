@@ -15,6 +15,7 @@
 
 import * as THREE from 'three';
 
+import { CONFIRM_ACTIONS, POSTURE_STATE, SPEEDS } from './go2cmd.js';
 import { hudDetailRows, healthColor, statsHealth, transportLabel } from './hud.js';
 import { state } from './state.js';
 
@@ -27,7 +28,8 @@ const C = {
 };
 const HEALTH = { good: C.good, warn: C.warn, bad: C.bad };
 
-// ── Command catalog (verbatim from go2.js) ───────────────────────────
+// Display catalogs — VR uses tighter labels than the DOM cockpit, so these
+// stay local; the shared name/scale/confirm/posture data is in go2cmd.js.
 const POSTURE = [
     { name: 'StandReady', label: 'Stand / Drive' },
     { name: 'StandDown', label: 'Sit' },
@@ -38,19 +40,12 @@ const ACTIONS = [
     { name: 'FrontPounce', label: 'Pounce' },
     { name: 'FrontJump', label: 'Jump Fwd' },
 ];
-const SPEEDS = [
-    { mode: 'normal', label: 'Normal', scale: { lin: 0.5, ang: 0.5 } },
-    { mode: 'high', label: 'High', scale: { lin: 1.0, ang: 1.0 } },
-    { mode: 'rage', label: 'Rage', scale: { lin: 2.0, ang: 1.5 } },
-];
 const CAMS = [{ id: 'cam1', label: 'Cam 1' }, { id: 'cam2', label: 'Cam 2' }];
 // Discrete light presets — a raycast slider is fiddly; presets read cleanly.
 const LIGHTS = [
     { label: 'Off', v: 0 }, { label: 'Low', v: 0.34 },
     { label: 'Med', v: 0.67 }, { label: 'Full', v: 1.0 },
 ];
-const CONFIRM_ACTIONS = new Set(['FrontPounce', 'FrontJump']);
-const POSTURE_STATE = { StandReady: 'StandReady', StandDown: 'StandDown', RecoveryStand: 'RecoveryStand', Sit: 'Sit' };
 const GO2_LEN_M = 0.70, GO2_WID_M = 0.31;  // footprint, matches cockpit glyph
 
 // ── Shared cockpit UI state (mirror of go2.js `ui`) ──────────────────
@@ -546,4 +541,3 @@ export function buildCockpit(scene, headPos) {
     };
 }
 
-export { SPEEDS };

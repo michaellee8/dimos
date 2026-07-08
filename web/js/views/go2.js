@@ -8,6 +8,7 @@
 // Preview with no broker:  window._teleopDev.previewGo2()
 
 import { disconnect } from '../disconnect.js';
+import { CONFIRM_ACTIONS, POSTURE_STATE, SPEEDS } from '../go2cmd.js';
 import { applyStampCrop, hudDetailRows, hudSummaryLine, statsHealth, transportLabel } from '../hud.js';
 import { escHtml, state } from '../state.js';
 import { startKeyboardLoop } from './keyboard.js';
@@ -34,26 +35,13 @@ const ACTIONS = [
     { name: 'FrontJump', label: 'Jump Forward' },
 ];
 
-// Speed bar. Normal/High = browser-side velocity scale (lin m/s-ish, ang).
-// Rage = firmware Rage Mode (set_mode RPC) + full scale. mode is sent to the
-// robot; scale is applied locally in buildTwist via state.speedScale.
 // Camera tabs → robot composites the selected cameras into the one video track.
 // cam1 = Go2, cam2 = RealSense. Toggle on/off; both = side-by-side. (B-ready:
 // the same {camera_select, cams:[...]} protocol works for per-camera tracks.)
+// SPEEDS / CONFIRM_ACTIONS / POSTURE_STATE live in go2cmd.js (shared with VR).
 const CAMS = [
     { id: 'cam1', label: 'Cam 1' },
     { id: 'cam2', label: 'Cam 2' },
-];
-
-const SPEEDS = [
-    { mode: 'normal', label: 'Normal', scale: { lin: 0.5, ang: 0.5 } },
-    { mode: 'high', label: 'High', scale: { lin: 1.0, ang: 1.0 } },
-    // Rage: firmware widens the envelope to ~2.5 m/s, but you only reach it by
-    // pushing the stick HARDER. At lin=1.0 rage feels identical to High. The
-    // working rage keyboard blueprint sends linear_speed=1.25; we go further to
-    // actually exploit the wider envelope. (Note: buildTwist's Shift adds ×2 on
-    // top, so effective max can exceed this.)
-    { mode: 'rage', label: 'Rage', scale: { lin: 2.0, ang: 1.5 } },
 ];
 
 // Local UI state; battery/posture/estop reconcile from real telemetry.
@@ -839,8 +827,12 @@ function onRobotState(s) {
         ui.estopped = s.estopped;
         dirty = true;
     }
+    // Robot-confirmed camera stall. Dormant until the robot-side no-frames
+    // watchdog (dimos) emits state.video_stalled — the browser-side 8s
+    // "no video from robot" hint covers the gap meanwhile. Guarded so it's a
+    // safe no-op until that field arrives.
     if (typeof s.video_stalled === 'boolean') {
-        ui.robotVideoStalled = s.video_stalled;  // robot-confirmed camera stall
+        ui.robotVideoStalled = s.video_stalled;
     }
     if (typeof s.obstacle_avoidance === 'boolean' && s.obstacle_avoidance !== ui.obstacleAvoid) {
         ui.obstacleAvoid = s.obstacle_avoidance;
@@ -873,7 +865,6 @@ function resolveAck(nonce, ok) {
     const btn = p.el;
     // Track posture optimistically on a confirmed posture command. StandReady
     // is an action (stand+balance), not a latched state — map it to standing.
-    const POSTURE_STATE = { StandReady: 'StandReady', PoseStand: 'PoseStand', StandDown: 'StandDown', RecoveryStand: 'RecoveryStand', Sit: 'Sit' };
     if (ok && POSTURE_STATE[p.name]) ui.posture = POSTURE_STATE[p.name];
     // Range inputs (light slider) flash via the cmd-* classes; buttons via
     // data-status. 700ms flash → idle; bail if the cockpit unmounted.
@@ -895,9 +886,6 @@ function resolveAck(nonce, ok) {
 
 // Posture/gesture button → {type:sport_cmd, name, nonce} on state_reliable.
 // Robot allow-lists + dispatches, then acks on state_reliable_back (→ resolveAck).
-// Acrobatic actions make the robot leap — confirm before firing so a stray
-// click doesn't launch it. (Matches the robot-side allow-list entries.)
-const CONFIRM_ACTIONS = new Set(['FrontPounce', 'FrontJump']);
 
 function sendCommand(name, btn) {
     if (!cmdReady()) return;
