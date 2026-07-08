@@ -261,11 +261,14 @@ class FakeGridServer(FakeServer):
 
 
 class FakePointCloudHandle(FakeHandle):
-    def __init__(self, points: np.ndarray, colors: np.ndarray, point_size: float) -> None:
+    def __init__(
+        self, points: np.ndarray, colors: np.ndarray, point_size: float, point_shape: str
+    ) -> None:
         super().__init__()
         self.points = points
         self.colors = colors
         self.point_size = point_size
+        self.point_shape = point_shape
 
 
 class FakePointCloudServer(FakeGridServer):
@@ -275,9 +278,15 @@ class FakePointCloudServer(FakeGridServer):
         self.scene.add_point_cloud = self.add_point_cloud
 
     def add_point_cloud(
-        self, name: str, *, points: np.ndarray, colors: np.ndarray, point_size: float
+        self,
+        name: str,
+        *,
+        points: np.ndarray,
+        colors: np.ndarray,
+        point_size: float,
+        point_shape: str = "square",
     ) -> FakePointCloudHandle:
-        handle = FakePointCloudHandle(points, colors, point_size)
+        handle = FakePointCloudHandle(points, colors, point_size, point_shape)
         handle.name = name
         self.point_clouds.append(handle)
         return handle
@@ -975,7 +984,10 @@ def test_scene_adds_reference_grid_when_supported() -> None:
     assert grid.visible is True
 
 
-def test_scene_planning_voxel_map_create_update_remove_and_close() -> None:
+def test_scene_planning_voxel_map_create_update_remove_and_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(scene_module, "PLANNING_VOXEL_MAP_MIN_UPDATE_INTERVAL_S", 0.0)
     server = FakePointCloudServer()
     scene = ViserManipulationScene(
         server, lambda *args, **kwargs: FakeUrdf(("j1",)), preview_fps=10.0
@@ -992,7 +1004,8 @@ def test_scene_planning_voxel_map_create_update_remove_and_close() -> None:
     np.testing.assert_allclose(handle.points, cloud.points_f32())
     assert handle.colors.dtype == np.uint8
     assert handle.colors.tolist() == [[0, 180, 255], [0, 180, 255]]
-    assert handle.point_size == 0.035
+    assert handle.point_size == 0.02
+    assert handle.point_shape == "circle"
 
     updated = PointCloud2.from_numpy(
         np.asarray([[1.0, 2.0, 3.0]], dtype=np.float32), frame_id="world"
@@ -1002,6 +1015,7 @@ def test_scene_planning_voxel_map_create_update_remove_and_close() -> None:
     assert len(server.point_clouds) == 1
     np.testing.assert_allclose(handle.points, updated.points_f32())
     assert handle.colors.tolist() == [[0, 180, 255]]
+    assert handle.point_shape == "circle"
 
     scene.update_planning_voxel_map(PointCloud2.from_numpy(np.empty((0, 3), dtype=np.float32)))
     assert handle.removed is True
@@ -1027,6 +1041,36 @@ def test_scene_planning_voxel_map_downsamples_deterministically(
 
     np.testing.assert_allclose(server.point_clouds[0].points, points[::4])
     assert len(server.point_clouds[0].colors) == 3
+
+
+def test_scene_planning_voxel_map_throttles_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    current_time = {"value": 10.0}
+    monkeypatch.setattr(scene_module, "PLANNING_VOXEL_MAP_MIN_UPDATE_INTERVAL_S", 0.5)
+    monkeypatch.setattr(scene_module.time, "monotonic", lambda: current_time["value"])
+    server = FakePointCloudServer()
+    scene = ViserManipulationScene(
+        server, lambda *args, **kwargs: FakeUrdf(("j1",)), preview_fps=10.0
+    )
+    first = PointCloud2.from_numpy(
+        np.asarray([[0.0, 0.0, 0.0]], dtype=np.float32), frame_id="world"
+    )
+    second = PointCloud2.from_numpy(
+        np.asarray([[1.0, 2.0, 3.0]], dtype=np.float32), frame_id="world"
+    )
+
+    scene.update_planning_voxel_map(first)
+    handle = server.point_clouds[0]
+    current_time["value"] = 10.1
+    scene.update_planning_voxel_map(second)
+
+    np.testing.assert_allclose(handle.points, first.points_f32())
+
+    current_time["value"] = 10.6
+    scene.update_planning_voxel_map(second)
+
+    np.testing.assert_allclose(handle.points, second.points_f32())
 
 
 def test_preview_visibility_only_affects_preview_ghost_and_close_removes_handles() -> None:

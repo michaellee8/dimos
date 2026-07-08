@@ -80,8 +80,10 @@ REFERENCE_GRID_CELL_COLOR = (44, 54, 58)
 REFERENCE_GRID_SECTION_COLOR = (90, 145, 165)
 PLANNING_VOXEL_MAP_NAME = "/planning/voxel_map"
 PLANNING_VOXEL_MAP_COLOR = (0, 180, 255)
-PLANNING_VOXEL_MAP_POINT_SIZE = 0.035
-PLANNING_VOXEL_MAP_MAX_POINTS = 100_000
+PLANNING_VOXEL_MAP_POINT_SIZE = 0.02
+PLANNING_VOXEL_MAP_POINT_SHAPE = "circle"
+PLANNING_VOXEL_MAP_MAX_POINTS = 20_000
+PLANNING_VOXEL_MAP_MIN_UPDATE_INTERVAL_S = 0.5
 
 SceneHandle: TypeAlias = ViserUrdf | TransformControlsHandle | GridHandle | MeshHandle | FrameHandle
 
@@ -109,6 +111,7 @@ class ViserManipulationScene:
         self._target_active: dict[str, bool] = {}
         self._target_tracks_current: dict[str, bool] = {}
         self._planning_map_handle: PointCloudHandle | None = None
+        self._planning_map_last_update_time = 0.0
         self._ensure_reference_grid()
 
     def has_reference_grid(self) -> bool:
@@ -124,6 +127,12 @@ class ViserManipulationScene:
         """Create, update, or remove the planning voxel map point-cloud layer."""
         if cloud is None:
             self._remove_planning_voxel_map()
+            return
+        now = time.monotonic()
+        if (
+            self._planning_map_handle is not None
+            and now - self._planning_map_last_update_time < PLANNING_VOXEL_MAP_MIN_UPDATE_INTERVAL_S
+        ):
             return
         points = np.asarray(cloud.points_f32(), dtype=np.float32).reshape((-1, 3))
         if len(points) == 0:
@@ -143,12 +152,16 @@ class ViserManipulationScene:
                     points=points,
                     colors=colors,
                     point_size=PLANNING_VOXEL_MAP_POINT_SIZE,
+                    point_shape=PLANNING_VOXEL_MAP_POINT_SHAPE,
                 ),
             )
+            self._planning_map_last_update_time = now
             return
         self._planning_map_handle.points = points
         self._planning_map_handle.colors = colors
         self._planning_map_handle.point_size = PLANNING_VOXEL_MAP_POINT_SIZE
+        self._planning_map_handle.point_shape = PLANNING_VOXEL_MAP_POINT_SHAPE
+        self._planning_map_last_update_time = now
 
     def register_robot(self, robot_id: str, config: RobotModelConfig) -> None:
         self._configs_by_id[robot_id] = config
@@ -375,6 +388,7 @@ class ViserManipulationScene:
         if self._planning_map_handle is not None:
             self._remove_scene_handle(self._planning_map_handle)
             self._planning_map_handle = None
+        self._planning_map_last_update_time = 0.0
 
     def _ensure_robot_urdfs(self, robot_id: str, config: RobotModelConfig) -> None:
         if not config.model_path:

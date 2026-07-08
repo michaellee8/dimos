@@ -86,6 +86,12 @@ class FakeJointTrajectory:
         self.velocities = np.zeros_like(positions)
 
 
+class FakeOcTree:
+    def __init__(self, boxes: list[np.ndarray], resolution: float) -> None:
+        self.boxes = [np.asarray(box, dtype=np.float64) for box in boxes]
+        self.resolution = float(resolution)
+
+
 class FakeSplineFittingMode:
     Hermite = "Hermite"
     Cubic = "Cubic"
@@ -210,6 +216,11 @@ class FakeScene:
             return FakeJointGroupInfo(self.joint_group_joint_names)
         return FakeJointGroupInfo(self.joint_groups[name])
 
+    def getFrameId(self, name: str) -> int:
+        if name in {"world", "link_base"}:
+            return 1
+        raise RuntimeError(f"Frame name '{name}' not found in frame_map_.")
+
     def toFullJointPositions(self, group_name: str, q: np.ndarray) -> np.ndarray:
         if (
             group_name == ""
@@ -281,6 +292,21 @@ class FakeScene:
         self.geometry[obstacle_id] = matrix
         self.octrees[obstacle_id] = (np.asarray(points, dtype=np.float64), float(resolution))
         return obstacle_id
+
+    def addOcTreeGeometry(
+        self,
+        obstacle_id: str,
+        parent_frame: str,
+        octree: FakeOcTree,
+        matrix: np.ndarray,
+        color: np.ndarray,
+    ) -> None:
+        _ = (parent_frame, color)
+        if type(self).fail_next_octree_add:
+            type(self).fail_next_octree_add = False
+            raise RuntimeError("octree add failed")
+        self.geometry[obstacle_id] = matrix
+        self.octrees[obstacle_id] = (np.asarray(octree.boxes, dtype=np.float64), octree.resolution)
 
     def updateGeometryPlacement(self, handle: str, matrix: np.ndarray) -> None:
         self.geometry[handle] = matrix
@@ -455,6 +481,7 @@ def _install_fake_roboplan(
     roboplan_pkg.__path__ = []  # type: ignore[attr-defined]
     core = ModuleType("roboplan.core")
     core.Scene = FakeScene  # type: ignore[attr-defined]
+    core.OcTree = FakeOcTree  # type: ignore[attr-defined]
     core.JointConfiguration = FakeJointConfiguration  # type: ignore[attr-defined]
     core.JointPath = FakeJointPath  # type: ignore[attr-defined]
     core.CartesianConfiguration = FakeCartesianConfiguration  # type: ignore[attr-defined]
@@ -1319,7 +1346,13 @@ def test_octree_obstacle_add_replace_remove_and_collisions(
     )
 
     assert world.add_obstacle(obstacle) == "map_octree"
-    np.testing.assert_allclose(world._scene.octrees["map_octree"][0], points)
+    np.testing.assert_allclose(
+        world._scene.octrees["map_octree"][0],
+        np.array(
+            [[0.0, 0.0, 0.0, 0.05, 1.0, 0.5], [0.1, 0.0, 0.0, 0.05, 1.0, 0.5]],
+            dtype=np.float64,
+        ),
+    )
     assert world._scene.octrees["map_octree"][1] == 0.05
     assert not world.check_config_collision_free(
         robot_id, JointState(name=["joint1", "joint2"], position=[0.1, 0.2])
@@ -1335,7 +1368,10 @@ def test_octree_obstacle_add_replace_remove_and_collisions(
     )
     assert world.replace_obstacle(replacement) == "map_octree"
     assert len(world._scene.octrees) == 1
-    np.testing.assert_allclose(world._scene.octrees["map_octree"][0], replacement_points)
+    np.testing.assert_allclose(
+        world._scene.octrees["map_octree"][0],
+        np.array([[1.0, 2.0, 3.0, 0.2, 1.0, 0.5]], dtype=np.float64),
+    )
     assert world._scene.octrees["map_octree"][1] == 0.2
 
     assert world.remove_obstacle("map_octree")
@@ -1369,7 +1405,10 @@ def test_invalid_octree_replacement_keeps_existing_octree(
     with pytest.raises(ValueError, match="finite"):
         world.replace_obstacle(invalid)
 
-    np.testing.assert_allclose(world._scene.octrees["map_octree"][0], points)
+    np.testing.assert_allclose(
+        world._scene.octrees["map_octree"][0],
+        np.array([[0.0, 0.0, 0.0, 0.05, 1.0, 0.5]], dtype=np.float64),
+    )
     assert world._scene.octrees["map_octree"][1] == 0.05
 
 
@@ -1400,7 +1439,10 @@ def test_octree_replacement_backend_failure_restores_existing_octree(
     with pytest.raises(RuntimeError, match="octree add failed"):
         world.replace_obstacle(replacement)
 
-    np.testing.assert_allclose(world._scene.octrees["map_octree"][0], points)
+    np.testing.assert_allclose(
+        world._scene.octrees["map_octree"][0],
+        np.array([[0.0, 0.0, 0.0, 0.05, 1.0, 0.5]], dtype=np.float64),
+    )
     assert world._scene.octrees["map_octree"][1] == 0.05
     assert world.get_obstacles()[0] is obstacle
 
@@ -1442,6 +1484,7 @@ def test_octree_obstacle_requires_scene_feature(
 ) -> None:
     world, _ = _make_world(fake_roboplan, robot_config)
     world.finalize()
+    world._scene.addOcTreeGeometry = None
     world._scene.addOctreeGeometry = None
 
     obstacle = Obstacle(

@@ -30,6 +30,7 @@ from dimos.manipulation.grasping.pointcloud_grasp_demo_controller import (
 )
 from dimos.manipulation.grasping.target_grasp_demo_controller import TargetGraspDemoController
 from dimos.manipulation.grasping.vgn_grasp_gen_module import VGNGraspGenModule
+from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.manipulation.pick_and_place_module import PickAndPlaceModule
 from dimos.manipulation.planning.spec.config import RobotModelConfig
 from dimos.manipulation.planning.utils.mesh_utils import prepare_urdf_for_drake
@@ -74,7 +75,7 @@ XARM7_RERUN_LINK_FRAMES = unique_link_names(
 )
 
 XARM7_RERUN_HIGHLIGHT_LINKS = ["link7", "xarm_gripper_base_link", "link_tcp"]
-XARM_VOXEL_PLANNING_RESOLUTION = 0.05
+XARM_VOXEL_PLANNING_RESOLUTION = 0.02
 
 
 def _manual_agentic_xarm7_model_config() -> RobotModelConfig:
@@ -259,7 +260,7 @@ manual_agentic_gpd_mujoco_grasp_demo = autoconnect(
 
 
 xarm_voxel_planning_viser_demo = autoconnect(
-    PickAndPlaceModule.blueprint(
+    ManipulationModule.blueprint(
         robots=[
             make_xarm7_model_config(
                 name="arm",
@@ -319,6 +320,6 @@ xarm_voxel_planning_viser_demo = autoconnect(
 ).remappings(
     [
         (RayTracingVoxelMap, "lidar", "filtered_pointcloud"),
-        (PickAndPlaceModule, "planning_voxel_map", "global_map"),
+        (ManipulationModule, "planning_voxel_map", "global_map"),
     ]
 )

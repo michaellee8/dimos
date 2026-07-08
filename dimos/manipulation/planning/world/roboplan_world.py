@@ -3674,6 +3674,21 @@ class RoboPlanWorld:
         resolution: float,
         matrix: NDArray[np.float64],
     ) -> Any:
+        native_method = getattr(scene, "addOcTreeGeometry", None)
+        octree_cls = getattr(roboplan_core, "OcTree", None)
+        if callable(native_method) and octree_cls is not None:
+            boxes = self._octree_boxes_from_points(points, resolution)
+            octree = octree_cls(boxes, resolution)
+            color = np.asarray((0.0, 0.6, 1.0, 0.6), dtype=np.float64)
+            result = native_method(
+                obstacle_id,
+                self._scene_obstacle_parent_frame(scene),
+                octree,
+                np.asarray(matrix, dtype=np.float64, order="F"),
+                color,
+            )
+            return obstacle_id if result is None else result
+
         for method_name in (
             "addOctreeGeometry",
             "addOctomapGeometry",
@@ -3691,8 +3706,33 @@ class RoboPlanWorld:
                     return method(obstacle_id, points, resolution)
         raise NotImplementedError(
             "RoboPlan scene does not expose octree collision geometry support "
-            "(expected addOctreeGeometry/addOctomapGeometry/addPointCloudGeometry)."
+            "(expected addOcTreeGeometry/addOctreeGeometry/"
+            "addOctomapGeometry/addPointCloudGeometry)."
         )
+
+    def _octree_boxes_from_points(
+        self, points: NDArray[np.float64], resolution: float
+    ) -> list[NDArray[np.float64]]:
+        return [
+            np.asarray((point[0], point[1], point[2], resolution, 1.0, 0.5), dtype=np.float64)
+            for point in points
+        ]
+
+    def _scene_obstacle_parent_frame(self, scene: Any) -> str:
+        frame_ids = getattr(scene, "getFrameId", None)
+        if callable(frame_ids):
+            try:
+                frame_ids("world")
+                return "world"
+            except Exception:
+                pass
+            for robot in self._robots.values():
+                try:
+                    frame_ids(robot.config.base_link)
+                    return robot.config.base_link
+                except Exception:
+                    continue
+        raise NotImplementedError("RoboPlan scene has no usable obstacle parent frame")
 
     def _require_dimensions(self, obstacle: Obstacle, n_dims: int) -> None:
         if len(obstacle.dimensions) != n_dims:

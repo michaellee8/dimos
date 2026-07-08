@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import queue
 import threading
+import time
 from typing import Literal
 
 from dimos.manipulation.planning.spec.models import PlanningGroupID
@@ -249,9 +250,11 @@ class TargetEvaluationWorker:
         apply_result: Callable[
             [TargetEvaluationRequest, TargetEvaluation | TargetSetEvaluation], None
         ],
+        timeout_seconds: float | None = None,
     ) -> None:
         self._handler = handler
         self._apply_result = apply_result
+        self._timeout_seconds = timeout_seconds
         self._requests: queue.Queue[TargetEvaluationRequest] = queue.Queue(maxsize=1)
         self._submit_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -274,12 +277,25 @@ class TargetEvaluationWorker:
 
     def submit(self, request: TargetEvaluationRequest) -> None:
         with self._submit_lock:
+            dropped_count = 0
             while True:
                 try:
                     self._requests.get_nowait()
+                    dropped_count += 1
                 except queue.Empty:
                     break
             self._requests.put_nowait(request)
+        logger.info(
+            "[DEBUG-viser-ik] target evaluation submitted",
+            sequence_id=request.sequence_id,
+            source=request.source,
+            group_ids=[str(group_id) for group_id in request.group_ids],
+            auxiliary_group_ids=[str(group_id) for group_id in request.auxiliary_group_ids],
+            pose_target_count=len(request.pose_targets),
+            joint_target_count=len(request.joint_targets),
+            check_collision=request.check_collision,
+            dropped_queued_requests=dropped_count,
+        )
 
     def _run(self) -> None:
         while not self._stop_event.is_set():
@@ -287,16 +303,105 @@ class TargetEvaluationWorker:
                 request = self._requests.get(timeout=0.1)
             except queue.Empty:
                 continue
+            drained_count = 0
             while True:
                 try:
                     request = self._requests.get_nowait()
+                    drained_count += 1
                 except queue.Empty:
                     break
+            logger.info(
+                "[DEBUG-viser-ik] target evaluation worker picked request",
+                sequence_id=request.sequence_id,
+                source=request.source,
+                drained_queued_requests=drained_count,
+            )
             try:
-                result = self._handler(request)
-                self._apply_result(request, result)
+                self._run_evaluation(request)
             except Exception:
                 logger.warning("Target evaluation worker caught unhandled exception", exc_info=True)
+
+    def _run_evaluation(self, request: TargetEvaluationRequest) -> None:
+        timeout = self._evaluation_timeout()
+        start_time = time.monotonic()
+        logger.info(
+            "[DEBUG-viser-ik] target evaluation started",
+            sequence_id=request.sequence_id,
+            source=request.source,
+            timeout_seconds=timeout,
+            group_ids=[str(group_id) for group_id in request.group_ids],
+            auxiliary_group_ids=[str(group_id) for group_id in request.auxiliary_group_ids],
+            pose_target_count=len(request.pose_targets),
+            joint_target_count=len(request.joint_targets),
+        )
+        if timeout is None:
+            result = self._handler(request)
+            logger.info(
+                "[DEBUG-viser-ik] target evaluation finished",
+                sequence_id=request.sequence_id,
+                source=request.source,
+                elapsed_s=round(time.monotonic() - start_time, 3),
+                status=str(result.get("status", "")),
+                success=bool(result.get("success", False)),
+                collision_free=bool(result.get("collision_free", False)),
+            )
+            self._apply_result(request, result)
+            return
+
+        result: TargetEvaluation | TargetSetEvaluation | None = None
+        error: Exception | None = None
+
+        def run() -> None:
+            nonlocal error, result
+            try:
+                result = self._handler(request)
+            except Exception as e:
+                error = e
+
+        thread = threading.Thread(target=run, name="ViserTargetEvaluation", daemon=True)
+        thread.start()
+        thread.join(timeout=max(timeout, 0.0))
+        if thread.is_alive():
+            logger.warning(
+                "[DEBUG-viser-ik] target evaluation timed out",
+                sequence_id=request.sequence_id,
+                source=request.source,
+                timeout_seconds=timeout,
+                elapsed_s=round(time.monotonic() - start_time, 3),
+            )
+            self._apply_result(request, self._timeout_result(timeout))
+            return
+        if error is not None:
+            logger.warning(
+                "[DEBUG-viser-ik] target evaluation raised",
+                sequence_id=request.sequence_id,
+                source=request.source,
+                elapsed_s=round(time.monotonic() - start_time, 3),
+                error=str(error),
+            )
+            raise error
+        if result is not None:
+            logger.info(
+                "[DEBUG-viser-ik] target evaluation finished",
+                sequence_id=request.sequence_id,
+                source=request.source,
+                elapsed_s=round(time.monotonic() - start_time, 3),
+                status=str(result.get("status", "")),
+                success=bool(result.get("success", False)),
+                collision_free=bool(result.get("collision_free", False)),
+            )
+            self._apply_result(request, result)
+
+    def _evaluation_timeout(self) -> float | None:
+        return None if self._timeout_seconds is None else float(self._timeout_seconds)
+
+    def _timeout_result(self, timeout: float) -> TargetSetEvaluation:
+        return {
+            "success": False,
+            "collision_free": False,
+            "status": "TIMEOUT",
+            "message": f"Target evaluation timed out after {timeout:.1f}s",
+        }
 
 
 class OperationWorker:

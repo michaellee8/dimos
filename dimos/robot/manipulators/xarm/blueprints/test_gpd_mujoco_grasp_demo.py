@@ -35,6 +35,7 @@ from dimos.manipulation.grasping.pointcloud_grasp_demo_controller import (
 )
 from dimos.manipulation.grasping.target_grasp_demo_controller import TargetGraspDemoController
 from dimos.manipulation.grasping.vgn_grasp_gen_module import VGNGraspGenModule
+from dimos.manipulation.manipulation_module import ManipulationModule
 from dimos.manipulation.pick_and_place_module import PickAndPlaceModule
 from dimos.manipulation.skill_errors import ManipulationSkillError
 from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
@@ -170,7 +171,8 @@ def test_manual_agentic_gpd_mujoco_grasp_demo_registry_name_is_stable() -> None:
 def test_xarm_voxel_planning_viser_demo_wires_mapping_stack_without_demo_only_modules() -> None:
     modules = {atom.module for atom in xarm_voxel_planning_viser_demo.blueprints}
 
-    assert PickAndPlaceModule in modules
+    assert ManipulationModule in modules
+    assert PickAndPlaceModule not in modules
     assert MujocoSimModule in modules
     assert PointCloudSelfFilter in modules
     assert TfPoseSource in modules
@@ -185,10 +187,10 @@ def test_xarm_voxel_planning_viser_demo_wires_mapping_stack_without_demo_only_mo
 
 
 def test_xarm_voxel_planning_viser_demo_config_and_remappings() -> None:
-    pick_atom = next(
+    manipulation_atom = next(
         atom
         for atom in xarm_voxel_planning_viser_demo.blueprints
-        if atom.module is PickAndPlaceModule
+        if atom.module is ManipulationModule
     )
     mapper_atom = next(
         atom
@@ -207,11 +209,13 @@ def test_xarm_voxel_planning_viser_demo_config_and_remappings() -> None:
         atom for atom in xarm_voxel_planning_viser_demo.blueprints if atom.module is TfPoseSource
     )
 
-    assert pick_atom.kwargs["visualization"] == {"backend": "viser"}
-    assert pick_atom.kwargs["world_backend"] == "roboplan"
-    assert pick_atom.kwargs["planner_name"] == "roboplan"
-    assert pick_atom.kwargs["kinematics"] == {"backend": "roboplan"}
-    assert pick_atom.kwargs["planning_voxel_map_resolution"] == XARM_VOXEL_PLANNING_RESOLUTION
+    assert manipulation_atom.kwargs["visualization"] == {"backend": "viser"}
+    assert manipulation_atom.kwargs["world_backend"] == "roboplan"
+    assert manipulation_atom.kwargs["planner_name"] == "roboplan"
+    assert manipulation_atom.kwargs["kinematics"] == {"backend": "roboplan"}
+    assert (
+        manipulation_atom.kwargs["planning_voxel_map_resolution"] == XARM_VOXEL_PLANNING_RESOLUTION
+    )
     assert mapper_atom.kwargs["voxel_size"] == XARM_VOXEL_PLANNING_RESOLUTION
     assert sim_atom.kwargs["enable_depth"] is True
     assert sim_atom.kwargs["enable_color"] is True
@@ -225,7 +229,7 @@ def test_xarm_voxel_planning_viser_demo_config_and_remappings() -> None:
     ]
     assert regions[0].size == (0.22, 0.22, 0.30)
     assert regions[1].radius == 0.16
-    robot_config = pick_atom.kwargs["robots"][0]
+    robot_config = manipulation_atom.kwargs["robots"][0]
     assert "link7" in robot_config.tf_extra_links
     assert "link_tcp" in robot_config.tf_extra_links
     assert (
@@ -233,9 +237,13 @@ def test_xarm_voxel_planning_viser_demo_config_and_remappings() -> None:
         == "filtered_pointcloud"
     )
     assert (
-        xarm_voxel_planning_viser_demo.remapping_map[(PickAndPlaceModule, "planning_voxel_map")]
+        xarm_voxel_planning_viser_demo.remapping_map[(ManipulationModule, "planning_voxel_map")]
         == "global_map"
     )
+
+    config_fields = xarm_voxel_planning_viser_demo.config().model_fields
+    assert "manipulationmodule" in config_fields
+    assert "pickandplacemodule" not in config_fields
 
 
 def test_xarm_voxel_planning_viser_demo_maps_global_map_to_planning_input() -> None:
@@ -244,19 +252,19 @@ def test_xarm_voxel_planning_viser_demo_maps_global_map_to_planning_input() -> N
         for atom in xarm_voxel_planning_viser_demo.blueprints
         if atom.module is RayTracingVoxelMap
     )
-    pick_atom = next(
+    manipulation_atom = next(
         atom
         for atom in xarm_voxel_planning_viser_demo.blueprints
-        if atom.module is PickAndPlaceModule
+        if atom.module is ManipulationModule
     )
 
     mapper_streams = {(stream.name, stream.direction) for stream in mapper_atom.streams}
-    pick_streams = {(stream.name, stream.direction) for stream in pick_atom.streams}
+    manipulation_streams = {(stream.name, stream.direction) for stream in manipulation_atom.streams}
 
     assert ("global_map", "out") in mapper_streams
-    assert ("planning_voxel_map", "in") in pick_streams
+    assert ("planning_voxel_map", "in") in manipulation_streams
     assert (
-        xarm_voxel_planning_viser_demo.remapping_map[(PickAndPlaceModule, "planning_voxel_map")]
+        xarm_voxel_planning_viser_demo.remapping_map[(ManipulationModule, "planning_voxel_map")]
         == "global_map"
     )
 
