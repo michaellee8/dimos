@@ -56,6 +56,9 @@ class _FakeBus:
 
 
 class _FailingBus:
+    def __init__(self, exc: Exception | None = None) -> None:
+        self._exc = exc if exc is not None else ValueError("read failure")
+
     def connect(self) -> None:
         pass
 
@@ -63,7 +66,7 @@ class _FailingBus:
         pass
 
     def read_positions(self) -> dict[str, float]:
-        raise ValueError("read failure")
+        raise self._exc
 
 
 def _payload(command: TeleopCommand | None) -> JointState:
@@ -350,6 +353,28 @@ def test_adapter_returns_none_when_bus_reports_invalid_reading(
 ) -> None:
     left_path, right_path = _write_calibrations(tmp_path)
     _patch_buses(monkeypatch, {"left": _FailingBus(), "right": _FakeBus(_readings())})
+
+    adapter = OpenArmMiniTeleopAdapter(_configured_config(left_path, right_path))
+
+    adapter.connect()
+    command = adapter.get_current_command()
+    adapter.disconnect()
+
+    assert command is None
+
+
+def test_adapter_returns_none_when_bus_read_raises_runtime_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    left_path, right_path = _write_calibrations(tmp_path)
+    _patch_buses(
+        monkeypatch,
+        {
+            "left": _FailingBus(RuntimeError("Feetech motor read failed")),
+            "right": _FakeBus(_readings()),
+        },
+    )
 
     adapter = OpenArmMiniTeleopAdapter(_configured_config(left_path, right_path))
 

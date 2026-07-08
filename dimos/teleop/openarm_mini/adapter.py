@@ -27,6 +27,9 @@ from dimos.teleop.openarm_mini.config import (
 from dimos.teleop.openarm_mini.feetech import OpenArmMiniLeaderReader
 from dimos.teleop.openarm_mini.mapping import combine_side_commands, map_side_readings
 from dimos.teleop.runtime.types import TeleopCommand
+from dimos.utils.logging_config import setup_logger
+
+logger = setup_logger()
 
 
 class OpenArmMiniTeleopAdapter:
@@ -36,6 +39,7 @@ class OpenArmMiniTeleopAdapter:
         self.config = config if config is not None else OpenArmMiniTeleopConfig()
         self._buses: dict[str, OpenArmMiniLeaderReader] = {}
         self._previous_positions_by_side: dict[str, dict[str, float]] = {}
+        self._last_read_error: str | None = None
         self._connected = False
 
     def connect(self) -> None:
@@ -90,8 +94,16 @@ class OpenArmMiniTeleopAdapter:
                 )
                 side_commands.append(side_command)
                 next_previous_positions_by_side[side] = side_command.positions_by_joint
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, RuntimeError, OSError) as exc:
+            error_message = str(exc)
+            if error_message != self._last_read_error:
+                logger.warning(
+                    "OpenArm Mini teleop read failed; dropping command: %s",
+                    error_message,
+                )
+                self._last_read_error = error_message
             return None
 
+        self._last_read_error = None
         self._previous_positions_by_side = next_previous_positions_by_side
         return TeleopCommand(payload=combine_side_commands(side_commands))
