@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import os
 import pickle
 import statistics
 import threading
@@ -39,7 +40,13 @@ def _turbojpeg_available() -> bool:
     return True
 
 
-# some CI runners (ubuntu-arm) lack the native libturbojpeg
+# A missing libturbojpeg must not silently skip this suite in CI (same
+# treatment as the webrtc aiortc guard) — ci.yml installs it. Local
+# no-system-lib installs still skip.
+if os.environ.get("CI"):
+    assert _turbojpeg_available(), (
+        "native libturbojpeg missing in CI — install it in ci.yml's apt step"
+    )
 pytestmark = pytest.mark.skipif(
     not _turbojpeg_available(), reason="native libturbojpeg unavailable"
 )
