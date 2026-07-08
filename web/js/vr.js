@@ -228,7 +228,10 @@ export async function startVR() {
     canvas.style.display = 'block';
 
     if (!renderer) {
-        renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+        // xrCompatible: true at context creation — on Quest, without it the GL
+        // context is not usable by the immersive session, so VideoTextures that
+        // render fine in the flat page come up black in VR.
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, xrCompatible: true });
         renderer.autoClear = true;
         renderer.xr.enabled = true;
         renderer.xr.setReferenceSpaceType('local-floor');
