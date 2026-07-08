@@ -19,8 +19,6 @@ import threading
 import time
 from typing import Any
 
-from pydantic import Field
-
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
@@ -28,13 +26,10 @@ from dimos.core.stream import Out
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.JointState import JointState
-from dimos.teleop.openarm_mini.config import OpenArmMiniTeleopConfig
-from dimos.teleop.runtime.adapters import TeleopAdapterConfig, create_teleop_adapter
-from dimos.teleop.runtime.types import TeleopAdapter, TeleopCommand
+from dimos.teleop.runtime.types import TeleopCommand
 
 
 class TeleopModuleConfig(ModuleConfig):
-    adapter: TeleopAdapterConfig = Field(default_factory=OpenArmMiniTeleopConfig)
     tick_period_s: float = 0.02
     max_publish_rate_hz: float = 50.0
     stale_command_timeout_s: float = 0.25
@@ -49,17 +44,12 @@ class TeleopModule(Module):
     coordinator_cartesian_command: Out[PoseStamped]
     twist_command: Out[Twist]
 
-    def __init__(self, runtime_adapter: TeleopAdapter | None = None, **kwargs: Any) -> None:
+    def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         if self.teleop_config.max_publish_rate_hz <= 0.0:
             raise ValueError("max_publish_rate_hz must be positive")
         if self.teleop_config.stale_command_timeout_s < 0.0:
             raise ValueError("stale_command_timeout_s must be non-negative")
-        self._adapter = (
-            runtime_adapter
-            if runtime_adapter is not None
-            else create_teleop_adapter(self.teleop_config.adapter)
-        )
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_publish_time = 0.0
@@ -69,7 +59,7 @@ class TeleopModule(Module):
         super().start()
         self._stop_event.clear()
         self._last_publish_time = 0.0
-        self._adapter.connect()
+        self.connect_teleop()
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
@@ -78,7 +68,7 @@ class TeleopModule(Module):
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(DEFAULT_THREAD_JOIN_TIMEOUT)
-        self._adapter.disconnect()
+        self.disconnect_teleop()
         super().stop()
 
     def tick(self) -> None:
@@ -86,7 +76,7 @@ class TeleopModule(Module):
 
         if self._stop_event.is_set():
             return
-        command = self._adapter.get_current_command()
+        command = self.get_current_command()
         if command is None:
             return
         if command.stop:
@@ -118,6 +108,18 @@ class TeleopModule(Module):
 
     def _now(self) -> float:
         return time.monotonic()
+
+    def connect_teleop(self) -> None:
+        """Connect the concrete teleop source."""
+        raise NotImplementedError
+
+    def disconnect_teleop(self) -> None:
+        """Disconnect the concrete teleop source."""
+        raise NotImplementedError
+
+    def get_current_command(self) -> TeleopCommand | None:
+        """Return the current teleop command from the concrete source."""
+        raise NotImplementedError
 
     @singledispatchmethod
     def _publish_payload(self, payload: object) -> None:

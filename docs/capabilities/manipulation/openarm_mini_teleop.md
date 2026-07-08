@@ -137,9 +137,8 @@ before connecting any OpenArm follower hardware:
 
 ```bash
 dimos run openarm-mini-left-teleop-viser \
-  -o teleopmodule.adapter.backend=openarm_mini \
-  -o teleopmodule.adapter.port_left=<left-feetech-port> \
-  -o teleopmodule.adapter.baudrate=<feetech-baudrate>
+  -o openarmminiteleopmodule.openarm_mini.port_left=<left-feetech-port> \
+  -o openarmminiteleopmodule.openarm_mini.baudrate=<feetech-baudrate>
 ```
 
 The blueprint requires:
@@ -165,9 +164,8 @@ Run with the required right leader connection settings:
 
 ```bash
 uv run dimos run openarm-mini-right-teleop-viser \
-  -o teleopmodule.adapter.backend=openarm_mini \
-  -o teleopmodule.adapter.port_right=<right-feetech-port> \
-  -o teleopmodule.adapter.baudrate=<feetech-baudrate>
+  -o openarmminiteleopmodule.openarm_mini.port_right=<right-feetech-port> \
+  -o openarmminiteleopmodule.openarm_mini.baudrate=<feetech-baudrate>
 ```
 
 The blueprint requires:
@@ -178,9 +176,8 @@ The blueprint requires:
   configured `right_calibration_path`
 - Viser dependencies from `uv sync --extra manipulation` or `uv sync --extra all`
 
-The right blueprint publishes ManipulationModule-compatible global coordinator
-joint names (`right_arm/openarm_right_joint1` through
-`right_arm/openarm_right_joint7`). Viser renders follower-observed
+The right blueprint publishes ManipulationModule-compatible coordinator joint
+names (`openarm_right_joint1` through `openarm_right_joint7`). Viser renders follower-observed
 `coordinator_joint_state`, not the raw sender-side command, so mock mode validates
 the same coordinator routing used before real hardware is connected. Real
 follower hardware is intentionally out of scope for these Viser demo blueprints.
@@ -188,25 +185,24 @@ follower hardware is intentionally out of scope for these Viser demo blueprints.
 ## Dual-arm coordinator + Viser bring-up
 
 Use `openarm-mini-dual-teleop-viser` for bimanual OpenArm Mini leader teleop with
-the same coordinator-observed Viser path. It uses one bimanual generic
-`TeleopModule` with the OpenArm Mini adapter backend, one `ControlCoordinator`,
-and one `ManipulationModule` with both left and right OpenArm models.
+the same coordinator-observed Viser path. It uses one bimanual
+`OpenArmMiniTeleopModule`, one `ControlCoordinator`, and one `ManipulationModule`
+with both left and right OpenArm models.
 
 Run with the required leader connection settings:
 
 ```bash
 uv run dimos run openarm-mini-dual-teleop-viser \
-  -o teleopmodule.adapter.backend=openarm_mini \
-  -o teleopmodule.adapter.port_left=<left-feetech-port> \
-  -o teleopmodule.adapter.port_right=<right-feetech-port> \
-  -o teleopmodule.adapter.baudrate=<feetech-baudrate>
+  -o openarmminiteleopmodule.openarm_mini.port_left=<left-feetech-port> \
+  -o openarmminiteleopmodule.openarm_mini.port_right=<right-feetech-port> \
+  -o openarmminiteleopmodule.openarm_mini.baudrate=<feetech-baudrate>
 ```
 
-The dual blueprint publishes ManipulationModule-compatible global coordinator
-joint names for both arms:
+The dual blueprint publishes ManipulationModule-compatible coordinator joint
+names for both arms:
 
-- `left_arm/openarm_left_joint1` through `left_arm/openarm_left_joint7`
-- `right_arm/openarm_right_joint1` through `right_arm/openarm_right_joint7`
+- `openarm_left_joint1` through `openarm_left_joint7`
+- `openarm_right_joint1` through `openarm_right_joint7`
 
 Each follower side remains mocked. Real follower hardware is intentionally out of
 scope for these Viser demo blueprints.

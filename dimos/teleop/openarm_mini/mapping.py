@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.robot.manipulators.openarm.config import openarm_joints
 from dimos.teleop.openarm_mini.calibration import OPENARM_MINI_ARM_JOINT_NAMES
-from dimos.teleop.openarm_mini.config import validate_side
+from dimos.teleop.openarm_mini.config import OpenArmMiniSide, validate_side
 
 LEADER_JOINT_NAMES = OPENARM_MINI_ARM_JOINT_NAMES
 LEADER_MOTOR_NAMES = LEADER_JOINT_NAMES
@@ -30,7 +30,7 @@ LEADER_MOTOR_NAMES = LEADER_JOINT_NAMES
 # Mirrors the measured OpenArm v1.0 follower limits from
 # dimos.hardware.manipulators.openarm.adapter. The sender-side clamp improves
 # teleop behavior; the follower/control stack remains defensive.
-OPENARM_FOLLOWER_JOINT_LIMITS: dict[str, tuple[tuple[float, float], ...]] = {
+OPENARM_FOLLOWER_JOINT_LIMITS: dict[OpenArmMiniSide, tuple[tuple[float, float], ...]] = {
     "left": (
         (-3.45, 1.35),
         (-3.30, 0.15),
@@ -56,7 +56,7 @@ OPENARM_FOLLOWER_JOINT_LIMITS: dict[str, tuple[tuple[float, float], ...]] = {
 class OpenArmMiniSideCommand:
     """Mapped command for one OpenArm follower side."""
 
-    side: str
+    side: OpenArmMiniSide
     positions_by_joint: dict[str, float]
 
 
@@ -69,16 +69,16 @@ def map_side_readings(
     max_joint_jump_radians: float | None = None,
 ) -> OpenArmMiniSideCommand:
     """Map calibrated leader arm radians into OpenArm follower joint positions."""
-    validate_side(side)
+    valid_side = validate_side(side)
     _validate_readings(readings)
 
-    follower_joint_names = tuple(target_joint_names or openarm_joints(side))
+    follower_joint_names = tuple(target_joint_names or openarm_joints(valid_side))
     if len(follower_joint_names) != len(LEADER_JOINT_NAMES):
         raise ValueError(
             f"target_joint_names must contain {len(LEADER_JOINT_NAMES)} names, "
             f"got {len(follower_joint_names)}"
         )
-    side_limits = OPENARM_FOLLOWER_JOINT_LIMITS[side]
+    side_limits = OPENARM_FOLLOWER_JOINT_LIMITS[valid_side]
     positions_by_joint = {
         follower_joint: _clamp(readings[f"joint_{index}"], *side_limits[index - 1])
         for index, follower_joint in enumerate(follower_joint_names, start=1)
@@ -89,7 +89,7 @@ def map_side_readings(
         max_joint_jump_radians,
     )
     return OpenArmMiniSideCommand(
-        side=side,
+        side=valid_side,
         positions_by_joint=positions_by_joint,
     )
 

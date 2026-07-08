@@ -201,7 +201,7 @@ def test_adapter_left_only_connects_left_bus_and_emits_left_joints(
 def test_config_rejects_invalid_or_duplicate_enabled_sides() -> None:
     with pytest.raises(ValueError, match="at least one side"):
         OpenArmMiniTeleopConfig(enabled_sides=())
-    with pytest.raises(ValueError, match="side must be"):
+    with pytest.raises(ValueError, match="Input should be 'left' or 'right'"):
         OpenArmMiniTeleopConfig(enabled_sides=("center",))
     with pytest.raises(ValueError, match="duplicate"):
         OpenArmMiniTeleopConfig(enabled_sides=("left", "left"))

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import time
-from typing import Protocol, TypeAlias
+from typing import TypeAlias
 
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
@@ -40,13 +40,3 @@ class TeleopCommand:
             return
         if self.payload is None:
             raise ValueError("TeleopCommand must contain a payload unless stop=True")
-
-
-class TeleopAdapter(Protocol):
-    """Adapter interface for generic teleop command sources."""
-
-    def connect(self) -> None: ...
-
-    def disconnect(self) -> None: ...
-
-    def get_current_command(self) -> TeleopCommand | None: ...

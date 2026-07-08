@@ -22,7 +22,6 @@ import pytest
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.sensor_msgs.JointState import JointState
-from dimos.teleop.openarm_mini.config import OpenArmMiniTeleopConfig
 from dimos.teleop.runtime.teleop_module import TeleopModule
 from dimos.teleop.runtime.types import TeleopCommand
 
@@ -45,13 +44,28 @@ class _Adapter:
         return self.commands.pop(0)
 
 
-@pytest.fixture
-def module_factory() -> Iterator[Callable[..., TeleopModule]]:
-    modules: list[TeleopModule] = []
+class _TestTeleopModule(TeleopModule):
+    def __init__(self, runtime_adapter: _Adapter, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._runtime_adapter = runtime_adapter
 
-    def make(runtime_adapter: _Adapter, **kwargs: Any) -> TeleopModule:
+    def connect_teleop(self) -> None:
+        self._runtime_adapter.connect()
+
+    def disconnect_teleop(self) -> None:
+        self._runtime_adapter.disconnect()
+
+    def get_current_command(self) -> TeleopCommand | None:
+        return self._runtime_adapter.get_current_command()
+
+
+@pytest.fixture
+def module_factory() -> Iterator[Callable[..., _TestTeleopModule]]:
+    modules: list[_TestTeleopModule] = []
+
+    def make(runtime_adapter: _Adapter, **kwargs: Any) -> _TestTeleopModule:
         config = {"max_publish_rate_hz": 100.0, "stale_command_timeout_s": 1.0, **kwargs}
-        module = TeleopModule(runtime_adapter=runtime_adapter, **config)
+        module = _TestTeleopModule(runtime_adapter=runtime_adapter, **config)
         modules.append(module)
         return module
 
@@ -87,19 +101,8 @@ def test_command_envelope_requires_payload_unless_stopping() -> None:
         TeleopCommand(joint, stop=True)
 
 
-def test_module_config_creates_adapter_from_discriminated_backend(
-    module_factory: Callable[..., TeleopModule],
-) -> None:
-    module = module_factory(
-        _Adapter(), adapter={"backend": "openarm_mini", "enabled_sides": ("right",)}
-    )
-
-    assert isinstance(module.teleop_config.adapter, OpenArmMiniTeleopConfig)
-    assert module.teleop_config.adapter.enabled_sides == ("right",)
-
-
 def test_explicit_stop_command_is_not_published(
-    mocker: Any, module_factory: Callable[..., TeleopModule]
+    mocker: Any, module_factory: Callable[..., _TestTeleopModule]
 ) -> None:
     module = module_factory(_Adapter([TeleopCommand(timestamp=1.0, stop=True)]))
     publishers = _publishers(mocker, module)
@@ -122,7 +125,7 @@ def test_tick_routes_payload_by_type(
     payload: JointState | PoseStamped | Twist,
     stream_name: str,
     mocker: Any,
-    module_factory: Callable[..., TeleopModule],
+    module_factory: Callable[..., _TestTeleopModule],
 ) -> None:
     module = module_factory(_Adapter([TeleopCommand(payload, timestamp=1.0)]))
     publishers = _publishers(mocker, module)
@@ -137,7 +140,7 @@ def test_tick_routes_payload_by_type(
 
 
 def test_stale_commands_are_not_published(
-    mocker: Any, module_factory: Callable[..., TeleopModule]
+    mocker: Any, module_factory: Callable[..., _TestTeleopModule]
 ) -> None:
     joint = JointState({"name": ["j0"], "position": [1.0]})
     module = module_factory(_Adapter([TeleopCommand(joint, timestamp=1.0)]))
@@ -150,7 +153,7 @@ def test_stale_commands_are_not_published(
 
 
 def test_rate_limiting_skips_commands(
-    mocker: Any, module_factory: Callable[..., TeleopModule]
+    mocker: Any, module_factory: Callable[..., _TestTeleopModule]
 ) -> None:
     first = JointState({"name": ["j0"], "position": [1.0]})
     second = JointState({"name": ["j0"], "position": [2.0]})
@@ -169,7 +172,7 @@ def test_rate_limiting_skips_commands(
 
 def test_start_stop_connect_disconnect_and_no_publish_after_stop(
     mocker: Any,
-    module_factory: Callable[..., TeleopModule],
+    module_factory: Callable[..., _TestTeleopModule],
 ) -> None:
     joint = JointState({"name": ["j0"], "position": [1.0]})
     adapter = _Adapter([TeleopCommand(joint, timestamp=1.0)])

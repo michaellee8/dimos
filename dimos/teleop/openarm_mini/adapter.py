@@ -30,7 +30,7 @@ from dimos.teleop.runtime.types import TeleopCommand
 
 
 class OpenArmMiniTeleopAdapter:
-    """TeleopAdapter implementation for selected OpenArm Mini leader sides."""
+    """Read selected OpenArm Mini leader sides and map them to teleop commands."""
 
     def __init__(self, config: OpenArmMiniTeleopConfig | None = None) -> None:
         self.config = config if config is not None else OpenArmMiniTeleopConfig()
