@@ -19,6 +19,22 @@ from dimos.msgs.sensor_msgs.CompressedImage import CompressedImage
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 
 
+def _turbojpeg_available() -> bool:
+    try:
+        from turbojpeg import TurboJPEG
+
+        TurboJPEG()
+    except Exception:
+        return False
+    return True
+
+
+# some CI runners (ubuntu-arm) lack the native libturbojpeg
+pytestmark = pytest.mark.skipif(
+    not _turbojpeg_available(), reason="native libturbojpeg unavailable"
+)
+
+
 @pytest.fixture()
 def rgb_image():
     rng = np.random.RandomState(42)

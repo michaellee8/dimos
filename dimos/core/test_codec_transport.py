@@ -29,6 +29,22 @@ from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.protocol.service.zenohservice import ZenohSessionPool
 
 
+def _turbojpeg_available() -> bool:
+    try:
+        from turbojpeg import TurboJPEG
+
+        TurboJPEG()
+    except Exception:
+        return False
+    return True
+
+
+# some CI runners (ubuntu-arm) lack the native libturbojpeg
+pytestmark = pytest.mark.skipif(
+    not _turbojpeg_available(), reason="native libturbojpeg unavailable"
+)
+
+
 def make_image(width: int = 1280, height: int = 720) -> Image:
     """720p-ish frame: gradient + noise, roughly what a real camera compresses like."""
     rng = np.random.RandomState(7)
