@@ -44,6 +44,12 @@ from dimos.visualization.vis_module import vis_module
 
 voxel_size = 0.08
 
+# Robot footprint (m): length is forward (x), width is left (y).
+ROBOT_LENGTH = 0.6858
+ROBOT_WIDTH = 0.3175
+# Ground to the tallest point (the lidar). Drives clearance and the ground projection.
+ROBOT_HEIGHT = 0.45
+
 # Body-frame axis-triad length (m).
 _axis_len = 0.5
 # Arrow radius as a fraction of the triad length.
@@ -87,7 +93,10 @@ def _render_path(msg: Any) -> Any:
 def _static_robot_body(rr: Any) -> list[Any]:
     """Go2-shaped box on pointlio's sensor frame, counter-rotated for the lidar pitch."""
     return [
-        rr.Boxes3D(half_sizes=[0.35, 0.155, 0.2], colors=[(0, 255, 127)]),
+        rr.Boxes3D(
+            half_sizes=[ROBOT_LENGTH / 2, ROBOT_WIDTH / 2, ROBOT_HEIGHT / 2],
+            colors=[(0, 255, 127)],
+        ),
         rr.Transform3D(
             parent_frame="tf#/mid360_link",
             rotation=rr.RotationAxisAngle(axis=(0, 1, 0), degrees=-math.degrees(MID360_PITCH_DOWN)),
@@ -178,7 +187,7 @@ unitree_go2_nav_3d = autoconnect(
     MLSPlannerNative.blueprint(
         world_frame="odom",
         voxel_size=voxel_size,
-        robot_height=0.3,
+        robot_height=ROBOT_HEIGHT,
         surface_closing_radius=0.3,
         wall_clearance_m=0.1,
         wall_buffer_m=0.75,
@@ -187,7 +196,7 @@ unitree_go2_nav_3d = autoconnect(
         step_penalty_weight=4.0,
         viz_publish_hz=0.0,
     ).remappings([(MLSPlannerNative, "global_map", "global_map_unused")]),
-    GoalRelay.blueprint(),
+    GoalRelay.blueprint(lidar_height=ROBOT_HEIGHT),
     BasicPathFollower.blueprint(speed=0.5, heading_gain=0.4, max_angular=0.6).remappings(
         [(BasicPathFollower, "odometry", "body_odometry")]
     ),

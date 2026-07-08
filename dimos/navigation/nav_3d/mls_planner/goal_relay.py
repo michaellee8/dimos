@@ -26,6 +26,10 @@ from dimos.msgs.nav_msgs.Odometry import Odometry
 
 class GoalRelayConfig(ModuleConfig):
     base_frame: str = "base_link"
+    sensor_frame: str = "mid360_link"
+    # The lidar's height above the ground. base_link's height is derived from the
+    # base -> sensor mount transform, so this is the only fixed measurement.
+    lidar_height: float = 0.0
 
 
 class GoalRelay(Module):
@@ -50,9 +54,13 @@ class GoalRelay(Module):
 
     def _on_odometry(self, msg: Odometry) -> None:
         base = self.tf.get(msg.frame_id, self.config.base_frame, msg.ts, 1.0)
-        if base is None:
+        mount = self.tf.get(self.config.base_frame, self.config.sensor_frame, msg.ts, 1.0)
+        if base is None or mount is None:
             return
-        self.start_pose.publish(base.to_pose(ts=msg.ts))
+        base_height = self.config.lidar_height - mount.translation.z
+        start = base.to_pose(ts=msg.ts)
+        start.position.z -= base_height
+        self.start_pose.publish(start)
 
     def _on_goal(self, point: PointStamped) -> None:
         self.goal_pose.publish(point.to_pose_stamped())

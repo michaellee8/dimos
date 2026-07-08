@@ -43,7 +43,7 @@ from dimos.utils.data import resolve_named_path
 
 TIMELINE = "ts"
 
-# Body-frame axis-triad length for the odometry transform (m).
+# Axis-triad length for the odometry transform (m).
 ODOM_AXIS_LEN = 0.5
 # Arrow radius as a fraction of the triad length.
 AXIS_RADIUS_RATIO = 25
@@ -51,6 +51,10 @@ AXIS_RADIUS_RATIO = 25
 # Mount frames as recorded on the tf stream.
 BASE_FRAME = "base_link"
 SENSOR_FRAME = "mid360_link"
+
+# Robot footprint (m): length is forward (x), width is left (y).
+ROBOT_LENGTH = 0.6858
+ROBOT_WIDTH = 0.3175
 
 # Distinct path colors for overlaid configurations, config 0 first.
 PATH_PALETTE = [
@@ -121,12 +125,8 @@ def _log_path_wp(waypoints: NDArray[np.float32] | None, entity: str, color: list
     rr.log(entity, rr.LineStrips3D([points], colors=[color], radii=0.05))
 
 
-def _base_from_body(store: SqliteStore) -> Transform | None:
-    """The body -> base_link transform from the recording's static mount frames.
-
-    Treats the LIO body frame as the sensor frame. The few-cm IMU-to-lidar
-    extrinsic is invisible at triad scale.
-    """
+def _base_from_sensor(store: SqliteStore) -> Transform | None:
+    """The sensor -> base_link transform from the recording's static mount frames."""
     buffer = MultiTBuffer()
     try:
         for i, obs in enumerate(store.stream("tf", TFMessage).order_by("ts")):
@@ -139,34 +139,40 @@ def _base_from_body(store: SqliteStore) -> Transform | None:
     return buffer.get(SENSOR_FRAME, BASE_FRAME)
 
 
+def _base_pose(pose: tuple[float, ...], ts: float, base_from_sensor: Transform) -> Transform:
+    """Compose the odometry pose with the recorded mount frames into world -> base_link."""
+    px, py, pz, qx, qy, qz, qw = pose
+    sensor = Transform(
+        translation=Vector3(px, py, pz),
+        rotation=Quaternion(qx, qy, qz, qw),
+        frame_id="world",
+        child_frame_id=base_from_sensor.frame_id,
+        ts=ts,
+    )
+    return sensor + base_from_sensor
+
+
 def _log_odometry(
     pose: tuple[float, ...],
     ts: float,
     trail: list[tuple[float, float, float]],
-    base_from_body: Transform | None,
+    base_from_sensor: Transform | None,
 ) -> None:
-    """Log the odometry pose as a moving body-frame transform with an XYZ axis
+    """Log the sensor pose as a moving mid360_link transform with an XYZ axis
     triad, plus the trajectory trail growing over time. The triad is a static
-    child of world/odom, so it inherits this transform and sweeps along the path."""
+    child of world/mid360_link, so it inherits this transform and sweeps along the path."""
     px, py, pz, qx, qy, qz, qw = pose
     rr.set_time(TIMELINE, timestamp=ts)
     rr.log(
-        "world/odom",
+        "world/mid360_link",
         rr.Transform3D(translation=[px, py, pz], quaternion=rr.Quaternion(xyzw=[qx, qy, qz, qw])),
     )
     trail.append((px, py, pz))
     if len(trail) > 1:
-        rr.log("world/odom_path", rr.LineStrips3D([trail], colors=[[255, 255, 255]], radii=0.015))
-    if base_from_body is None:
+        rr.log("world/mid360_path", rr.LineStrips3D([trail], colors=[[255, 255, 255]], radii=0.015))
+    if base_from_sensor is None:
         return
-    body = Transform(
-        translation=Vector3(px, py, pz),
-        rotation=Quaternion(qx, qy, qz, qw),
-        frame_id="world",
-        child_frame_id=base_from_body.frame_id,
-        ts=ts,
-    )
-    base = body + base_from_body
+    base = _base_pose(pose, ts, base_from_sensor)
     rr.log(
         "world/base_link",
         rr.Transform3D(
@@ -279,6 +285,7 @@ def _process_frame(
     ray_obs: Observation[PointCloud2],
     planners: list[tuple[str, list[int], MLSPlanner]],
     goal: tuple[float, float, float],
+    base_from_sensor: Transform | None,
     robot_height: float,
     render_voxel: float,
     clearance_clamp: float,
@@ -288,7 +295,20 @@ def _process_frame(
     assert ray_obs.pose_tuple is not None
     bounds = ray_obs.tags["region_bounds"]
     px, py, pz, *_ = ray_obs.pose_tuple
-    start = (float(px), float(py), float(pz) - robot_height)
+    # Plan from the robot base, ground-projected to the supporting surface. Without
+    # a tf stream fall back to the sensor pose dropped by the robot height.
+    if base_from_sensor is not None:
+        base = _base_pose(ray_obs.pose_tuple, ray_obs.ts, base_from_sensor)
+        # The mount transform gives the lidar's height above base_link, so the
+        # base sits this far below the lidar's known ground height.
+        base_height = robot_height - base_from_sensor.inverse().translation.z
+        start = (
+            float(base.translation.x),
+            float(base.translation.y),
+            float(base.translation.z) - base_height,
+        )
+    else:
+        start = (float(px), float(py), float(pz) - robot_height)
     ox, oy, radius, z_min, z_max = bounds
     pts = ray_obs.data.points_f32()
     rr.set_time(TIMELINE, timestamp=ray_obs.ts)
@@ -359,7 +379,9 @@ def main(
         help="Min occupied neighbors a surface voxel needs to be emitted; "
         "0 emits all, higher drops isolated returns",
     ),
-    robot_height: float = typer.Option(0.3, "--robot-height", help="Robot height (m)"),
+    robot_height: float = typer.Option(
+        0.45, "--robot-height", help="Robot height, ground to tallest point / lidar (m)"
+    ),
     max_overhead: float = typer.Option(
         2.0, "--max-overhead", help="Ignore surface more than this far above the sensor (m)"
     ),
@@ -455,10 +477,12 @@ def main(
 
         rr.log("world/goal", rr.Points3D([goal], colors=[[255, 0, 0]], radii=0.1), static=True)
 
-        # Static XYZ axis triads in the odometry body frame and the derived
+        # Static XYZ axis triads in the odometry sensor frame and the derived
         # robot base frame.
-        base_from_body = _base_from_body(store)
-        entities = ["world/odom/axes"] + (["world/base_link/axes"] if base_from_body else [])
+        base_from_sensor = _base_from_sensor(store)
+        entities = ["world/mid360_link/axes"] + (
+            ["world/base_link/axes"] if base_from_sensor else []
+        )
         for entity in entities:
             rr.log(
                 entity,
@@ -474,7 +498,29 @@ def main(
                 ),
                 static=True,
             )
-        odom_trail: list[tuple[float, float, float]] = []
+        # also show the outline of the robot
+        if base_from_sensor is not None:
+            rr.log(
+                "world/base_link/outline",
+                rr.Boxes3D(
+                    half_sizes=[ROBOT_LENGTH / 2, ROBOT_WIDTH / 2, robot_height / 2],
+                    colors=[(0, 255, 127)],
+                ),
+                static=True,
+            )
+            # Light red clearance cylinder centered on the robot base.
+            # wall_clearance is the planner's proxy for the robot radius.
+            rr.log(
+                "world/base_link/clearance",
+                rr.Cylinders3D(
+                    lengths=[robot_height],
+                    radii=[wall_clearance],
+                    colors=[(255, 120, 120, 80)],
+                    fill_mode="solid",
+                ),
+                static=True,
+            )
+        sensor_trail: list[tuple[float, float, float]] = []
 
         try:
             frame = 0
@@ -485,12 +531,13 @@ def main(
                     ray_obs,
                     planners,
                     goal,
+                    base_from_sensor,
                     robot_height,
                     render_voxel,
                     clearance_clamp,
                     ref_clearance,
                 )
-                _log_odometry(ray_obs.pose_tuple, ray_obs.ts, odom_trail, base_from_body)
+                _log_odometry(ray_obs.pose_tuple, ray_obs.ts, sensor_trail, base_from_sensor)
                 frame += 1
                 print(
                     f"frame={frame} configs={len(planners)} "
