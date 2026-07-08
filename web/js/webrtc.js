@@ -106,11 +106,9 @@ async function _setupWebRTCInner(sessionId) {
     }
     pc.ontrack = (e) => {
         if (e.track.kind !== 'video') return;
-        // Minimise the receiver's jitter buffer: teleop wants freshest-frame,
-        // not smooth-playback. Chrome defaults to a several-hundred-ms buffer
-        // that dominates glass-to-glass latency at our 15fps source; 0 tells it
-        // to hold as little as possible. Both are hints (browser clamps to what
-        // the link tolerates) and non-standard, so guard the assignment.
+        // Minimise the receiver jitter buffer — teleop wants the freshest frame,
+        // not smooth playback. Both hints are non-standard and browser-clamped,
+        // so guard the assignment.
         try {
             if ('playoutDelayHint' in e.receiver) e.receiver.playoutDelayHint = 0;
             if ('jitterBufferTarget' in e.receiver) e.receiver.jitterBufferTarget = 0;
@@ -442,11 +440,8 @@ export function startVideoStats(channel, getReport = null) {
         if (payload) {
             try { channel.send(JSON.stringify(payload)); } catch (_) {}
             state.liveStats.video = payload;  // latest sample for the HUD/VR quad
-            // One-shot latency summary the moment video is flowing: the three
-            // numbers that decide e2e latency — negotiated codec (H264 = HW
-            // decode), the receiver jitter buffer (did playoutDelayHint stick?),
-            // and the ICE path (turn = an extra relay hop). Saves squinting at
-            // the HUD to see whether the low-latency setup actually took.
+            // One-shot latency summary once video flows: codec, jitter buffer,
+            // and ICE path — the three knobs that decide glass-to-glass latency.
             if (!loggedSummary && payload.codec) {
                 loggedSummary = true;
                 console.info(
@@ -558,7 +553,7 @@ function applyPong(pong) {
     state.clockOffsetMs = offsetSec * 1000;
     state.liveStats.rttMs = rttMs;
     state.liveStats.offsetMs = state.clockOffsetMs;
-    console.log(`[clock-sync] rtt=${rttMs.toFixed(1)}ms offset=${state.clockOffsetMs.toFixed(1)}ms`);
+    console.debug(`[clock-sync] rtt=${rttMs.toFixed(1)}ms offset=${state.clockOffsetMs.toFixed(1)}ms`);
     // Report back so the robot can log it (can't derive from one-way pings).
     if (state.stateChannel && state.stateChannel.readyState === 'open') {
         state.stateChannel.send(JSON.stringify({

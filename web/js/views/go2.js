@@ -1,9 +1,9 @@
-// Go2 teleop cockpit — big video left, control column right.
+// Go2 teleop cockpit — swappable camera/map stage, control column right.
 //
-// Fully wired: posture/action commands go over state_reliable (acked on
-// state_reliable_back), telemetry + battery come back over state_reliable_back,
-// video is the WebRTC track, and drive (WASD/QE) reuses the keyboard loop /
-// cmdChannel exactly as views/keyboard.js does.
+// Posture/action commands go over state_reliable (acked on state_reliable_back);
+// telemetry + battery + occupancy map come back the same way; video is the
+// WebRTC track; drive (WASD/QE) reuses the keyboard loop / cmdChannel exactly
+// as views/keyboard.js does.
 //
 // Preview with no broker:  window._teleopDev.previewGo2()
 
@@ -56,8 +56,7 @@ const SPEEDS = [
     { mode: 'rage', label: 'Rage', scale: { lin: 2.0, ang: 1.5 } },
 ];
 
-// Local UI state. Posture/estop still placeholder; battery is wired to real
-// telemetry. (Body-height shelved — firmware 3203.)
+// Local UI state; battery/posture/estop reconcile from real telemetry.
 const ui = {
     posture: 'StandReady',  // robot auto-stands+balances on blueprint start
     estopped: false,
@@ -105,8 +104,7 @@ export function renderGo2(c) {
 
         <div class="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-4">
             <!-- LEFT: main stage — camera OR map, swappable. The non-main one
-                 shows in the floating PiP (bottom-right). state.mainView toggles.
-                 SKELETON: markup + swap wired; map draw + PiP layout TBD. -->
+                 shows in the floating PiP (bottom-right). state.mainView toggles. -->
             <section class="bg-bg-950 border border-[#2a2a2a] rounded-xl overflow-hidden flex flex-col min-h-0">
                 <!-- Slim control strip: swap + camera tabs. Kept compact (px-2
                      py-1, text-[11px]) so it's a thin bar, not a tall column. -->
@@ -337,9 +335,6 @@ function wireGo2() {
         refreshControls();
     });
 
-    // Body-height slider shelved for v1 (firmware 3203 unknown-api). The
-    // command send/ack infra below stays — posture buttons will use it next.
-
     // Resolve command acks coming back on state_reliable_back (via webrtc.js).
     state.onCmdAck = onCmdAck;
     // Reconcile controls from robot-authoritative telemetry state (3Hz).
@@ -524,7 +519,7 @@ function bindMapPanZoom() {
     });
 }
 
-// ── minimap: map + robot marker (SKELETON) ───────────────────────────
+// ── minimap: map + robot marker ──────────────────────────────────────
 // Camera stays the WebRTC <video>; the map is a <canvas> we draw ourselves.
 // The two swap between the big stage and the floating PiP.
 
@@ -879,7 +874,6 @@ function resolveAck(nonce, ok) {
     // Track posture optimistically on a confirmed posture command. StandReady
     // is an action (stand+balance), not a latched state — map it to standing.
     const POSTURE_STATE = { StandReady: 'StandReady', PoseStand: 'PoseStand', StandDown: 'StandDown', RecoveryStand: 'RecoveryStand', Sit: 'Sit' };
-    if (POSTURE_STATE[p.name]) console.log(`[cockpit] ack ${p.name} ok=${ok}`);
     if (ok && POSTURE_STATE[p.name]) ui.posture = POSTURE_STATE[p.name];
     // Range inputs (light slider) flash via the cmd-* classes; buttons via
     // data-status. 700ms flash → idle; bail if the cockpit unmounted.
@@ -972,7 +966,6 @@ function renderDriveHints() {
     const mode = state.poseMode ? 'pose' : 'drive';
     if (hints.dataset.mode === mode) return;  // refreshControls runs per telemetry tick
     hints.dataset.mode = mode;
-    console.log(`[cockpit] key mapping → ${mode} (posture=${ui.posture})`);
     title.textContent = state.poseMode ? 'Pose' : 'Drive';
     hints.innerHTML = state.poseMode
         ? `<div><span class="text-gray-300">W/S</span> pitch down · up &nbsp; <span class="text-gray-300">A/D</span> yaw left · right</div>
@@ -998,10 +991,6 @@ function renderBattery() {
     pct.style.color = p > 40 ? '#c4e7f3' : p > 15 ? '#eab308' : '#f3b4b4';
 }
 
-// Telemetry tick (1Hz): samples the operator's own send rate (cmdHz), then
-// renders the summary + full detail from the shared hud.js formatters, drives
-// the health pill, and updates battery. Reuses hud.js so the cockpit and the
-// keyboard HUD stay in sync.
 // Telemetry value tint by per-metric health (matches the .pill palette).
 const HEALTH_TINT = { good: 'text-[#b0e1f0]', warn: 'text-[#eab308]', bad: 'text-[#f3b4b4]' };
 
@@ -1020,6 +1009,9 @@ function renderTelemetryGrid() {
         </div>`).join('');
 }
 
+// Telemetry tick (1Hz): sample the operator's own send rate (cmdHz), render
+// summary + detail via the shared hud.js formatters, drive the health pills,
+// update battery. Reuses hud.js so cockpit + keyboard HUD stay in sync.
 let _lastHudSample = 0;
 let _noVideoSinceMs = 0;  // connected-but-never-saw-a-frame escalation timer
 function startTick() {

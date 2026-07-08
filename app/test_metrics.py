@@ -64,7 +64,6 @@ with TestClient(app=main.app) as c:
     check("latency histogram present", "teleop_http_request_seconds_bucket" in body)
 
     # Reaper gauge refresh reads the real DB.
-    asyncio.get_event_loop_policy()
     asyncio.run(_refresh_session_gauge())
     body = c.get("/metrics").text
     check("session gauge reflects created session",

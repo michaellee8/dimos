@@ -23,7 +23,6 @@ export const state = {
     micTrack: null,         // operator mic MediaStreamTrack (starts muted; cockpit toggles)
     xrSession: null,
     xrRefSpace: null,
-    lastSendTime: 0,
     activeRobot: null,
 
     // Clock sync

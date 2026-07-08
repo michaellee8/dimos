@@ -25,16 +25,13 @@ if (location.hash === '#vrpreview') navigate('vrpreview');
 else if (state.token) navigate('dashboard');
 else navigate('auth');
 
-// DevTools-only preview hook — no broker required.
+// DevTools-only preview hooks — no broker required. (VR preview lives at the
+// #vrpreview route, which fakes channels + map + video; see vrpreview.js.)
 window._teleopDev = {
     previewKeyboard() {
         state.cmdChannel = { readyState: 'open', send: () => {} };
         state.activeRobot = { session_id: 'preview', robot_name: 'Preview Bot' };
         navigate('keyboard');
-    },
-    previewVR() {
-        state.activeRobot = { session_id: 'preview', robot_name: 'Preview Bot' };
-        navigate('teleop');
     },
     previewGo2() {
         state.activeRobot = { session_id: 'preview', robot_name: 'go2-preview' };

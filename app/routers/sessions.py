@@ -307,7 +307,6 @@ async def create_session(
             detail=f"Cloudflare session create failed ({type(e).__name__}): {e}",
         )
 
-    # Store session
     session = TeleopSession(
         robot_id=robot_id,
         owner_id=owner_id,
@@ -805,9 +804,8 @@ async def _bridge_datachannel_locked(
         )
         robot_sub_ids = {e["dataChannelName"]: int(e["id"]) for e in robot_sub}
 
-        # robot → operator: state_back. Fresh push each connect (stale one
-        # closed above); operator subscribes to it.
-        # Both robot→operator channels (state_back + map) pushed together.
+        # robot → operator channels (state_back + map): fresh push each connect
+        # (stale ones closed above); operator subscribes to them.
         back_names = [STATE_BACK_CHANNEL_NAME, MAP_CHANNEL_NAME]
         robot_pub = await cf_client.add_datachannels(
             session.cf_session_id,

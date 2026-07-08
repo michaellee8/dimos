@@ -205,39 +205,3 @@ export function unmountHud() {
     const hud = document.getElementById('live-hud');
     if (hud) hud.remove();
 }
-
-// ─── VR stats canvas ─────────────────────────────────────────────────────
-// XR has no DOM, so stats render to a 2D canvas; vr.js maps it onto a quad
-// via a three.js CanvasTexture. Redraw + return the canvas each frame.
-
-// ?vrdebug=1 → opaque red background, to distinguish "quad drawing but
-// content empty" from "quad not drawing".
-const VR_HUD_DEBUG = new URLSearchParams(location.search).has('vrdebug');
-
-let _statsCanvas = null;
-let _statsCtx = null;
-
-export function renderStatsCanvas() {
-    if (!_statsCanvas) {
-        _statsCanvas = document.createElement('canvas');
-        _statsCanvas.width = 512;
-        _statsCanvas.height = 256;
-        _statsCtx = _statsCanvas.getContext('2d');
-    }
-    const ctx = _statsCtx, W = _statsCanvas.width, H = _statsCanvas.height;
-    ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = VR_HUD_DEBUG ? 'rgba(220,38,38,1.0)' : 'rgba(21,21,21,0.62)';
-    ctx.fillRect(0, 0, W, H);
-
-    ctx.fillStyle = healthColor();
-    ctx.beginPath(); ctx.arc(28, 34, 11, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = '#e5e7eb';
-    ctx.font = '600 26px ui-monospace, monospace';
-    ctx.fillText(hudSummaryLine(), 50, 43);
-
-    ctx.fillStyle = '#b0e1f0';  // brand pale-cyan for detail lines
-    ctx.font = '22px ui-monospace, monospace';
-    const lines = hudDetailLines();
-    for (let i = 0; i < lines.length; i++) ctx.fillText(lines[i], 16, 86 + i * 30);
-    return _statsCanvas;
-}
