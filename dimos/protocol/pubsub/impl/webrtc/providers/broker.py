@@ -14,33 +14,20 @@
 
 """Broker-mediated Cloudflare Realtime provider (hosted teleop).
 
-The robot dials out to the ``dimensional-teleop`` broker, which owns CF
-session creation and operator lifecycle. SCTP ids for all bridged channels
-arrive via heartbeat acks; we open/close the negotiated channels to track
-the broker's view (operator join / leave / rejoin).
+The robot dials out to the ``dimensional-teleop`` broker; SCTP ids for the
+bridged channels arrive via heartbeat acks, and we open/close negotiated
+channels to track operator join/leave/rejoin.
 
-Channel plan (topic == DataChannel name):
+Channels (topic == DataChannel name):
     cmd_unreliable      operator → robot   commands (unordered, lossy)
     state_reliable      operator → robot   control plane (reliable)
     state_reliable_back robot → operator   telemetry (reliable) — publishable
     map_unreliable      robot → operator   map (unordered, lossy) — publishable
 
-Audio (opt-in, ``audio_in=True``): the offer also carries a recvonly audio
-transceiver; the broker pulls the operator's mic track onto this session and
-hands the CF renegotiation offer back via the heartbeat ack, which we answer.
-Received PCM frames fan out through ``set_audio_frame_callback``.
-
-Video: the robot's session offer always carries one sendonly video track
-(the broker stores its mid/track and the operator pulls it on join). Feed
-frames with ``set_video_frame()`` — typically via ``CloudflareVideoTransport``
-bound to a blueprint's Image stream; unfed, the track simply never emits.
-The aiortc/CF quirks this inherits (MAX_BUNDLE, the id=0 throwaway channel)
-are documented in ``dimos/teleop/quest_hosted/README.md``.
-
-Credentials reach ``BrokerConfig`` via the standard blueprint config flow —
-either ``-o transports.broker.api_key=dtk_live_...`` on the CLI or the
-``TRANSPORTS__BROKER__API_KEY=...`` env form. The broker derives the robot
-identity from the API key; ``robot_id`` is optional.
+Media rides the same session: a sendonly camera track (``set_video_frame``)
+and, opt-in (``audio_in``), the operator's mic (``set_audio_frame_callback``).
+The aiortc/CF quirks (MAX_BUNDLE, the id=0 throwaway channel) are documented
+in ``dimos/teleop/quest_hosted/README.md``. Config via ``transports.broker.*``.
 """
 
 from __future__ import annotations
@@ -80,12 +67,7 @@ class BrokerConfig(ProviderConfig):
     heartbeat_hz: float = 1.0
     ordered: bool = False
     max_retransmits: int | None = 0
-    # Preferred video codec ("h264" / "vp8"; "" = aiortc's VP8-first default).
-    # h264 by default: browsers hardware-decode it but software-decode VP8,
-    # adding latency. Best-effort (see _prefer_video_codec).
     video_codec: str = "h264"
-    # Operator → robot audio: add a recvonly audio transceiver so the operator's
-    # mic can be bridged in. Off by default — ships dark until Go2 has audio-out.
     audio_in: bool = False
 
     def _create(self) -> BrokerProvider:
@@ -130,23 +112,21 @@ class BrokerProvider(AsyncProviderBase):
         self._pc: RTCPeerConnection | None = None
         self.session_id: str | None = None
         self._hb_task: asyncio.Task[None] | None = None
-        # name → open negotiated channel / its SCTP id. Mutated on the loop
-        # thread (heartbeat); read from any thread under self._lock.
+        # Channel state (name → channel / SCTP id) and subscriber callbacks:
+        # mutated on the loop thread (heartbeat), read from any thread under
+        # self._lock.
         self._dcs: dict[str, RTCDataChannel] = {}
         self._dc_ids: dict[str, int | None] = {}
+        self._callbacks: dict[str, list[Callable[[bytes, str], None]]] = defaultdict(list)
         self._dropped_publish_warned = False
-        # Sendonly camera track, present in the initial offer so the broker
-        # can bridge video without renegotiating the robot side.
+        # Camera track is built here (not lazily) so it's in the initial offer —
+        # lets the broker bridge video without renegotiating the robot side.
         from dimos.protocol.pubsub.impl.webrtc.providers.video_track import CameraVideoTrack
 
         self._video_track = CameraVideoTrack()
-        # Operator → robot audio: sink for received PCM frames + the reader task.
-        # set_audio_frame_callback() wires the transport; None = drop frames.
+        # Operator-audio sink; None drops frames until set_audio_frame_callback().
         self._audio_frame_cb: Callable[[bytes, int, int], None] | None = None
         self._audio_task: asyncio.Task[None] | None = None
-
-        # Guarded by self._lock (from the base).
-        self._callbacks: dict[str, list[Callable[[bytes, str], None]]] = defaultdict(list)
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -155,12 +135,9 @@ class BrokerProvider(AsyncProviderBase):
     # ─── Connect / Disconnect (loop thread) ──────────────────────────
 
     async def _fetch_ice_servers(self) -> list[RTCIceServer]:
-        """STUN + short-lived TURN relay credentials minted by the broker.
-
-        TURN must be in the PC's config at construction for relay candidates
-        to gather with the offer; robots on UDP-blocked networks (CGNAT,
-        corporate) only connect via the turns:443 relay. Best-effort —
-        STUN-only on any failure or when the broker has no TURN configured.
+        """STUN + broker-minted TURN creds. TURN must be in the PC config at
+        construction for relay candidates to gather; robots on UDP-blocked
+        networks only connect via turns:443. Best-effort: STUN-only on failure.
         """
         from aiortc import RTCIceServer
 
@@ -293,8 +270,7 @@ class BrokerProvider(AsyncProviderBase):
         self._audio_frame_cb = cb
 
     def _attach_audio_receiver(self) -> None:
-        """Read frames off the operator's inbound audio track and fan them to the
-        sink callback. Runs on the loop thread; one reader task per track."""
+        """Fan the operator's inbound audio track to the sink callback."""
         assert self._pc is not None
 
         @self._pc.on("track")
@@ -305,10 +281,8 @@ class BrokerProvider(AsyncProviderBase):
             self._audio_task = asyncio.get_running_loop().create_task(self._read_audio_track(track))
 
     async def _read_audio_track(self, track: Any) -> None:
-        """Pull av.AudioFrames off the track → PCM bytes → sink callback.
-
-        Best-effort: any decode error ends the loop (the track is gone); the
-        callback failing must not kill it. Frames drop when no sink is set."""
+        """Pull av.AudioFrames off the track → PCM → sink callback. A decode
+        error ends the loop (track gone); a sink error must not."""
         import av  # noqa: F401  (aiortc dep; AudioFrame comes off the track)
 
         try:
@@ -424,12 +398,9 @@ class BrokerProvider(AsyncProviderBase):
         return 200
 
     def _reconcile_channels(self, ids: dict[str, Any]) -> None:
-        """Track the broker's view: open on join, close on leave, re-open on
-        rejoin (the broker assigns fresh SCTP ids per operator session).
-
-        The id is recorded only after a successful open — if createDataChannel
-        raises, the stale entry keeps the delta alive so the next heartbeat
-        retries instead of skipping the channel forever."""
+        """Open on join, close on leave, re-open on rejoin (broker assigns
+        fresh SCTP ids per session). The id is recorded only after a successful
+        open, so a failed createDataChannel retries on the next heartbeat."""
         for name, raw_id in ids.items():
             sctp_id = int(raw_id) if raw_id is not None else None
             if sctp_id != self._dc_ids.get(name):
@@ -447,11 +418,8 @@ class BrokerProvider(AsyncProviderBase):
                 self._dc_ids[name] = sctp_id
 
     async def _answer_renegotiation(self, offer_sdp: str) -> None:
-        """setRemoteDescription(CF offer) → answer → POST back to the broker.
-
-        This is the robot's first-ever renegotiation path — the initial connect
-        is offer→answer with us as the offerer; a track pull inverts the roles.
-        Best-effort: a failure degrades to no-audio, never drops the session."""
+        """Answer a broker renegotiation offer (an audio-track pull inverts the
+        offer/answer roles). Best-effort: a failure degrades to no-audio."""
         from aiortc import RTCSessionDescription
 
         if self._pc is None or self._http is None or self.session_id is None:
@@ -473,12 +441,8 @@ class BrokerProvider(AsyncProviderBase):
             logger.exception("Robot renegotiation failed — continuing without audio")
 
     def _notify_operator_lost(self) -> None:
-        """Synthetic {"type":"operator_lost"} to state_reliable subscribers.
-
-        Rides the normal inbound plumbing (same thread, same callback shape as
-        a real operator message) so modules get one uniform signal on both
-        transports without new provider API.
-        """
+        """Synthetic {"type":"operator_lost"} to state_reliable subscribers,
+        via the normal inbound plumbing (no new provider API)."""
         payload = b'{"type": "operator_lost"}'
         with self._lock:
             callbacks = list(self._callbacks.get("state_reliable", ()))
@@ -527,14 +491,9 @@ class BrokerProvider(AsyncProviderBase):
                 ch.close()
 
     def _maybe_answer_ping(self, payload: bytes) -> None:
-        """Answer the web client's clock-sync ping inline on the loop thread.
-
-        The operator measures RTT/offset from ping→pong timing, so the reply
-        must not ride a module hop (stream dispatch latency would inflate
-        every sample, and keep-latest mailboxes could drop pings outright).
-        The ping still fans out to subscribers afterwards — the provider stays
-        a transparent relay with this one reflex attached.
-        """
+        """Answer the clock-sync ping inline on the loop thread — a module hop
+        would add dispatch jitter to the operator's RTT/offset samples. The
+        ping still fans out to subscribers afterwards."""
         if not payload.startswith(b"{"):
             return  # LCM binary or other non-JSON — not ours
         try:

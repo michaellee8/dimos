@@ -14,12 +14,10 @@
 
 """PCM → aiortc audio track for the Go2's speaker.
 
-The dog's WebRTC connection negotiates ``m=audio sendrecv`` on every session
-(driver's ``WebRTCAudioChannel``) but never feeds the outbound sender — this
-track fills that half. Push interleaved s16 PCM from any thread; the dog-side
-PC pulls frames off ``recv()`` and Opus-encodes them (aiortc resamples as
-needed). Same drain-mode idea as ``CameraVideoTrack``: no frames pushed = no
-frames sent, so an idle mic costs nothing.
+The dog's WebRTC connection negotiates ``m=audio sendrecv`` but never feeds the
+outbound sender — this track fills that half. Push interleaved s16 PCM from any
+thread; the dog-side PC pulls frames off ``recv()`` and Opus-encodes them.
+Drain-mode (like ``CameraVideoTrack``): no frames pushed = nothing sent.
 """
 
 from __future__ import annotations

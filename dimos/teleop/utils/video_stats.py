@@ -14,14 +14,9 @@
 
 """Operator-side video health snapshot, sampled in the browser via getStats().
 
-Same trick as ``Buttons`` (which rides on ``UInt32`` with bit packing): we
-don't need a new LCM type, we ride on ``sensor_msgs.Joy`` with positional
-``axes[]`` slots for each metric. That keeps the message wire-compatible with
-the existing dimos_lcm stack while exposing named fields in Python.
-
-This is a teleop-only construct (not a general sensor message), so it lives
-beside the other teleop helpers in ``teleop/utils`` rather than in
-``dimos.msgs.sensor_msgs``.
+Rides on ``sensor_msgs.Joy`` positional ``axes[]`` (like ``Buttons`` on
+``UInt32``) to stay wire-compatible with dimos_lcm without a new LCM type.
+Teleop-only, so it lives in ``teleop/utils``, not ``dimos.msgs``.
 """
 
 from __future__ import annotations
@@ -57,17 +52,9 @@ _AXES = (
 
 
 class VideoStats(Timestamped):
-    """One snapshot of operator-side video health.
-
-    Sampled by the operator's browser from ``pc.getStats()`` once per second
-    and shipped to the robot, where ``HostedTeleopModule`` publishes it on
-    an ``Out[VideoStats]`` port. The recorder captures it like any other
-    typed stream — no sidecar file needed.
-
-    All fields are floats on the wire (Joy ``axes[]`` is ``float32[]``);
-    ``width``, ``height``, ``frames_dropped``, ``freezes`` are integer-valued
-    but stored as floats. float32 is exact for integers up to 2^24.
-    """
+    """One operator-side video-health snapshot (browser getStats, ~1 Hz),
+    shipped to the robot and published on an ``Out[VideoStats]`` port. Integer
+    fields ride the float32 ``axes[]`` — exact up to 2^24."""
 
     msg_name = "sensor_msgs.VideoStats"
 

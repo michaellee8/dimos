@@ -12,33 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared hosted-teleop control plane for robot connection modules.
+"""Shared hosted-teleop control plane (state_json dispatch, cmd_ack, E-STOP
+latch, telemetry loop, camera mux) for robot connection modules. See
+``Go2HostedConnection`` for the reference shape.
 
-Camera mux (via ``CameraMuxMixin``), state_json dispatch, cmd_ack, E-STOP
-latch storage, and the telemetry push loop — everything hosted teleop needs
-regardless of robot shape. See ``Go2HostedConnection`` for the reference
-shape; a new robot implements the same hooks.
+Host contract: declare the ``state_json``/``telemetry_out``/``mux_image``/
+``video_stats`` streams (all on ONE module = one broker session) + an
+In[Image] per camera; provide ``self._stop_event`` and the ``telemetry_hz`` /
+mux config; call ``_hosted_init(cameras)`` in ``__init__``, wire subscriptions
++ ``_start_telemetry()`` in ``start()``, ``_stop_telemetry()`` in ``stop()``.
 
-Host contract: declare ``state_json``/``telemetry_out``/``mux_image``/
-``video_stats`` streams (all broker-bound streams on ONE module = one broker
-session) plus an In[Image] per camera; provide ``self._stop_event`` and
-``telemetry_hz`` + mux config fields; call ``_hosted_init(cameras)`` in
-``__init__``, wire subscriptions + ``_start_telemetry()`` in ``start()``,
-``_stop_telemetry()`` in ``stop()``.
-
-Required hooks: ``_handle_estop(nonce)``, ``_handle_estop_clear(nonce)``,
-``_on_operator_lost()``, ``_telemetry_state()``. Optional:
-``_handle_robot_msg(kind, msg)``, ``_telemetry_extra()``.
-
-Clock-sync pings never reach here — ``BrokerProvider`` answers them inline.
+Required hooks: ``_handle_estop``, ``_handle_estop_clear``,
+``_on_operator_lost``, ``_telemetry_state``. Optional: ``_handle_robot_msg``,
+``_telemetry_extra``. Clock-sync pings are answered by the provider, not here.
 """
 
 from __future__ import annotations
 
-# Callable is a runtime import (not TYPE_CHECKING): the class-level
-# _handle_estop / _on_operator_lost hooks below are annotated with it, and
-# blueprint.config() runs get_type_hints() on this class, which evaluates
-# those annotations at runtime — an under-TYPE_CHECKING import NameErrors there.
+# Runtime import (not TYPE_CHECKING): blueprint.config() runs get_type_hints()
+# on this class, evaluating the class-level hook annotations below at runtime.
 from collections.abc import Callable
 import json
 import threading

@@ -66,8 +66,7 @@ class CameraMuxMixin:
         self._last_mux_pub = 0.0  # monotonic stamp for the video_max_fps cap
 
     def _on_cam(self, cam: str, img: Image) -> None:
-        """Per-camera frame sink: cache latest; if `cam` is selected, apply the
-        fps cap then composite + publish to ``mux_image``."""
+        """Cache the latest frame; if `cam` is selected, fps-cap then publish."""
         with self._cam_lock:
             self._cam_frames[cam] = img
             shown = cam in self._cam_selected
@@ -113,9 +112,8 @@ class CameraMuxMixin:
 
     @staticmethod
     def _even_dims(img: Image) -> Image:
-        """Crop odd width/height down to even so libx264 (yuv420p) can open — an
-        odd composite crashes ``avcodec_open2`` when a camera switch reopens the
-        encoder. Drops at most one pixel per side."""
+        """Crop to even width/height — an odd composite crashes libx264's
+        avcodec_open2 when a camera switch reopens the encoder."""
         data = img.data
         if data.ndim < 2:
             return img
@@ -140,12 +138,8 @@ class CameraMuxMixin:
         return Image(data=out, format=img.format, frame_id=img.frame_id)
 
     def _stamp(self, img: Image) -> Image:
-        """Append a bottom strip encoding capture time as B/W cells (benchmark).
-
-        Rows are ADDED below the frame (height grows by ``_STAMP_STRIP_PX``), so
-        the video content is never overwritten — the operator reads the strip,
-        then crops it on display. No-op unless ``config.latency_stamp``.
-        """
+        """Append (not overwrite) a bottom strip encoding capture time as B/W
+        cells; the operator reads then crops it. No-op unless latency_stamp."""
         if not self.config.latency_stamp:  # type: ignore[attr-defined]
             return img
 
@@ -169,9 +163,8 @@ class CameraMuxMixin:
         return Image(data=out, format=img.format, frame_id=img.frame_id)
 
     def _set_cam_selection(self, cams: list[str]) -> None:
-        """Operator camera_select: filter to known names (fallback: first cam),
-        store, and immediately republish the composite so the view flips
-        without waiting for the next frame."""
+        """camera_select: filter to known names (fallback first cam), then
+        republish immediately so the view flips without waiting for a frame."""
         sel = [c for c in cams if c in self._cam_order] or self._cam_order[:1]
         with self._cam_lock:
             self._cam_selected = sel
@@ -181,7 +174,6 @@ class CameraMuxMixin:
             self.mux_image.publish(out)  # type: ignore[attr-defined]
 
     def _mux_state(self) -> list[str]:
-        """Current selection for the telemetry payload (robot-authoritative UI
-        state on operator reconnect)."""
+        """Current selection, for the telemetry payload."""
         with self._cam_lock:
             return list(self._cam_selected)

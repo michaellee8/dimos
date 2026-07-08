@@ -14,10 +14,9 @@
 
 """Stat helpers for teleop streams (latency / jitter / rate).
 
-* **`pcts`** — percentile helper shared with the post-hoc report writer.
-* **`LiveStreamStats`** — rolling window the robot measures over the inbound
-  command wire, then ships each ``snapshot()`` to the operator HUD (the robot
-  doesn't consume the stats locally — it's compute-and-forward).
+* ``pcts`` — percentile helper, shared with the report writer.
+* ``LiveStreamStats`` — rolling window over the inbound command wire; the robot
+  ships each ``snapshot()`` to the operator HUD (compute-and-forward).
 """
 
 from __future__ import annotations
@@ -45,14 +44,9 @@ def pcts(values: Sequence[float]) -> dict[str, float] | None:
 
 
 class LiveStreamStats:
-    """Rolling-window health of an inbound stream, for forwarding to a remote HUD.
-
-    ``record()`` notes each arrival in a bounded deque; ``snapshot()`` returns
-    the window's median E2E latency, jitter, arrival rate, and throughput —
-    which the robot ships to the operator (it doesn't use them locally).
+    """Rolling-window health of an inbound stream, forwarded to a remote HUD.
     Thread-safe: ``record()`` on the transport callback, ``snapshot()`` on a
-    separate reader.
-    """
+    separate reader."""
 
     def __init__(self, window: int = 120) -> None:
         self._lock = threading.Lock()

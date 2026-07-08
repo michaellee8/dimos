@@ -14,20 +14,13 @@
 
 """Broker-mediated LiveKit provider (hosted teleop).
 
-The robot asks the ``dimensional-teleop`` broker for a LiveKit room + JWT
-(``POST /api/v1/sessions {transport:"livekit"}`` → ``{url, token, room}``),
-then connects straight to the LiveKit SFU. Data is bidirectional and
-topic-addressed, so one room carries every channel — no SDP relay or per-channel
-lifecycle. Topics match the Cloudflare path so the transport-layer demux is
-unchanged:
-    cmd_unreliable      operator → robot   commands (lossy)
-    state_reliable      operator → robot   control plane (reliable)
-    state_reliable_back robot → operator   telemetry (reliable)
-
-Video: ``set_video_frame()`` pushes camera frames into a sendonly LiveKit track
-(published lazily on the first frame), typically via ``LiveKitVideoTransport``.
-Config comes from the blueprint's ``transports.broker.*`` flow (see
-``LiveKitBrokerConfig``).
+LiveKit sibling of ``BrokerProvider``. The robot asks the broker for a room +
+JWT (``POST /api/v1/sessions {transport:"livekit"}``), then connects to the
+SFU. Data is bidirectional and topic-addressed, so one room carries every
+channel — no SDP relay or per-channel lifecycle. Topics
+(``cmd_unreliable`` / ``state_reliable`` / ``state_reliable_back``) match the
+Cloudflare path, so transport-layer demux is unchanged. Video rides a sendonly
+track via ``set_video_frame()``.
 """
 
 from __future__ import annotations
@@ -71,8 +64,7 @@ class LiveKitBrokerConfig(ProviderConfig):
     robot_id: str | None = None
     robot_name: str | None = None
     heartbeat_hz: float = 1.0
-    # Publish-side encoder caps (0 = LiveKit defaults). Bounds uplink usage on
-    # constrained links instead of letting congestion surface as drops/freezes.
+    # Publish-side encoder caps (0 = LiveKit defaults) to bound uplink usage.
     video_max_bitrate_bps: int = 0
     video_max_fps: float = 0.0
 
@@ -108,20 +100,15 @@ def _image_to_rgba(img: Image) -> tuple[int, int, bytes]:
 
 
 class _VideoPublisher:
-    """Lazily-published sendonly LiveKit video track fed from an Image stream.
-
-    Frames arrive from the producer thread; the source/track are created and the
-    track published on the first frame (so dimensions come from real data), all
-    marshalled onto the provider's loop thread where the room lives.
-    """
+    """Sendonly LiveKit video track, published lazily on the first frame (so
+    dimensions come from real data), marshalled onto the provider's loop."""
 
     def __init__(self) -> None:
         self._room: rtc.Room | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._source: rtc.VideoSource | None = None
         self._publish_task: asyncio.Task[None] | None = None
-        # (max_bitrate_bps, max_fps); zeros = LiveKit defaults.
-        self._encoding: tuple[int, float] = (0, 0.0)
+        self._encoding: tuple[int, float] = (0, 0.0)  # (max_bitrate_bps, max_fps)
 
     def bind(
         self,
@@ -134,8 +121,7 @@ class _VideoPublisher:
         self._encoding = encoding
 
     def reset(self) -> None:
-        """Drop per-session state so a later bind() (reconnect) re-publishes the
-        track on the new room. Called from the provider's _disconnect()."""
+        """Drop per-session state so a reconnect re-publishes on the new room."""
         self._room = None
         self._loop = None
         self._source = None
@@ -186,15 +172,9 @@ class _VideoPublisher:
 
 
 class LiveKitBrokerProvider(AsyncProviderBase):
-    """Bidirectional broker-mediated LiveKit provider.
-
-    Inbound (operator → robot): ``cmd_unreliable`` + ``state_reliable``,
-    delivered to subscribers by topic. Outbound (robot → operator):
-    ``publish()`` on any topic (LiveKit is bidirectional); ``cmd_unreliable``
-    rides the lossy channel, everything else reliable. Together with
-    ``LiveKitTransport`` / ``LiveKitVideoTransport`` this is the LiveKit analog
-    of ``BrokerProvider``.
-    """
+    """Bidirectional broker-mediated LiveKit provider. Inbound delivered to
+    subscribers by topic; ``publish()`` on any topic (cmd lossy, rest reliable).
+    LiveKit analog of ``BrokerProvider``."""
 
     LOSSY_TOPICS = ("cmd_unreliable",)
 
@@ -203,8 +183,6 @@ class LiveKitBrokerProvider(AsyncProviderBase):
             raise RuntimeError("livekit and httpx required: pip install dimos[livekit]")
         super().__init__()
         config = config or LiveKitBrokerConfig()
-        # Config is populated from transports.broker.* (= TRANSPORTS__BROKER__*
-        # env / -o overrides), same scheme as the Cloudflare BrokerConfig.
         self._broker_url = (config.broker_url or "https://teleop.dimensionalos.com").rstrip("/")
         self._api_key = config.api_key or ""
         self._robot_id = config.robot_id or ""
@@ -223,7 +201,7 @@ class LiveKitBrokerProvider(AsyncProviderBase):
         self.room: str | None = None
         self._hb_task: asyncio.Task[None] | None = None
         self._video = _VideoPublisher()
-        # topic → subscriber callbacks. Guarded by self._lock (from the base).
+        # topic → subscriber callbacks, guarded by self._lock (from the base).
         self._callbacks: dict[str, list[Callable[[bytes, str], None]]] = defaultdict(list)
 
     @property
@@ -259,9 +237,8 @@ class LiveKitBrokerProvider(AsyncProviderBase):
         def _on_data(packet: Any) -> None:
             self._dispatch(packet)
 
-        # Operator leaving the room = command plane gone. Same synthetic
-        # signal shape as BrokerProvider._notify_operator_lost so modules
-        # handle one message on both transports.
+        # Operator leaving the room = command plane gone — same synthetic
+        # operator_lost signal as the Cloudflare path.
         @self._room.on("participant_disconnected")  # type: ignore[untyped-decorator]
         def _on_participant_gone(_participant: Any) -> None:
             self._notify_operator_lost()
@@ -306,9 +283,8 @@ class LiveKitBrokerProvider(AsyncProviderBase):
 
     async def _heartbeat_loop(self) -> None:
         interval = 1.0 / max(self._config.heartbeat_hz, 0.1)
-        # Terminal condition mirrors BrokerProvider: 5 consecutive 401/404
-        # means the key was revoked or the session force-deleted — retrying
-        # forever just log-floods at heartbeat_hz.
+        # Stop after 5 consecutive 401/404 (key revoked / session gone) —
+        # otherwise the loop log-floods at heartbeat_hz forever.
         terminal_streak = 0
         while True:
             status: int | None = None
@@ -340,8 +316,7 @@ class LiveKitBrokerProvider(AsyncProviderBase):
     # ─── Dispatch (loop thread) ──────────────────────────────────────
 
     def _notify_operator_lost(self) -> None:
-        """Synthetic {"type":"operator_lost"} to state_reliable subscribers
-        (mirrors BrokerProvider — one uniform signal on both transports)."""
+        """Synthetic {"type":"operator_lost"} to state_reliable subscribers."""
         payload = b'{"type": "operator_lost"}'
         with self._lock:
             callbacks = list(self._callbacks.get("state_reliable", ()))
@@ -367,12 +342,8 @@ class LiveKitBrokerProvider(AsyncProviderBase):
                 logger.exception("LiveKit subscriber callback error")
 
     def _maybe_answer_ping(self, payload: bytes) -> None:
-        """Answer the operator's clock-sync ping inline on the loop thread.
-
-        Mirrors BrokerProvider._maybe_answer_ping so LiveKit robots produce
-        the same {client_ts, robot_ts} pong on state_reliable_back — without
-        this the operator's RTT/offset never converge.
-        """
+        """Answer the operator's clock-sync ping inline (mirrors
+        BrokerProvider); without the pong RTT/offset never converge."""
         if not payload.startswith(b"{"):
             return
         try:
@@ -394,8 +365,7 @@ class LiveKitBrokerProvider(AsyncProviderBase):
     # ─── Public API (Provider) ───────────────────────────────────────
 
     def publish(self, topic: str, data: bytes) -> None:
-        """Robot → operator on any topic (LiveKit is bidirectional). Messages
-        drop while no room/operator is connected — normal pubsub behaviour."""
+        """Robot → operator on any topic; drops while no room is connected."""
         if isinstance(data, (bytearray, memoryview)):
             data = bytes(data)
         reliable = topic not in self.LOSSY_TOPICS
