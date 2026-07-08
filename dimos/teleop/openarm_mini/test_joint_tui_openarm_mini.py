@@ -63,7 +63,7 @@ def test_read_side_rows_displays_raw_radians_clamped_and_flip(tmp_path: Path) ->
     raw_positions["joint_1"] = 2049
     raw_positions["joint_4"] = 0
 
-    rows = _read_side_rows(_load_tui_calibration(calibration_path), raw_positions)
+    rows = _read_side_rows(_load_tui_calibration("left", calibration_path), raw_positions)
 
     assert rows[0].side == "left"
     assert rows[0].joint == "joint_1"
@@ -86,7 +86,7 @@ def test_build_joint_dashboard_contains_key_columns(tmp_path: Path) -> None:
     calibration_path = tmp_path / "right"
     save_calibration(calibration_path, calibration)
     rows = _read_side_rows(
-        _load_tui_calibration(calibration_path),
+        _load_tui_calibration("right", calibration_path),
         {joint: 100 for joint in OPENARM_MINI_ARM_JOINT_NAMES},
     )
     console = Console(record=True, width=140, file=StringIO())
@@ -100,7 +100,7 @@ def test_build_joint_dashboard_contains_key_columns(tmp_path: Path) -> None:
     assert "openarm_right_joint7" in rendered
 
 
-def test_resolve_calibration_path_uses_only_existing_default(
+def test_resolve_calibration_path_uses_side_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -126,16 +126,17 @@ def test_resolve_calibration_path_uses_only_existing_default(
         fake_default_calibration_path,
     )
 
-    assert _resolve_calibration_path(None) == left_path
+    assert _resolve_calibration_path("left", None) == left_path
+    assert _resolve_calibration_path("right", None) == right_path
 
 
-def test_joint_tui_cli_uses_single_port_without_side_options() -> None:
+def test_joint_tui_cli_uses_side_and_single_port_without_side_specific_ports() -> None:
     runner = CliRunner()
     result = runner.invoke(_joint_tui_app(), ["--help"])
 
     assert result.exit_code == 0
+    assert "--side" in result.output
     assert "--port" in result.output
     assert "--calibration-path" in result.output
-    assert "--side" not in result.output
     assert "--port-left" not in result.output
     assert "--port-right" not in result.output

@@ -34,13 +34,11 @@ import typer
 from dimos.teleop.openarm_mini.calibration import (
     OPENARM_MINI_ARM_JOINT_NAMES,
     OpenArmMiniCalibration,
-    calibration_file,
     load_calibration,
 )
 from dimos.teleop.openarm_mini.config import (
     OPENARM_MINI_DEFAULT_BAUDRATE,
-    OPENARM_MINI_SIDES,
-    OpenArmMiniCalibrationError,
+    OpenArmMiniSide,
     default_calibration_path,
 )
 from dimos.teleop.openarm_mini.feetech import FeetechLeaderReader, _calibrated_motor_radians
@@ -61,6 +59,7 @@ class OpenArmMiniJointRow:
 
 
 def main(
+    side: OpenArmMiniSide = typer.Option(..., help="Leader side to inspect."),
     port: str = typer.Option(..., help="Leader Feetech serial port."),
     baudrate: int = typer.Option(
         OPENARM_MINI_DEFAULT_BAUDRATE,
@@ -68,13 +67,13 @@ def main(
     ),
     calibration_path: Path | None = typer.Option(
         None,
-        help="Calibration directory or JSON file. Defaults to the only existing side calibration.",
+        help="Calibration directory or JSON file. Defaults to the selected side calibration.",
     ),
     refresh_hz: float = typer.Option(10.0),
 ) -> None:
     """Display one OpenArm Mini leader side in a Rich TUI."""
     refresh_seconds = 1.0 / refresh_hz
-    calibration = _load_tui_calibration(_resolve_calibration_path(calibration_path))
+    calibration = _load_tui_calibration(side, _resolve_calibration_path(side, calibration_path))
     reader = FeetechLeaderReader(port, baudrate)
     try:
         reader.connect()
@@ -93,37 +92,17 @@ def main(
         reader.disconnect()
 
 
-def _resolve_calibration_path(calibration_path: Path | None) -> Path:
+def _resolve_calibration_path(side: OpenArmMiniSide, calibration_path: Path | None) -> Path:
     if calibration_path is not None:
         return calibration_path
-    candidates = [
-        path
-        for path in (default_calibration_path(side) for side in OPENARM_MINI_SIDES)
-        if calibration_file(path).exists()
-    ]
-    if len(candidates) == 1:
-        return candidates[0]
-    if not candidates:
-        raise OpenArmMiniCalibrationError(
-            "Missing OpenArm Mini calibration. Pass --calibration-path or run "
-            "`python -m dimos.teleop.openarm_mini.tools.calibrate` first."
-        )
-    raise OpenArmMiniCalibrationError(
-        "Multiple OpenArm Mini calibrations found. Pass --calibration-path for the side to inspect."
-    )
+    return default_calibration_path(side)
 
 
-def _load_tui_calibration(calibration_path: Path) -> OpenArmMiniCalibration:
-    artifact_path = calibration_file(calibration_path)
-    if not artifact_path.exists():
-        raise OpenArmMiniCalibrationError(f"Missing OpenArm Mini calibration at {artifact_path}")
-    try:
-        calibration = OpenArmMiniCalibration.model_validate_json(artifact_path.read_text())
-    except ValueError as exc:
-        raise OpenArmMiniCalibrationError(
-            f"Invalid OpenArm Mini calibration at {artifact_path}: {exc}"
-        ) from exc
-    return load_calibration(calibration_path, calibration.side)
+def _load_tui_calibration(
+    side: OpenArmMiniSide,
+    calibration_path: Path,
+) -> OpenArmMiniCalibration:
+    return load_calibration(calibration_path, side)
 
 
 def _read_side_rows(
