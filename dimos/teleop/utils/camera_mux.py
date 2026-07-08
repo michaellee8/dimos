@@ -86,14 +86,20 @@ class CameraMuxMixin:
 
     def _composite(self) -> Image | None:
         """Selected frames → one Image: single frame passthrough, else hstack
-        scaled to min height. Returns None if nothing cached yet."""
+        scaled to min height. Returns None if nothing cached yet.
+
+        Every return is even-sized: the hstack/downscale resizes above compute
+        widths/heights as ``int(...)`` and can land odd, but libx264 (yuv420p)
+        refuses odd dimensions — and a camera switch changes the frame size,
+        forcing aiortc to reopen the encoder, so an odd composite crashes it
+        with ``avcodec_open2(libx264)``. _even_dims makes that impossible."""
         with self._cam_lock:
             order = [c for c in self._cam_order if c in self._cam_selected]
             imgs = [self._cam_frames[c] for c in order if c in self._cam_frames]
         if not imgs:
             return None
         if len(imgs) == 1:
-            return self._stamp(self._downscale(imgs[0]))
+            return self._even_dims(self._stamp(self._downscale(imgs[0])))
         import cv2
 
         target_h = min(im.data.shape[0] for im in imgs)
@@ -103,11 +109,28 @@ class CameraMuxMixin:
             tiles.append(
                 cv2.resize(im.data, (int(w * target_h / h), target_h)) if h != target_h else im.data
             )
-        return self._stamp(
-            self._downscale(
-                Image(data=np.hstack(tiles), format=imgs[0].format, frame_id="camera_mux")
+        return self._even_dims(
+            self._stamp(
+                self._downscale(
+                    Image(data=np.hstack(tiles), format=imgs[0].format, frame_id="camera_mux")
+                )
             )
         )
+
+    @staticmethod
+    def _even_dims(img: Image) -> Image:
+        """Crop the last row/column when a dimension is odd so libx264 (yuv420p,
+        even dims only) can always open. At most one pixel each way — invisible,
+        and the stamp strip is untouched (it's the full width, already even after
+        this crops width first)."""
+        data = img.data
+        if data.ndim < 2:
+            return img
+        h, w = data.shape[:2]
+        if h % 2 == 0 and w % 2 == 0:
+            return img
+        data = data[: h - (h % 2), : w - (w % 2)]
+        return Image(data=np.ascontiguousarray(data), format=img.format, frame_id=img.frame_id)
 
     def _downscale(self, img: Image) -> Image:
         """Cap publish width at config.video_max_width (0 = off). Runs before

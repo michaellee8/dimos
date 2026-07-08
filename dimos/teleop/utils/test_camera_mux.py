@@ -1,0 +1,108 @@
+# Copyright 2026 Dimensional Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Camera mux compositing — even-dimension guard for the H.264 encoder.
+
+Regression cover for the camera-switch crash: an odd composite width/height
+made aiortc's libx264 reopen fail with avcodec_open2 on the next selection
+change. _composite must always return even w x h.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import numpy as np
+
+from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
+from dimos.teleop.utils.camera_mux import CameraMuxMixin
+
+
+class _Mux(CameraMuxMixin):
+    """Bare host: just the config the mixin reads + a captured publish."""
+
+    def __init__(self, cameras: list[str], **cfg: object) -> None:
+        self.config = SimpleNamespace(
+            video_max_width=cfg.get("video_max_width", 0),
+            video_max_fps=cfg.get("video_max_fps", 0.0),
+            latency_stamp=cfg.get("latency_stamp", False),
+        )
+        self.published: list[Image] = []
+        self.mux_image = SimpleNamespace(publish=self.published.append)
+        self._mux_init(cameras)
+
+
+def _img(w: int, h: int) -> Image:
+    return Image(data=np.zeros((h, w, 3), dtype=np.uint8), format=ImageFormat.BGR)
+
+
+def _feed(mux: _Mux, cam: str, img: Image) -> None:
+    with mux._cam_lock:
+        mux._cam_frames[cam] = img
+
+
+def _is_even(img: Image) -> bool:
+    h, w = img.data.shape[:2]
+    return h % 2 == 0 and w % 2 == 0
+
+
+# ─── _even_dims unit ──────────────────────────────────────────────────
+
+
+def test_even_dims_crops_odd_width_and_height() -> None:
+    out = CameraMuxMixin._even_dims(_img(641, 481))
+    assert out.data.shape[:2] == (480, 640)
+    assert out.data.flags["C_CONTIGUOUS"]  # from_ndarray needs contiguous
+
+
+def test_even_dims_passes_even_through_unchanged() -> None:
+    src = _img(640, 480)
+    assert CameraMuxMixin._even_dims(src) is src  # no copy when already even
+
+
+# ─── _composite always even (the actual crash path) ───────────────────
+
+
+def test_single_camera_downscale_to_odd_is_evened() -> None:
+    # 1280→641 cap yields an odd width, and 641*720/1280 = 360 (even h) —
+    # width alone would crash the encoder; the guard fixes it.
+    mux = _Mux(["cam1"], video_max_width=641)
+    _feed(mux, "cam1", _img(1280, 720))
+    out = mux._composite()
+    assert out is not None and _is_even(out)
+
+
+def test_hstack_odd_tile_width_is_evened() -> None:
+    # Two cams of different aspect → per-tile int() scaling can sum to an odd
+    # composite width. Guard must even it regardless of the arithmetic.
+    mux = _Mux(["cam1", "cam2"])
+    with mux._cam_lock:
+        mux._cam_selected = ["cam1", "cam2"]
+    _feed(mux, "cam1", _img(853, 480))  # 16:9-ish, odd width
+    _feed(mux, "cam2", _img(641, 481))  # deliberately odd both ways
+    out = mux._composite()
+    assert out is not None and _is_even(out)
+
+
+def test_switch_between_selections_stays_even() -> None:
+    # Reproduces the report: flipping selection changes frame size (encoder
+    # reopen). Every produced frame must be even so libx264 never fails.
+    mux = _Mux(["cam1", "cam2"], video_max_width=641, latency_stamp=True)
+    _feed(mux, "cam1", _img(1280, 721))
+    _feed(mux, "cam2", _img(647, 483))
+    for selection in (["cam1", "cam2"], ["cam1"], ["cam2"], ["cam1", "cam2"]):
+        with mux._cam_lock:
+            mux._cam_selected = list(selection)
+        out = mux._composite()
+        assert out is not None and _is_even(out), f"odd dims for {selection}"
