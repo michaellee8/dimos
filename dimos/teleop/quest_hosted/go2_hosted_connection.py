@@ -120,9 +120,8 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
     # connection.odom_stream() in start() (the source the base uses for TF).
     global_costmap: In[OccupancyGrid]
     map_out: Out[bytes]
-    # Operator mic audio, re-published for local consumers (Go2 has no speaker
-    # yet). 8-byte header (sample_rate u32, channels u16, 0=s16 u16) + PCM.
-    # Frames only flow when the provider runs with transports.broker.audio_in=true.
+    # Operator mic audio, re-published for local consumers (header + PCM, see
+    # _on_audio_frame). Only flows with transports.broker.audio_in=true.
     audio_out: Out[bytes]
     # Click-to-navigate: operator map click → goal_request → planner; the
     # planner's nav_cmd_vel drives move() (yielding to live operator input),
@@ -155,9 +154,7 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         # lets us swallow those idle zeros so they don't stomp nav twists.
         self._last_drive_ts = 0.0
         self._last_nav_ts = 0.0
-        # Single worker (repo pattern, cf. utils/threadpool + drake_world):
-        # commands execute strictly in order, so state like _rage_active can't
-        # race between overlapping runners. Bounded by _MAX_PENDING_CMDS.
+        # Serialized command executor (ordering rationale in _submit_cmd).
         self._cmd_executor: ThreadPoolExecutor | None = None
         self._cmd_pending = 0
         self._cmd_lock = threading.Lock()
