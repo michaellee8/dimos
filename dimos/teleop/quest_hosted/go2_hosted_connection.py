@@ -72,17 +72,17 @@ _POSTURE_SPORT_CMDS = frozenset({"StandDown", "RecoveryStand", "Sit", "Damp"})
 
 
 class Go2HostedConnectionConfig(ConnectionConfig):
-    telemetry_hz: float = 3.0  # robot → operator HUD telemetry push rate
-    cmd_stale_after_sec: float = 0.5  # cmd_vel twists older than this are dropped
-    latency_stamp: bool = False  # benchmark: paint capture-time into frame corner
-    damp_on_operator_lost: bool = False  # go limp on link loss (off: deadman covers it)
-    video_max_width: int = 0  # publish-side cap at the mux (0 = source resolution)
-    video_max_fps: float = 0.0  # publish-side cap at the mux (0 = source rate)
-    map_hz: float = 2.0  # occupancy-grid push rate (0 = off)
-    map_min_resolution: float = 0.1  # coarsen finer grids to this m/cell before encode
-    odom_hz: float = 15.0  # robot-pose push rate (0 = off)
-    speaker: bool = True  # play operator audio on the dog's speaker (needs audio_in)
-    nav_yield_sec: float = 1.0  # operator drive suppresses planner twists this long
+    telemetry_hz: float = 3.0
+    cmd_stale_after_sec: float = 0.5
+    latency_stamp: bool = False
+    damp_on_operator_lost: bool = False
+    video_max_width: int = 0
+    video_max_fps: float = 0.0
+    map_hz: float = 2.0
+    map_min_resolution: float = 0.1
+    odom_hz: float = 15.0
+    speaker: bool = True
+    nav_yield_sec: float = 1.0
 
 
 class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
@@ -96,56 +96,44 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
 
     config: Go2HostedConnectionConfig
 
-    state_json: In[bytes]
-    cmd_raw: In[bytes]
-    video_stats: Out[VideoStats]
-    telemetry_out: Out[bytes]
+    # Cloudflare / LiveKit over WebRTC
+    state_json: In[bytes]  # state_reliable
+    cmd_raw: In[bytes]  # cmd_unreliable
+    mux_image: Out[Image]  # video track
+    telemetry_out: Out[bytes]  # state_reliable_back
+    map_out: Out[bytes]  # map_unreliable
+
+    # Other modules
     cam2_in: In[Image]
-    mux_image: Out[Image]
-    cmd_vel_stamped: Out[TwistStamped]
-
-    # Map overlay → operator minimap on the map_unreliable channel. Odom rides
-    # map_out too but has no port — start() taps connection.odom_stream().
     global_costmap: In[OccupancyGrid]
-    map_out: Out[bytes]
-
-    # Operator mic → local consumers (header + PCM, see _on_audio_frame).
-    audio_out: Out[bytes]
-
-    # Click-to-navigate: map click → goal_request → planner → nav_cmd_vel →
-    # move(); stop_movement cancels the goal (E-STOP / operator loss).
-    goal_request: Out[PoseStamped]
     nav_cmd_vel: In[Twist]
+    cmd_vel_stamped: Out[TwistStamped]
+    video_stats: Out[VideoStats]
+    audio_out: Out[bytes]
+    goal_request: Out[PoseStamped]
     stop_movement: Out[Bool]
 
-    _MAX_PENDING_CMDS = 4  # non-urgent backlog cap; beyond this → busy-reject
-    # Nonce dedup TTL: re-ack duplicates instead of re-running. Short because
-    # browser nonces restart at 1 per session and must age out before reconnect.
+    _MAX_PENDING_CMDS = 4
     _NONCE_TTL_SEC = 10.0
     _NONCE_CACHE_MAX = 64
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._hosted_init(["cam1", "cam2"])  # sets the E-STOP latch move() checks
+        self._hosted_init(["cam1", "cam2"])
         self._stop_event = threading.Event()
         self._rage_active = False
         self._last_cmd_ts = 0.0
-        # Nav arbitration: only non-zero operator input counts as steering (the
-        # browser streams idle zeros), so nav twists aren't stomped by them.
         self._last_drive_ts = 0.0
         self._last_nav_ts = 0.0
-        # Serialized command executor (ordering rationale in _submit_cmd).
         self._cmd_executor: ThreadPoolExecutor | None = None
         self._cmd_pending = 0
         self._cmd_lock = threading.Lock()
-        self._nonce_results: dict[Any, tuple[bool | None, float]] = {}  # nonce → (result, ts)
+        self._nonce_results: dict[Any, tuple[bool | None, float]] = {}
         self._speaker_track: PCMAudioTrack | None = None
-        # Robot-authoritative UI state, pushed in telemetry so a reconnecting
-        # cockpit reflects reality. start() stands the robot up → StandReady.
         self._posture = "StandReady"
-        self._obstacle_avoidance = True  # corrected from config.g in start()
-        self._light = 0.0  # head-LED brightness 0..1
-        self._last_map_pub = 0.0  # map/odom throttle gates (monotonic)
+        self._obstacle_avoidance = True
+        self._light = 0.0
+        self._last_map_pub = 0.0
         self._last_odom_pub = 0.0
 
     @rpc
@@ -157,19 +145,15 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
             self._obstacle_avoidance = bool(self.config.g.obstacle_avoidance)
         except AttributeError:
             pass
-        # Force firmware out of Rage so _rage_active=False matches reality — a
-        # prior session may have left it on, then set_mode locks the user in.
         try:
             self.connection.set_rage_mode(False)
         except Exception:
             logger.exception("startup set_rage_mode(False) failed")
-        # Sync subscribes (not async handle_*): keep-latest would drop bursts.
         for stream, cb in (
             (self.state_json, self._on_state_json),
             (self.cmd_raw, self._on_cmd_raw),
         ):
             self.register_disposable(Disposable(stream.subscribe(cb)))
-        # color_image → cam1, RealSense → cam2, muxed to mux_image.
         self.register_disposable(
             Disposable(self.color_image.subscribe(lambda i: self._on_cam("cam1", i)))
         )
@@ -181,8 +165,6 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         self.register_disposable(Disposable(self.nav_cmd_vel.subscribe(self._on_nav_cmd)))
         if self.config.odom_hz > 0:
             self.register_disposable(self.connection.odom_stream().subscribe(self._on_odom))
-        # The subscribes above forced the broker provider into existence, so the
-        # audio-sink registry sweep finds it; frames need audio_in=true.
         set_audio_sink(self._on_audio_frame)
         if self.config.speaker:
             self._attach_speaker()
