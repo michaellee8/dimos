@@ -107,7 +107,11 @@ export function hudDetailRows() {
             { label: 'Decode', value: `${fmt(v.decode_ms)} ms`, health: null },
             { label: 'E2E', value: v.e2e_latency_ms ? `${fmt(v.e2e_latency_ms)} ms` : '—',
               health: v.e2e_latency_ms ? band(v.e2e_latency_ms, 150, 300) : null },
-            { label: 'Freezes', value: `${v.freezes ?? 0}`, health: band(v.freezes, 0, 3) },
+            // freezeCount is a monotonic SESSION TOTAL, not a rate — a few over
+            // a long drive is normal, so keep 1–3 green; warn past a handful,
+            // bad only when it's clearly a bad link. (Ideally a per-window
+            // delta like fps/loss; total is what getStats gives cheaply.)
+            { label: 'Freezes', value: `${v.freezes ?? 0}`, health: band(v.freezes, 8, 20) },
         ]},
         { group: 'Command', rows: [
             { label: 'Latency', value: c ? `${fmt(c.latency_ms)} ms` : '—',
