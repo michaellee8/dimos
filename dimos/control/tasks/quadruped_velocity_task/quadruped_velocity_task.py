@@ -41,7 +41,7 @@ adapter backed by state estimation + elevation mapping) expose
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import threading
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -148,10 +148,12 @@ class QuadrupedVelocityTaskConfig:
     height_scan_rays: int = 187
     height_scan_scale: float = 0.2
     height_scan_miss: float = 5.0
-    # Command clip, from the training command ranges (post-curriculum).
-    cmd_clip: tuple[tuple[float, float], ...] = field(
-        default_factory=lambda: ((-1.0, 1.5), (-1.0, 1.0), (-0.7, 0.7))
-    )
+    # Per-axis gain from the stack's cmd_vel convention to the policy's
+    # command units, applied in the obs (same pattern as
+    # G1GrootWBCTaskConfig.cmd_scale). 2.0 maps the nav planner's and
+    # teleop client's standard magnitudes onto the range this policy
+    # tracks well (measured stable to ~1.9 m/s / 1.9 rad/s).
+    cmd_scale: tuple[float, float, float] = (2.0, 2.0, 2.0)
     # Inference every N coordinator ticks (blueprint pairs a 50 Hz tick
     # with decimation 1 to match the trained 50 Hz policy rate).
     decimation: int = 1
@@ -216,6 +218,7 @@ class QuadrupedVelocityTask(BaseControlTask):
 
         self._default_q = np.asarray(config.default_positions, dtype=np.float32)
         self._action_scale = np.asarray(config.action_scale, dtype=np.float32)
+        self._cmd_scale = np.asarray(config.cmd_scale, dtype=np.float32)
 
         self._last_action = np.zeros(_NUM_JOINTS, dtype=np.float32)
         self._tick_count = 0
@@ -373,7 +376,7 @@ class QuadrupedVelocityTask(BaseControlTask):
         obs[9:21] = q - self._default_q
         obs[21:33] = dq
         obs[33:45] = self._last_action
-        obs[45:48] = cmd
+        obs[45:48] = cmd * self._cmd_scale
         obs[48:] = heights * self._config.height_scan_scale
 
         action = self._session.run(None, {self._input_name: self._obs})[0][0].astype(np.float32)
@@ -398,11 +401,8 @@ class QuadrupedVelocityTask(BaseControlTask):
 
     def set_velocity_command(self, vx: float, vy: float, yaw_rate: float, t_now: float) -> None:
         """Called by the coordinator's twist_command dispatcher. Thread-safe."""
-        clip = self._config.cmd_clip
         with self._cmd_lock:
-            self._cmd[0] = min(max(vx, clip[0][0]), clip[0][1])
-            self._cmd[1] = min(max(vy, clip[1][0]), clip[1][1])
-            self._cmd[2] = min(max(yaw_rate, clip[2][0]), clip[2][1])
+            self._cmd[:] = [vx, vy, yaw_rate]
             self._last_cmd_time = t_now
 
     @staticmethod
