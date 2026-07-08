@@ -134,11 +134,3 @@ teleop_hosted_go2_multicam = (
     )
     .global_config(viewer="none")
 )
-
-
-__all__ = [
-    "teleop_hosted_go2",
-    "teleop_hosted_go2_livekit",
-    "teleop_hosted_go2_multicam",
-    "teleop_hosted_go2_transport",
-]

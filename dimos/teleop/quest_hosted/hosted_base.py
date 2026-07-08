@@ -165,6 +165,3 @@ class HostedConnectionMixin(CameraMuxMixin):
         if self._telemetry_thread is not None:
             self._telemetry_thread.join(timeout=2.0)
             self._telemetry_thread = None
-
-
-__all__ = ["HostedConnectionMixin"]

@@ -685,6 +685,3 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
             "obstacle_avoidance": self._obstacle_avoidance,
             "light": self._light,  # brightness 0..1
         }
-
-
-__all__ = ["Go2HostedConnection", "Go2HostedConnectionConfig"]

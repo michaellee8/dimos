@@ -86,6 +86,3 @@ class PCMAudioTrack(MediaStreamTrack):
         frame.time_base = fractions.Fraction(1, sample_rate)
         self._pts += samples
         return frame
-
-
-__all__ = ["PCMAudioTrack"]
