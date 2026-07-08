@@ -324,35 +324,21 @@ class BabylonViewerModule(Module):
         if self._splat_path is not None and self._splat_path.exists():
             splat_file = _versioned_asset_name("splat", self._splat_path)
             splat_bytes = self._splat_path.stat().st_size
-        # Keys the page expects are kept verbatim; the browser-physics block
-        # is pinned to "off" — this build renders, it never simulates.
+        # Exactly the keys the page reads — this build renders, it never
+        # simulates, so there is no browser-physics block.
         return JSONResponse(
             {
                 "sceneFile": scene_file,
                 "sceneBytes": scene_bytes,
-                "collisionSceneFile": None,
-                "collisionSceneBytes": 0,
                 "splatFile": splat_file,
                 "splatBytes": splat_bytes,
                 "splatAlignment": self._splat_alignment,
                 "sceneScale": self._scene_scale,
                 "scenePosition": list(self._scene_translation),
                 "sceneWxyz": list(scene_wxyz),
-                "browserPhysics": False,
+                # "external" = any entity authority lives outside the browser;
+                # the page's ENTITY MIRROR stub keys off this.
                 "entityAuthority": "external",
-                "browserPhysicsHz": 0.0,
-                "browserPhysicsInitialPose": {
-                    "x": 0.0,
-                    "y": 0.0,
-                    "z": 0.0,
-                    "yaw": 0.0,
-                    "lockZ": False,
-                },
-                "vehicleHeight": 0.75,
-                "stepOffset": 0.22,
-                "supportFloor": False,
-                "supportFloorZ": 0.0,
-                "supportFloorSize": 0.0,
             },
             headers=_NO_CACHE_HEADERS,
         )

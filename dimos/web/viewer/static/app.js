@@ -66,50 +66,9 @@ const bodyNodeList = [];
 const bodyNameList = [];
 const sceneMeshes = [];
 const sceneMeshSet = new Set();
-const collisionMeshes = [];
-const collisionMeshSet = new Set();
 const robotMeshes = [];
 const maxAutoSceneBytes = 2 * 1024 * 1024 * 1024;
 
-// Havok physics. Right-handed, z-up: gravity is -Z.
-// `physicsReady` is a promise that resolves once HavokPhysics() returns and
-// the plugin is wired. Consumers (collision-mesh wrapper, entity spawn)
-// await it before creating aggregates.
-const physicsGravity = new BABYLON.Vector3(0, 0, -9.8);
-const physicsReady = (async () => {
-  if (typeof HavokPhysics !== "function") {
-    console.warn("HavokPhysics not loaded — physics disabled");
-    return false;
-  }
-  try {
-    const havok = await HavokPhysics();
-    scene.enablePhysics(physicsGravity, new BABYLON.HavokPlugin(true, havok));
-    console.log("Havok physics enabled");
-    return true;
-  } catch (error) {
-    console.error("Havok init failed:", error);
-    return false;
-  }
-})();
-
-// Entity world. Browser is authoritative for state; Python pushes
-// spawn/despawn/teleport via WS, browser reports per-tick state back.
-const entities = new Map();              // entity_id -> {mesh, aggregate, descriptor}
-let entityBroadcastIntervalMs = 1000 / 15;   // state changes only; 15 Hz is enough for sensors
-let lastEntityBroadcast = 0;
-let lastEntityBroadcastSignature = "";
-let lastEntityBroadcastKeepalive = 0;
-const entityBroadcastKeepaliveMs = 2000;
-
-// Kinematic robot collider. Parented to the root body node so the odom-
-// driven transform drags it through the world; entities collide with it.
-// Humanoid defaults — adjust per robot if needed (no real-world cost to
-// being a bit oversized for nav testing).
-const ROBOT_COLLIDER_HEIGHT = 1.4;
-const ROBOT_COLLIDER_RADIUS = 0.25;
-const ROBOT_COLLIDER_Z_OFFSET = 0.7;    // capsule center above the root body origin
-let robotColliderMesh = null;
-let robotColliderAggregate = null;
 const params = new URLSearchParams(window.location.search);
 const useRobotMesh = params.get("robot") !== "proxy";
 const sceneMode = params.get("scene") || "auto";
@@ -136,8 +95,6 @@ let spawnMarker = null;
 let latestRootPosition = null;
 let sceneDepthEnabled = true;
 let sceneWireEnabled = false;
-let collisionVisible = false;
-let collisionMaterial = null;
 let forceVisibleEnabled = false;
 let driveEnabled = false;
 let lastDriveSendTime = 0;
@@ -148,28 +105,6 @@ const driveSendPeriod = 0.08;
 const driveLinearSpeed = 0.35;
 const driveStrafeSpeed = 0.25;
 const driveAngularSpeed = 0.8;
-let browserPhysicsEnabled = false;
-let entityAuthorityExternal = false;
-let browserPhysicsPose = { x: 0, y: 0, z: 0.75, yaw: 0 };
-let browserPhysicsCommand = {
-  linear: [0, 0, 0],
-  angular: [0, 0, 0],
-};
-let browserPhysicsLastStepMs = null;
-let browserPhysicsLastOdomMs = 0;
-let browserVehicleHeight = 0.75;
-let browserStepOffset = 0.22;
-let supportFloorEnabled = false;
-let supportFloorZ = 0.0;
-let supportFloorSize = 0.0;
-let supportFloorMesh = null;
-let supportFloorAggregate = null;
-const browserMaxStepDown = 0.5;
-const browserGroundProbeExtra = 1.0;
-const browserPhysicsOdomPeriodMs = 1000 / 50;
-const browserCharacterRadius = ROBOT_COLLIDER_RADIUS;
-const browserCollisionProbeHeights = [0.25, 0.75, 1.2];
-const supportFloorThickness = 0.08;
 const robotPoseHeaderBytes = 16;
 const stateQueueMaxLength = 8;
 const stateImmediateDeltaMs = 100;
@@ -181,7 +116,6 @@ const posePositionEpsilon = 1e-5;
 const poseQuaternionEpsilon = 1e-5;
 const queuedStateFrames = [];
 const lastAppliedRobotPoses = [];
-let latestRobotPosePayload = null;
 let robotRootBodyIndex = -1;
 const robotPoseComposeScale = BABYLON.Vector3.One();
 const robotPoseDecomposeScale = BABYLON.Vector3.One();
@@ -190,9 +124,6 @@ const robotPoseQuaternionScratch = BABYLON.Quaternion.Identity();
 const robotPoseMatrixScratch = BABYLON.Matrix.Identity();
 const robotPoseRootMatrixScratch = BABYLON.Matrix.Identity();
 const robotPoseRootInverseMatrixScratch = BABYLON.Matrix.Identity();
-const robotPoseBrowserRootMatrixScratch = BABYLON.Matrix.Identity();
-const robotPoseRebaseMatrixScratch = BABYLON.Matrix.Identity();
-const robotPoseRebasedMatrixScratch = BABYLON.Matrix.Identity();
 const stateTiming = {
   previousSourceMs: null,
   lastIdealJsMs: null,
@@ -237,17 +168,6 @@ function finiteNumber(value, fallback) {
 function registerSceneMesh(mesh) {
   sceneMeshes.push(mesh);
   sceneMeshSet.add(mesh);
-}
-
-function registerCollisionMesh(mesh) {
-  collisionMeshes.push(mesh);
-  collisionMeshSet.add(mesh);
-}
-
-function unregisterCollisionMesh(mesh) {
-  const index = collisionMeshes.indexOf(mesh);
-  if (index >= 0) collisionMeshes.splice(index, 1);
-  collisionMeshSet.delete(mesh);
 }
 
 function setStatus(message) {
@@ -343,41 +263,9 @@ function setRenderableVisible(node, visible) {
   if ("visibility" in node) node.visibility = visible ? 1 : 0;
 }
 
-function setEntityVisualsVisible(entry, visible) {
-  if (!entry) return;
-  if (entry.visualNodes && entry.visualNodes.length > 0) {
-    for (const node of entry.visualNodes) {
-      setRenderableVisible(node, visible);
-    }
-    return;
-  }
-  // Primitive entities often use their physics mesh as the visible mesh.
-  // Hide the renderable surface only; keep the body enabled for Havok and
-  // for browser->native entity-state publication.
-  setRenderableVisible(entry.mesh, visible);
-}
-
-function setAllEntityVisualsVisible(visible) {
-  for (const entry of entities.values()) {
-    setEntityVisualsVisible(entry, visible);
-  }
-}
-
-function applyCollisionVisibility() {
-  const visible = sceneVisible && collisionVisible;
-  for (const mesh of collisionMeshes) {
-    // Only toggle visibility — setEnabled(false) would also stop the
-    // PhysicsAggregate from colliding, which defeats the point of
-    // running Havok against the cooked collision scene.
-    mesh.visibility = visible ? 1 : 0;
-  }
-}
-
 function setSceneVisibility(visible) {
   sceneVisible = visible;
   for (const mesh of sceneMeshes) setRenderableVisible(mesh, visible);
-  setAllEntityVisualsVisible(visible);
-  applyCollisionVisibility();
   setButtonActive("toggleScene", visible);
 }
 
@@ -458,26 +346,6 @@ async function loadSplat(config) {
     setStatus("splat load failed");
     splatLoadStarted = false;
   }
-}
-
-function createCollisionMaterial() {
-  if (collisionMaterial) return collisionMaterial;
-  collisionMaterial = new BABYLON.StandardMaterial("collisionDebugMaterial", scene);
-  collisionMaterial.diffuseColor = BABYLON.Color3.FromHexString("#00d7ff");
-  collisionMaterial.emissiveColor = BABYLON.Color3.FromHexString("#00a8ff");
-  collisionMaterial.specularColor = BABYLON.Color3.Black();
-  collisionMaterial.alpha = 0.55;
-  collisionMaterial.wireframe = true;
-  collisionMaterial.backFaceCulling = false;
-  collisionMaterial.disableLighting = true;
-  collisionMaterial.transparencyMode = BABYLON.Material.MATERIAL_ALPHABLEND;
-  return collisionMaterial;
-}
-
-function setCollisionVisibility(visible) {
-  collisionVisible = visible;
-  applyCollisionVisibility();
-  setButtonActive("toggleCollision", visible);
 }
 
 function sceneMaterials() {
@@ -656,7 +524,6 @@ function sendDriveCommand(force = false) {
       return;
     }
   }
-  if (browserPhysicsEnabled) setBrowserPhysicsCommand(twist);
   lastDriveSendTime = now;
   lastDriveSignature = signature;
 }
@@ -668,224 +535,41 @@ function setDriveEnabled(enabled) {
   if (!enabled) sendDriveCommand(true);
 }
 
-function setBrowserPhysicsCommand(twist) {
-  if (!twist) return;
-  const linear = Array.isArray(twist.linear) ? twist.linear : [0, 0, 0];
-  const angular = Array.isArray(twist.angular) ? twist.angular : [0, 0, 0];
-  browserPhysicsCommand = {
-    linear: [Number(linear[0]) || 0, Number(linear[1]) || 0, Number(linear[2]) || 0],
-    angular: [Number(angular[0]) || 0, Number(angular[1]) || 0, Number(angular[2]) || 0],
-  };
-}
-
-function setBrowserPhysicsPose(pose, publish = true) {
-  if (!pose) return;
-  browserPhysicsPose = {
-    x: Number(pose.x) || 0,
-    y: Number(pose.y) || 0,
-    z: Number(pose.z) || 0,
-    yaw: Number(pose.yaw) || 0,
-  };
-  browserPhysicsLastStepMs = performance.now();
-  if (publish) publishBrowserSimOdom(true);
-}
-
-function yawQuaternion(yaw) {
-  return BABYLON.Quaternion.FromEulerAngles(0, 0, yaw);
-}
-
-function capsuleQuaternion(yaw) {
-  return yawQuaternion(yaw).multiply(BABYLON.Quaternion.FromEulerAngles(Math.PI / 2, 0, 0));
-}
-
-function publishBrowserSimOdom(force = false) {
-  if (!browserPhysicsEnabled) return;
-  const now = performance.now();
-  if (!force && now - browserPhysicsLastOdomMs < browserPhysicsOdomPeriodMs) return;
-  browserPhysicsLastOdomMs = now;
-  const q = yawQuaternion(browserPhysicsPose.yaw);
-  const M = window.dimosMsgs;
-  const lcm = window.dimosLcm;
-  if (!M || !lcm) return;
-  try {
-    const ts = Date.now() / 1000;
-    const sec = Math.floor(ts);
-    const nanosec = Math.floor((ts - sec) * 1e9);
-    const pose = new M.geometry_msgs.PoseStamped({
-      header: new M.std_msgs.Header({
-        // Root frame must be "world": the sim connection turns /odom into the
-        // world->base_link TF (parent = this frame_id), and the agent/nav
-        // self-locate via tf.get("world", "base_link"). DimSim stamps "world"
-        // too — "map" here silently broke agent localization.
-        stamp: new M.builtin_interfaces.Time({ sec, nanosec }),
-        frame_id: "world",
-      }),
-      pose: new M.geometry_msgs.Pose({
-        position: new M.geometry_msgs.Point({
-          x: browserPhysicsPose.x,
-          y: browserPhysicsPose.y,
-          z: browserPhysicsPose.z,
-        }),
-        orientation: new M.geometry_msgs.Quaternion({
-          x: q.x, y: q.y, z: q.z, w: q.w,
-        }),
-      }),
-    });
-    lcm.publish("/odom", pose);
-  } catch (err) {
-    console.warn("[lcm] sim_odom publish failed", err);
-  }
-}
-
-function horizontalCollisionDistance(origin, direction, maxDistance) {
-  if (collisionMeshes.length === 0 || maxDistance <= 1e-6) return maxDistance;
-  let allowed = maxDistance;
-  const groundZ = origin.z - browserVehicleHeight;
-  for (const height of browserCollisionProbeHeights) {
-    const rayOrigin = new BABYLON.Vector3(origin.x, origin.y, groundZ + height);
-    const ray = new BABYLON.Ray(rayOrigin, direction, maxDistance + browserCharacterRadius);
-    const pick = scene.pickWithRay(
-      ray,
-      (mesh) => collisionMeshSet.has(mesh),
-    );
-    if (pick && pick.hit && Number.isFinite(pick.distance)) {
-      allowed = Math.min(allowed, Math.max(0, pick.distance - browserCharacterRadius));
-    }
-  }
-  return allowed;
-}
-
-function groundHeightAt(x, y, referenceBaseZ) {
-  if (collisionMeshes.length === 0) return null;
-  const origin = new BABYLON.Vector3(
-    x,
-    y,
-    referenceBaseZ + browserStepOffset + browserGroundProbeExtra,
-  );
-  const length =
-    browserVehicleHeight + browserStepOffset + browserMaxStepDown + browserGroundProbeExtra;
-  const ray = new BABYLON.Ray(origin, new BABYLON.Vector3(0, 0, -1), length);
-  const pick = scene.pickWithRay(ray, (mesh) => collisionMeshSet.has(mesh));
-  if (pick && pick.hit && pick.pickedPoint) return pick.pickedPoint.z;
-  return null;
-}
-
-function snapCandidateToGround(candidate, currentBaseZ) {
-  const currentGroundZ = currentBaseZ - browserVehicleHeight;
-  const groundZ = groundHeightAt(candidate.x, candidate.y, currentBaseZ);
-  if (groundZ === null) return candidate;
-  const stepDelta = groundZ - currentGroundZ;
-  if (stepDelta > browserStepOffset || stepDelta < -browserMaxStepDown) return null;
-  return new BABYLON.Vector3(candidate.x, candidate.y, groundZ + browserVehicleHeight);
-}
-
-function resolvePlanarMove(position, delta) {
-  const distance = Math.hypot(delta.x, delta.y);
-  if (distance <= 1e-8 || collisionMeshes.length === 0) {
-    return new BABYLON.Vector3(position.x + delta.x, position.y + delta.y, position.z);
-  }
-  const direction = new BABYLON.Vector3(delta.x / distance, delta.y / distance, 0);
-  const allowed = horizontalCollisionDistance(position, direction, distance);
-  if (allowed >= distance - 1e-5) {
-    const snapped = snapCandidateToGround(
-      new BABYLON.Vector3(position.x + delta.x, position.y + delta.y, position.z),
-      position.z,
-    );
-    return snapped || position.clone();
-  }
-
-  // Cheap slide: try each axis independently when the diagonal path is blocked.
-  const candidates = [
-    new BABYLON.Vector3(delta.x, 0, 0),
-    new BABYLON.Vector3(0, delta.y, 0),
-  ];
-  let best = BABYLON.Vector3.Zero();
-  for (const candidate of candidates) {
-    const d = Math.hypot(candidate.x, candidate.y);
-    if (d <= 1e-8) continue;
-    const dir = new BABYLON.Vector3(candidate.x / d, candidate.y / d, 0);
-    const a = horizontalCollisionDistance(position, dir, d);
-    const moved = dir.scale(a);
-    const snapped = snapCandidateToGround(
-      new BABYLON.Vector3(position.x + moved.x, position.y + moved.y, position.z),
-      position.z,
-    );
-    if (snapped && a > best.length()) {
-      best = new BABYLON.Vector3(snapped.x - position.x, snapped.y - position.y, snapped.z - position.z);
-    }
-  }
-  return new BABYLON.Vector3(position.x + best.x, position.y + best.y, position.z + best.z);
-}
-
-function snapBrowserPhysicsToGround(publish = false) {
-  if (!browserPhysicsEnabled || collisionMeshes.length === 0) return;
-  const groundZ = groundHeightAt(
-    browserPhysicsPose.x,
-    browserPhysicsPose.y,
-    browserPhysicsPose.z,
-  );
-  if (groundZ === null) return;
-  browserPhysicsPose = {
-    ...browserPhysicsPose,
-    z: groundZ + browserVehicleHeight,
-  };
-  if (publish) publishBrowserSimOdom(true);
-}
-
-function stepBrowserPhysics() {
-  if (!browserPhysicsEnabled) return;
-  const now = performance.now();
-  const previous = browserPhysicsLastStepMs ?? now;
-  browserPhysicsLastStepMs = now;
-  const dt = Math.min(Math.max((now - previous) / 1000, 0), 0.05);
-  if (dt <= 0) return;
-
-  const linear = browserPhysicsCommand.linear;
-  const angular = browserPhysicsCommand.angular;
-  const yaw = browserPhysicsPose.yaw + (angular[2] || 0) * dt;
-  const c = Math.cos(yaw);
-  const s = Math.sin(yaw);
-  const vx = c * (linear[0] || 0) - s * (linear[1] || 0);
-  const vy = s * (linear[0] || 0) + c * (linear[1] || 0);
-  const current = new BABYLON.Vector3(
-    browserPhysicsPose.x,
-    browserPhysicsPose.y,
-    browserPhysicsPose.z,
-  );
-  const next = resolvePlanarMove(current, new BABYLON.Vector3(vx * dt, vy * dt, 0));
-  browserPhysicsPose = { x: next.x, y: next.y, z: next.z, yaw };
-  if (robotColliderMesh) {
-    robotColliderMesh.position.set(next.x, next.y, next.z);
-    robotColliderMesh.rotationQuaternion = capsuleQuaternion(yaw);
-  }
-  publishBrowserSimOdom(false);
-}
-
-function configureBrowserPhysics(config) {
-  browserPhysicsEnabled = Boolean(config.browserPhysics);
-  // With an external entity authority (MuJoCo sim), entities here are
-  // kinematic mirrors: poses arrive on /entity_state_batch via the LCM
-  // bridge and we never publish our own entity states back.
+// ─── ENTITY MIRROR (stub) ────────────────────────────────────────────────
+//
+// The simulation tree's authority viewer can mirror dynamic scene entities:
+// MuJoCo publishes /entity_state_batch (plus an entity-descriptor replay on
+// /ws) and the browser spawns kinematic meshes it re-poses every tick. That
+// subsystem is deliberately absent from this viewer-only build — this page
+// renders robots, scenes and pointclouds; it owns and simulates nothing.
+//
+// To bring entity mirroring here, port from the simulation tree's Babylon
+// module (dimos/simulation/bridges/babylon on the sim refactor branch):
+//   1. entity-descriptor replay on /ws  → spawn/despawn handlers + the
+//      primitive/mesh entity builders,
+//   2. an /entity_state_batch subscription → pose mirroring,
+//   3. per-entity visibility hooks in setSceneVisibility.
+// The server half of the replay was dropped from the slim module and needs
+// re-adding at the same time.
+let entityAuthorityExternal = false;
+function configureEntityMirror(config) {
   entityAuthorityExternal = config.entityAuthority === "external";
-  if (entityAuthorityExternal) {
-    // whenLcmReady: dimosLcm is an ESM module gated on a network import —
-    // a direct window.dimosLcm check here races it and silently no-ops.
-    whenLcmReady(() => {
-      window.dimosLcm.subscribeChannel(
-        "/entity_state_batch#pimsim.EntityStateBatch",
-        applyExternalEntityBatch,
-      );
-      console.log("[entities] mirroring external entity authority");
-    });
-  }
-  if (!browserPhysicsEnabled) return;
-  browserVehicleHeight = Number(config.vehicleHeight) || browserVehicleHeight;
-  browserStepOffset = Number(config.stepOffset) || browserStepOffset;
-  supportFloorEnabled = Boolean(config.supportFloor);
-  supportFloorZ = finiteNumber(config.supportFloorZ, supportFloorZ);
-  supportFloorSize = Math.max(0, finiteNumber(config.supportFloorSize, supportFloorSize));
-  setBrowserPhysicsPose(config.browserPhysicsInitialPose || {}, false);
-  setStatus("browser physics ready");
+  if (!entityAuthorityExternal) return;
+  whenLcmReady(() => {
+    // Acknowledge-only: log once so an operator can see the sim IS
+    // publishing entities that this build does not draw yet.
+    let seen = false;
+    window.dimosLcm.subscribeChannel(
+      "/entity_state_batch#pimsim.EntityStateBatch",
+      () => {
+        if (seen) return;
+        seen = true;
+        console.info(
+          "[entities] entity_state_batch is on the bus — mirroring is stubbed in this build (see ENTITY MIRROR in app.js)",
+        );
+      },
+    );
+  });
 }
 
 function setSceneDepthWrite(enabled) {
@@ -978,62 +662,6 @@ function fitCameraToMeshes(meshes) {
   setStatus(`scene ${count} meshes`);
 }
 
-function disposeSupportFloor() {
-  if (supportFloorAggregate) {
-    try {
-      supportFloorAggregate.dispose();
-    } catch (_) {
-      // best-effort cleanup
-    }
-    supportFloorAggregate = null;
-  }
-  if (supportFloorMesh) {
-    unregisterCollisionMesh(supportFloorMesh);
-    try {
-      supportFloorMesh.dispose();
-    } catch (_) {
-      // best-effort cleanup
-    }
-    supportFloorMesh = null;
-  }
-}
-
-async function ensureSupportFloor(config) {
-  supportFloorEnabled = Boolean(config.supportFloor);
-  supportFloorZ = finiteNumber(config.supportFloorZ, supportFloorZ);
-  supportFloorSize = Math.max(0, finiteNumber(config.supportFloorSize, supportFloorSize));
-  if (!browserPhysicsEnabled || !supportFloorEnabled) return;
-  if (!(await physicsReady)) return;
-
-  disposeSupportFloor();
-  const bounds = computeMeshBounds(collisionMeshes.length > 0 ? collisionMeshes : sceneMeshes);
-  const center = bounds
-    ? new BABYLON.Vector3(bounds.center.x, bounds.center.y, supportFloorZ - supportFloorThickness * 0.5)
-    : new BABYLON.Vector3(browserPhysicsPose.x, browserPhysicsPose.y, supportFloorZ - supportFloorThickness * 0.5);
-  const derivedSize = bounds
-    ? Math.max(bounds.extent.x, bounds.extent.y) + 8.0
-    : 20.0;
-  const size = Math.max(20.0, supportFloorSize > 0 ? supportFloorSize : derivedSize);
-
-  supportFloorMesh = BABYLON.MeshBuilder.CreateBox(
-    "supportFloor",
-    { width: size, height: size, depth: supportFloorThickness },
-    scene,
-  );
-  supportFloorMesh.position = center;
-  supportFloorMesh.material = createCollisionMaterial();
-  supportFloorMesh.visibility = sceneVisible && collisionVisible ? 1 : 0;
-  supportFloorMesh.isPickable = true;
-  supportFloorMesh.metadata = { dimosCollisionMesh: true, dimosSupportFloor: true };
-  registerCollisionMesh(supportFloorMesh);
-  supportFloorAggregate = new BABYLON.PhysicsAggregate(
-    supportFloorMesh,
-    BABYLON.PhysicsShapeType.BOX,
-    { mass: 0 },
-    scene,
-  );
-}
-
 function focusRobot() {
   if (!latestRootPosition) return;
   camera.setTarget(latestRootPosition);
@@ -1110,59 +738,6 @@ async function loadSceneAsset(config) {
   setSceneWireframe(sceneWireEnabled);
   setForceVisible(forceVisibleEnabled);
   fitCameraToMeshes(sceneMeshes);
-  await ensureSupportFloor(config);
-}
-
-async function loadCollisionAsset(config) {
-  if (!config.collisionSceneFile) return;
-  if (config.collisionSceneFile === config.sceneFile) return;
-  if (config.collisionSceneBytes > maxAutoSceneBytes) {
-    setStatus("collision exceeds browser load guard");
-    return;
-  }
-  setStatus("loading collision");
-  const root = new BABYLON.TransformNode("collisionRoot", scene);
-  root.position = vec3(config.scenePosition);
-  root.scaling = new BABYLON.Vector3(config.sceneScale, config.sceneScale, config.sceneScale);
-  root.rotationQuaternion = quatWxyz(config.sceneWxyz);
-
-  const result = await BABYLON.SceneLoader.ImportMeshAsync(
-    null,
-    "/assets/",
-    config.collisionSceneFile,
-    scene,
-  );
-  for (const light of result.lights || []) light.dispose();
-  for (const camera of result.cameras || []) camera.dispose();
-  for (const mesh of result.meshes) {
-    if (mesh.parent === null) mesh.parent = root;
-    if (!mesh.getTotalVertices || mesh.getTotalVertices() === 0) continue;
-    mesh.isPickable = true;
-    mesh.material = createCollisionMaterial();
-    mesh.visibility = sceneVisible && collisionVisible ? 1 : 0;
-    // Don't setEnabled(false) — Havok needs the mesh active to collide.
-    // setCollisionVisibility() toggles only the visibility for display.
-    mesh.metadata = { dimosCollisionMesh: true };
-    registerCollisionMesh(mesh);
-  }
-  if (sceneMeshes.length === 0) fitCameraToMeshes(collisionMeshes);
-
-  // Wrap each collision mesh with a static (mass=0) PhysicsAggregate so
-  // entities + the character controller actually collide with the scene.
-  if (await physicsReady) {
-    for (const mesh of collisionMeshes) {
-      if (mesh.physicsBody) continue; // idempotent
-      try {
-        new BABYLON.PhysicsAggregate(mesh, BABYLON.PhysicsShapeType.MESH, { mass: 0 }, scene);
-      } catch (error) {
-        console.warn(`collision physics aggregate failed for ${mesh.name}:`, error);
-      }
-    }
-  }
-
-  await ensureSupportFloor(config);
-  snapBrowserPhysicsToGround(true);
-  setStatus("live");
 }
 
 function pickScenePoint() {
@@ -1172,11 +747,7 @@ function pickScenePoint() {
     BABYLON.Matrix.Identity(),
     camera,
   );
-  const useCollision = collisionMeshes.length > 0;
-  const pick = scene.pickWithRay(
-    ray,
-    (mesh) => (useCollision ? collisionMeshSet.has(mesh) : sceneMeshSet.has(mesh)),
-  );
+  const pick = scene.pickWithRay(ray, (mesh) => sceneMeshSet.has(mesh));
   if (pick && pick.hit && pick.pickedPoint) return pick.pickedPoint;
   if (Math.abs(ray.direction.z) < 1e-6) return null;
   const distance = -ray.origin.z / ray.direction.z;
@@ -1191,7 +762,6 @@ async function loadRobot() {
   bodyNodeList.length = 0;
   bodyNameList.length = 0;
   lastAppliedRobotPoses.length = 0;
-  latestRobotPosePayload = null;
   robotRootBodyIndex = -1;
   for (const bodyName of payload.bodyNames) {
     bodyNameList.push(bodyName);
@@ -1224,108 +794,6 @@ async function loadRobot() {
     mesh.rotationQuaternion = quatWxyz(geom.wxyz);
     mesh.isPickable = false;
     robotMeshes.push(mesh);
-  }
-}
-
-async function setupRobotCollider() {
-  // Find the root body node (pelvis/torso/body_1) and wrap it with a
-  // kinematic capsule so Havok-driven entities collide with the robot
-  // as it's driven through the world by odom.
-  if (!(await physicsReady)) return;
-  if (browserPhysicsEnabled) {
-    robotColliderMesh = BABYLON.MeshBuilder.CreateCapsule(
-      "robotCollider",
-      {
-        height: ROBOT_COLLIDER_HEIGHT,
-        radius: ROBOT_COLLIDER_RADIUS,
-        tessellation: 12,
-        subdivisions: 1,
-      },
-      scene,
-    );
-    robotColliderMesh.position = new BABYLON.Vector3(
-      browserPhysicsPose.x,
-      browserPhysicsPose.y,
-      browserPhysicsPose.z,
-    );
-    robotColliderMesh.rotationQuaternion = capsuleQuaternion(browserPhysicsPose.yaw);
-    robotColliderMesh.isVisible = false;
-    robotColliderMesh.isPickable = false;
-    try {
-      robotColliderAggregate = new BABYLON.PhysicsAggregate(
-        robotColliderMesh,
-        BABYLON.PhysicsShapeType.CAPSULE,
-        { mass: 0 },
-        scene,
-      );
-      if (
-        robotColliderAggregate.body
-        && "disablePreStep" in robotColliderAggregate.body
-      ) {
-        robotColliderAggregate.body.disablePreStep = false;
-      }
-      console.log("browser physics robot collider initialized");
-    } catch (error) {
-      console.warn("browser robot collider aggregate failed:", error);
-      robotColliderMesh.dispose();
-      robotColliderMesh = null;
-      robotColliderAggregate = null;
-    }
-    return;
-  }
-  let rootName = null;
-  for (const name of bodyNameList) {
-    if (robotRootBodyNames.has(name)) {
-      rootName = name;
-      break;
-    }
-  }
-  if (rootName === null) {
-    console.warn("robot collider: no root body found (looked for pelvis/torso/body_1)");
-    return;
-  }
-  const rootNode = bodyNodes.get(rootName);
-  if (!rootNode) return;
-
-  // CreateCapsule is Y-axis by default; rotate to align with our Z-up scene.
-  robotColliderMesh = BABYLON.MeshBuilder.CreateCapsule(
-    "robotCollider",
-    {
-      height: ROBOT_COLLIDER_HEIGHT,
-      radius: ROBOT_COLLIDER_RADIUS,
-      tessellation: 12,
-      subdivisions: 1,
-    },
-    scene,
-  );
-  robotColliderMesh.rotation = new BABYLON.Vector3(Math.PI / 2, 0, 0);
-  robotColliderMesh.position = new BABYLON.Vector3(0, 0, ROBOT_COLLIDER_Z_OFFSET);
-  robotColliderMesh.isVisible = false;
-  robotColliderMesh.isPickable = false;
-  robotColliderMesh.parent = rootNode;
-
-  try {
-    robotColliderAggregate = new BABYLON.PhysicsAggregate(
-      robotColliderMesh,
-      BABYLON.PhysicsShapeType.CAPSULE,
-      { mass: 0 },
-      scene,
-    );
-    // Kinematic bodies: prestep enabled so the parent-driven worldMatrix
-    // is read into the physics body each tick. Entities then collide
-    // against the capsule's current pose.
-    if (
-      robotColliderAggregate.body
-      && "disablePreStep" in robotColliderAggregate.body
-    ) {
-      robotColliderAggregate.body.disablePreStep = false;
-    }
-    console.log(`robot collider attached to body "${rootName}"`);
-  } catch (error) {
-    console.warn("robot collider aggregate failed:", error);
-    robotColliderMesh.dispose();
-    robotColliderMesh = null;
-    robotColliderAggregate = null;
   }
 }
 
@@ -1434,22 +902,6 @@ function copyMatrixPoseToNode(node, matrix) {
   matrix.decompose(robotPoseDecomposeScale, node.rotationQuaternion, node.position);
 }
 
-function browserPhysicsRootMatrixToRef(result) {
-  robotPosePositionScratch.copyFromFloats(
-    browserPhysicsPose.x,
-    browserPhysicsPose.y,
-    browserPhysicsPose.z,
-  );
-  const q = yawQuaternion(browserPhysicsPose.yaw);
-  robotPoseQuaternionScratch.copyFromFloats(q.x, q.y, q.z, q.w);
-  BABYLON.Matrix.ComposeToRef(
-    robotPoseComposeScale,
-    robotPoseQuaternionScratch,
-    robotPosePositionScratch,
-    result,
-  );
-}
-
 function updateLatestRootPosition(position) {
   if (!latestRootPosition) latestRootPosition = BABYLON.Vector3.Zero();
   latestRootPosition.copyFrom(position);
@@ -1477,21 +929,6 @@ function updatePath(path, pathVersion) {
 
 function applyRobotPose(payload) {
   const count = Math.min(payload.count, bodyNodeList.length);
-  const rebaseToBrowserPhysics =
-    browserPhysicsEnabled &&
-    robotRootBodyIndex >= 0 &&
-    robotRootBodyIndex < count;
-
-  if (rebaseToBrowserPhysics) {
-    const rootOffset = robotRootBodyIndex * 7;
-    packedPoseToMatrixToRef(payload.poses, rootOffset, robotPoseRootMatrixScratch);
-    robotPoseRootMatrixScratch.invertToRef(robotPoseRootInverseMatrixScratch);
-    browserPhysicsRootMatrixToRef(robotPoseBrowserRootMatrixScratch);
-    robotPoseRootInverseMatrixScratch.multiplyToRef(
-      robotPoseBrowserRootMatrixScratch,
-      robotPoseRebaseMatrixScratch,
-    );
-  }
 
   let updated = 0;
   let skipped = 0;
@@ -1500,16 +937,7 @@ function applyRobotPose(payload) {
     const bodyName = bodyNameList[bodyIndex];
     const offset = bodyIndex * 7;
 
-    if (rebaseToBrowserPhysics) {
-      packedPoseToMatrixToRef(payload.poses, offset, robotPoseMatrixScratch);
-      robotPoseMatrixScratch.multiplyToRef(
-        robotPoseRebaseMatrixScratch,
-        robotPoseRebasedMatrixScratch,
-      );
-      copyMatrixPoseToNode(node, robotPoseRebasedMatrixScratch);
-      rememberAppliedPose(bodyIndex, payload.poses, offset);
-      updated += 1;
-    } else if (poseChanged(payload.poses, offset, lastAppliedRobotPoses[bodyIndex])) {
+    if (poseChanged(payload.poses, offset, lastAppliedRobotPoses[bodyIndex])) {
       copyPackedPoseToNode(node, payload.poses, offset);
       rememberAppliedPose(bodyIndex, payload.poses, offset);
       updated += 1;
@@ -1527,11 +955,6 @@ function applyRobotPose(payload) {
   perfCounters.poseFrames += 1;
   perfCounters.poseBodiesUpdated += updated;
   perfCounters.poseBodiesSkipped += skipped;
-}
-
-function applyLatestRobotPose() {
-  if (!browserPhysicsEnabled || !latestRobotPosePayload) return;
-  applyRobotPose(latestRobotPosePayload);
 }
 
 function queueRobotPose(payload) {
@@ -1579,8 +1002,7 @@ function applyQueuedState() {
     frame = queuedStateFrames.shift();
   }
   if (!frame) return;
-  latestRobotPosePayload = frame.payload;
-  if (!browserPhysicsEnabled) applyRobotPose(frame.payload);
+  applyRobotPose(frame.payload);
 }
 
 function createLidarMaterial() {
@@ -1843,401 +1265,11 @@ function connectPointcloudWorker() {
   };
 }
 
-// ─── Entity world ───────────────────────────────────────────────────────
-//
-// Python sends spawn/despawn/set_pose/apply_velocity over WS (JSON,
-// dispatched in the worker handler below). State is broadcast back per
-// Havok physics tick, throttled to ~30 Hz.
-
-function physicsShapeFromHint(hint) {
-  switch (hint) {
-    case "box":
-      return BABYLON.PhysicsShapeType.BOX;
-    case "sphere":
-      return BABYLON.PhysicsShapeType.SPHERE;
-    case "cylinder":
-      return BABYLON.PhysicsShapeType.CYLINDER;
-    case "mesh":
-    default:
-      return BABYLON.PhysicsShapeType.MESH;
-  }
-}
-
-function physicsShapeForEntity(descriptor, mass) {
-  if (descriptor.shape_hint === "mesh" && descriptor.kind === "dynamic" && mass > 0) {
-    // Havok/Babylon can use triangle meshes reliably for static scene
-    // collision, but dynamic triangle-mesh rigid bodies are unstable for
-    // authored furniture. Keep the exact mesh for rendering + lidar; use a
-    // convex hull only for the live rigid-body solver.
-    return BABYLON.PhysicsShapeType.CONVEX_HULL ?? BABYLON.PhysicsShapeType.MESH;
-  }
-  return physicsShapeFromHint(descriptor.shape_hint);
-}
-
-function applyEntityColor(mesh, descriptor) {
-  const rgba = descriptor.rgba;
-  if (!Array.isArray(rgba) || rgba.length !== 4) return mesh;
-  const mat = new BABYLON.StandardMaterial(`entity:${descriptor.entity_id}:mat`, scene);
-  mat.diffuseColor = new BABYLON.Color3(rgba[0], rgba[1], rgba[2]);
-  mat.alpha = rgba[3];
-  mesh.material = mat;
-  return mesh;
-}
-
-function buildPrimitiveMesh(descriptor) {
-  const ext = descriptor.extents || [];
-  switch (descriptor.shape_hint) {
-    case "box": {
-      const w = ext[0] || 1.0;
-      const h = ext[1] || 1.0;
-      const d = ext[2] || 1.0;
-      return BABYLON.MeshBuilder.CreateBox(
-        `entity:${descriptor.entity_id}`,
-        { width: w, height: h, depth: d },
-        scene,
-      );
-    }
-    case "sphere": {
-      const r = ext[0] || 0.5;
-      return BABYLON.MeshBuilder.CreateSphere(
-        `entity:${descriptor.entity_id}`,
-        { diameter: 2 * r },
-        scene,
-      );
-    }
-    case "cylinder": {
-      const r = ext[0] || 0.5;
-      const h = ext[1] || 1.0;
-      return BABYLON.MeshBuilder.CreateCylinder(
-        `entity:${descriptor.entity_id}`,
-        { diameterTop: 2 * r, diameterBottom: 2 * r, height: h },
-        scene,
-      );
-    }
-    default:
-      return null;
-  }
-}
-
-async function buildMeshEntity(descriptor) {
-  if (!descriptor.mesh_ref) {
-    console.warn(`entity_spawn ${descriptor.entity_id}: mesh shape requires mesh_ref`);
-    return null;
-  }
-  let result;
-  try {
-    result = await BABYLON.SceneLoader.ImportMeshAsync(
-      null,
-      "/assets/",
-      descriptor.mesh_ref,
-      scene,
-    );
-  } catch (error) {
-    console.warn(`entity_spawn ${descriptor.entity_id}: failed to import mesh_ref`, error);
-    return null;
-  }
-
-  for (const light of result.lights || []) light.dispose();
-  for (const camera of result.cameras || []) camera.dispose();
-
-  const nodes = [...(result.meshes || []), ...(result.transformNodes || [])];
-  const meshes = (result.meshes || []).filter(
-    (mesh) => mesh.getTotalVertices && mesh.getTotalVertices() > 0,
-  );
-  if (meshes.length === 0) {
-    console.warn(`entity_spawn ${descriptor.entity_id}: mesh_ref has no renderable meshes`);
-    for (const node of nodes) node.dispose?.();
-    return null;
-  }
-
-  for (const node of nodes) {
-    node.computeWorldMatrix?.(true);
-    if ("isPickable" in node) {
-      node.isPickable = false;
-    }
-  }
-
-  const collider = BABYLON.Mesh.MergeMeshes(
-    meshes,
-    false,
-    true,
-    undefined,
-    false,
-    true,
-  );
-  if (!collider) {
-    console.warn(`entity_spawn ${descriptor.entity_id}: failed to merge mesh collider`);
-    for (const node of nodes) node.dispose?.();
-    return null;
-  }
-  collider.computeWorldMatrix(true);
-  collider.bakeCurrentTransformIntoVertices();
-  collider.name = `entity:${descriptor.entity_id}`;
-  collider.position.set(0, 0, 0);
-  collider.scaling.set(1, 1, 1);
-  collider.rotationQuaternion = BABYLON.Quaternion.Identity();
-  collider.isVisible = false;
-  collider.isPickable = false;
-  collider.metadata = { dimosEntityCollider: true, entityId: descriptor.entity_id };
-
-  for (const node of nodes) {
-    if (node === collider) continue;
-    if (!node.parent) {
-      node.parent = collider;
-    }
-  }
-  return { mesh: collider, visualNodes: nodes };
-}
-
-async function buildEntityMesh(descriptor) {
-  if (descriptor.shape_hint === "mesh") {
-    return buildMeshEntity(descriptor);
-  }
-  const mesh = buildPrimitiveMesh(descriptor);
-  if (!mesh) return null;
-  applyEntityColor(mesh, descriptor);
-  return { mesh, visualNodes: [] };
-}
-
-function applyPoseWire(mesh, pose) {
-  mesh.position.set(pose.x || 0, pose.y || 0, pose.z || 0);
-  if (!mesh.rotationQuaternion) {
-    mesh.rotationQuaternion = BABYLON.Quaternion.Identity();
-  }
-  mesh.rotationQuaternion.set(
-    pose.qx || 0,
-    pose.qy || 0,
-    pose.qz || 0,
-    pose.qw === undefined ? 1 : pose.qw,
-  );
-}
-
-async function attachEntityVisual(descriptor, colliderMesh) {
-  if (!descriptor.mesh_ref) return [];
-  try {
-    const result = await BABYLON.SceneLoader.ImportMeshAsync(
-      null,
-      "/assets/",
-      descriptor.mesh_ref,
-      scene,
-    );
-    const nodes = [...(result.meshes || []), ...(result.transformNodes || [])];
-    for (const node of nodes) {
-      if (node === colliderMesh) continue;
-      if (!node.parent) {
-        node.parent = colliderMesh;
-      }
-      if ("isPickable" in node) {
-        node.isPickable = false;
-      }
-    }
-    if (nodes.length > 0) {
-      colliderMesh.isVisible = false;
-    }
-    return nodes;
-  } catch (error) {
-    console.warn(`entity ${descriptor.entity_id}: failed to load mesh_ref`, error);
-    return [];
-  }
-}
-
-async function handleEntitySpawn(payload) {
-  const desc = payload.descriptor || {};
-  const id = desc.entity_id;
-  if (!id) return;
-  if (entities.has(id)) {
-    // Idempotent re-spawn (e.g. reconnect replay): just apply the pose.
-    handleEntitySetPose({ entity_id: id, pose: payload.pose || {} });
-    return;
-  }
-  if (!(await physicsReady)) {
-    console.warn(`entity_spawn ${id}: physics not ready, dropping`);
-    return;
-  }
-  const built = await buildEntityMesh(desc);
-  if (!built) {
-    console.warn(
-      `entity_spawn ${id}: cannot build shape_hint=${desc.shape_hint}`,
-    );
-    return;
-  }
-  const mesh = built.mesh;
-  applyPoseWire(mesh, payload.pose || {});
-  mesh.computeWorldMatrix(true);
-  mesh.refreshBoundingInfo(true);
-
-  // mass=0 → kinematic (program-driven via set_entity_pose). Matches the
-  // semantics in entity.py: dynamic with mass>0 actually gets simulated.
-  const wantsKinematic = desc.kind !== "dynamic" || (desc.mass || 0) === 0;
-  const mass = wantsKinematic ? 0 : desc.mass;
-  let aggregate;
-  try {
-    aggregate = new BABYLON.PhysicsAggregate(
-      mesh,
-      physicsShapeForEntity(desc, mass),
-      { mass },
-      scene,
-    );
-  } catch (error) {
-    console.warn(`entity_spawn ${id}: aggregate failed:`, error);
-    mesh.dispose();
-    return;
-  }
-  // Kinematic bodies: keep prestep enabled so set_entity_pose teleports
-  // are picked up before the next integration.
-  if (wantsKinematic && aggregate.body && "disablePreStep" in aggregate.body) {
-    aggregate.body.disablePreStep = false;
-  }
-  let visualNodes = built.visualNodes;
-  if (desc.shape_hint !== "mesh") {
-    visualNodes = await attachEntityVisual(desc, mesh);
-  }
-  const entry = {
-    mesh,
-    aggregate,
-    visualNodes,
-    descriptor: desc,
-    kinematic: wantsKinematic,
-  };
-  entities.set(id, entry);
-  setEntityVisualsVisible(entry, sceneVisible);
-  if (ui.setEntityStatus) ui.setEntityStatus(`${entities.size} active`);
-  broadcastEntityStates(true);
-}
-
-function handleEntityDespawn(payload) {
-  const entry = entities.get(payload.entity_id);
-  if (!entry) return;
-  try {
-    entry.aggregate.dispose();
-  } catch (_) {
-    // best-effort
-  }
-  try {
-    entry.mesh.dispose();
-  } catch (_) {
-    // best-effort
-  }
-  entities.delete(payload.entity_id);
-  if (ui.setEntityStatus) ui.setEntityStatus(`${entities.size} active`);
-  broadcastEntityStates(true);
-}
-
-// External-authority path: the MuJoCo sim publishes EntityStateBatch
-// (4-byte BE length + JSON) on the bus; the LCM bridge forwards it here.
-// Entities are kinematic mirrors, so applying the mesh pose is enough.
-function applyExternalEntityBatch(payload) {
-  let batch;
-  try {
-    const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-    const len = view.getUint32(0, false);
-    const body = new Uint8Array(payload.buffer, payload.byteOffset + 4, len);
-    batch = JSON.parse(new TextDecoder().decode(body));
-  } catch (err) {
-    console.warn("[entities] external batch parse failed", err);
-    return;
-  }
-  for (const state of batch.entities || []) {
-    const entry = entities.get(state.id);
-    if (!entry) continue;
-    applyPoseWire(entry.mesh, state.pose || {});
-  }
-}
-
-function handleEntitySetPose(payload) {
-  const entry = entities.get(payload.entity_id);
-  if (!entry) return;
-  applyPoseWire(entry.mesh, payload.pose || {});
-  // For dynamic bodies, zero velocities so the teleport doesn't carry
-  // stale momentum into the next step.
-  if (!entry.kinematic && entry.aggregate.body) {
-    try {
-      entry.aggregate.body.setLinearVelocity(BABYLON.Vector3.Zero());
-      entry.aggregate.body.setAngularVelocity(BABYLON.Vector3.Zero());
-    } catch (_) {
-      // ignore
-    }
-  }
-}
-
-function handleEntityApplyVelocity(payload) {
-  const entry = entities.get(payload.entity_id);
-  if (!entry || entry.kinematic) return;
-  const t = payload.twist || {};
-  try {
-    entry.aggregate.body.setLinearVelocity(
-      new BABYLON.Vector3(t.lx || 0, t.ly || 0, t.lz || 0),
-    );
-    entry.aggregate.body.setAngularVelocity(
-      new BABYLON.Vector3(t.ax || 0, t.ay || 0, t.az || 0),
-    );
-  } catch (error) {
-    console.warn(`apply_velocity ${payload.entity_id} failed:`, error);
-  }
-}
-
-function roundedStateValue(value, scale) {
-  return Math.round(finiteNumber(value, 0) * scale);
-}
-
-function entityStateSignature(states) {
-  return JSON.stringify(states.map((state) => [
-    state.entity_id,
-    roundedStateValue(state.pose.x, 100),
-    roundedStateValue(state.pose.y, 100),
-    roundedStateValue(state.pose.z, 100),
-    roundedStateValue(state.pose.qw, 1000),
-    roundedStateValue(state.pose.qx, 1000),
-    roundedStateValue(state.pose.qy, 1000),
-    roundedStateValue(state.pose.qz, 1000),
-  ]));
-}
-
-function broadcastEntityStates(force = false) {
-  // External authority (MuJoCo) owns entity state — never echo our
-  // kinematic mirror poses back as if they were simulation output.
-  if (entityAuthorityExternal) return;
-  if (entities.size === 0 && !force) return;
-  const now = performance.now();
-  if (!force && now - lastEntityBroadcast < entityBroadcastIntervalMs) return;
-  const ts = Date.now() / 1000.0;
-  const states = [];
-  for (const [id, entry] of entities) {
-    const p = entry.mesh.position;
-    const q = entry.mesh.rotationQuaternion || BABYLON.Quaternion.Identity();
-    states.push({
-      entity_id: id,
-      frame_id: "world",
-      ts,
-      pose: { x: p.x, y: p.y, z: p.z, qw: q.w, qx: q.x, qy: q.y, qz: q.z },
-    });
-  }
-  const signature = entityStateSignature(states);
-  if (
-    !force
-    && signature === lastEntityBroadcastSignature
-    && now - lastEntityBroadcastKeepalive < entityBroadcastKeepaliveMs
-  ) {
-    lastEntityBroadcast = now;
-    return;
-  }
-  lastEntityBroadcast = now;
-  lastEntityBroadcastSignature = signature;
-  lastEntityBroadcastKeepalive = now;
-  sendSocketPayload({ type: "entity_states", states });
-}
-
-physicsReady.then((ok) => {
-  if (ok) scene.onAfterPhysicsObservable.add(() => broadcastEntityStates(false));
-});
-
-// `window.__viewerReady` becomes true once physics has loaded, the WS to
-// the Python module is up, and (if requested) the scene assets have
-// settled. Headless test harnesses (Playwright) poll this to know when
-// it's safe to send respawn/cmd_vel/spawn_entity messages.
+// `window.__viewerReady` becomes true once the WS to the Python module is
+// up and (if requested) the scene assets have settled. Headless test
+// harnesses (Playwright) poll this before sending cmd_vel etc.
 let __viewerSceneReady = false;
 async function evaluateViewerReady() {
-  if (!(await physicsReady)) return;
   if (!streamRef.ready) return;
   if (!__viewerSceneReady) return;
   window.__viewerReady = true;
@@ -2325,21 +1357,6 @@ function subscribeLcmTopics() {
     _updateSlidersFromState(joints);
   });
 
-  // The sim base is a pure /cmd_vel consumer, exactly like hardware: every
-  // velocity source — browser WASD, nav planner, rerun teleop, sim.cmd_vel() —
-  // drives it by publishing /cmd_vel, and the latest writer wins. WASD also
-  // integrates locally (sendDriveCommand) for zero-latency feel; since
-  // setBrowserPhysicsCommand just *sets* the current command (it does not
-  // accumulate), WASD's own /cmd_vel echo re-sets the identical value, so
-  // there is no double-integration.
-  lcm.subscribe("/cmd_vel", M.geometry_msgs.Twist, (msg) => {
-    if (!browserPhysicsEnabled) return;
-    setBrowserPhysicsCommand({
-      linear: [msg.linear.x, msg.linear.y, msg.linear.z],
-      angular: [msg.angular.x, msg.angular.y, msg.angular.z],
-    });
-  });
-
   lcm.subscribe("/camera_image", M.sensor_msgs.Image, (msg) => {
     dispatchLcmCameraFrame("camera", msg);
   });
@@ -2359,28 +1376,11 @@ function connectStreamWorker() {
       case "status":
         streamRef.ready = Boolean(message.ready);
         setStatus(message.status);
-        if (streamRef.ready && browserPhysicsEnabled) publishBrowserSimOdom(true);
         if (streamRef.ready) evaluateViewerReady();
         break;
       case "state":
-        // Only JSON-only multi-tab entity replay + sim respawn ride here now.
-        // Joint state, nav path, pointcloud, and planner cmd_vel all arrive
-        // via /lcm-ws and are dispatched in subscribeLcmTopics() below.
-        if (message.payload.type === "entity_spawn") {
-          handleEntitySpawn(message.payload);
-        }
-        if (message.payload.type === "entity_despawn") {
-          handleEntityDespawn(message.payload);
-        }
-        if (message.payload.type === "entity_set_pose") {
-          handleEntitySetPose(message.payload);
-        }
-        if (message.payload.type === "entity_apply_velocity") {
-          handleEntityApplyVelocity(message.payload);
-        }
-        if (message.payload.type === "sim_respawn") {
-          setBrowserPhysicsPose(message.payload.pose || {}, true);
-        }
+        // Authority-mode control frames (entity spawn/despawn, sim respawn)
+        // are ignored in the viewer-only build — see the ENTITY MIRROR stub.
         break;
       case "robot_pose":
         queueRobotPose({
@@ -2551,7 +1551,7 @@ function publishLcmPointStamped(topic, point) {
     const nanosec = Math.floor((ts - sec) * 1e9);
     const stamped = new M.geometry_msgs.PointStamped({
       header: new M.std_msgs.Header({
-        // "world" to match /odom + the nav stack (see publishBrowserSimOdom);
+        // "world" to match /odom + the nav stack;
         // click goals (/point_goal, /clicked_point, /grasp_goal) ride this frame.
         stamp: new M.builtin_interfaces.Time({ sec, nanosec }),
         frame_id: "world",
@@ -2567,9 +1567,6 @@ function publishLcmPointStamped(topic, point) {
 document.getElementById("toggleScene").onclick = () => {
   const visible = document.getElementById("toggleScene").dataset.active !== "true";
   setSceneVisibility(visible);
-};
-document.getElementById("toggleCollision").onclick = () => {
-  setCollisionVisibility(!collisionVisible);
 };
 document.getElementById("toggleRobot").onclick = () => {
   const visible = document.getElementById("toggleRobot").dataset.active !== "true";
@@ -2604,27 +1601,11 @@ document.getElementById("loadScene").onclick = () => {
   (async () => {
     try {
       await loadSceneAsset(sceneConfig);
-      await loadCollisionAsset(sceneConfig);
     } catch (error) {
       console.error(error);
       setStatus("scene load failed");
     }
   })();
-};
-
-document.getElementById("entityAdd").onclick = () => {
-  // Drop the box 2 m above the camera target so Havok gravity catches it
-  // on the way down — proves both the scene collision aggregate and the
-  // entity body are wired correctly.
-  const t = camera.getTarget();
-  sendSocketPayload({
-    type: "entity_test_add",
-    point: [t.x, t.y, t.z + 2.0],
-  });
-};
-
-document.getElementById("entityClear").onclick = () => {
-  sendSocketPayload({ type: "entity_clear" });
 };
 
 // --- Policy arm / dry-run toggles ---
@@ -2777,11 +1758,9 @@ function _updateSlidersFromState(joints) {
   try {
     const config = await loadConfig();
     sceneConfig = config;
-    configureBrowserPhysics(config);
+    configureEntityMirror(config);
     connectPointcloudWorker();
     await loadRobot();
-    setupRobotCollider();   // fire-and-forget; awaits physicsReady internally
-    await ensureSupportFloor(config);
     connectStreamWorker();
     whenLcmReady(subscribeLcmTopics);
     installClickPublisher();
@@ -2790,7 +1769,6 @@ function _updateSlidersFromState(joints) {
       window.setTimeout(async () => {
         try {
           await loadSceneAsset(config);
-          await loadCollisionAsset(config);
           markViewerSceneReady();
         } catch (error) {
           console.error(error);
@@ -2798,7 +1776,7 @@ function _updateSlidersFromState(joints) {
         }
       }, 0);
     } else {
-      // No scene to load (manual / empty) — ready as soon as WS + physics are up.
+      // No scene to load (manual / empty) — ready as soon as the WS is up.
       markViewerSceneReady();
     }
   } catch (error) {
@@ -2838,9 +1816,7 @@ window.addEventListener("blur", () => {
 });
 
 function renderFrame() {
-  stepBrowserPhysics();
   applyQueuedState();
-  applyLatestRobotPose();
   applyQueuedPointcloud();
   updateKeyboardCamera();
   sendDriveCommand(false);
