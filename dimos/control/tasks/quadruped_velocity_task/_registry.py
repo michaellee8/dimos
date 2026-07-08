@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ADAPTER_FACTORIES = {
-    "sim_mujoco_g1": "dimos.simulation.adapters.whole_body.g1:SimMujocoG1WholeBodyAdapter",
-    "sim_mujoco_quadruped": (
-        "dimos.simulation.adapters.whole_body.quadruped:SimMujocoQuadrupedAdapter"
+TASK_FACTORIES = {
+    "quadruped_velocity": (
+        "dimos.control.tasks.quadruped_velocity_task.quadruped_velocity_task:create_task"
     ),
 }

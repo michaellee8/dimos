@@ -109,11 +109,23 @@ _with_vis = autoconnect(
     ),
 )
 
+if global_config.simulation == "mujoco":
+    # Modern MuJoCo backend: MujocoSimModule + ControlCoordinator running
+    # an RL locomotion policy (go1 body standing in for the go2, like the
+    # legacy sim's go2->go1 remap). Provides the same ports GO2Connection
+    # does: pointcloud/odom/color_image out, cmd_vel in.
+    from dimos.robot.unitree.go2.blueprints.basic.go2_mujoco_backend import (
+        go2_mujoco_backend,
+    )
+
+    _backend = go2_mujoco_backend()
+else:
+    _backend = GO2Connection.blueprint()
 
 unitree_go2_basic = (
     autoconnect(
         _with_vis,
-        GO2Connection.blueprint(),
+        _backend,
     ).global_config(n_workers=4, robot_model="unitree_go2")
     # we temporarily disabled sensor timestamps
     # and are derriving all timestmaps upon reception

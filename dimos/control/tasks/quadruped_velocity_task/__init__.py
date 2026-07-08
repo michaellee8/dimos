@@ -11,10 +11,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-ADAPTER_FACTORIES = {
-    "sim_mujoco_g1": "dimos.simulation.adapters.whole_body.g1:SimMujocoG1WholeBodyAdapter",
-    "sim_mujoco_quadruped": (
-        "dimos.simulation.adapters.whole_body.quadruped:SimMujocoQuadrupedAdapter"
-    ),
-}

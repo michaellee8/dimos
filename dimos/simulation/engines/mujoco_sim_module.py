@@ -206,6 +206,76 @@ class _WholeBodySimHooks:
         return chi - t * (chi - clo)
 
 
+class _HeightScanner:
+    """Yaw-aligned downward ray grid around the robot root body.
+
+    Replicates the mjlab/IsaacLab ``GridPattern`` + ``height_scan``
+    observation semantics so policies trained against a terrain scan can
+    run in this sim: rays start at the root body's world position (grid
+    offsets rotated by base yaw only), point straight down, and each value
+    is ``root_z - hit_z`` (equal to the ray distance). Misses report
+    ``max_distance``.
+    """
+
+    def __init__(
+        self,
+        *,
+        size: tuple[float, float],
+        resolution: float,
+        max_distance: float,
+        geom_groups: list[int],
+        root_body_id: int,
+    ) -> None:
+        # arange with a half-resolution epsilon makes the endpoint
+        # inclusive (17 x 11 = 187 rays for the default 1.6 x 1.0 grid).
+        x = np.arange(-size[0] / 2.0, size[0] / 2.0 + resolution * 0.5, resolution)
+        y = np.arange(-size[1] / 2.0, size[1] / 2.0 + resolution * 0.5, resolution)
+        grid_x, grid_y = np.meshgrid(x, y, indexing="xy")  # x is the fastest-varying axis
+        self._offsets_x: NDArray[np.float64] = grid_x.ravel()
+        self._offsets_y: NDArray[np.float64] = grid_y.ravel()
+        self.n_rays = int(self._offsets_x.shape[0])
+        self._max_distance = float(max_distance)
+        self._root_body_id = root_body_id
+        self._geomgroup = np.zeros(6, dtype=np.uint8)
+        for group in geom_groups:
+            if 0 <= group < 6:
+                self._geomgroup[group] = 1
+        self._down = np.array([0.0, 0.0, -1.0], dtype=np.float64)
+        self._heights = np.full(self.n_rays, self._max_distance, dtype=np.float64)
+
+    def scan(self, model: mujoco.MjModel, data: mujoco.MjData) -> NDArray[np.float64]:
+        """Cast the grid. Must be called from the sim thread."""
+        root_pos = data.xpos[self._root_body_id]
+        quat = data.xquat[self._root_body_id]  # (w, x, y, z)
+        w, qx, qy, qz = float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])
+        yaw = math.atan2(2.0 * (w * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+        cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
+
+        origin = np.empty(3, dtype=np.float64)
+        origin[2] = float(root_pos[2])
+        geomid = np.zeros(1, dtype=np.int32)
+        heights = self._heights
+        for i in range(self.n_rays):
+            ox, oy = self._offsets_x[i], self._offsets_y[i]
+            origin[0] = float(root_pos[0]) + cos_yaw * ox - sin_yaw * oy
+            origin[1] = float(root_pos[1]) + sin_yaw * ox + cos_yaw * oy
+            dist = mujoco.mj_ray(
+                model,
+                data,
+                origin,
+                self._down,
+                self._geomgroup,
+                1,  # include static geoms
+                self._root_body_id,
+                geomid,
+            )
+            if dist < 0.0 or dist > self._max_distance:
+                heights[i] = self._max_distance
+            else:
+                heights[i] = dist
+        return heights
+
+
 class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     """Configuration for the unified MuJoCo simulation module.
 
@@ -253,6 +323,18 @@ class MujocoSimModuleConfig(ModuleConfig, DepthCameraConfig):
     mujoco_lidar_max_range: float = MAX_RANGE
     mujoco_lidar_max_height: float = MAX_HEIGHT
     mujoco_lidar_robot_exclusion_radius: float = 0.0
+    # Optional terrain height scan for RL locomotion policies: a yaw-aligned
+    # grid of downward rays around the robot root, written to SHM for the
+    # whole-body adapter (mirrors mjlab's terrain_scan sensor). Requires
+    # robot_sim_spec (the root body anchors the grid).
+    enable_height_scan: bool = False
+    height_scan_size: tuple[float, float] = (1.6, 1.0)
+    height_scan_resolution: float = 0.1
+    height_scan_max_distance: float = 5.0
+    height_scan_geom_groups: list[int] = Field(default_factory=lambda: [2, 3])
+    # Sim steps between scans. 4 matches a 50 Hz policy at the 200 Hz
+    # physics rate; scanning every step wastes sim-thread time.
+    height_scan_every_n_steps: int = 4
     # Inject menagerie/dimos-bundled mesh bytes (via
     # dimos.simulation.mujoco.model.get_assets) into MjModel.from_xml_string.
     # MJCFs that reference meshes by bare filename (G1 GR00T, Go2) need this;
@@ -325,6 +407,9 @@ class MujocoSimModule(
         self._imu_quat_slice: slice | None = None
         self._imu_gyro_slice: slice | None = None
         self._imu_accel_slice: slice | None = None
+        self._imu_linvel_slice: slice | None = None
+        self._height_scanner: _HeightScanner | None = None
+        self._height_scan_step = 0
         # Quaternion is read from the floating-base qpos when the model
         # has a free joint at the robot root; None otherwise.
         self._imu_base_qpos_slice: slice | None = None
@@ -491,6 +576,7 @@ class MujocoSimModule(
             self._imu_quat_slice = binding.imu_quat_slice
             self._imu_gyro_slice = binding.imu_gyro_slice
             self._imu_accel_slice = binding.imu_accel_slice
+            self._imu_linvel_slice = binding.imu_linvel_slice
             self._root_base_qpos_adr = binding.root_qpos_adr
         else:
             self._imu_quat_slice = None
@@ -500,7 +586,28 @@ class MujocoSimModule(
             self._imu_accel_slice = _find_sensor_slice(
                 self._engine.model, *self.config.imu_accel_sensor_names, dim=3
             )
+            self._imu_linvel_slice = None
             self._root_base_qpos_adr = self._engine.root_qpos_adr
+
+        if self.config.enable_height_scan:
+            if binding is None or binding.root_body_id is None:
+                raise RuntimeError(
+                    "MujocoSimModule: enable_height_scan requires a robot_sim_spec "
+                    "with a resolved root body to anchor the scan grid"
+                )
+            self._height_scanner = _HeightScanner(
+                size=self.config.height_scan_size,
+                resolution=self.config.height_scan_resolution,
+                max_distance=self.config.height_scan_max_distance,
+                geom_groups=self.config.height_scan_geom_groups,
+                root_body_id=binding.root_body_id,
+            )
+            logger.info(
+                "MujocoSimModule: height scan enabled",
+                n_rays=self._height_scanner.n_rays,
+                size=self.config.height_scan_size,
+                resolution=self.config.height_scan_resolution,
+            )
 
         if self._root_base_qpos_adr is not None:
             self._imu_base_qpos_slice = slice(
@@ -586,9 +693,14 @@ class MujocoSimModule(
             if self.config.robot_meshdir is not None:
                 spec_robot.meshdir = str(self.config.robot_meshdir)
 
-            # Keep the robot controller timing stable when attached to a scene
-            # package whose wrapper may have different default options.
+            # Keep the robot controller dynamics stable when attached to a
+            # scene package whose wrapper may have different default options:
+            # RL policies are sensitive to timestep, integrator, and contact
+            # model, so the robot MJCF's choices win.
             spec_scene.option.timestep = spec_robot.option.timestep
+            spec_scene.option.integrator = spec_robot.option.integrator
+            spec_scene.option.cone = spec_robot.option.cone
+            spec_scene.option.impratio = spec_robot.option.impratio
 
             spawn_xy = self.config.spawn_xy or (0.0, 0.0)
             spawn_z = self.config.spawn_z if self.config.spawn_z is not None else 0.0
@@ -736,6 +848,12 @@ class MujocoSimModule(
         if shm is None:
             return
 
+        if self._height_scanner is not None:
+            self._height_scan_step += 1
+            if self._height_scan_step >= self.config.height_scan_every_n_steps:
+                self._height_scan_step = 0
+                shm.write_height_scan(self._height_scanner.scan(engine.model, engine.data))
+
         # Odom - when the MJCF has a free-joint root, publish base pose
         # every step.  Without this, downstream consumers (viser viewer,
         # nav stack) only see joint articulation, not base translation
@@ -790,7 +908,12 @@ class MujocoSimModule(
             accel = (float(a[0]), float(a[1]), float(a[2]))
         else:
             accel = (0.0, 0.0, 0.0)
-        shm.write_imu(quaternion=quat, gyroscope=gyro, accelerometer=accel)
+        if self._imu_linvel_slice is not None:
+            v = data.sensordata[self._imu_linvel_slice]
+            linvel = (float(v[0]), float(v[1]), float(v[2]))
+        else:
+            linvel = (0.0, 0.0, 0.0)
+        shm.write_imu(quaternion=quat, gyroscope=gyro, accelerometer=accel, linear_velocity=linvel)
         # Also publish on the stream port for downstream consumers.
         # MuJoCo reports quaternions as (w,x,y,z); Imu/Quaternion stores (x,y,z,w).
         self.imu.publish(

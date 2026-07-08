@@ -47,8 +47,15 @@ MAX_JOINTS = 32
 _FLOAT_BYTES = 8  # float64
 _INT32_BYTES = 4
 
-# IMU layout: quat (4) + gyro (3) + accel (3) = 10 floats.
-_IMU_FLOATS = 10
+# IMU layout: quat (4) + gyro (3) + accel (3) + linvel (3) = 13 floats.
+# linvel is the body-frame base linear velocity (sim ground truth via a
+# velocimeter sensor); RL locomotion policies trained with a base_lin_vel
+# observation need it, real hardware estimates it.
+_IMU_FLOATS = 13
+
+# Height-scan layout: fixed-size float64 grid, actual ray count is set by
+# whichever scan pattern the module and adapter agree on (<= this max).
+HEIGHT_SCAN_MAX = 512
 
 _joint_array_size = MAX_JOINTS * _FLOAT_BYTES  # float64 array
 
@@ -67,10 +74,11 @@ _shm_sizes = {
     "vel_t": _joint_array_size,
     "grp": 2 * _FLOAT_BYTES,  # [gripper_position, gripper_target]
     # Whole-body additions (unused by manipulator path).
-    "imu": _IMU_FLOATS * _FLOAT_BYTES,  # [w,x,y,z, gx,gy,gz, ax,ay,az]
+    "imu": _IMU_FLOATS * _FLOAT_BYTES,  # [w,x,y,z, gx,gy,gz, ax,ay,az, vx,vy,vz]
     "kp_t": _joint_array_size,  # per-joint position-gain target
     "kd_t": _joint_array_size,  # per-joint velocity-gain target
     "tau_t": _joint_array_size,  # per-joint feedforward torque
+    "hsc": HEIGHT_SCAN_MAX * _FLOAT_BYTES,  # terrain height-scan grid
     # Bookkeeping
     "seq": _NUM_SEQ_COUNTERS * _FLOAT_BYTES,  # int64 counters
     "ctl": _NUM_CTRL_FIELDS * _INT32_BYTES,  # [ready, stop, command_mode, num_joints]
@@ -89,6 +97,7 @@ SEQ_IMU = 7
 SEQ_KP_CMD = 8
 SEQ_KD_CMD = 9
 SEQ_TAU_CMD = 10
+SEQ_HEIGHT_SCAN = 11
 
 # Control indices.
 CTRL_READY = 0
@@ -153,6 +162,7 @@ class ManipShmSet:
     kp_t: SharedMemory
     kd_t: SharedMemory
     tau_t: SharedMemory
+    hsc: SharedMemory
     # Bookkeeping
     seq: SharedMemory
     ctl: SharedMemory
@@ -268,13 +278,22 @@ class ManipShmWriter:
         quaternion: tuple[float, float, float, float],
         gyroscope: tuple[float, float, float],
         accelerometer: tuple[float, float, float],
+        linear_velocity: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ) -> None:
         """Write IMU sample.  Quaternion is (w, x, y, z)."""
         arr = self._array(self.shm.imu, _IMU_FLOATS, np.float64)
         arr[0:4] = quaternion
         arr[4:7] = gyroscope
         arr[7:10] = accelerometer
+        arr[10:13] = linear_velocity
         self._increment_seq(SEQ_IMU)
+
+    def write_height_scan(self, heights: NDArray[np.float64]) -> None:
+        """Write the terrain height-scan grid (module-side)."""
+        n = min(heights.shape[0], HEIGHT_SCAN_MAX)
+        arr = self._array(self.shm.hsc, HEIGHT_SCAN_MAX, np.float64)
+        arr[:n] = heights[:n]
+        self._increment_seq(SEQ_HEIGHT_SCAN)
 
     def read_kp_command(self, num_joints: int) -> NDArray[np.float64] | None:
         """Per-joint position-gain target if a new command landed since last call."""
@@ -406,6 +425,16 @@ class ManipShmReader:
             (float(arr[4]), float(arr[5]), float(arr[6])),
             (float(arr[7]), float(arr[8]), float(arr[9])),
         )
+
+    def read_base_lin_vel(self) -> tuple[float, float, float]:
+        """Body-frame base linear velocity (sim ground truth)."""
+        arr = np.ndarray((_IMU_FLOATS,), dtype=np.float64, buffer=self.shm.imu.buf)
+        return (float(arr[10]), float(arr[11]), float(arr[12]))
+
+    def read_height_scan(self, n: int) -> list[float]:
+        """First ``n`` terrain height-scan values (adapter-side)."""
+        arr = np.ndarray((HEIGHT_SCAN_MAX,), dtype=np.float64, buffer=self.shm.hsc.buf)
+        return [float(x) for x in arr[: min(n, HEIGHT_SCAN_MAX)]]
 
     def write_kp_command(self, kp: list[float]) -> None:
         """Per-joint position-gain target.  Switches command mode to PD+tau."""

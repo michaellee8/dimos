@@ -1,0 +1,19 @@
+<mujoco model="go1_flat_scene">
+  <!-- Minimal flat-ground scene for robot-only composition runs
+       (no scene package). The floor uses geom group 2 so the raycast
+       lidar and terrain height scan (which include groups 2/3) see it,
+       matching the cooked scene-package convention. -->
+  <visual>
+    <headlight ambient="0.3 0.3 0.3" diffuse="0.6 0.6 0.6"/>
+    <map znear="0.01" zfar="10000"/>
+  </visual>
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" width="256" height="256"
+             rgb1="0.2 0.3 0.4" rgb2="0.3 0.4 0.5"/>
+    <material name="grid" texture="grid" texrepeat="8 8" reflectance="0.1"/>
+  </asset>
+  <worldbody>
+    <light directional="true" pos="0 0 10" dir="0 0 -1"/>
+    <geom name="floor" type="plane" size="50 50 0.05" group="2" material="grid"/>
+  </worldbody>
+</mujoco>
