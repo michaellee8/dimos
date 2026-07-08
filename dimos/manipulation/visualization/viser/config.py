@@ -50,6 +50,12 @@ class ViserVisualizationConfig(BaseModel):
         default=5.0,
         validation_alias=AliasChoices("preview_request_timeout", "viser_preview_request_timeout"),
     )
+    target_evaluation_timeout: float = Field(
+        default=5.0,
+        validation_alias=AliasChoices(
+            "target_evaluation_timeout", "viser_target_evaluation_timeout"
+        ),
+    )
     allow_plan_execute: bool = Field(
         default=False,
         validation_alias=AliasChoices("allow_plan_execute", "viser_allow_plan_execute"),

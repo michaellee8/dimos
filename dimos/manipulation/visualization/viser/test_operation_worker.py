@@ -23,6 +23,7 @@ import pytest
 pytest.importorskip("viser", reason="Viser optional dependency is not installed")
 
 from dimos.manipulation.planning.groups.models import PlanningGroup
+from dimos.manipulation.visualization.types import TargetEvaluation, TargetSetEvaluation
 from dimos.manipulation.visualization.viser.config import ViserVisualizationConfig
 from dimos.manipulation.visualization.viser.gui import ViserPanelGui
 from dimos.manipulation.visualization.viser.state import (
@@ -31,6 +32,7 @@ from dimos.manipulation.visualization.viser.state import (
     OperationWorker,
     PanelRuntime,
     PlanStatus,
+    TargetEvaluationRequest,
     TargetEvaluationWorker,
     TargetStatus,
 )
@@ -175,6 +177,211 @@ def test_operation_worker_uses_per_operation_timeout() -> None:
     assert worker._operation_timeout(request) == 0.25
 
 
+def test_target_evaluation_worker_generates_timeout_result() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    applied: list[tuple[TargetEvaluationRequest, TargetEvaluation | TargetSetEvaluation]] = []
+
+    def handler(request: TargetEvaluationRequest) -> TargetSetEvaluation:
+        del request
+        started.set()
+        release.wait(timeout=1.0)
+        finished.set()
+        return {"success": True, "collision_free": True, "status": "VALID"}
+
+    def apply(
+        request: TargetEvaluationRequest, result: TargetEvaluation | TargetSetEvaluation
+    ) -> None:
+        applied.append((request, result))
+
+    worker = TargetEvaluationWorker(handler, apply, timeout_seconds=0.001)
+    request = TargetEvaluationRequest(sequence_id=1, source="joints", group_ids=("arm",))
+
+    worker._run_evaluation(request)
+    release.set()
+
+    assert started.is_set()
+    assert finished.wait(timeout=1.0)
+    assert applied == [
+        (
+            request,
+            {
+                "success": False,
+                "collision_free": False,
+                "status": "TIMEOUT",
+                "message": "Target evaluation timed out after 0.0s",
+            },
+        )
+    ]
+
+
+def test_target_evaluation_worker_runs_newer_request_after_timeout() -> None:
+    release = threading.Event()
+    applied: list[tuple[int, TargetEvaluation | TargetSetEvaluation]] = []
+
+    def handler(request: TargetEvaluationRequest) -> TargetSetEvaluation:
+        if request.sequence_id == 1:
+            release.wait(timeout=1.0)
+            return {"success": False, "collision_free": False, "status": "LATE"}
+        return {"success": True, "collision_free": True, "status": "VALID"}
+
+    def apply(
+        request: TargetEvaluationRequest, result: TargetEvaluation | TargetSetEvaluation
+    ) -> None:
+        applied.append((request.sequence_id, result))
+
+    worker = TargetEvaluationWorker(handler, apply, timeout_seconds=0.001)
+
+    worker._run_evaluation(
+        TargetEvaluationRequest(sequence_id=1, source="joints", group_ids=("arm",))
+    )
+    worker._run_evaluation(
+        TargetEvaluationRequest(sequence_id=2, source="joints", group_ids=("arm",))
+    )
+    release.set()
+
+    assert applied[0][0] == 1
+    assert applied[0][1].get("status") == "TIMEOUT"
+    assert applied[1] == (2, {"success": True, "collision_free": True, "status": "VALID"})
+
+
+def test_target_evaluation_worker_queue_recovers_after_timeout() -> None:
+    first_started = threading.Event()
+    release_first = threading.Event()
+    first_finished = threading.Event()
+    first_timed_out = threading.Event()
+    second_applied = threading.Event()
+    applied: list[tuple[int, str]] = []
+
+    def handler(request: TargetEvaluationRequest) -> TargetSetEvaluation:
+        if request.sequence_id == 1:
+            first_started.set()
+            release_first.wait(timeout=1.0)
+            first_finished.set()
+            return {"success": False, "collision_free": False, "status": "LATE"}
+        return {"success": True, "collision_free": True, "status": "VALID"}
+
+    def apply(
+        request: TargetEvaluationRequest, result: TargetEvaluation | TargetSetEvaluation
+    ) -> None:
+        applied.append((request.sequence_id, str(result.get("status", ""))))
+        if request.sequence_id == 1 and result.get("status") == "TIMEOUT":
+            first_timed_out.set()
+        if request.sequence_id == 2:
+            second_applied.set()
+
+    worker = TargetEvaluationWorker(handler, apply, timeout_seconds=0.001)
+    worker.start()
+    try:
+        worker.submit(TargetEvaluationRequest(sequence_id=1, source="joints", group_ids=("arm",)))
+        assert first_started.wait(timeout=1.0)
+        assert first_timed_out.wait(timeout=1.0)
+
+        worker.submit(TargetEvaluationRequest(sequence_id=2, source="joints", group_ids=("arm",)))
+
+        assert second_applied.wait(timeout=1.0)
+    finally:
+        release_first.set()
+        assert first_finished.wait(timeout=1.0)
+        worker.stop(timeout=1.0)
+
+    assert applied == [(1, "TIMEOUT"), (2, "VALID")]
+
+
+def test_target_evaluation_timeout_config_alias() -> None:
+    assert ViserVisualizationConfig().target_evaluation_timeout == 5.0
+    assert (
+        ViserVisualizationConfig(viser_target_evaluation_timeout=0.25).target_evaluation_timeout
+        == 0.25
+    )
+
+
+def test_gui_timeout_result_marks_target_infeasible() -> None:
+    gui = ViserPanelGui(
+        EmptyServer(),
+        EmptyWorldMonitor(),
+        FakeOperationAdapter(),
+        ViserVisualizationConfig(),
+    )
+    gui._operation_worker.stop()
+    gui._worker.stop()
+    request = TargetEvaluationRequest(
+        sequence_id=gui.state.next_sequence_id(), source="joints", group_ids=("arm",)
+    )
+    gui.state.target_status = TargetStatus.CHECKING
+
+    gui._apply_target_evaluation_result(
+        request,
+        {
+            "success": False,
+            "collision_free": False,
+            "status": "TIMEOUT",
+            "message": "Target evaluation timed out after 0.1s",
+        },
+    )
+
+    assert gui.state.target_status == TargetStatus.INFEASIBLE
+    assert gui.state.error == "Target evaluation timed out after 0.1s"
+
+
+def test_gui_normal_ik_failure_result_marks_target_infeasible() -> None:
+    gui = ViserPanelGui(
+        EmptyServer(),
+        EmptyWorldMonitor(),
+        FakeOperationAdapter(),
+        ViserVisualizationConfig(),
+    )
+    gui._operation_worker.stop()
+    gui._worker.stop()
+    request = TargetEvaluationRequest(
+        sequence_id=gui.state.next_sequence_id(), source="joints", group_ids=("arm",)
+    )
+    gui.state.target_status = TargetStatus.CHECKING
+
+    gui._apply_target_evaluation_result(
+        request,
+        {
+            "success": False,
+            "collision_free": False,
+            "status": "IK_FAILED",
+            "message": "No IK solution",
+        },
+    )
+
+    assert gui.state.target_status == TargetStatus.INFEASIBLE
+    assert gui.state.error == "No IK solution"
+
+
+def test_gui_ignores_late_stale_target_result() -> None:
+    gui = ViserPanelGui(
+        EmptyServer(),
+        EmptyWorldMonitor(),
+        FakeOperationAdapter(),
+        ViserVisualizationConfig(),
+    )
+    gui._operation_worker.stop()
+    gui._worker.stop()
+    stale_request = TargetEvaluationRequest(
+        sequence_id=gui.state.next_sequence_id(), source="joints", group_ids=("arm",)
+    )
+    newer_request = TargetEvaluationRequest(
+        sequence_id=gui.state.next_sequence_id(), source="joints", group_ids=("arm",)
+    )
+    gui._apply_target_evaluation_result(
+        newer_request,
+        {"success": False, "collision_free": False, "status": "IK_FAILED", "message": "new"},
+    )
+
+    gui._apply_target_evaluation_result(
+        stale_request,
+        {"success": True, "collision_free": True, "status": "VALID", "message": "old"},
+    )
+
+    assert gui.state.target_status == TargetStatus.INFEASIBLE
+    assert gui.state.error == "new"
+
+
 def test_operation_worker_uses_operation_error_callback_on_timeout() -> None:
     default_errors: list[str] = []
     operation_errors: list[str] = []
@@ -315,11 +522,12 @@ def test_gui_guard_errors_keep_action_idle(
     submit: str, expected_error: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     submissions: list[Callable[[], None]] = []
+    config = ViserVisualizationConfig(allow_plan_execute=submit == "_submit_execute")
     gui = ViserPanelGui(
         EmptyServer(),
         EmptyWorldMonitor(),
         FakeOperationAdapter(),
-        ViserVisualizationConfig(),
+        config,
     )
     gui._operation_worker.stop()
     monkeypatch.setattr(gui, "_operation_worker", FakeOperationSubmitWorker(submissions))

@@ -136,6 +136,7 @@ class ViserPanelGui:
         self._worker = TargetEvaluationWorker(
             self._handle_target_evaluation_request,
             self._apply_target_evaluation_result,
+            timeout_seconds=config.target_evaluation_timeout,
         )
         self._operation_worker = OperationWorker(self._set_error)
 
@@ -836,13 +837,15 @@ class ViserPanelGui:
         self.state.cartesian_target = pose
         self.state.pose_targets[group_id] = pose
         sequence_id = self.state.next_sequence_id()
+        auxiliary_group_ids = self._selected_auxiliary_group_ids()
+        pose_targets = self._active_pose_targets()
         self._worker.submit(
             TargetEvaluationRequest(
                 sequence_id=sequence_id,
                 source="cartesian",
                 group_ids=self.state.selected_group_ids,
-                auxiliary_group_ids=self._selected_auxiliary_group_ids(),
-                pose_targets=self._active_pose_targets(),
+                auxiliary_group_ids=auxiliary_group_ids,
+                pose_targets=pose_targets,
                 check_collision=True,
             )
         )

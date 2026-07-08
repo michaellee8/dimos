@@ -249,9 +249,11 @@ class TargetEvaluationWorker:
         apply_result: Callable[
             [TargetEvaluationRequest, TargetEvaluation | TargetSetEvaluation], None
         ],
+        timeout_seconds: float | None = None,
     ) -> None:
         self._handler = handler
         self._apply_result = apply_result
+        self._timeout_seconds = timeout_seconds
         self._requests: queue.Queue[TargetEvaluationRequest] = queue.Queue(maxsize=1)
         self._submit_lock = threading.Lock()
         self._stop_event = threading.Event()
@@ -293,10 +295,48 @@ class TargetEvaluationWorker:
                 except queue.Empty:
                     break
             try:
-                result = self._handler(request)
-                self._apply_result(request, result)
+                self._run_evaluation(request)
             except Exception:
                 logger.warning("Target evaluation worker caught unhandled exception", exc_info=True)
+
+    def _run_evaluation(self, request: TargetEvaluationRequest) -> None:
+        timeout = self._evaluation_timeout()
+        if timeout is None:
+            result = self._handler(request)
+            self._apply_result(request, result)
+            return
+
+        result: TargetEvaluation | TargetSetEvaluation | None = None
+        error: Exception | None = None
+
+        def run() -> None:
+            nonlocal error, result
+            try:
+                result = self._handler(request)
+            except Exception as e:
+                error = e
+
+        thread = threading.Thread(target=run, name="ViserTargetEvaluation", daemon=True)
+        thread.start()
+        thread.join(timeout=max(timeout, 0.0))
+        if thread.is_alive():
+            self._apply_result(request, self._timeout_result(timeout))
+            return
+        if error is not None:
+            raise error
+        if result is not None:
+            self._apply_result(request, result)
+
+    def _evaluation_timeout(self) -> float | None:
+        return None if self._timeout_seconds is None else float(self._timeout_seconds)
+
+    def _timeout_result(self, timeout: float) -> TargetSetEvaluation:
+        return {
+            "success": False,
+            "collision_free": False,
+            "status": "TIMEOUT",
+            "message": f"Target evaluation timed out after {timeout:.1f}s",
+        }
 
 
 class OperationWorker:
