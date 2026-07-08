@@ -1,17 +1,9 @@
-// VR cockpit UI — the Go2 cockpit (go2.js) ported to spatial panels.
-//
-// Each panel is a 2D canvas textured onto a three.js plane; interaction is
-// controller-ray raycast → panel UV → canvas px → hit-test against the panel's
-// registered rectangles. That reuses the cockpit's visual language (rounded
-// chips, brand palette, health tints) and its command protocol verbatim —
-// only the input model changes (ray-click instead of mouse, thumbstick drive).
-//
-// Layout (world-anchored in local-floor, user starts at origin looking -Z):
-//   MAP left · CAMERA front-centre · BUTTONS right · STATS far-right column.
-//
-// Commands mirror views/go2.js exactly (same JSON on state.stateChannel), so
-// the robot side needs no changes and telemetry reconcile / acks flow back
-// through the same state.onRobotState / state.onCmdAck hooks.
+// VR cockpit UI — the Go2 cockpit (go2.js) as spatial canvas panels.
+// Each panel is a 2D canvas on a three plane; interaction is controller-ray →
+// panel UV → canvas px → hit-test against registered rects. Commands are the
+// same JSON go2.js sends, so acks/telemetry flow back through the shared
+// state.onCmdAck / state.onRobotState hooks. Layout: MAP left · CAMERA centre ·
+// BUTTONS right · STATS far right.
 
 import * as THREE from 'three';
 
@@ -91,10 +83,9 @@ class Panel {
         this.mesh.position.copy(pos);
         this.mesh.rotation.set(rotX, 0, 0);
     }
-    // Triptych fold: rotate about Y by `yaw`, then position so this panel's
-    // own vertical edge (`edgeSign` +1 = right edge, -1 = left edge) lands
-    // exactly on `hinge`. Center = hinge − (rotated edge offset), so the seam
-    // edges of two folded panels coincide regardless of width/angle.
+    // Fold about Y, positioning so this panel's edge (edgeSign +1 right /
+    // -1 left) lands exactly on `hinge` — center = hinge − rotated edge — so
+    // adjacent folded panels' seams coincide at any width/angle.
     placeHinged(hinge, edgeSign, yaw) {
         this.mesh.rotation.set(0, yaw, 0);
         const h = this.mesh.geometry.parameters.width / 2;
@@ -482,13 +473,9 @@ let _mapPanel = null;
 let _lastStatsMs = 0;  // throttle the stats-panel repaint to ~1Hz
 
 export function buildCockpit(scene, headPos) {
-    // One tight cluster around the camera panel (1.4m wide, centre z=-1.6):
-    //   MAP flush left · CAMERA centre · STATS flush right, all at the same
-    //   height/depth; CONSOLE below as a tilted operator shelf.
-    // Folded triptych: MAP + STATS hinge exactly at the camera panel's
-    // left/right edges and angle toward the operator (~30°), so the seams
-    // coincide with the video edges and the sides wrap around. Must agree
-    // with vr.js CAM (same half-width, y, z, flat orientation).
+    // Folded triptych: MAP + STATS hinge at the camera panel's left/right edges
+    // and angle ~30° toward the operator; CONSOLE is a tilted shelf below.
+    // CAM_HALF_W/PANEL_Y/PANEL_Z must agree with vr.js CAM.
     const CAM_HALF_W = 0.7, PANEL_Y = 1.52, PANEL_Z = -1.6;
     const FOLD = THREE.MathUtils.degToRad(30);
 
@@ -520,11 +507,9 @@ export function buildCockpit(scene, headPos) {
             const id = panel.hitTest(uv);
             if (id) handleButtonsClick(id, panel);
         },
-        // Redraw dirty panels each XR frame; refresh the always-live stats
-        // panel at ~1Hz only (its data changes at 1Hz, but a per-frame full
-        // canvas repaint + 380x680 texture upload at 72-90Hz would burn GPU
-        // bandwidth and risk judder on the Quest). Buttons/map still redraw
-        // immediately via their own dirty flags on interaction/telemetry.
+        // Stats data changes at 1Hz — refresh it at 1Hz, not per XR frame (a
+        // per-frame canvas repaint + texture upload would risk Quest judder).
+        // Buttons/map still redraw immediately via their own dirty flags.
         tick(nowMs) {
             if (nowMs - _lastStatsMs >= 1000) { stats.markDirty(); _lastStatsMs = nowMs; }
             for (const p of _allPanels) {

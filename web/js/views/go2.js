@@ -827,10 +827,8 @@ function onRobotState(s) {
         ui.estopped = s.estopped;
         dirty = true;
     }
-    // Robot-confirmed camera stall. Dormant until the robot-side no-frames
-    // watchdog (dimos) emits state.video_stalled — the browser-side 8s
-    // "no video from robot" hint covers the gap meanwhile. Guarded so it's a
-    // safe no-op until that field arrives.
+    // Robot-confirmed camera stall — dormant (guarded no-op) until the dimos
+    // no-frames watchdog emits state.video_stalled; 8s "no video" hint covers it.
     if (typeof s.video_stalled === 'boolean') {
         ui.robotVideoStalled = s.video_stalled;
     }

@@ -113,10 +113,9 @@ function driveFromSticks(frame) {
     if (now - lastDriveSend < sendInterval) return;
     lastDriveSend = now;
 
-    // Read the sticks FIRST — the neutral gate needs to know whether an input
-    // is held so it can keep drive blocked after a video stall clears until
-    // the operator releases the stick (else a held-forward stick lunges the
-    // robot the instant the picture unfreezes).
+    // Read sticks FIRST: the stall gate needs the held-state to keep drive
+    // blocked after a freeze clears until the operator releases the stick
+    // (else a held stick lunges the robot the instant video unfreezes).
     let lx = 0, ly = 0, rx = 0, boost = 1;
     for (const src of frame.session.inputSources) {
         const gp = src.gamepad;
