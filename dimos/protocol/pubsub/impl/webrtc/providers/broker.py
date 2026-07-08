@@ -80,11 +80,9 @@ class BrokerConfig(ProviderConfig):
     heartbeat_hz: float = 1.0
     ordered: bool = False
     max_retransmits: int | None = 0
-    # Preferred video codec ("h264" / "vp8"; "" = aiortc default order).
-    # Defaults to h264: aiortc offers VP8 first, but operator browsers hardware-
-    # decode H.264 and often fall back to *software* VP8, which adds decode
-    # latency to the teleop feed. Best-effort — falls back to aiortc's order if
-    # h264 isn't in local capabilities (see _prefer_video_codec).
+    # Preferred video codec ("h264" / "vp8"; "" = aiortc's VP8-first default).
+    # h264 by default: browsers hardware-decode it but software-decode VP8,
+    # adding latency. Best-effort (see _prefer_video_codec).
     video_codec: str = "h264"
     # Operator → robot audio: add a recvonly audio transceiver so the operator's
     # mic can be bridged in. Off by default — ships dark until Go2 has audio-out.
@@ -434,8 +432,8 @@ class BrokerProvider(AsyncProviderBase):
         for name, raw_id in ids.items():
             sctp_id = int(raw_id) if raw_id is not None else None
             if sctp_id != self._dc_ids.get(name):
-                # Operator left (or was reaped): the command plane is gone.
-                # Tell subscribers so the robot can stop motion / reset state.
+                # state_reliable dropping to None = operator gone; tell
+                # subscribers so the robot can stop motion.
                 if (
                     name == "state_reliable"
                     and self._dc_ids.get(name) is not None

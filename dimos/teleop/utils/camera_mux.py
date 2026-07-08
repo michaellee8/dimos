@@ -85,14 +85,8 @@ class CameraMuxMixin:
             self.mux_image.publish(out)  # type: ignore[attr-defined]
 
     def _composite(self) -> Image | None:
-        """Selected frames → one Image: single frame passthrough, else hstack
-        scaled to min height. Returns None if nothing cached yet.
-
-        Every return is even-sized: the hstack/downscale resizes above compute
-        widths/heights as ``int(...)`` and can land odd, but libx264 (yuv420p)
-        refuses odd dimensions — and a camera switch changes the frame size,
-        forcing aiortc to reopen the encoder, so an odd composite crashes it
-        with ``avcodec_open2(libx264)``. _even_dims makes that impossible."""
+        """Selected frames → one Image: single passthrough, else hstack scaled to
+        min height. None if nothing cached yet. Always even-sized (see _even_dims)."""
         with self._cam_lock:
             order = [c for c in self._cam_order if c in self._cam_selected]
             imgs = [self._cam_frames[c] for c in order if c in self._cam_frames]
@@ -119,10 +113,9 @@ class CameraMuxMixin:
 
     @staticmethod
     def _even_dims(img: Image) -> Image:
-        """Crop the last row/column when a dimension is odd so libx264 (yuv420p,
-        even dims only) can always open. At most one pixel each way — invisible,
-        and the stamp strip is untouched (it's the full width, already even after
-        this crops width first)."""
+        """Crop odd width/height down to even so libx264 (yuv420p) can open — an
+        odd composite crashes ``avcodec_open2`` when a camera switch reopens the
+        encoder. Drops at most one pixel per side."""
         data = img.data
         if data.ndim < 2:
             return img
