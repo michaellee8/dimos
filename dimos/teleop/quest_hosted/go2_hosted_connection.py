@@ -75,26 +75,14 @@ class Go2HostedConnectionConfig(ConnectionConfig):
     telemetry_hz: float = 3.0  # robot → operator HUD telemetry push rate
     cmd_stale_after_sec: float = 0.5  # cmd_vel twists older than this are dropped
     latency_stamp: bool = False  # benchmark: paint capture-time into frame corner
-    # Also Damp (go limp) when the operator link drops, on top of the always-on
-    # zero-velocity stop. Off by default: a WiFi blip shouldn't drop the robot
-    # mid-patrol; the 0.2s cmd_vel deadman + stop_movement cover the base.
-    damp_on_operator_lost: bool = False
-    # Publish-side video caps (0 = source rate/resolution). Applied at the mux,
-    # so they hold on both transports: capping here beats letting congestion
-    # show up as encoder drops/freezes on a constrained uplink.
-    video_max_width: int = 0
-    video_max_fps: float = 0.0
-    # Map/odom overlay on the map_unreliable channel. Map is slow + few-KB; odom
-    # is fast + tiny so the marker moves smoothly. Coarsen keeps the PNG < 16 KB.
+    damp_on_operator_lost: bool = False  # go limp on link loss (off: deadman covers it)
+    video_max_width: int = 0  # publish-side cap at the mux (0 = source resolution)
+    video_max_fps: float = 0.0  # publish-side cap at the mux (0 = source rate)
     map_hz: float = 2.0  # occupancy-grid push rate (0 = off)
     map_min_resolution: float = 0.1  # coarsen finer grids to this m/cell before encode
     odom_hz: float = 15.0  # robot-pose push rate (0 = off)
-    # Play operator audio on the dog's speaker (feeds the dog PC's sendrecv
-    # audio m-line). Only matters when the uplink runs (broker audio_in=true).
-    speaker: bool = True
-    # Click-to-navigate: operator WASD input suppresses the planner's nav
-    # twists for this long — manual drive always wins over autonomy.
-    nav_yield_sec: float = 1.0
+    speaker: bool = True  # play operator audio on the dog's speaker (needs audio_in)
+    nav_yield_sec: float = 1.0  # operator drive suppresses planner twists this long
 
 
 class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
@@ -115,60 +103,49 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
     cam2_in: In[Image]
     mux_image: Out[Image]
     cmd_vel_stamped: Out[TwistStamped]
-    # Map overlay input (occupancy grid) + output (compressed map/odom on the
-    # dedicated map_unreliable channel). Odom is not a stream — we tap
-    # connection.odom_stream() in start() (the source the base uses for TF).
+
+    # Map overlay → operator minimap on the map_unreliable channel. Odom rides
+    # map_out too but has no port — start() taps connection.odom_stream().
     global_costmap: In[OccupancyGrid]
     map_out: Out[bytes]
-    # Operator mic audio, re-published for local consumers (header + PCM, see
-    # _on_audio_frame). Only flows with transports.broker.audio_in=true.
+
+    # Operator mic → local consumers (header + PCM, see _on_audio_frame).
     audio_out: Out[bytes]
-    # Click-to-navigate: operator map click → goal_request → planner; the
-    # planner's nav_cmd_vel drives move() (yielding to live operator input),
-    # and stop_movement cancels the goal (E-STOP / operator loss).
+
+    # Click-to-navigate: map click → goal_request → planner → nav_cmd_vel →
+    # move(); stop_movement cancels the goal (E-STOP / operator loss).
     goal_request: Out[PoseStamped]
     nav_cmd_vel: In[Twist]
     stop_movement: Out[Bool]
 
-    # Queued (non-urgent) commands beyond this are busy-rejected — bounds the
-    # backlog a spamming/laggy operator can build behind a slow command.
-    _MAX_PENDING_CMDS = 4
-    # Nonce dedup: transport/UI duplicates within this window re-ack the prior
-    # result instead of re-executing. Short on purpose — browser nonces restart
-    # at 1 per session, so entries must age out before a quick reconnect reuses
-    # them. Applies to nonce'd JSON commands only; cmd_vel twists carry no
-    # nonce and are guarded by the monotonic-ts drop in move().
+    _MAX_PENDING_CMDS = 4  # non-urgent backlog cap; beyond this → busy-reject
+    # Nonce dedup TTL: re-ack duplicates instead of re-running. Short because
+    # browser nonces restart at 1 per session and must age out before reconnect.
     _NONCE_TTL_SEC = 10.0
     _NONCE_CACHE_MAX = 64
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        # E-STOP latch from _hosted_init: while set, move() refuses twists and
-        # non-urgent commands are rejected until estop_clear.
-        self._hosted_init(["cam1", "cam2"])
+        self._hosted_init(["cam1", "cam2"])  # sets the E-STOP latch move() checks
         self._stop_event = threading.Event()
         self._rage_active = False
         self._last_cmd_ts = 0.0
-        # Nav arbitration: only NON-ZERO operator input counts as steering
-        # (the browser streams zero twists whenever idle), and nav-activity
-        # lets us swallow those idle zeros so they don't stomp nav twists.
+        # Nav arbitration: only non-zero operator input counts as steering (the
+        # browser streams idle zeros), so nav twists aren't stomped by them.
         self._last_drive_ts = 0.0
         self._last_nav_ts = 0.0
         # Serialized command executor (ordering rationale in _submit_cmd).
         self._cmd_executor: ThreadPoolExecutor | None = None
         self._cmd_pending = 0
         self._cmd_lock = threading.Lock()
-        # nonce → (result | None while in flight, monotonic stamp)
-        self._nonce_results: dict[Any, tuple[bool | None, float]] = {}
+        self._nonce_results: dict[Any, tuple[bool | None, float]] = {}  # nonce → (result, ts)
         self._speaker_track: PCMAudioTrack | None = None
         # Robot-authoritative UI state, pushed in telemetry so a reconnecting
-        # operator's cockpit reflects reality instead of optimistic defaults.
-        # GO2Connection.start() stands the robot up, hence the initial posture.
+        # cockpit reflects reality. start() stands the robot up → StandReady.
         self._posture = "StandReady"
         self._obstacle_avoidance = True  # corrected from config.g in start()
-        self._light = 0.0  # head-LED brightness 0..1, assumed off until set
-        # Map/odom throttle gates (monotonic stamps, cf. the mux's _last_mux_pub).
-        self._last_map_pub = 0.0
+        self._light = 0.0  # head-LED brightness 0..1
+        self._last_map_pub = 0.0  # map/odom throttle gates (monotonic)
         self._last_odom_pub = 0.0
 
     @rpc
@@ -176,14 +153,12 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         super().start()
         self._stop_event.clear()
         self._cmd_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Go2Cmd")
-        # Firmware OA was just set from config.g by GO2Connection.start().
         try:
             self._obstacle_avoidance = bool(self.config.g.obstacle_avoidance)
         except AttributeError:
             pass
-        # Force firmware out of Rage so _rage_active=False matches reality —
-        # a prior session may have left it on, and the set_mode short-circuit
-        # then locks the user in Rage.
+        # Force firmware out of Rage so _rage_active=False matches reality — a
+        # prior session may have left it on, then set_mode locks the user in.
         try:
             self.connection.set_rage_mode(False)
         except Exception:
@@ -194,24 +169,20 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
             (self.cmd_raw, self._on_cmd_raw),
         ):
             self.register_disposable(Disposable(stream.subscribe(cb)))
-        # Mux: tap the base's color_image as cam1, RealSense as cam2 → mux_image.
+        # color_image → cam1, RealSense → cam2, muxed to mux_image.
         self.register_disposable(
             Disposable(self.color_image.subscribe(lambda i: self._on_cam("cam1", i)))
         )
         self.register_disposable(
             Disposable(self.cam2_in.subscribe(lambda i: self._on_cam("cam2", i)))
         )
-        # Map overlay → operator minimap; throttled + compressed in the handlers.
         if self.config.map_hz > 0:
             self.register_disposable(Disposable(self.global_costmap.subscribe(self._on_costmap)))
-        # Planner nav twists → move(), yielding to live operator input.
         self.register_disposable(Disposable(self.nav_cmd_vel.subscribe(self._on_nav_cmd)))
-        # Odom: tap the raw stream the base consumes for TF (no stream port).
         if self.config.odom_hz > 0:
             self.register_disposable(self.connection.odom_stream().subscribe(self._on_odom))
-        # Operator mic → audio_out. The subscribes above already forced the
-        # broker provider into existence, so the registry sweep finds it; frames
-        # only arrive when it runs with audio_in=true.
+        # The subscribes above forced the broker provider into existence, so the
+        # audio-sink registry sweep finds it; frames need audio_in=true.
         set_audio_sink(self._on_audio_frame)
         if self.config.speaker:
             self._attach_speaker()
