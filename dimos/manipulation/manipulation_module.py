@@ -1242,46 +1242,11 @@ class ManipulationModule(Module):
             return IKResult(status=IKStatus.NO_SOLUTION, message=str(exc))
         if seed_state is None:
             return IKResult(status=IKStatus.NO_SOLUTION, message="No joint state")
-        logger.info(
-            "[DEBUG-viser-ik] manipulation inverse kinematics solving",
-            group_ids=[str(group_id) for group_id in group_ids],
-            auxiliary_group_ids=[str(group_id) for group_id in auxiliary_group_ids],
-            seed_joint_count=len(seed_state.name),
-            seed_joint_names=[str(name) for name in seed_state.name],
-            seed_positions=[round(float(position), 4) for position in seed_state.position],
-            targets={
-                str(group_id): {
-                    "frame_id": pose.frame_id,
-                    "position": [
-                        round(float(pose.position.x), 4),
-                        round(float(pose.position.y), 4),
-                        round(float(pose.position.z), 4),
-                    ],
-                    "orientation_xyzw": [
-                        round(float(pose.orientation.x), 4),
-                        round(float(pose.orientation.y), 4),
-                        round(float(pose.orientation.z), 4),
-                        round(float(pose.orientation.w), 4),
-                    ],
-                }
-                for group_id, pose in pose_targets.items()
-            },
-        )
         result = self._kinematics.solve_pose_targets(
             world=self._world_monitor.world,
             pose_targets=target_groups,
             auxiliary_groups=auxiliary_groups,
             seed=seed_state,
-        )
-        logger.info(
-            "[DEBUG-viser-ik] manipulation inverse kinematics result",
-            group_ids=[str(group_id) for group_id in group_ids],
-            status=result.status.name,
-            message=result.message,
-            success=result.is_success(),
-            has_joint_state=result.joint_state is not None,
-            position_error=result.position_error,
-            orientation_error=result.orientation_error,
         )
         return result
 

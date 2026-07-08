@@ -1003,7 +1003,7 @@ def test_scene_planning_voxel_map_create_update_remove_and_close(
     assert handle.name == "/planning/voxel_map"
     np.testing.assert_allclose(handle.points, cloud.points_f32())
     assert handle.colors.dtype == np.uint8
-    assert handle.colors.tolist() == [[0, 180, 255], [0, 180, 255]]
+    assert handle.colors.tolist() == [[30, 90, 255], [255, 210, 40]]
     assert handle.point_size == 0.02
     assert handle.point_shape == "circle"
 
@@ -1014,7 +1014,7 @@ def test_scene_planning_voxel_map_create_update_remove_and_close(
 
     assert len(server.point_clouds) == 1
     np.testing.assert_allclose(handle.points, updated.points_f32())
-    assert handle.colors.tolist() == [[0, 180, 255]]
+    assert handle.colors.tolist() == [[30, 90, 255]]
     assert handle.point_shape == "circle"
 
     scene.update_planning_voxel_map(PointCloud2.from_numpy(np.empty((0, 3), dtype=np.float32)))
@@ -1041,6 +1041,8 @@ def test_scene_planning_voxel_map_downsamples_deterministically(
 
     np.testing.assert_allclose(server.point_clouds[0].points, points[::4])
     assert len(server.point_clouds[0].colors) == 3
+    assert server.point_clouds[0].colors[0].tolist() == [30, 90, 255]
+    assert server.point_clouds[0].colors[-1].tolist() == [255, 210, 40]
 
 
 def test_scene_planning_voxel_map_throttles_updates(

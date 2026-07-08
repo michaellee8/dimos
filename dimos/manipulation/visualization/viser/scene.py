@@ -79,7 +79,8 @@ REFERENCE_GRID_NAME = "/reference_grid"
 REFERENCE_GRID_CELL_COLOR = (44, 54, 58)
 REFERENCE_GRID_SECTION_COLOR = (90, 145, 165)
 PLANNING_VOXEL_MAP_NAME = "/planning/voxel_map"
-PLANNING_VOXEL_MAP_COLOR = (0, 180, 255)
+PLANNING_VOXEL_MAP_LOW_COLOR = np.asarray((30, 90, 255), dtype=np.float32)
+PLANNING_VOXEL_MAP_HIGH_COLOR = np.asarray((255, 210, 40), dtype=np.float32)
 PLANNING_VOXEL_MAP_POINT_SIZE = 0.02
 PLANNING_VOXEL_MAP_POINT_SHAPE = "circle"
 PLANNING_VOXEL_MAP_MAX_POINTS = 20_000
@@ -90,6 +91,22 @@ SceneHandle: TypeAlias = ViserUrdf | TransformControlsHandle | GridHandle | Mesh
 
 class _ColorHandle(Protocol):
     color: tuple[int, int, int]
+
+
+def _planning_voxel_map_colors(points: np.ndarray) -> np.ndarray:
+    """Color planning map voxels by height, matching Viser point-cloud examples."""
+    z = points[:, 2]
+    z_min = float(np.min(z))
+    z_span = float(np.max(z) - z_min)
+    if z_span <= np.finfo(np.float32).eps:
+        normalized = np.zeros_like(z, dtype=np.float32)
+    else:
+        normalized = ((z - z_min) / z_span).astype(np.float32)
+    colors = (
+        PLANNING_VOXEL_MAP_LOW_COLOR[None, :] * (1.0 - normalized[:, None])
+        + PLANNING_VOXEL_MAP_HIGH_COLOR[None, :] * normalized[:, None]
+    )
+    return np.clip(colors, 0, 255).astype(np.uint8)
 
 
 class ViserManipulationScene:
@@ -141,9 +158,7 @@ class ViserManipulationScene:
         if len(points) > PLANNING_VOXEL_MAP_MAX_POINTS:
             stride = int(np.ceil(len(points) / PLANNING_VOXEL_MAP_MAX_POINTS))
             points = points[::stride]
-        colors = np.broadcast_to(
-            np.asarray(PLANNING_VOXEL_MAP_COLOR, dtype=np.uint8), (len(points), 3)
-        ).copy()
+        colors = _planning_voxel_map_colors(points)
         if self._planning_map_handle is None:
             self._planning_map_handle = cast(
                 "PointCloudHandle",

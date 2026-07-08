@@ -839,16 +839,6 @@ class ViserPanelGui:
         sequence_id = self.state.next_sequence_id()
         auxiliary_group_ids = self._selected_auxiliary_group_ids()
         pose_targets = self._active_pose_targets()
-        logger.info(
-            "[DEBUG-viser-ik] cartesian target update queued",
-            sequence_id=sequence_id,
-            group_id=str(group_id),
-            selected_group_ids=[str(selected) for selected in self.state.selected_group_ids],
-            auxiliary_group_ids=[str(auxiliary) for auxiliary in auxiliary_group_ids],
-            active_pose_target_ids=[str(target_id) for target_id in pose_targets],
-            position=[round(float(value), 4) for value in target.position.tolist()],
-            wxyz=[round(float(value), 4) for value in target.wxyz.tolist()],
-        )
         self._worker.submit(
             TargetEvaluationRequest(
                 sequence_id=sequence_id,
@@ -869,12 +859,6 @@ class ViserPanelGui:
         self._refresh_target_joints_from_groups()
         self._move_joint_target_visuals()
         sequence_id = self.state.next_sequence_id()
-        logger.info(
-            "[DEBUG-viser-ik] joint target update queued",
-            sequence_id=sequence_id,
-            selected_group_ids=[str(selected) for selected in self.state.selected_group_ids],
-            target_group_ids=[str(target_id) for target_id in targets],
-        )
         self._worker.submit(
             TargetEvaluationRequest(
                 sequence_id=sequence_id,
@@ -946,14 +930,6 @@ class ViserPanelGui:
         if self._closed:
             return
         if request.sequence_id != self.state.latest_sequence_id:
-            logger.info(
-                "[DEBUG-viser-ik] target evaluation result ignored as stale",
-                sequence_id=request.sequence_id,
-                latest_sequence_id=self.state.latest_sequence_id,
-                source=request.source,
-                status=str(result.get("status", "")),
-                message=str(result.get("message", "")),
-            )
             return
         collision_free = bool(result.get("collision_free", False))
         success = bool(result.get("success", False))
@@ -965,17 +941,6 @@ class ViserPanelGui:
             TargetStatus.FEASIBLE if success and collision_free else TargetStatus.INFEASIBLE
         )
         self.state.error = "" if success and collision_free else self.state.feasibility.message
-        logger.info(
-            "[DEBUG-viser-ik] target evaluation result applied",
-            sequence_id=request.sequence_id,
-            source=request.source,
-            status=str(result.get("status", "")),
-            message=str(result.get("message", "")),
-            success=success,
-            collision_free=collision_free,
-            target_status=self.state.target_status.value,
-            feasibility_status=self.state.feasibility.status.value,
-        )
         target_joints = result.get("target_joints") or result.get("joint_state")
         if isinstance(target_joints, JointState):
             self.state.target_joints = JointState(target_joints)

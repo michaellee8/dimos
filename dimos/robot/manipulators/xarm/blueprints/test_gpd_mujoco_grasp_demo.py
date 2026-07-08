@@ -50,6 +50,7 @@ from dimos.perception.reconstruction import SceneReconstructionModule
 from dimos.protocol.tf.tf_pose_source import TfPoseSource
 from dimos.robot.all_blueprints import all_blueprints
 from dimos.robot.manipulators.xarm.blueprints.simulation import (
+    XARM_VOXEL_PLANNING_COLLISION_RESOLUTION,
     XARM_VOXEL_PLANNING_RESOLUTION,
     gpd_mujoco_grasp_demo,
     manual_agentic_gpd_mujoco_grasp_demo,
@@ -214,9 +215,14 @@ def test_xarm_voxel_planning_viser_demo_config_and_remappings() -> None:
     assert manipulation_atom.kwargs["planner_name"] == "roboplan"
     assert manipulation_atom.kwargs["kinematics"] == {"backend": "roboplan"}
     assert (
-        manipulation_atom.kwargs["planning_voxel_map_resolution"] == XARM_VOXEL_PLANNING_RESOLUTION
+        manipulation_atom.kwargs["planning_voxel_map_resolution"]
+        == XARM_VOXEL_PLANNING_COLLISION_RESOLUTION
     )
     assert mapper_atom.kwargs["voxel_size"] == XARM_VOXEL_PLANNING_RESOLUTION
+    assert mapper_atom.kwargs["min_health"] == 0
+    assert mapper_atom.kwargs["max_health"] == 4
+    assert mapper_atom.kwargs["shadow_depth"] == 0.08
+    assert mapper_atom.kwargs["grace_depth"] == 0.08
     assert sim_atom.kwargs["enable_depth"] is True
     assert sim_atom.kwargs["enable_color"] is True
     assert sim_atom.kwargs["enable_pointcloud"] is True

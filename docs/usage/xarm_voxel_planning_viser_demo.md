@@ -19,14 +19,17 @@ MujocoSimModule.pointcloud
   -> ManipulationModule.planning_voxel_map
 ```
 
-Viser renders the planning voxel map at `/planning/voxel_map` as round points from the latest map synchronized into the planning world before planning.
+Viser renders the planning voxel map at `/planning/voxel_map` as round, height-colored points from the latest map synchronized into the planning world before planning.
 
 Key configuration values:
 
 - `world_backend="roboplan"`
 - `planner_name="roboplan"`
 - `kinematics={"backend": "roboplan"}`
-- shared voxel/planning resolution: `0.02` m
+- mapper voxel resolution: `0.02` m
+- planning collision voxel resolution: `0.04` m
+- voxel persistence tuning: `min_health=0`, `max_health=4`
+- ray clearing tuning: `shadow_depth=0.08`, `grace_depth=0.08`
 - strict world frame: mapper and planning input use `world`
 
 Known v1 limitations:

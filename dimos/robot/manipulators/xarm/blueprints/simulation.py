@@ -76,6 +76,7 @@ XARM7_RERUN_LINK_FRAMES = unique_link_names(
 
 XARM7_RERUN_HIGHLIGHT_LINKS = ["link7", "xarm_gripper_base_link", "link_tcp"]
 XARM_VOXEL_PLANNING_RESOLUTION = 0.02
+XARM_VOXEL_PLANNING_COLLISION_RESOLUTION = 0.04
 
 
 def _manual_agentic_xarm7_model_config() -> RobotModelConfig:
@@ -275,7 +276,7 @@ xarm_voxel_planning_viser_demo = autoconnect(
         world_backend="roboplan",
         planner_name="roboplan",
         kinematics={"backend": "roboplan"},
-        planning_voxel_map_resolution=XARM_VOXEL_PLANNING_RESOLUTION,
+        planning_voxel_map_resolution=XARM_VOXEL_PLANNING_COLLISION_RESOLUTION,
     ),
     MujocoSimModule.blueprint(
         address=str(XARM7_SIM_PATH),
@@ -312,7 +313,13 @@ xarm_voxel_planning_viser_demo = autoconnect(
         tf_tolerance_s=0.25,
         publish_rate_hz=10.0,
     ),
-    RayTracingVoxelMap.blueprint(voxel_size=XARM_VOXEL_PLANNING_RESOLUTION),
+    RayTracingVoxelMap.blueprint(
+        voxel_size=XARM_VOXEL_PLANNING_RESOLUTION,
+        min_health=0,
+        max_health=4,
+        shadow_depth=0.08,
+        grace_depth=0.08,
+    ),
     coordinator(
         hardware=[_xarm7_sim_hw],
         tasks=[trajectory_task(_xarm7_sim_hw)],

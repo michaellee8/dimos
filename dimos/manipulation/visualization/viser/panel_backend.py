@@ -24,9 +24,6 @@ from dimos.manipulation.visualization.viser.state import FeasibilityStatus
 from dimos.msgs.geometry_msgs.Pose import Pose
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.sensor_msgs.JointState import JointState
-from dimos.utils.logging_config import setup_logger
-
-logger = setup_logger()
 
 if TYPE_CHECKING:
     from dimos.manipulation.manipulation_module import ManipulationModule
@@ -115,44 +112,10 @@ def evaluate_pose_target_set(
         return {"success": False, "status": "INVALID", "message": "No pose target"}
     stamped_targets = {group_id: stamped_pose(pose) for group_id, pose in pose_targets.items()}
     group_ids = tuple(dict.fromkeys((*stamped_targets.keys(), *auxiliary_groups)))
-    logger.info(
-        "[DEBUG-viser-ik] pose target set evaluating",
-        group_ids=[str(group_id) for group_id in group_ids],
-        auxiliary_group_ids=[str(group_id) for group_id in auxiliary_groups],
-        seed_joint_count=0 if seed is None else len(seed.name),
-        seed_joint_names=[] if seed is None else [str(name) for name in seed.name],
-        targets={
-            str(group_id): {
-                "frame_id": pose.frame_id,
-                "position": [
-                    round(float(pose.position.x), 4),
-                    round(float(pose.position.y), 4),
-                    round(float(pose.position.z), 4),
-                ],
-                "orientation_xyzw": [
-                    round(float(pose.orientation.x), 4),
-                    round(float(pose.orientation.y), 4),
-                    round(float(pose.orientation.z), 4),
-                    round(float(pose.orientation.w), 4),
-                ],
-            }
-            for group_id, pose in stamped_targets.items()
-        },
-    )
     ik = manipulation_module.inverse_kinematics(
         pose_targets=stamped_targets,
         auxiliary_group_ids=auxiliary_groups,
         seed=copy_joint_state(seed),
-    )
-    logger.info(
-        "[DEBUG-viser-ik] pose target IK result",
-        group_ids=[str(group_id) for group_id in group_ids],
-        status=ik.status.name,
-        message=ik.message,
-        success=ik.is_success(),
-        has_joint_state=ik.joint_state is not None,
-        position_error=ik.position_error,
-        orientation_error=ik.orientation_error,
     )
     if not ik.is_success() or ik.joint_state is None:
         return {
