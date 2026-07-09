@@ -478,3 +478,49 @@ Chronology of the wheels-won't-turn hunt (all hypotheses tested and killed):
 
 Session totals: gripper ✅ arm ✅ torso ⚠️(negative result, guarded)
 chassis ⏸️(node-level fully validated; wheel-level refusal unresolved).
+
+## 2026-07-09 — Day 3: CHASSIS SOLVED ✅ (test_03 PASS)
+
+Structured fault-tree session (planned before touching hardware). Key
+discriminating experiments and results:
+
+1. **No wireless e-stop fob exists on this unit** (only the base button) —
+   suspect C eliminated by inventory.
+2. **Clean cold boot** (both e-stops clear, RC in manual BEFORE power-on):
+   **RC manual drove the robot WITH NO ROS STACK RUNNING** → RC-manual is
+   VCU-DIRECT (radio → VCU firmware). The ROS chassis node was never in
+   the manual loop.
+3. Reference capture during RC driving: /motion_control/control_chassis
+   carried ALL ZEROS while wheels turned — confirms bypass conclusively.
+4. Arm reference during working software motion (test_04 PASS):
+   control_arm_left shows mode: 0 TOO → **mode field acquitted** (0 does
+   not mean "don't execute"). Real arm/chassis frame difference: arms carry
+   full impedance params (kp/kd/t_ff), chassis frames have empty arrays —
+   turned out to be irrelevant.
+5. **THE ANSWER: test_03 on a healthy VCU simply PASSED.** Peak measured
+   0.0470 m/s, stop to 0.0000, ~5cm roll, RC in mode 5, all gates streamed
+   by the script. Nothing was ever wrong with the software recipe.
+
+**Root cause of the entire Day-2 chassis saga: the VCU was latched**
+(e-stop pressed at/before a power-on earlier that day). A latched VCU:
+- ignores software chassis commands (the eternal 0.3mm/s "creep")
+- eventually also killed RC manual mid-session
+- survives ROS stack restarts, reports w1-w6 error_code 0, clears ONLY on
+  a clean power cycle with e-stops released
+Every Day-2 software experiment ran on poisoned hardware; the recipe
+(RC ON mode 5 + Gate-1 subscriber + acc_limit + brake=false + streamed
+speed) was correct all along.
+
+**Final chassis operating procedure:** cold-boot with e-stops released →
+RC ON, all switches position 1 (mode 5) → test_03 or equivalent gate
+streams → drive. End every session with a zero-stream (latch!). If wheels
+ever refuse both paths: power cycle, don't debug software.
+
+**Day-3 addendum:** test_03 re-run twice more — PASS both (peaks 0.0490 /
+0.0447 m/s, stops to 0.0000). Chassis validation is reproducible. Curiosity
+left open (academic): a 40s capture of /motion_control/control_chassis
+during the passing runs again showed all-zero v_des — either timing missed
+the 1s moves, or software wheel commands route below/beside that topic
+just like RC manual does. Irrelevant to the integration (our interface is
+/motion_target/*, proven working); logged for completeness.
+BRING-UP PHASE COMPLETE — next: R1LiteConnection module.

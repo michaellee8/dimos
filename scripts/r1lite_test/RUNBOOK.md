@@ -85,19 +85,24 @@ ros2 topic pub -r 10 /motion_target/target_joint_state_arm_left sensor_msgs/msg/
 - **`findrobot_server.sh` on the robot** — rewrites DDS config to
   discovery-server mode and reboots; would break our multicast setup.
 
-## Chassis: partially solved, one blocker (see BRINGUP_LOG for full saga)
+## Chassis: SOLVED ✅ (2026-07-09, test_03 PASS — BRINGUP_LOG Day 3)
 
-Validated: chassis node accepts streamed targets in RC **mode 5** (RC ON,
-all 4 switches position 1), ramp reaches full speed with acc_limit +
-brake=false streamed (test_03 does all gates itself). RC mode map:
-all-pos1=5 (software), sw1@2+sw2@3=2 (brake), +sw3@mid=3 (RC manual drive).
+**Root cause of the Day-2 saga: latched VCU.** An e-stop pressed at/before
+power-on poisons the VCU for the whole session — it ignores software
+commands (0.3mm/s "creep"), eventually kills RC manual too, survives stack
+restarts, and reports w1-w6 all-zero. ONLY a clean power cycle (e-stops
+released) recovers it. The software recipe was correct all along.
 
-UNRESOLVED: wheels refuse to turn (both software AND RC manual) despite
-healthy RC/VCU/battery/e-stop. **Next session, check FIRST: the separate
-wireless E-STOP REMOTE** (R1 Lite ships 3 remotes: torso/chassis/e-stop —
-a pressed or dead e-stop fob = failsafe stop, explains everything).
-Fallbacks: Galaxea "Wheel Motor Zero-Point Calibration" doc,
-product@galaxea-dynamics.com.
+**Operating procedure for software chassis control:**
+1. Cold-booted robot, e-stop released at power-on (verify: RC manual
+   drives — it's VCU-direct, works with no ROS running).
+2. RC **ON**, all 4 switches position 1 → mode 5 (software). Map:
+   all-pos1=5 (software) · sw1@2+sw2@3=2 (brake) · +sw3@mid=3 (manual).
+3. Stream speed + acc_limit + brake=false with a Gate-1 subscriber —
+   test_03 does all of it: PASS = ~5cm roll, peak ≥0.02 m/s, stop to ~0.
+
+**If wheels ever refuse both software AND RC manual: POWER CYCLE. Do not
+debug software** — that mistake cost a full session.
 
 ⚠️ RULES learned the hard way:
 - Chassis node LATCHES the last target forever (no dead-man!) — ALWAYS
@@ -108,7 +113,6 @@ product@galaxea-dynamics.com.
 
 ## Not yet done
 
-- Chassis wheel-level unblock (e-stop remote lead above), then test_03 PASS.
 - Torso task-space experiment (target_speed_torso, MPC path) — designed
   session; joint path is guarded off.
 - Mesh copy for LFS: `scp -r r1lite:~/galaxea/install/mobiman/share/mobiman/urdf/R1_Lite/meshes /tmp/`
