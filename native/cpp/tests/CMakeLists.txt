@@ -21,6 +21,7 @@ add_executable(dimos_native_tests
   test_transport_selection.cpp
   test_config.cpp
   test_module.cpp
+  test_lcm_codec.cpp
 )
 find_package(Threads REQUIRED)
 target_link_libraries(dimos_native_tests PRIVATE
