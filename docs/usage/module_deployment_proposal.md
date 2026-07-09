@@ -94,98 +94,31 @@ These are not the same feature as packaged Python runtime work. They point at th
 
 ## 3. Proposed model
 
-```mermaid
-flowchart TD
-    Blueprint[Blueprint\nabstract module graph]
-    Contract[Module Contract\nDimOS-facing identity]
-    Package[Self-Contained Module Package]
-    RuntimeReq[Runtime Requirement]
-    Launch[Launch Recipe]
-    TargetMap[Deployment Target Map\nnamed targets]
-    Target[Execution Target Profile\none machine/substrate]
-    Assignment[Deployment Assignment]
-    Spec[Deployment Spec]
-    Reconciler[Deployment Reconciler]
+The model separates three inputs and one resolved output:
 
-    Blueprint --> Contract
-    Contract --> Package
-    Package --> RuntimeReq
-    Package --> Launch
-
-    Target --> TargetMap
-    TargetMap --> Spec
-    Assignment --> Spec
-    Package --> Spec
-    Blueprint --> Spec
-
-    Spec --> Reconciler
-    Reconciler --> Prepare[prepare / build]
-    Reconciler --> Sync[sync code, binary, or closure]
-    Reconciler --> Run[spawn workers and runtime hosts]
-    Reconciler --> Connect[connect control and data planes]
+```text
+Blueprint              what modules exist and how they connect
+deployment.py          how a packaged/native module is prepared and launched
+DeploymentSpec         where modules run
+DeploymentPlan         validated, concrete prepare and launch actions
 ```
 
-### Blueprint
+### 3.1 Complete Deployment Spec
 
-A Blueprint stays the abstract module graph:
-
-- which Module Contracts participate,
-- how streams connect,
-- how module refs connect,
-- what config surfaces exist.
-
-A plain Blueprint remains locally runnable. `dimos run <blueprint>` should keep today's local-default behavior.
-
-### Module Contract
-
-A Module Contract is the stable DimOS-facing identity. It declares the streams, RPCs, config shape, and lifecycle surface other modules depend on.
-
-The implementation may run:
-
-- in the local Python worker environment,
-- in a packaged Python runtime process,
-- as a native executable,
-- eventually on another machine.
-
-### Self-Contained Module Package
-
-A Self-Contained Module Package is the module-owned deployment unit. It carries:
-
-- Module Contract or NativeModule wrapper,
-- implementation source or binary target,
-- Runtime Requirement,
-- preparation recipe,
-- launch recipe,
-- optional smoke test.
-
-This should start as a layout convention, not a required manifest.
-
-### Runtime Requirement
-
-Runtime Requirement is the stable environment or artifact declaration needed by the module implementation. Examples:
-
-- Python project with `pyproject.toml` and `uv.lock`,
-- Pixi or Nix environment,
-- Rust project with `Cargo.toml`,
-- C++ project with `CMakeLists.txt`,
-- prebuilt executable path.
-
-It does not say which machine runs the module.
-
-### Deployment Spec
-
-A Deployment Spec is deployment-owned. It binds Module Contracts to Execution Target Profiles and describes prepare/sync/run policy.
-
-It does not define the abstract module graph. It references a Blueprint and assigns some or all modules to targets.
-
-For v1, a Deployment Spec contains a target map and class-keyed assignments:
+A Deployment Spec references a Blueprint, defines named targets, and assigns Module Contract classes to target names:
 
 ```python
-deployment(
+go2_deployment = DeploymentSpec(
     blueprint=go2_stack,
     targets={
-        "robot": ssh_target("go2"),
-        "gpu": ssh_target("gpu-box"),
+        "robot": SshTarget(
+            host="go2",
+            workspace="~/dimos-deployments/go2",
+        ),
+        "gpu": SshTarget(
+            host="gpu-box",
+            workspace="~/dimos-deployments/go2",
+        ),
     },
     assignments={
         MLSPlannerNative: "robot",
@@ -194,7 +127,208 @@ deployment(
 )
 ```
 
-Targets are named strings. Assignment keys are Module Contract classes. Assignment values are target names. The local target is implicit, and unassigned modules run locally by default.
+The v1 rules are concrete:
+
+- `blueprint` supplies active modules, stream wiring, module refs, and config surfaces.
+- `targets` maps stable string names to execution target definitions.
+- `assignments` maps Module Contract classes to target names.
+- `local` always exists as an implicit target.
+- modules absent from `assignments` run on `local`.
+- an in-environment Python module cannot be assigned to a non-local target.
+- package roots, build commands, executables, and implementation paths do not belong in `DeploymentSpec`.
+
+### 3.2 Module-owned package declarations
+
+Packaged and native modules declare their intrinsic prepare and launch information beside the Module Contract. These names illustrate the model; PR 1 will settle the exact internal API.
+
+```text
+heavy_detector/
+  heavy_detector.py
+  deployment.py
+  runtime/
+    pyproject.toml
+    uv.lock
+    src/heavy_detector_runtime/
+```
+
+```python
+# heavy_detector/deployment.py
+
+package = PackagedPythonModule(
+    contract=HeavyDetector,
+    preset=UvRuntime(
+        project="runtime",
+        implementation="heavy_detector_runtime.module:HeavyDetectorImpl",
+    ),
+)
+```
+
+```text
+mls_planner/
+  mls_planner_native.py
+  deployment.py
+  rust/
+    Cargo.toml
+    Cargo.lock
+    src/...
+```
+
+```python
+# mls_planner/deployment.py
+
+package = NativeModulePackage(
+    contract=MLSPlannerNative,
+    preset=CargoNative(
+        project="rust",
+        executable="target/release/mls_planner",
+    ),
+)
+```
+
+The package declaration owns the runtime root, implementation or executable, Convention Preset, and intrinsic prepare/launch behavior. Deployment Spec owns target assignment and deployment-time strategy; it cannot replace those package facts.
+
+### 3.3 Key model shapes
+
+The internal model should stay data-shaped even if the first implementation uses different names:
+
+```python
+@dataclass(frozen=True)
+class DeploymentSpec:
+    blueprint: Blueprint
+    targets: Mapping[str, ExecutionTarget]
+    assignments: Mapping[type[ModuleBase], str]
+```
+
+```python
+@dataclass(frozen=True)
+class ModulePackage:
+    contract: type[ModuleBase]
+    preset: ConventionPreset
+```
+
+```python
+@dataclass(frozen=True)
+class DeploymentPlan:
+    modules: tuple[ResolvedModuleDeployment, ...]
+```
+
+```python
+@dataclass(frozen=True)
+class ResolvedModuleDeployment:
+    contract: type[ModuleBase]
+    target_name: str
+    package: ModulePackage | None
+    prepare_steps: tuple[PrepareStep, ...]
+    worker_route: WorkerRoute
+```
+
+The distinction is operational:
+
+```text
+DeploymentSpec   user-authored placement intent
+ModulePackage    module-owned prepare and launch facts
+DeploymentPlan   validated and fully resolved actions
+```
+
+### 3.4 Resolution and validation
+
+Deployment planning resolves every active Blueprint module:
+
+```text
+for each active module in the Blueprint:
+    target = assignments.get(module, "local")
+
+    if module is an in-environment Python module:
+        require target == "local"
+        route = PythonWorker
+    else:
+        package = discover deployment.py from the module anchor
+        preset = resolve exactly one Convention Preset
+        prepare_steps = preset.prepare(package, target)
+        route = DeploymentWorker -> RuntimeHost
+
+    emit ResolvedModuleDeployment
+```
+
+Planning fails before mutation when:
+
+- an assignment references a target absent from `targets`,
+- an assignment references a module absent from the Blueprint,
+- an in-environment Python module is assigned remotely,
+- a packaged/native module has no discoverable package declaration,
+- zero or multiple Convention Presets match,
+- a required lockfile, project file, executable, or build declaration is missing.
+
+### 3.5 Resolved plan
+
+The previous Deployment Spec should resolve to an inspectable plan:
+
+```text
+Module              Target   Package preset   Prepare                   Worker route
+Agent               local    —                —                         PythonWorker
+MLSPlannerNative    robot    CargoNative      remote cargo build        DeploymentWorker -> RuntimeHost
+HeavyDetector       gpu      UvRuntime         remote uv sync --locked   DeploymentWorker -> RuntimeHost
+```
+
+Plan, prepare, and run should consume the same `DeploymentPlan`; they should not independently rediscover package or assignment state.
+
+### 3.6 Module Launch Envelope
+
+After prepare and connection resolution, Runtime Host receives one unified envelope:
+
+```python
+@dataclass(frozen=True)
+class ModuleLaunchEnvelope:
+    module: str
+    runtime: RuntimeLaunch
+    config: ModuleConfigPayload
+    topics: Mapping[str, TopicBinding]
+    control: ControlEndpoint
+```
+
+```json
+{
+  "module": "MLSPlannerNative",
+  "runtime": {
+    "executable": "target/release/mls_planner"
+  },
+  "topics": {
+    "global_map": {
+      "channel": "/global_map",
+      "type": "sensor_msgs.PointCloud2",
+      "transport": "zenoh"
+    }
+  },
+  "config": {
+    "world_frame": "map",
+    "voxel_size": 0.1
+  },
+  "control": {
+    "endpoint": "..."
+  }
+}
+```
+
+This extends the current `NativeModule.stdin_config` shape. DimOS may track where fields originate internally, but Runtime Host receives one handoff containing launch metadata, module config, stream bindings, transport descriptors, and control details.
+
+### 3.7 Process topology
+
+```mermaid
+flowchart LR
+    Spec[DeploymentSpec] --> Planner[Deployment Planner]
+    Packages[deployment.py packages] --> Planner
+    Planner --> Plan[DeploymentPlan]
+
+    Plan --> Local[PythonWorker route]
+    Plan --> Worker[DeploymentWorker route]
+    Plan --> Envelope[ModuleLaunchEnvelope]
+
+    Worker --> PythonHost[Python RuntimeHost]
+    Worker --> NativeHost[Native RuntimeHost]
+
+    Envelope --> PythonHost
+    Envelope --> NativeHost
+```
 
 ## 4. Package discovery convention
 
@@ -297,37 +431,7 @@ cpp/CMakeLists.txt
 
 If exactly one preset matches, use it. If no preset or multiple presets match, fail during planning and ask the module to declare package-level configuration in `deployment.py`.
 
-## 5. Universal deployed module shape
-
-The universal shape should be the **Module Launch Envelope**, not a separate top-level `kind` field.
-
-Native and packaged Python modules both need the same handoff shape:
-
-```json
-{
-  "module": "MLSPlannerNative",
-  "runtime": {
-    "executable": "target/release/mls_planner"
-  },
-  "topics": {
-    "global_map": "/global_map#sensor_msgs.PointCloud2",
-    "path": "/path#nav_msgs.Path"
-  },
-  "config": {
-    "world_frame": "map",
-    "voxel_size": 0.1
-  },
-  "control": {
-    "endpoint": "..."
-  }
-}
-```
-
-This follows current `NativeModule.stdin_config`: one unified runtime handoff that contains launch metadata, module config values, resolved stream bindings, transport descriptors, and control details.
-
-DimOS may know internally which fields came from package convention, module config, Blueprint wiring, or Deployment Spec. Runtime Host should receive one envelope.
-
-## 6. Worker / runtime architecture
+## 5. Worker / runtime architecture
 
 Worker routing should depend on module kind, not on a top-level deployment mode.
 
@@ -397,7 +501,7 @@ Execution Target
 
 Deployment Worker is ephemeral per run. A future persistent target agent can implement the same control contract later.
 
-## 7. Control plane vs data plane
+## 6. Control plane vs data plane
 
 Deployment needs two different communication paths.
 
@@ -434,24 +538,9 @@ Data plane handles module streams:
 
 Those streams continue to use transports such as Zenoh, DDS, ROS, LCM, or SHM where applicable.
 
-V1 should report cross-target transport assumptions in `dimos deploy plan`, but it should not try to fully prove data-plane compatibility yet. Strict data-plane validation can come later.
+V1 should report cross-target transport assumptions in `dimos deploy plan`, but it should not try to fully prove data-plane compatibility yet. Strict data-plane validation can come later. Section 3.6 defines the Module Launch Envelope that carries the resolved control and stream bindings into each Runtime Host.
 
-### Module Launch Envelope
-
-The Module Launch Envelope is the shared handoff from DimOS to a Runtime Host. It should generalize the current `NativeModule.stdin_config` JSON.
-
-It should carry:
-
-- module identity,
-- implementation identity,
-- resolved config,
-- input and output stream topics,
-- transport descriptors,
-- optional control-plane details.
-
-The first implementation slice should normalize the current native stdin JSON as envelope v0 rather than introduce a large schema immediately.
-
-## 8. End-user UX
+## 7. End-user UX
 
 The safe deployment flow should be explicit:
 
@@ -506,7 +595,7 @@ Prepare should be idempotent: run the package manager, build tool, or sync tool 
 
 Open question: should `dimos deploy <deployment>` become shorthand for prepare plus run later?
 
-## 9. Lifecycle semantics
+## 8. Lifecycle semantics
 
 Deployment runs should participate in the existing lifecycle model.
 
@@ -527,7 +616,7 @@ Runtime Host death after startup should mark the deployment unhealthy. V1 should
 
 Deployment Workers need a coordinator lease. If the coordinator disappears, Deployment Workers should stop their Runtime Hosts instead of leaving orphaned robot processes.
 
-## 10. Implementation path / PR slicing
+## 9. Implementation path / PR slicing
 
 This should be built as a sequence of small PRs. PR #2704 should stay as a draft/reference for the packaged-runtime exploration; it should not merge as the public packaged-Python architecture because packaged Python and native modules should share the same Deployment Worker plus Runtime Host path.
 
@@ -618,7 +707,7 @@ This PR should:
 - launch remote Native Runtime Hosts,
 - keep packaged-Python remote and native remote separate because their prepare and failure modes differ.
 
-## 11. Open questions
+## 10. Open questions
 
 1. Exact package convention: which sibling runtime roots should v1 support?
 2. When should DimOS add optional `dimos.module.toml` or another manifest?
