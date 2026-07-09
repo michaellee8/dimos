@@ -225,6 +225,27 @@ function processTracking(frame) {
     }
     lastSendTime = now;
 
+    // Send the headset (viewer) pose alongside the controllers so modules
+    // that retarget relative to the operator's head (e.g. humanoids) can
+    // consume it. Modules that don't care ignore frame_id "head".
+    const viewerPose = frame.getViewerPose(xrRefSpace);
+    if (viewerPose && ws && ws.readyState === WebSocket.OPEN) {
+        const pos = viewerPose.transform.position;
+        const rot = viewerPose.transform.orientation;
+        const nowMs = Date.now();
+        const headPose = new geometry_msgs.PoseStamped({
+            header: new std_msgs.Header({
+                stamp: new std_msgs.Time({ sec: Math.floor(nowMs / 1000), nsec: (nowMs % 1000) * 1_000_000 }),
+                frame_id: 'head'
+            }),
+            pose: new geometry_msgs.Pose({
+                position: new geometry_msgs.Point({ x: pos.x, y: pos.y, z: pos.z }),
+                orientation: new geometry_msgs.Quaternion({ x: rot.x, y: rot.y, z: rot.z, w: rot.w })
+            })
+        });
+        ws.send(headPose.encode());
+    }
+
     // Process input sources (controllers)
     for (const inputSource of frame.session.inputSources) {
         const trackingSpace = inputSource.gripSpace || inputSource.targetRaySpace;

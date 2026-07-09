@@ -91,6 +91,7 @@ _GROOT_MODEL_DIR = LfsPath("groot")
 _MJCF_PATH = LfsPath("mujoco_sim/g1_gear_wbc.xml")
 _ROBOT_ONLY_MJCF_PATH = Path(__file__).resolve().parents[2] / "assets" / "g1_29dof.xml"
 _ROBOT_MESHDIR = LfsPath("g1_urdf/meshes")
+_G1_URDF_PATH = Path(__file__).resolve().parents[2] / "g1.urdf"
 
 _adapter_address: str | Path
 _cmd_vel_topic = "/cmd_vel" if global_config.simulation else "/g1/cmd_vel"
@@ -409,6 +410,18 @@ _coordinator = ControlCoordinator.blueprint(
             },
         ),
         *([_arm_holder] if _arm_holder is not None else []),
+        # Quest teleop arm target: coupled 14-DOF IK over both arms.
+        # Inert until wrist poses arrive on coordinator_cartesian_command
+        # (frame_id "dual_arm_ik/left|right"); once engaged it outranks
+        # servo_arms and holds the arms where the operator leaves them.
+        TaskConfig(
+            name="dual_arm_ik",
+            type="g1_dual_arm_ik",
+            joint_names=g1_arms,
+            priority=20,
+            auto_start=True,
+            params={"model_path": str(_G1_URDF_PATH)},
+        ),
     ],
 ).transports(
     {
