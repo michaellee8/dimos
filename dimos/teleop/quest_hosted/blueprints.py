@@ -40,7 +40,7 @@ from dimos.robot.manipulators.xarm.blueprints.teleop import (
     coordinator_teleop_xarm6,
     coordinator_teleop_xarm7,
 )
-from dimos.robot.manipulators.xarm.config import XARM7_SIM_PATH
+from dimos.robot.manipulators.xarm.config import XARM6_SIM_PATH, XARM7_SIM_PATH
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_basic import unitree_go2_basic
 from dimos.robot.unitree.go2.connection import GO2Connection
 from dimos.simulation.engines.mujoco_sim_module import MujocoSimModule
@@ -119,40 +119,19 @@ _ARM_BROKER_TRANSPORTS = {
 }
 
 
-# Single-camera XArm hosted teleop: one front RealSense mux'd to the video track.
-def _teleop_hosted_xarm(coordinator):
-    return (
-        autoconnect(
-            ArmHostedConnection.blueprint(task_names={"right": "teleop_xarm"}),
-            coordinator,
-            FrontCamera.blueprint(camera_name="front", enable_depth=False, enable_pointcloud=False),
-        )
-        .remappings([(FrontCamera, "color_image", "cam1_in")])
-        .transports(
-            {
-                **_ARM_BROKER_TRANSPORTS,
-                ("cam1_in", Image): LCMTransport.spec("cam1_in", Image),
-            }
-        )
-        .global_config(viewer="none")
-    )
-
-
-teleop_hosted_xarm6 = _teleop_hosted_xarm(coordinator_teleop_xarm6)
-teleop_hosted_xarm7 = _teleop_hosted_xarm(coordinator_teleop_xarm7)
-
-
 # Two-camera XArm hosted teleop: front/overview = cam1, wrist = cam2,
-# operator-selectable via camera_select, mux'd into one video track.
+# operator-selectable via camera_select, mux'd into one video track. One
+# blueprint per arm; pass --simulation for MuJoCo, omit it for real hardware.
 #
-# Real: two RealSense units (-o frontcamera.serial_number=... etc.).
-# --simulation (sim_path with named cameras only): MuJoCo renders both — the
-# coordinator already brings a bare MujocoSimModule; we override it (same class
-# = same module) with one that also renders the overview cam. env_camera →
-# cam1, wrist_camera → cam2. 848×480 matches RealSense and stays wide enough
-# for the latency stamp (needs ≥768px).
-def _teleop_hosted_xarm_multicam(coordinator, *, sim_path=None, dof=7):
-    if global_config.simulation and sim_path is not None:
+# Real: two RealSense units (-o frontcamera.serial_number=... -o
+#   wristcamera.serial_number=...).
+# --simulation: MuJoCo renders both cams from the arm's scene (env_camera →
+#   cam1, wrist_camera → cam2). The coordinator already brings a bare
+#   MujocoSimModule; we override it (same class = same module) with one that
+#   also renders the overview cam. 848×480 matches RealSense and stays wide
+#   enough for the latency stamp (needs ≥768px).
+def _teleop_hosted_xarm(coordinator, *, sim_path, dof):
+    if global_config.simulation:
         cameras = (
             MujocoSimModule.blueprint(
                 address=str(sim_path),
@@ -197,12 +176,8 @@ def _teleop_hosted_xarm_multicam(coordinator, *, sim_path=None, dof=7):
     )
 
 
-# xArm6 sim has no cameras in its MJCF (data/xarm6/scene.xml) — real-only until
-# env_camera/wrist_camera are added there. xArm7 sim renders both.
-teleop_hosted_xarm6_multicam = _teleop_hosted_xarm_multicam(coordinator_teleop_xarm6, dof=6)
-teleop_hosted_xarm7_multicam = _teleop_hosted_xarm_multicam(
-    coordinator_teleop_xarm7, sim_path=XARM7_SIM_PATH, dof=7
-)
+teleop_hosted_xarm6 = _teleop_hosted_xarm(coordinator_teleop_xarm6, sim_path=XARM6_SIM_PATH, dof=6)
+teleop_hosted_xarm7 = _teleop_hosted_xarm(coordinator_teleop_xarm7, sim_path=XARM7_SIM_PATH, dof=7)
 
 
 __all__ = [
@@ -211,7 +186,5 @@ __all__ = [
     "teleop_hosted_go2_multicam",
     "teleop_hosted_go2_transport",
     "teleop_hosted_xarm6",
-    "teleop_hosted_xarm6_multicam",
     "teleop_hosted_xarm7",
-    "teleop_hosted_xarm7_multicam",
 ]
