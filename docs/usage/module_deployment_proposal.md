@@ -94,16 +94,93 @@ These are not the same feature as packaged Python runtime work. They point at th
 
 ## 3. Proposed model
 
-The model separates three inputs and one resolved output:
+The proposal extends the existing manager/worker split instead of introducing a separate deployment stack.
 
-```text
-Blueprint              what modules exist and how they connect
-deployment.py          how a packaged/native module is prepared and launched
-DeploymentSpec         where modules run
-DeploymentPlan         validated, concrete prepare and launch actions
+```mermaid
+flowchart TD
+    Coordinator[ModuleCoordinator]
+
+    Coordinator --> PythonManager[WorkerManagerPython\none per coordinator]
+    PythonManager --> PythonWorkerA[PythonWorker]
+    PythonManager --> PythonWorkerB[PythonWorker]
+    PythonWorkerA --> ModuleA[normal Python Module]
+    PythonWorkerA --> ModuleB[normal Python Module]
+    PythonWorkerB --> ModuleC[normal Python Module]
+
+    Coordinator --> ExternalManager[WorkerManagerExternal\none per coordinator]
+    ExternalManager --> LocalWorker[ExternalWorker: local machine]
+    ExternalManager --> RobotWorker[ExternalWorker: robot machine]
+    ExternalManager --> GpuWorker[ExternalWorker: GPU machine]
+
+    LocalWorker --> LocalHost[RuntimeHost\none per ExternalModule]
+    RobotWorker --> RobotHostA[RuntimeHost]
+    RobotWorker --> RobotHostB[RuntimeHost]
+    GpuWorker --> GpuHost[RuntimeHost]
 ```
 
-### 3.1 Complete Deployment Spec
+The ownership boundaries follow current DimOS:
+
+```text
+ModuleCoordinator       groups modules by deployment backend
+WorkerManagerPython     schedules the normal Python worker pool
+PythonWorker            controls one Python worker process
+WorkerManagerExternal   assigns external modules to machine workers
+ExternalWorker          controls one worker process on one machine
+RuntimeHost             runs one external implementation
+```
+
+### 3.1 Module contract shape
+
+`ExternalModule` is a declarative `Module` subclass. It adds an implementation reference but no build, process, watchdog, or transport behavior.
+
+Packaged Python uses a class import reference:
+
+```python
+class HeavyDetector(ExternalModule):
+    implementation = "heavy_detector.module:HeavyDetectorImpl"
+
+    config: HeavyDetectorConfig
+    image: In[Image]
+    detections: Out[Detections]
+```
+
+```python
+class HeavyDetectorImpl(HeavyDetector):
+    def start(self) -> None:
+        ...
+```
+
+Runtime Host imports the class and requires:
+
+```python
+issubclass(HeavyDetectorImpl, HeavyDetector)
+```
+
+Native execution uses an executable path relative to its convention-discovered implementation folder:
+
+```python
+from pathlib import Path as FsPath
+
+
+class MLSPlanner(ExternalModule):
+    implementation = FsPath("target/release/mls_planner")
+
+    config: MLSPlannerConfig
+    global_map: In[PointCloud2]
+    goal_pose: In[PoseStamped]
+    path: Out[Path]
+```
+
+The implementation type is sufficient:
+
+```text
+str    Python class import reference
+pathlib.Path   native executable
+```
+
+The class location anchors package discovery. `ExternalModule` should not be sent to `PythonWorker`; it requires a Deployment Spec and the external worker path.
+
+### 3.2 Complete Deployment Spec
 
 A Deployment Spec references a Blueprint, defines named targets, and assigns Module Contract classes to target names:
 
@@ -121,7 +198,7 @@ go2_deployment = DeploymentSpec(
         ),
     },
     assignments={
-        MLSPlannerNative: "robot",
+        MLSPlanner: "robot",
         HeavyDetector: "gpu",
     },
 )
@@ -134,62 +211,17 @@ The v1 rules are concrete:
 - `assignments` maps Module Contract classes to target names.
 - `local` always exists as an implicit target.
 - modules absent from `assignments` run on `local`.
-- an in-environment Python module cannot be assigned to a non-local target.
-- package roots, build commands, executables, and implementation paths do not belong in `DeploymentSpec`.
-
-### 3.2 Module-owned package declarations
-
-Packaged and native modules declare their intrinsic prepare and launch information beside the Module Contract. These names illustrate the model; PR 1 will settle the exact internal API.
-
-```text
-heavy_detector/
-  heavy_detector.py
-  deployment.py
-  runtime/
-    pyproject.toml
-    uv.lock
-    src/heavy_detector_runtime/
-```
-
-```python
-# heavy_detector/deployment.py
-
-package = PackagedPythonModule(
-    contract=HeavyDetector,
-    preset=UvRuntime(
-        project="runtime",
-        implementation="heavy_detector_runtime.module:HeavyDetectorImpl",
-    ),
-)
-```
-
-```text
-mls_planner/
-  mls_planner_native.py
-  deployment.py
-  rust/
-    Cargo.toml
-    Cargo.lock
-    src/...
-```
-
-```python
-# mls_planner/deployment.py
-
-package = NativeModulePackage(
-    contract=MLSPlannerNative,
-    preset=CargoNative(
-        project="rust",
-        executable="target/release/mls_planner",
-    ),
-)
-```
-
-The package declaration owns the runtime root, implementation or executable, Convention Preset, and intrinsic prepare/launch behavior. Deployment Spec owns target assignment and deployment-time strategy; it cannot replace those package facts.
+- an in-environment Python module, the most common module kind, cannot be assigned to a non-local target.
+- each target name identifies one execution machine in v1; aliases for the same machine are rejected.
 
 ### 3.3 Key model shapes
 
-The internal model should stay data-shaped even if the first implementation uses different names:
+The public declaration remains small:
+
+```python
+class ExternalModule(Module):
+    implementation: ClassVar[str | FsPath]
+```
 
 ```python
 @dataclass(frozen=True)
@@ -201,8 +233,10 @@ class DeploymentSpec:
 
 ```python
 @dataclass(frozen=True)
-class ModulePackage:
-    contract: type[ModuleBase]
+class ResolvedExternalModule:
+    contract: type[ExternalModule]
+    implementation: str | FsPath
+    implementation_dir: Path
     preset: ConventionPreset
 ```
 
@@ -217,7 +251,8 @@ class DeploymentPlan:
 class ResolvedModuleDeployment:
     contract: type[ModuleBase]
     target_name: str
-    package: ModulePackage | None
+    target: ExecutionTarget
+    external: ResolvedExternalModule | None
     prepare_steps: tuple[PrepareStep, ...]
     worker_route: WorkerRoute
 ```
@@ -226,11 +261,11 @@ The distinction is operational:
 
 ```text
 DeploymentSpec   user-authored placement intent
-ModulePackage    module-owned prepare and launch facts
+ExternalModule   module-owned implementation declaration
 DeploymentPlan   validated and fully resolved actions
 ```
 
-### 3.4 Resolution and validation
+### 3.4 Planning, prepare, and deploy
 
 Deployment planning resolves every active Blueprint module:
 
@@ -238,36 +273,61 @@ Deployment planning resolves every active Blueprint module:
 for each active module in the Blueprint:
     target = assignments.get(module, "local")
 
-    if module is an in-environment Python module:
-        require target == "local"
-        route = PythonWorker
-    else:
-        package = discover deployment.py from the module anchor
+    if issubclass(module, ExternalModule):
+        implementation_dir = discover python/, rust/, or cpp/ beside the module
         preset = resolve exactly one Convention Preset
-        prepare_steps = preset.prepare(package, target)
-        route = DeploymentWorker -> RuntimeHost
+        prepare_steps = preset.prepare(module, implementation_dir, target)
+        route = WorkerManagerExternal -> ExternalWorker(target) -> RuntimeHost
+    else:
+        require target == "local"
+        route = WorkerManagerPython -> PythonWorker
 
     emit ResolvedModuleDeployment
 ```
+
+`WorkerManagerExternal` owns orchestration for the external backend:
+
+```text
+group modules by target
+create or reuse one ExternalWorker handle per machine
+coordinate prepare in parallel
+deploy RuntimeHosts
+roll back successful work if another deployment fails
+aggregate worker health and shutdown
+```
+
+Each coordinator-side `ExternalWorker` sends requests over one control connection to its target-side external worker entrypoint. That entrypoint executes target-local actions:
+
+```text
+run prepare steps on its machine
+spawn one RuntimeHost per ExternalModule
+forward control requests by module ID
+collect logs, readiness, health, and exit state
+stop RuntimeHosts during rollback or shutdown
+```
+
+`DeploymentPlan` is immutable data consumed by the manager/worker path; it is not a separate behavioral reconciler layer.
 
 Planning fails before mutation when:
 
 - an assignment references a target absent from `targets`,
 - an assignment references a module absent from the Blueprint,
 - an in-environment Python module is assigned remotely,
-- a packaged/native module has no discoverable package declaration,
+- an `ExternalModule` has no discoverable implementation folder,
 - zero or multiple Convention Presets match,
-- a required lockfile, project file, executable, or build declaration is missing.
+- a required lockfile, project file, source manifest, or build declaration is missing.
+
+A native executable is normally a prepare output, so planning validates its declared relative path but does not require the file to exist. Prepare must verify that the executable exists before launch.
 
 ### 3.5 Resolved plan
 
 The previous Deployment Spec should resolve to an inspectable plan:
 
 ```text
-Module              Target   Package preset   Prepare                   Worker route
-Agent               local    —                —                         PythonWorker
-MLSPlannerNative    robot    CargoNative      remote cargo build        DeploymentWorker -> RuntimeHost
-HeavyDetector       gpu      UvRuntime         remote uv sync --locked   DeploymentWorker -> RuntimeHost
+Module           Target   Preset        Prepare                   Worker route
+Agent            local    —             —                         WorkerManagerPython -> PythonWorker
+MLSPlanner       robot    CargoNative   remote cargo build        WorkerManagerExternal -> ExternalWorker -> RuntimeHost
+HeavyDetector    gpu      UvRuntime      remote uv sync --locked   WorkerManagerExternal -> ExternalWorker -> RuntimeHost
 ```
 
 Plan, prepare, and run should consume the same `DeploymentPlan`; they should not independently rediscover package or assignment state.
@@ -288,7 +348,7 @@ class ModuleLaunchEnvelope:
 
 ```json
 {
-  "module": "MLSPlannerNative",
+  "module": "MLSPlanner",
   "runtime": {
     "executable": "target/release/mls_planner"
   },
@@ -316,15 +376,17 @@ This extends the current `NativeModule.stdin_config` shape. DimOS may track wher
 ```mermaid
 flowchart LR
     Spec[DeploymentSpec] --> Planner[Deployment Planner]
-    Packages[deployment.py packages] --> Planner
+    Modules[ExternalModule declarations] --> Planner
     Planner --> Plan[DeploymentPlan]
 
-    Plan --> Local[PythonWorker route]
-    Plan --> Worker[DeploymentWorker route]
+    Plan --> PythonManager[WorkerManagerPython]
+    Plan --> ExternalManager[WorkerManagerExternal]
     Plan --> Envelope[ModuleLaunchEnvelope]
 
-    Worker --> PythonHost[Python RuntimeHost]
-    Worker --> NativeHost[Native RuntimeHost]
+    PythonManager --> PythonWorker[PythonWorker]
+    ExternalManager --> ExternalWorker[ExternalWorker: one per machine]
+    ExternalWorker --> PythonHost[Python RuntimeHost]
+    ExternalWorker --> NativeHost[Native RuntimeHost]
 
     Envelope --> PythonHost
     Envelope --> NativeHost
@@ -332,22 +394,34 @@ flowchart LR
 
 ## 4. Package discovery convention
 
-Package discovery should be **assignment-first**:
+The `ExternalModule` class file anchors package discovery. Deployment Spec only assigns that class to a target; it does not repeat or override implementation details.
 
-```python
-deployment(
-    blueprint=go2_stack,
-    targets={"robot": ssh_target("go2")},
-    assignments={
-        MLSPlannerNative: "robot",
-        HeavyDetector: "robot",
-    },
-)
+The implementation directory is selected by a hardcoded sibling convention:
+
+```text
+python/pyproject.toml   packaged Python implementation
+rust/Cargo.toml        Rust executable implementation
+cpp/CMakeLists.txt     C++ executable implementation
 ```
 
-The Deployment Spec assigns Module Contracts to targets. DimOS discovers each module package from the Module Contract or NativeModule wrapper anchor.
+Python may include Pixi or Nix metadata inside `python/`:
 
-Package settings are module-internal. Deployment Spec should not override package root, executable, implementation path, or build command. If convention discovery is ambiguous, the module should provide package-level configuration in a `deployment.py` sidecar.
+```text
+python/
+  pyproject.toml
+  uv.lock
+  pixi.toml
+  pixi.lock
+  src/...
+```
+
+The `implementation` field is interpreted using the discovered directory:
+
+```text
+python/ + str    import a Python implementation class
+rust/   + Path   launch an executable relative to rust/
+cpp/    + Path   launch an executable relative to cpp/
+```
 
 ### Existing native precedent
 
@@ -374,15 +448,26 @@ class MLSPlannerNativeConfig(NativeModuleConfig):
 
 Deployment should generalize this convention rather than replace it with a manifest immediately.
 
-For modules that use the new deployment API, add a sidecar file instead of changing the existing wrapper just to prove deployment behavior:
+The new API extends the design with a parallel declarative module, leaving the existing `NativeModule` untouched until migration:
 
 ```text
 mls_planner/
-  mls_planner_native.py        # existing NativeModule wrapper
-  deployment.py                # new package/deployment API
+  mls_planner_native.py        # existing NativeModule compatibility path
+  mls_planner_external.py      # new ExternalModule declaration
   rust/
     Cargo.toml
     src/...
+```
+
+```python
+from pathlib import Path as FsPath
+
+
+class MLSPlanner(ExternalModule):
+    implementation = FsPath("target/release/mls_planner")
+
+    global_map: In[PointCloud2]
+    path: Out[Path]
 ```
 
 ### Packaged Python mirror
@@ -391,35 +476,43 @@ Packaged Python should mirror the native shape:
 
 ```text
 detector/
-  detector_module.py           # Module Contract / wrapper
-  deployment.py                # new package/deployment API
-  runtime/
+  detector_module.py           # ExternalModule declaration
+  python/
     pyproject.toml
     uv.lock
     src/detector_runtime/
       module.py                # Runtime implementation
 ```
 
+```python
+class HeavyDetector(ExternalModule):
+    implementation = "detector_runtime.module:HeavyDetectorImpl"
+
+    image: In[Image]
+    detections: Out[Detections]
+```
+
 V1 discovery rule:
 
-1. Start at the Module Contract or NativeModule wrapper file.
+1. Start at the `ExternalModule` class file.
 2. Walk to the nearest package root.
-3. Look for sibling runtime roots such as `runtime/`, `rust/`, `cpp/`, `native/`, `pixi.toml`, or `flake.nix`.
-4. If discovery finds multiple candidates, require package-level configuration in `deployment.py`.
+3. Look for exactly one of `python/pyproject.toml`, `rust/Cargo.toml`, or `cpp/CMakeLists.txt`.
+4. Interpret `implementation` as a Python class reference or executable path according to the matched convention.
+5. Fail during planning if zero or multiple implementation directories match.
 
-Open question: exactly which directory names should be supported first?
+The convention can expand later, but v1 should not expose a project-root override.
 
 ### Convention presets
 
 Users should not need to type raw `uv sync`, `pixi install`, `cargo build`, or CMake commands for every module. DimOS should ship **Convention Presets** that recognize common layouts and expand them into default prepare, sync, and launch behavior.
 
-Examples:
+Initial presets:
 
 ```text
-runtime/pyproject.toml + runtime/uv.lock
+python/pyproject.toml + python/uv.lock
   -> uv runtime preset
 
-runtime/pixi.toml + runtime/pixi.lock + runtime/pyproject.toml
+python/pixi.toml + python/pixi.lock + python/pyproject.toml
   -> Pixi-backed Python runtime preset
 
 rust/Cargo.toml
@@ -429,31 +522,32 @@ cpp/CMakeLists.txt
   -> CMake native preset
 ```
 
-If exactly one preset matches, use it. If no preset or multiple presets match, fail during planning and ask the module to declare package-level configuration in `deployment.py`.
+Preset matching uses the most specific convention: a Python directory with Pixi metadata selects the Pixi-backed preset; otherwise `pyproject.toml` plus `uv.lock` selects the uv preset. If no preset matches or unrelated implementation directories conflict, fail during planning. Custom project-root and preset overrides are deferred until a concrete module needs them.
 
 ## 5. Worker / runtime architecture
 
-Worker routing should depend on module kind, not on a top-level deployment mode.
+DimOS keeps one manager per deployment backend:
 
 ```mermaid
 flowchart TD
-    Module[Module Contract]
+    Coordinator[ModuleCoordinator]
+    Coordinator --> PythonManager[WorkerManagerPython]
+    Coordinator --> ExternalManager[WorkerManagerExternal]
 
-    Module --> Normal[In-Environment Python Module]
-    Module --> PackagedPy[Packaged Python Module]
-    Module --> Native[Native Module]
+    PythonManager --> PythonWorker[PythonWorker pool]
+    PythonWorker --> Normal[normal Python Modules]
 
-    Normal --> PythonWorker[PythonWorker\nlocal current env]
+    ExternalManager --> LocalWorker[ExternalWorker: local]
+    ExternalManager --> RobotWorker[ExternalWorker: robot]
+    ExternalManager --> GpuWorker[ExternalWorker: GPU]
 
-    PackagedPy --> DW1[Deployment Worker\none per target]
-    Native --> DW1
-
-    DW1 --> PyHost[Python Runtime Host\none module]
-    DW1 --> NativeHost[Native Runtime Host\none module]
-
-    PyHost --> PyImpl[Python implementation\nprepared runtime]
-    NativeHost --> Bin[native executable]
+    LocalWorker --> HostA[RuntimeHost]
+    RobotWorker --> HostB[RuntimeHost]
+    RobotWorker --> HostC[RuntimeHost]
+    GpuWorker --> HostD[RuntimeHost]
 ```
+
+There is one `WorkerManagerPython` and one `WorkerManagerExternal` per coordinator. `WorkerManagerExternal` owns one coordinator-side `ExternalWorker` handle per execution machine. Each handle communicates with one target-side external worker entrypoint, which owns one `RuntimeHost` per deployed `ExternalModule`.
 
 ### Normal Python modules
 
@@ -469,37 +563,63 @@ This proposal does not replace PythonWorker. In-environment Python modules shoul
 
 ### Packaged Python modules
 
-Packaged Python modules always use Deployment Worker plus Runtime Host, even on the local machine.
+Packaged Python implementations are declared through `ExternalModule` and always use `WorkerManagerExternal`, `ExternalWorker`, and Runtime Host, even on the local machine.
 
 ```text
-Packaged Python Module -> DeploymentWorker -> Python RuntimeHost
+ExternalModule -> WorkerManagerExternal -> ExternalWorker -> Python RuntimeHost
 ```
 
-The Deployment Worker spawns and supervises the runtime host without importing user implementation code. The packaged Python entrypoint imports the implementation inside the prepared runtime.
+The ExternalWorker spawns and supervises Runtime Host without importing user implementation code. Runtime Host imports the implementation inside the prepared Python environment, verifies that it subclasses the declared `ExternalModule`, initializes it, and sends an explicit ready acknowledgement.
 
 ### Native modules
 
-Native modules also converge on Deployment Worker plus Runtime Host for both local and remote assignments.
+Native implementations use the same `ExternalModule` contract and worker hierarchy for both local and remote assignments.
 
 ```text
-Native Module -> DeploymentWorker -> Native RuntimeHost
+ExternalModule -> WorkerManagerExternal -> ExternalWorker -> Native RuntimeHost
 ```
 
-This replaces the current permanent model of hosting NativeModule wrappers inside PythonWorker. Migration can be incremental, but the target architecture should use one path.
+The existing `NativeModule` remains unchanged during initial development. New native support uses `ExternalModule`; later PRs migrate existing native modules and eventually remove `NativeModule` and `NativeModuleConfig`.
 
-### Deployment Worker and Runtime Host
+### WorkerManagerExternal
 
-V1 uses one Deployment Worker per target and one Runtime Host per packaged/native module.
+`WorkerManagerExternal` parallels `WorkerManagerPython`. It owns coordinator-side external deployment state:
 
 ```text
-Execution Target
-  DeploymentWorker
-    RuntimeHost: module A
-    RuntimeHost: module B
-    RuntimeHost: module C
+target profiles and assignments
+target name -> ExternalWorker
+parallel prepare and deployment
+rollback
+health aggregation
+shutdown
 ```
 
-Deployment Worker is ephemeral per run. A future persistent target agent can implement the same control contract later.
+It groups `DeploymentPlan` entries by machine and coordinates each machine's prepare and deploy work.
+
+### ExternalWorker
+
+`ExternalWorker` parallels `PythonWorker`. It is the coordinator-side handle to one target-side worker process on one machine:
+
+```text
+process or SSH session
+one control connection
+worker ID and machine identity
+deployed module IDs
+RuntimeHost handles on that machine
+lease and shutdown state
+```
+
+The target-side external worker entrypoint executes prepare steps, starts Runtime Hosts, forwards control requests by module ID, and stops hosts during rollback or shutdown. The `ExternalWorker` handle sends these requests and tracks their coordinator-side state; it does not execute target commands itself.
+
+V1 uses one ExternalWorker per machine per deployment run. A future persistent target agent can implement the same worker contract later.
+
+### Runtime Host
+
+Runtime Host is the external equivalent of a module instance inside `PythonWorker`. It hosts exactly one `ExternalModule` implementation, receives one Module Launch Envelope, initializes stream/control bindings, and sends an explicit ready or failure response.
+
+For packaged Python, Runtime Host is the prepared Python process: it imports and instantiates the implementation class in-process.
+
+For native execution, Runtime Host is the DimOS host process around the executable: it passes the launch envelope to the child, forwards logs and control, supervises exit, and waits for the native SDK's ready acknowledgement. This extracts and generalizes the process-management responsibilities currently implemented by `NativeModule`.
 
 ## 6. Control plane vs data plane
 
@@ -517,13 +637,13 @@ Control plane handles:
 - status,
 - method calls where supported.
 
-For packaged/native modules, control flows through:
+For `ExternalModule` implementations, control flows through:
 
 ```text
-Coordinator <-> DeploymentWorker <-> RuntimeHost
+ModuleCoordinator <-> WorkerManagerExternal <-> ExternalWorker <-> RuntimeHost
 ```
 
-Remote v1 can start the Deployment Worker over SSH and use an SSH-tunneled control connection. A persistent target agent is explicitly later work.
+Remote v1 can start the target-side ExternalWorker over SSH and use an SSH-tunneled control connection. A persistent target agent is explicitly later work.
 
 ### Deployment Data Plane
 
@@ -557,10 +677,10 @@ Dry-run. No remote mutation.
 It should show the resolved plan:
 
 ```text
-Module              Kind              Target   Worker path
-Agent               Python            local    PythonWorker
-MLSPlannerNative    native            robot    DeploymentWorker -> RuntimeHost
-HeavyDetector       packaged-python   gpu      DeploymentWorker -> RuntimeHost
+Module           Contract        Target   Worker path
+Agent            Module          local    WorkerManagerPython -> PythonWorker
+MLSPlanner       ExternalModule  robot    WorkerManagerExternal -> ExternalWorker -> RuntimeHost
+HeavyDetector    ExternalModule  gpu      WorkerManagerExternal -> ExternalWorker -> RuntimeHost
 ```
 
 It should also show:
@@ -591,6 +711,8 @@ Prepare should be idempotent: run the package manager, build tool, or sync tool 
 
 `dimos run <blueprint>` keeps today's local-default behavior.
 
+A plain Blueprint bypasses Deployment Spec planning and uses the existing coordinator and `WorkerManagerPython` path. It cannot contain `ExternalModule` declarations because those require a Deployment Spec.
+
 `dimos run <deployment>` launches a prepared deployment and registers it with the same DimOS run lifecycle commands.
 
 Open question: should `dimos deploy <deployment>` become shorthand for prepare plus run later?
@@ -599,10 +721,10 @@ Open question: should `dimos deploy <deployment>` become shorthand for prepare p
 
 Deployment runs should participate in the existing lifecycle model.
 
-- `dimos status` shows coordinator, targets, Deployment Workers, and Runtime Hosts.
+- `dimos status` shows coordinator, managers, ExternalWorkers, and Runtime Hosts.
 - `dimos stop` stops the whole deployment, not just the local coordinator process.
 - `dimos restart` reruns the original command; it should not implicitly prepare unless the original command did.
-- `dimos log` aggregates coordinator, Deployment Worker, Runtime Host, packaged Python, and native process logs.
+- `dimos log` aggregates coordinator, ExternalWorker, Runtime Host, packaged Python, and native process logs.
 
 Startup should be fail-fast:
 
@@ -614,11 +736,11 @@ if any module fails before deployment is ready:
 
 Runtime Host death after startup should mark the deployment unhealthy. V1 should not auto-restart by default; robot safety makes restart policy an explicit later feature.
 
-Deployment Workers need a coordinator lease. If the coordinator disappears, Deployment Workers should stop their Runtime Hosts instead of leaving orphaned robot processes.
+ExternalWorkers need a coordinator lease. If the coordinator disappears, each ExternalWorker should stop its Runtime Hosts instead of leaving orphaned robot processes.
 
 ## 9. Implementation path / PR slicing
 
-This should be built as a sequence of small PRs. PR #2704 should stay as a draft/reference for the packaged-runtime exploration; it should not merge as the public packaged-Python architecture because packaged Python and native modules should share the same Deployment Worker plus Runtime Host path.
+This should be built as a sequence of small PRs. PR #2704 should stay as a draft/reference for the packaged-runtime exploration; it should not merge as the public packaged-Python architecture because packaged Python and native implementations should share the `ExternalModule` and external worker path.
 
 ### PR 1: internal shape and skeletons
 
@@ -626,10 +748,12 @@ Define the internal deployment layer without adding user-facing CLI commands or 
 
 Include:
 
-- `dimos/core/deployment/` package,
+- deployment data models and planning under `dimos/core/deployment/`,
+- manager/worker skeletons beside the current worker implementation under `dimos/core/coordination/`,
+- declarative `ExternalModule` base,
 - internal `DeploymentSpec` / target / assignment models,
 - `ModuleLaunchEnvelope` model,
-- `DeploymentWorker` and `RuntimeHost` skeletons,
+- `WorkerManagerExternal`, `ExternalWorker`, and `RuntimeHost` skeletons,
 - Convention Preset interfaces,
 - isolated planner tests with fake modules and fake backends,
 - a short in-tree design doc.
@@ -650,7 +774,9 @@ This PR should:
 
 - require a Deployment Spec even for local packaged Python,
 - prepare the local Python runtime project,
-- launch a local Python Runtime Host through Deployment Worker,
+- wire `WorkerManagerExternal` into `ModuleCoordinator`,
+- launch a local Python Runtime Host through the local ExternalWorker,
+- require the imported Python implementation to subclass its `ExternalModule` contract,
 - preserve Python module semantics where practical,
 - avoid the runtime-specific PythonWorker pool approach explored in PR #2704.
 
@@ -658,30 +784,31 @@ Open question: what is the first runnable entrypoint before the full deployment 
 
 ### PR 3: local native automatic prepare/build
 
-Add native automatic build/prepare through the new deployment API without changing existing NativeModule wrapper files.
+Add native automatic build/prepare and launch through `ExternalModule` without changing existing `NativeModule` wrapper files.
 
 This PR should:
 
 - use Deployment Spec,
-- add `deployment.py` sidecar for a native module package,
+- add a new `ExternalModule` declaration beside an existing native module,
 - use Convention Presets for a native package such as `rust/Cargo.toml`,
-- run prepare/build before launch,
-- keep existing NativeModule launch path for now.
+- run prepare/build through `WorkerManagerExternal` and the target ExternalWorker,
+- launch the executable through a Native Runtime Host,
+- leave the existing `NativeModule` class and existing native wrappers unchanged.
 
-Use `MLSPlannerNative` to prove the real wrapper plus `rust/Cargo.toml` convention.
+Use the MLS planner package to prove the real sibling `rust/Cargo.toml` convention while keeping `MLSPlannerNative` available as the compatibility path.
 
 ### PR 4: NativeModule runtime migration
 
-Move native launch onto Deployment Worker plus Native Runtime Host.
+Migrate existing `NativeModule` declarations onto `ExternalModule`, ExternalWorker, and Native Runtime Host.
 
 This PR should:
 
 - migrate a tiny native example first,
-- keep legacy NativeModule wrapper path available for unmigrated modules,
+- keep the legacy `NativeModule` path available for unmigrated modules,
 - make the new path recommended for migrated modules,
 - avoid a flag-day migration across all native modules.
 
-After the path is stable, migrate `MLSPlannerNative` and then other native modules.
+After the path is stable, migrate `MLSPlannerNative` and then other native modules. Remove `NativeModule` and `NativeModuleConfig` only after all callers migrate.
 
 ### PR 5: SSH remote packaged Python
 
@@ -692,7 +819,7 @@ This PR should:
 - define SSH target profiles,
 - sync packaged Python source to the target,
 - prepare the Python runtime on the target,
-- start an ephemeral Deployment Worker over SSH,
+- start one ExternalWorker for the remote machine over SSH,
 - launch remote Python Runtime Hosts,
 - keep the control contract compatible with a future persistent target agent.
 
@@ -704,19 +831,19 @@ This PR should:
 
 - sync native source or prepared artifacts,
 - support remote native build or cross-compile-and-sync strategies,
+- reuse the machine's ExternalWorker,
 - launch remote Native Runtime Hosts,
 - keep packaged-Python remote and native remote separate because their prepare and failure modes differ.
 
 ## 10. Open questions
 
-1. Exact package convention: which sibling runtime roots should v1 support?
-2. When should DimOS add optional `dimos.module.toml` or another manifest?
-3. What is the PR 2 run entrypoint for local packaged-Python Deployment Specs before the full CLI/registry exists?
-4. When should deployment definitions get YAML/TOML after Python-first API?
-5. How should shared target profiles and local overlays layer secrets and personal machine details?
-6. Should `dimos deploy <deployment>` ever become shorthand for prepare plus run?
-7. When should strict data-plane compatibility checks become mandatory?
-8. What is the minimal resolved-plan JSON schema for tooling and CI?
+1. When should DimOS add optional `dimos.module.toml` or another manifest?
+2. What is the PR 2 run entrypoint for local packaged-Python Deployment Specs before the full CLI/registry exists?
+3. When should deployment definitions get YAML/TOML after Python-first API?
+4. How should shared target profiles and local overlays layer secrets and personal machine details?
+5. Should `dimos deploy <deployment>` ever become shorthand for prepare plus run?
+6. When should strict data-plane compatibility checks become mandatory?
+7. What is the minimal resolved-plan JSON schema for tooling and CI?
 
 ## Suggested narrative
 
