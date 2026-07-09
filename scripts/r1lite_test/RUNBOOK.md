@@ -111,6 +111,27 @@ debug software** — that mistake cost a full session.
 - On-robot `ros2 topic list/echo` may show nothing after `ros2 daemon
   stop` — daemon cache warming, not an outage; wait or use --no-daemon.
 
+## Running the dimos blueprints (fast path, 2026-07-09)
+
+One-time on the laptop: `uv tool install rerun-sdk==0.29.2` (host-native
+viewer; the repo venv is container-built and not executable on the host).
+
+Then, with the robot stack up (see every-session bring-up above):
+```bash
+./scripts/r1lite_test/run_r1lite.sh                        # coordinator + viewer
+./scripts/r1lite_test/run_r1lite.sh r1lite-keyboard-teleop # teleop (RC mode 5!)
+```
+The script starts the laptop rerun viewer (:9877) if needed, starts the
+container, and runs the blueprint with VIEWER=rerun-connect.
+
+Manual equivalent: [laptop] `rerun --port 9877` · [container]
+`VIEWER=rerun-connect dimos run r1lite-coordinator`.
+
+Viewer rules learned the hard way (BRINGUP_LOG Day 3): never launch GUI
+viewers inside the container (X11/GL crashes); `dimos run` defaults to
+viewer=rerun (NOT headless — use `--viewer none` for headless);
+rerun-web mode hung worker 0 — avoid until debugged.
+
 ## Not yet done
 
 - Torso task-space experiment (target_speed_torso, MPC path) — designed

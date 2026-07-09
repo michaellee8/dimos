@@ -538,3 +538,45 @@ Tooling lesson for the record: non-interactive SSH does not source
 ~/.bashrc → any remote ros2/rclpy one-liner MUST set ROS_DOMAIN_ID=2
 explicitly, and robot-side `ros2` CLI depends on a flaky daemon — prefer
 direct rclpy via python3 heredoc for instrumentation.
+
+## 2026-07-09 (later) — R1LiteConnection LIVE: runs 1 & 2 PASS ✅
+
+**R1LiteConnection module + r1lite-coordinator / r1lite-keyboard-teleop
+blueprints written** (mirroring R1ProConnection; torso commands dropped,
+grippers first-class, chassis dead-man streaming, validated acc limits).
+Registered in all_blueprints. Venv had regressed to py3.12 (host Booster
+work re-synced it — bind-mount see-saw); rebuilt py3.10.
+
+**Run 1 (coordinator, hardware):** all 25 transports up, feedback found
+instantly, coordinator ticked 100Hz streaming hold-position to the arms —
+**arms perfectly still for 40s** (bootstrap gate + hold-current-pose
+verified on hardware). Fixed a teardown race found in the log (publish
+loop vs dying ROS context — loop now joins before courtesy chassis-zero).
+
+**Run 2 (cameras in rerun):** left wrist + right wrist + head streaming
+live in the two-tab layout, ~1.2 GiB/10s, smooth. Verified end-to-end:
+ROS compressed → connection decode → LCM → rerun bridge → viewer.
+
+**The viewer saga (write-off of ~45 min):**
+- `dimos run` is NEVER headless: global_config default viewer="rerun" —
+  the bridge always composes. True headless = `--viewer none`.
+- Native viewer in container: X11 auth fail; after `xhost +local:` it
+  crashed anyway (software-GL/winit BadDrawable — rerun-in-docker is
+  unsupported). Container GUIs: don't.
+- rerun-web mode: hung worker 0 mid-start (R1LiteConnection never finished
+  starting — cohabits worker 0 with the bridge), only grpc :9876 up, :9090
+  never served; ugly force-kill shutdowns. Isolated probe of
+  serve_web_viewer() worked — suspicion: first-use asset fetch blocking
+  worker 0. (My "rerun-web-viewer package missing" theory was WRONG —
+  invented package name; assets ship in rerun-sdk.)
+- **WINNING SETUP: viewer on the laptop + connect mode.** Host venv is
+  container-built (py3.10 shebangs → not executable on host), so:
+  `uv tool install rerun-sdk==0.29.2` on the host, `rerun --port 9877`,
+  and in the container VIEWER=rerun-connect (global_config reads env
+  vars). Host networking makes 127.0.0.1:9877 shared. Clean shutdowns.
+- One-command launcher added: `scripts/r1lite_test/run_r1lite.sh`
+  (starts host viewer if needed, starts container, runs blueprint with
+  VIEWER=rerun-connect).
+
+Remaining for blueprint validation: run 3 = r1lite-keyboard-teleop
+(chassis via full dimos chain; RC mode 5 + staging).
