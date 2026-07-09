@@ -121,12 +121,30 @@ _DEPTH_CAMERAS: dict[str, str] = {
 
 
 def _make_qos() -> Any:
-    """BEST_EFFORT + VOLATILE — the profile every R1 Lite topic uses."""
+    """BEST_EFFORT + VOLATILE — for SUBSCRIPTIONS (robot publishes best-effort)."""
     from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
     return QoSProfile(
         depth=10,
         reliability=ReliabilityPolicy.BEST_EFFORT,
+        durability=DurabilityPolicy.VOLATILE,
+    )
+
+
+def _make_cmd_qos() -> Any:
+    """RELIABLE + VOLATILE — for command PUBLISHERS.
+
+    A reliable publisher delivers to both reliable and best-effort
+    subscribers; a best-effort publisher is DDS-incompatible with reliable
+    subscribers ("No messages will be sent") — and the R1 Lite has at
+    least one RELIABLE subscriber on target_speed_chassis (observed
+    2026-07-09 during keyboard-teleop run 3).
+    """
+    from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+
+    return QoSProfile(
+        depth=10,
+        reliability=ReliabilityPolicy.RELIABLE,
         durability=DurabilityPolicy.VOLATILE,
     )
 
@@ -398,18 +416,19 @@ class R1LiteConnection(Module):
 
         assert self._ros is not None
         qos = _make_qos()
+        cmd_qos = _make_cmd_qos()
 
         self._cmd_left_topic = RawROSTopic(
-            "/motion_target/target_joint_state_arm_left", RosJointState, qos=qos
+            "/motion_target/target_joint_state_arm_left", RosJointState, qos=cmd_qos
         )
         self._cmd_right_topic = RawROSTopic(
-            "/motion_target/target_joint_state_arm_right", RosJointState, qos=qos
+            "/motion_target/target_joint_state_arm_right", RosJointState, qos=cmd_qos
         )
         self._cmd_gripper_left_topic = RawROSTopic(
-            "/motion_target/target_position_gripper_left", RosJointState, qos=qos
+            "/motion_target/target_position_gripper_left", RosJointState, qos=cmd_qos
         )
         self._cmd_gripper_right_topic = RawROSTopic(
-            "/motion_target/target_position_gripper_right", RosJointState, qos=qos
+            "/motion_target/target_position_gripper_right", RosJointState, qos=cmd_qos
         )
         self._fb_torso_topic = RawROSTopic(
             "/hdas/feedback_torso", RosJointState, qos=qos
@@ -427,13 +446,13 @@ class R1LiteConnection(Module):
             "/hdas/feedback_gripper_right", RosJointState, qos=qos
         )
         self._speed_topic = RawROSTopic(
-            "/motion_target/target_speed_chassis", TwistStamped, qos=qos
+            "/motion_target/target_speed_chassis", TwistStamped, qos=cmd_qos
         )
         self._acc_topic = RawROSTopic(
-            "/motion_target/chassis_acc_limit", TwistStamped, qos=qos
+            "/motion_target/chassis_acc_limit", TwistStamped, qos=cmd_qos
         )
         self._brake_topic = RawROSTopic(
-            "/motion_target/brake_mode", Bool, qos=qos
+            "/motion_target/brake_mode", Bool, qos=cmd_qos
         )
         self._chassis_speed_topic = RawROSTopic(
             "/motion_control/chassis_speed", TwistStamped, qos=qos
