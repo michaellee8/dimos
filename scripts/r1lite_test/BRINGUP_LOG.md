@@ -633,3 +633,16 @@ workflow (run_r1lite.sh). Evidence package ready for a dimos-core issue:**
 repro = any blueprint w/ RerunBridge viewer_mode=web in a worker; py-spy
 dump as above; suggested fix directions = call serve_grpc off the worker
 hot path / spawn-context workers / rerun version bump.
+
+**rerun-web WORKAROUND VALIDATED (sidecar pattern):** in-container
+`rerun --serve-web --port 9877` (headless — no X11 needed) + blueprint in
+VIEWER=rerun-connect → browser at
+http://127.0.0.1:9090?url=rerun%2Bhttp%3A%2F%2Flocalhost%3A9877%2Fproxy
+shows all cameras live; R1LiteConnection starts cleanly (rust server in
+its own process = fork can't poison it — confirms the root-cause theory).
+Gotchas: plain :9090 without the ?url= param = empty viewer (must use the
+full URL the sidecar prints); add --memory-limit 2GB or the sidecar
+buffers history until RAM (hit 1GiB in 38s of cameras).
+run_r1lite.sh now has --web mode implementing this. Proper core fix
+proposal stands: bridge.py web mode should spawn the server subprocess +
+connect_grpc instead of in-process serve_grpc.

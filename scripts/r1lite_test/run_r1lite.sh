@@ -20,10 +20,30 @@
 
 set -e
 
+# --web: serve the viewer as a headless in-container sidecar and view in
+# the BROWSER at http://127.0.0.1:9090?url=rerun%2Bhttp%3A%2F%2Flocalhost%3A9877%2Fproxy
+# (dimos' built-in rerun-web mode is known-broken: rr.serve_grpc()
+# GIL-deadlocks in forkserver workers — BRINGUP_LOG Day 3. The sidecar
+# keeps the rust server in its own process, which is why it works.)
+WEB=0
+if [ "$1" = "--web" ]; then
+    WEB=1
+    shift
+fi
+
 BLUEPRINT="${1:-r1lite-coordinator}"
 
-RERUN_BIN="$(command -v rerun || echo "$HOME/.local/bin/rerun")"
-if ! ss -tln | grep -q ':9877 '; then
+if [ "$WEB" = "1" ]; then
+    if ! ss -tln | grep -q ':9877 '; then
+        echo "[run_r1lite] starting headless web sidecar in container (:9877 grpc, :9090 browser)"
+        docker start dimos-dev-r1lite >/dev/null 2>&1 || true
+        docker exec -d dimos-dev-r1lite rerun --serve-web --port 9877 --memory-limit 2GB
+        sleep 2
+    fi
+    echo "[run_r1lite] BROWSER VIEWER:"
+    echo "    http://127.0.0.1:9090?url=rerun%2Bhttp%3A%2F%2Flocalhost%3A9877%2Fproxy"
+elif ! ss -tln | grep -q ':9877 '; then
+    RERUN_BIN="$(command -v rerun || echo "$HOME/.local/bin/rerun")"
     if [ -x "$RERUN_BIN" ]; then
         echo "[run_r1lite] starting rerun viewer on :9877"
         ("$RERUN_BIN" --port 9877 >/dev/null 2>&1 &)
