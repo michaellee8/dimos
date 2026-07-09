@@ -16,6 +16,10 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 validator = { version = "0.20", features = ["derive"] }
+zenoh = { version = "1", features = ["unstable"] }
 
 [dev-dependencies]
 tracing-test = "0.2"
+
+[[example]]
+name = "transport_bench"
