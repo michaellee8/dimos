@@ -325,10 +325,12 @@ class UnitreeWebRTCConnection(Resource):
         """Send a parameterless SPORT_MOD command by api_id (Hello, Stretch, ...)."""
         return bool(self.publish_request(RTC_TOPIC["SPORT_MOD"], {"api_id": api_id}))
 
-    def set_obstacle_avoidance(self, enabled: bool = True) -> None:
-        self.publish_request(
-            RTC_TOPIC["OBSTACLES_AVOID"],
-            {"api_id": 1001, "parameter": {"enable": int(enabled)}},
+    def set_obstacle_avoidance(self, enabled: bool = True) -> bool:
+        return bool(
+            self.publish_request(
+                RTC_TOPIC["OBSTACLES_AVOID"],
+                {"api_id": 1001, "parameter": {"enable": int(enabled)}},
+            )
         )
 
     def set_motion_mode(self, name: str) -> None:

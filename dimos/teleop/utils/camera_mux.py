@@ -167,6 +167,8 @@ class CameraMuxMixin:
     def _set_cam_selection(self, cams: list[str]) -> None:
         """camera_select: filter to known names (fallback first cam), then
         republish immediately so the view flips without waiting for a frame."""
+        if not isinstance(cams, list):  # untrusted wire payload (e.g. null)
+            cams = []
         sel = [c for c in cams if c in self._cam_order] or self._cam_order[:1]
         with self._cam_lock:
             self._cam_selected = sel

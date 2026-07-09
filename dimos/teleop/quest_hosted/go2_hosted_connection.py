@@ -126,6 +126,7 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         self._cmd_executor: ThreadPoolExecutor | None = None
         self._cmd_pending = 0
         self._cmd_lock = threading.Lock()
+        self._safety_epoch = 0
         self._nonce_results: dict[Any, tuple[bool | None, float]] = {}
         self._speaker_track: PCMAudioTrack | None = None
         self._posture = "StandReady"
@@ -253,10 +254,22 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
 
     # ─── E-STOP latch + operator-loss safety ─────────────────────────
 
+    def _bump_safety_epoch(self) -> int:
+        """Invalidate any in-flight non-urgent task (E-STOP / operator-lost)."""
+        with self._cmd_lock:
+            self._safety_epoch += 1
+            return self._safety_epoch
+
+    def _safety_ok(self, epoch: int) -> bool:
+        """True while no E-STOP / operator-lost has fired since `epoch`."""
+        with self._cmd_lock:
+            return self._safety_epoch == epoch
+
     def _handle_estop(self, nonce: Any) -> None:
         """Latch E-STOP and urgently Damp the robot."""
         # Latch first so move() is gated before the Damp RPC even lands.
         self._estopped = True
+        self._bump_safety_epoch()  # abort any in-flight non-urgent task
         logger.warning("E-STOP latched by operator")
         self._cancel_nav()
 
@@ -284,6 +297,7 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         # Zero the base and clear the nonce cache (browser nonces restart at 1
         # per session, so a stale entry would re-ack instead of executing).
         logger.warning("operator link lost — stopping motion")
+        self._bump_safety_epoch()  # abort any in-flight non-urgent task
         self._cancel_nav()
         with self._cmd_lock:
             self._nonce_results.clear()
@@ -420,22 +434,34 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         # stick emulation, which needs BOTH the BalanceStand FSM and firmware
         # joystick listening on; the sequence + sleeps are load-bearing. Each
         # step is checked so the operator's ack reflects reality, not optimism.
+        epoch = self._safety_epoch  # abort the rest of the sequence if E-STOP fires
+
         def _step(label: str, ok: object) -> bool:
             if not ok:
                 logger.warning("StandReady: %s failed", label)
             return bool(ok)
 
+        def _fenced_sleep(sec: float) -> bool:
+            time.sleep(sec)
+            if not self._safety_ok(epoch):
+                logger.warning("StandReady aborted: E-STOP / operator-lost mid-sequence")
+                return False
+            return True
+
         if not _step("standup", self.connection.standup()):
             return False
-        time.sleep(3.0)  # standup must finish before the FSM transitions
+        if not _fenced_sleep(3.0):  # standup must finish before the FSM transitions
+            return False
         if not _step(
             "RecoveryStand", self.connection.sport_command(ALLOWED_SPORT_CMDS["RecoveryStand"])
         ):
             return False
-        time.sleep(0.3)
+        if not _fenced_sleep(0.3):
+            return False
         if not _step("balance_stand", self.connection.balance_stand()):
             return False
-        time.sleep(0.3)
+        if not _fenced_sleep(0.3):
+            return False
         if not _step("switch_joystick", self.connection.switch_joystick(True)):
             return False
         self._posture = "StandReady"
@@ -471,10 +497,11 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
         nonce = msg.get("nonce")
 
         def task() -> bool:
-            self.connection.set_obstacle_avoidance(enabled)
-            self._obstacle_avoidance = enabled
-            logger.info("obstacle_avoidance: enabled=%s", enabled)
-            return True
+            ok = bool(self.connection.set_obstacle_avoidance(enabled))
+            if ok:
+                self._obstacle_avoidance = enabled
+            logger.info("obstacle_avoidance: enabled=%s ok=%s", enabled, ok)
+            return ok
 
         self._submit_cmd(f"obstacle_avoidance {enabled}", nonce, task)
 

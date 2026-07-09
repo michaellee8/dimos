@@ -93,6 +93,7 @@ def _bare_connection() -> Go2HostedConnection:
     conn._cmd_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Go2CmdTest")
     conn._cmd_pending = 0
     conn._cmd_lock = threading.Lock()
+    conn._safety_epoch = 0
     conn._nonce_results = {}
     conn._rage_active = False
     _live_executors.append(conn._cmd_executor)
@@ -455,6 +456,34 @@ def test_stand_ready_returns_false_and_stops_on_step_failure(
     assert conn._posture == "Sit"
 
 
+def test_stand_ready_aborts_when_estop_fires_mid_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E-STOP during a StandReady sleep must abort the rest of the sequence so
+    the robot can't stand back up after the Damp."""
+    conn = _bare_connection()
+    conn._posture = "Sit"
+    conn.connection.standup.return_value = True
+    conn.connection.sport_command.return_value = True
+    conn.connection.balance_stand.return_value = True
+    conn.connection.switch_joystick.return_value = True
+
+    # First sleep = E-STOP fires (bumps the safety epoch), then sleeps no-op.
+    def fake_sleep(_s: float) -> None:
+        if not conn._estopped:
+            conn._estopped = True
+            conn._bump_safety_epoch()
+
+    monkeypatch.setattr(time, "sleep", fake_sleep)
+
+    assert conn._stand_ready_task() is False
+    # standup ran, but the post-sleep fence aborts before RecoveryStand etc.
+    conn.connection.standup.assert_called_once()
+    conn.connection.balance_stand.assert_not_called()
+    conn.connection.switch_joystick.assert_not_called()
+    assert conn._posture == "Sit"  # never latched StandReady
+
+
 # ─── telemetry state snapshot (operator UI seeding) ──────────────────
 
 
@@ -538,6 +567,37 @@ def test_light_failure_keeps_state(monkeypatch: pytest.MonkeyPatch) -> None:
     _wait_for(lambda: (16, False) in acks)
 
     assert conn._light == 0.0
+
+
+def test_obstacle_avoidance_acks_true_and_updates_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = _bare_connection()
+    conn.connection.set_obstacle_avoidance.return_value = True
+    acks: list[tuple[Any, bool]] = []
+    monkeypatch.setattr(conn, "_send_ack", lambda nonce, ok: acks.append((nonce, ok)))
+
+    conn._handle_obstacle_avoidance({"enabled": False, "nonce": 20})
+    _wait_for(lambda: (20, True) in acks)
+
+    conn.connection.set_obstacle_avoidance.assert_called_once_with(False)
+    assert conn._obstacle_avoidance is False
+
+
+def test_obstacle_avoidance_failure_acks_false_and_keeps_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed request must not ACK ok=True or flip the reported state."""
+    conn = _bare_connection()
+    conn._obstacle_avoidance = True
+    conn.connection.set_obstacle_avoidance.return_value = False
+    acks: list[tuple[Any, bool]] = []
+    monkeypatch.setattr(conn, "_send_ack", lambda nonce, ok: acks.append((nonce, ok)))
+
+    conn._handle_obstacle_avoidance({"enabled": False, "nonce": 21})
+    _wait_for(lambda: (21, False) in acks)
+
+    assert conn._obstacle_avoidance is True  # unchanged on failure
 
 
 def test_posture_tracks_successful_posture_commands(monkeypatch: pytest.MonkeyPatch) -> None:

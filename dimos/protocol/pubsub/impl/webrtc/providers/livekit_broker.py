@@ -173,9 +173,11 @@ class _VideoPublisher:
             opts = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA)
             max_bitrate, max_fps = self._encoding
             if max_bitrate > 0 or max_fps > 0:
-                opts.video_encoding = rtc.VideoEncoding(
-                    max_bitrate=max_bitrate or 3_000_000,
-                    max_framerate=max_fps or 30.0,
+                opts.video_encoding.CopyFrom(
+                    rtc.VideoEncoding(
+                        max_bitrate=max_bitrate or 3_000_000,
+                        max_framerate=max_fps or 30.0,
+                    )
                 )
             await self._room.local_participant.publish_track(track, opts)
         except Exception:
@@ -349,6 +351,12 @@ class LiveKitBrokerProvider(AsyncProviderBase):
 
     def _dispatch(self, packet: Any) -> None:
         topic = getattr(packet, "topic", "") or ""
+        # Directionality: only operator→robot topics are accepted inbound, so a
+        # remote packet can't inject on robot outbound topics (state_reliable_back
+        # / map_unreliable). Mirrors publish()'s OUTBOUND_CHANNELS guard.
+        if topic not in self.INBOUND_CHANNELS:
+            logger.warning("Dropping inbound LiveKit packet on non-inbound topic %r", topic)
+            return
         payload = getattr(packet, "data", b"")
         if isinstance(payload, (bytearray, memoryview)):
             payload = bytes(payload)

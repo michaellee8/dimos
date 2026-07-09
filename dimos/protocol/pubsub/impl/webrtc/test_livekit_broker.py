@@ -21,6 +21,8 @@ and runs everywhere.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 
@@ -71,7 +73,59 @@ def test_gray16_scales_not_truncates() -> None:
     assert buf[0] == 0xFF  # >>8, not & 0xFF (which would give 0)
 
 
+def test_float_image_scales_not_truncates() -> None:
+    f = np.full((1, 1, 3), 1.0, np.float32)  # normalized white
+    _, _, buf = _image_to_rgba(_img(f, ImageFormat.RGB))
+    assert buf[:3] == bytes((255, 255, 255))  # scaled, not truncated to 0
+
+
 @pytest.mark.skipif(not LIVEKIT_AVAILABLE, reason="livekit extra not installed")
 def test_provider_requires_api_key() -> None:
     with pytest.raises(RuntimeError, match="api_key required"):
         LiveKitBrokerConfig()._create()
+
+
+def _bare_provider() -> object:
+    """A provider with just the state _dispatch touches (no room / SDK)."""
+    import threading
+
+    from dimos.protocol.pubsub.impl.webrtc.providers.livekit_broker import LiveKitBrokerProvider
+
+    p = object.__new__(LiveKitBrokerProvider)
+    p._lock = threading.RLock()
+    p._callbacks = {}
+    return p
+
+
+def test_dispatch_drops_non_inbound_topic() -> None:
+    """A remote packet on a robot-outbound topic must not reach subscribers."""
+    p = _bare_provider()
+    got: list[bytes] = []
+    p._callbacks = {"state_reliable_back": [lambda data, _t: got.append(data)]}
+    packet = SimpleNamespace(topic="state_reliable_back", data=b"spoofed")
+
+    p._dispatch(packet)  # type: ignore[attr-defined]
+
+    assert got == []  # dropped, never fanned out
+
+
+def test_dispatch_delivers_inbound_topic() -> None:
+    p = _bare_provider()
+    got: list[bytes] = []
+    p._callbacks = {"cmd_unreliable": [lambda data, _t: got.append(data)]}
+    packet = SimpleNamespace(topic="cmd_unreliable", data=b"drive")
+
+    p._dispatch(packet)  # type: ignore[attr-defined]
+
+    assert got == [b"drive"]
+
+
+@pytest.mark.skipif(not LIVEKIT_AVAILABLE, reason="livekit extra not installed")
+def test_video_encoding_copyfrom_does_not_raise() -> None:
+    """TrackPublishOptions.video_encoding is a protobuf field — CopyFrom works,
+    direct assignment raises. Guards against regressing to the broken form."""
+    from livekit import rtc
+
+    opts = rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_CAMERA)
+    opts.video_encoding.CopyFrom(rtc.VideoEncoding(max_bitrate=3_000_000, max_framerate=30.0))
+    assert opts.video_encoding.max_bitrate == 3_000_000

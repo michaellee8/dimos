@@ -24,6 +24,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
 from dimos.teleop.utils.camera_mux import CameraMuxMixin
@@ -120,3 +121,12 @@ def test_switch_between_selections_stays_even() -> None:
             mux._cam_selected = list(selection)
         out = mux._composite()
         assert out is not None and _is_even(out), f"odd dims for {selection}"
+
+
+@pytest.mark.parametrize("cams", [None, "cam1", 5, {"cam1": 1}])
+def test_set_cam_selection_ignores_non_list(cams: object) -> None:
+    # Untrusted wire payload (e.g. cams:null) must not raise into the state
+    # handler; a bad value falls back to the first camera.
+    mux = _Mux(["cam1", "cam2"])
+    mux._set_cam_selection(cams)  # type: ignore[arg-type]
+    assert mux._cam_selected == ["cam1"]
