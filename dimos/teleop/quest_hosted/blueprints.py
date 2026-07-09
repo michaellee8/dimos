@@ -87,13 +87,15 @@ teleop_hosted_go2_livekit = (
     .transports(
         {
             ("cmd_vel", Twist): LiveKitTransport.spec("cmd_unreliable", TwistStamped),
-            ("color_image", Image): LiveKitVideoTransport.spec(),
+            # mux_image (not color_image): same muxed/stamped output as the CF path.
+            ("mux_image", Image): LiveKitVideoTransport.spec(),
             ("state_json", bytes): LiveKitTransport.spec("state_reliable"),
             ("telemetry_out", bytes): LiveKitTransport.spec("state_reliable_back"),
             ("cmd_raw", bytes): LiveKitTransport.spec("cmd_unreliable"),  # stats tap
-            ("cmd_vel_stamped", TwistStamped): LiveKitTransport.spec(
-                "cmd_unreliable", TwistStamped
-            ),
+            # LCM, not the broker: cmd_vel_stamped is the robot re-publishing the
+            # decoded operator cmd for the local recorder — publishing it back on
+            # cmd_unreliable would echo onto the operator→robot channel.
+            ("cmd_vel_stamped", TwistStamped): LCMTransport.spec("cmd_vel_stamped", TwistStamped),
         }
     )
     .global_config(viewer="none")

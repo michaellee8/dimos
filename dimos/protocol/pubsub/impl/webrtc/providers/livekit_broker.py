@@ -32,7 +32,7 @@ import contextlib
 import importlib.util
 import json
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from dimos.protocol.pubsub.impl.webrtc.providers.spec import (
     AsyncProviderBase,
@@ -41,6 +41,15 @@ from dimos.protocol.pubsub.impl.webrtc.providers.spec import (
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
+
+
+def _log_publish_exc(fut: Any) -> None:
+    """Surface exceptions from a fire-and-forget publish_data future."""
+    try:
+        fut.result()
+    except Exception:
+        logger.debug("LiveKit publish failed", exc_info=True)
+
 
 # find_spec instead of importing: the livekit rtc SDK pulls native libs and
 # core.transport imports this module everywhere. Imported lazily on start().
@@ -57,7 +66,12 @@ if TYPE_CHECKING:
 
 
 class LiveKitBrokerConfig(ProviderConfig):
-    """Hosted teleop over LiveKit. Config from transports.broker.* (TRANSPORTS__BROKER__*)."""
+    """Hosted teleop over LiveKit. Shares the ``transports.broker.*`` config
+    namespace with the Cloudflare ``BrokerConfig`` (same broker service)."""
+
+    # Share the "broker" config key with BrokerConfig instead of deriving
+    # "livekitbroker" from the class name (see transport_config_name).
+    _config_name: ClassVar[str] = "broker"
 
     broker_url: str | None = None
     api_key: str | None = None
@@ -173,10 +187,14 @@ class _VideoPublisher:
 
 class LiveKitBrokerProvider(AsyncProviderBase):
     """Bidirectional broker-mediated LiveKit provider. Inbound delivered to
-    subscribers by topic; ``publish()`` on any topic (cmd lossy, rest reliable).
+    subscribers by topic; the robot ``publish()``es only on outbound topics.
     LiveKit analog of ``BrokerProvider``."""
 
-    LOSSY_TOPICS = ("cmd_unreliable",)
+    # Match BrokerProvider so robot code can't publish onto an operator→robot
+    # channel (which would echo back to subscribers on the same room).
+    INBOUND_CHANNELS = ("cmd_unreliable", "state_reliable")
+    OUTBOUND_CHANNELS = ("state_reliable_back", "map_unreliable")
+    LOSSY_TOPICS = ("map_unreliable",)
 
     def __init__(self, config: LiveKitBrokerConfig | None = None) -> None:
         if not LIVEKIT_AVAILABLE:
@@ -360,12 +378,18 @@ class LiveKitBrokerProvider(AsyncProviderBase):
         coro = self._room.local_participant.publish_data(
             pong, reliable=True, topic="state_reliable_back"
         )
-        asyncio.run_coroutine_threadsafe(coro, self._loop)
+        asyncio.run_coroutine_threadsafe(coro, self._loop).add_done_callback(_log_publish_exc)
 
     # ─── Public API (Provider) ───────────────────────────────────────
 
     def publish(self, topic: str, data: bytes) -> None:
-        """Robot → operator on any topic; drops while no room is connected."""
+        """Robot → operator on an outbound topic; drops while no room is
+        connected. Rejects operator→robot topics (would echo to subscribers)."""
+        if topic not in self.OUTBOUND_CHANNELS:
+            raise ValueError(
+                f"Robot can only publish on {self.OUTBOUND_CHANNELS}; "
+                f"{topic!r} is an operator→robot channel"
+            )
         if isinstance(data, (bytearray, memoryview)):
             data = bytes(data)
         reliable = topic not in self.LOSSY_TOPICS
@@ -373,7 +397,8 @@ class LiveKitBrokerProvider(AsyncProviderBase):
             if not self._started or self._loop is None or self._room is None:
                 return
             coro = self._room.local_participant.publish_data(data, reliable=reliable, topic=topic)
-            asyncio.run_coroutine_threadsafe(coro, self._loop)
+            fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        fut.add_done_callback(_log_publish_exc)
 
     def set_video_frame(self, img: Image) -> None:
         """Robot → operator video: publish the latest camera frame (thread-safe)."""

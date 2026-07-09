@@ -76,6 +76,7 @@ def _bare_connection() -> Go2HostedConnection:
         map_min_resolution=0.1,
         odom_hz=15.0,
         nav_yield_sec=1.0,
+        max_nav_goal_m=100.0,
     )
     conn._last_map_pub = 0.0
     conn._last_drive_ts = 0.0
@@ -816,7 +817,18 @@ def test_nav_goal_publishes_pose_and_acks(monkeypatch: pytest.MonkeyPatch) -> No
     assert acks == [(11, True)]
 
 
-@pytest.mark.parametrize("msg", [{}, {"x": "a", "y": 1}, {"x": float("nan"), "y": 0}])
+@pytest.mark.parametrize(
+    "msg",
+    [
+        {},
+        {"x": "a", "y": 1},
+        {"x": float("nan"), "y": 0},
+        {"x": float("inf"), "y": 0},
+        {"x": -float("inf"), "y": 0},
+        {"x": 1e309, "y": 0},  # overflows to inf
+        {"x": 500.0, "y": 0},  # beyond max_nav_goal_m
+    ],
+)
 def test_nav_goal_malformed_rejected(msg: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     conn = _bare_connection()
     acks: list[tuple[Any, bool]] = []

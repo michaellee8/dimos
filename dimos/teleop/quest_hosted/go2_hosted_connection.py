@@ -25,6 +25,7 @@ import base64
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 import struct
 import threading
 import time
@@ -81,6 +82,7 @@ class Go2HostedConnectionConfig(ConnectionConfig):
     odom_hz: float = 15.0
     speaker: bool = True
     nav_yield_sec: float = 1.0
+    max_nav_goal_m: float = 100.0  # reject click-to-nav goals beyond this radius
 
 
 class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
@@ -205,7 +207,11 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
             logger.warning("nav_goal: malformed %r", msg)
             self._send_ack(nonce, False)
             return
-        if x != x or y != y:  # NaN
+        # Reject NaN/inf and absurd distances — a malformed operator click must
+        # not inject an unreachable goal into the planner.
+        limit = self.config.max_nav_goal_m
+        if not (math.isfinite(x) and math.isfinite(y)) or abs(x) > limit or abs(y) > limit:
+            logger.warning("nav_goal: out-of-range (%r, %r)", x, y)
             self._send_ack(nonce, False)
             return
         pose = PoseStamped(

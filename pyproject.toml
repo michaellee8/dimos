@@ -348,7 +348,7 @@ apriltag = [
 ]
 
 all = [
-    "dimos[agents,apriltag,base,cpu,cuda,drone,manipulation,misc,perception,sim,unitree,visualization,web,webrtc]",
+    "dimos[agents,apriltag,base,cpu,cuda,drone,livekit,manipulation,misc,perception,sim,unitree,visualization,web,webrtc]",
 ]
 
 [dependency-groups]
