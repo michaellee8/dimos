@@ -30,6 +30,9 @@ from dimos.hardware.manipulators.spec import (
     ManipulatorAdapter,
     ManipulatorInfo,
 )
+from dimos.utils.logging_config import setup_logger
+
+logger = setup_logger()
 
 # Unit conversion constants
 MM_TO_M = 0.001
@@ -235,16 +238,22 @@ class XArmAdapter(ManipulatorAdapter):
         return self.set_control_mode(ControlMode.SERVO_POSITION)
 
     def deactivate(self) -> bool:
-        """Move the arm to its initial joint pose and enter stopped state."""
+        """Move the arm to its initial joint pose, then disable motion + stop.
+
+        Motion is ALWAYS disabled — even if the homing move fails (e.g. the arm
+        is in a warning state) — so a failed home never leaves a real arm
+        energized. Returns True only if every step succeeded.
+        """
         if not self._arm:
             return False
 
         self._prepare_for_position_motion()
-        if not self._move_to_initial_pose():
-            return False
+        homed = self._move_to_initial_pose()
+        if not homed:
+            logger.warning("xArm deactivate: move-to-initial-pose failed; disabling motion anyway")
         self._arm.motion_enable(enable=False)
         code: int = self._arm.set_state(4)
-        return code == 0
+        return homed and code == 0
 
     def _move_to_initial_pose(self) -> bool:
         if not self._arm:
@@ -260,6 +269,16 @@ class XArmAdapter(ManipulatorAdapter):
             mvacc=_XARM_LIFECYCLE_ACCEL_DEG,
             wait=True,
         )
+        if code != 0:
+            logger.warning(
+                "xArm move-to-initial-pose failed: set_servo_angle code=%s "
+                "(state=%s mode=%s err=%s warn=%s)",
+                code,
+                self._arm.state,
+                self._arm.mode,
+                self._arm.error_code,
+                self._arm.warn_code,
+            )
         return code == 0
 
     def _initial_joints_degrees(self) -> list[float] | None:
