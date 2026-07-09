@@ -96,6 +96,8 @@ def _image_to_rgba(img: Image) -> tuple[int, int, bytes]:
     arr = img.data
     if arr.dtype == np.uint16:
         arr = (arr >> 8).astype(np.uint8)  # scale 16-bit (e.g. GRAY16) to 8-bit, not truncate
+    elif np.issubdtype(arr.dtype, np.floating):
+        arr = (np.clip(arr, 0.0, 1.0) * 255).astype(np.uint8)  # [0,1] float → 0-255
     elif arr.dtype != np.uint8:
         arr = arr.astype(np.uint8)
     h, w = arr.shape[:2]
@@ -256,8 +258,8 @@ class LiveKitBrokerProvider(AsyncProviderBase):
         def _on_data(packet: Any) -> None:
             self._dispatch(packet)
 
-        # Operator leaving the room = command plane gone — same synthetic
-        # operator_lost signal as the Cloudflare path.
+        # Operator gone = command plane gone (assumes robot + single-operator
+        # room; filter by identity here if observers are ever admitted).
         @self._room.on("participant_disconnected")  # type: ignore[untyped-decorator]
         def _on_participant_gone(_participant: Any) -> None:
             self._notify_operator_lost()

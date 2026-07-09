@@ -490,7 +490,7 @@ class Go2HostedConnection(GO2Connection, HostedConnectionMixin):
             logger.warning("light: malformed brightness %r", raw)
             self._send_ack(nonce, False)
             return
-        if brightness != brightness:  # NaN
+        if math.isnan(brightness):
             self._send_ack(nonce, False)
             return
         brightness = max(0.0, min(1.0, brightness))
