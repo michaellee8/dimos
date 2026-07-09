@@ -38,6 +38,9 @@ from dimos.utils.trigonometry import angle_diff
 
 logger = setup_logger()
 
+# Max staleness (s) for tf lookups against a live odometry stamp.
+TF_LOOKUP_TOLERANCE_S = 0.1
+
 
 class BasicPathFollowerConfig(ModuleConfig):
     base_frame: str = "base_link"
@@ -100,7 +103,7 @@ class BasicPathFollower(Module):
 
     def _on_odometry(self, msg: Odometry) -> None:
         # Steer from the robot base pose, not the LIO body frame.
-        base = self.tf.get(msg.frame_id, self.config.base_frame, msg.ts, 1.0)
+        base = self.tf.get(msg.frame_id, self.config.base_frame, msg.ts, TF_LOOKUP_TOLERANCE_S)
         if base is None:
             return
         with self._lock:

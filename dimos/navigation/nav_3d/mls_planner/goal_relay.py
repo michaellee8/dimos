@@ -23,6 +23,9 @@ from dimos.msgs.geometry_msgs.PointStamped import PointStamped
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.nav_msgs.Odometry import Odometry
 
+# Max staleness (s) for tf lookups against a live odometry stamp.
+TF_LOOKUP_TOLERANCE_S = 0.1
+
 
 class GoalRelayConfig(ModuleConfig):
     base_frame: str = "base_link"
@@ -53,8 +56,10 @@ class GoalRelay(Module):
         self.register_disposable(Disposable(self.goal.subscribe(self._on_goal)))
 
     def _on_odometry(self, msg: Odometry) -> None:
-        base = self.tf.get(msg.frame_id, self.config.base_frame, msg.ts, 1.0)
-        mount = self.tf.get(self.config.base_frame, self.config.sensor_frame, msg.ts, 1.0)
+        base = self.tf.get(msg.frame_id, self.config.base_frame, msg.ts, TF_LOOKUP_TOLERANCE_S)
+        mount = self.tf.get(
+            self.config.base_frame, self.config.sensor_frame, msg.ts, TF_LOOKUP_TOLERANCE_S
+        )
         if base is None or mount is None:
             return
         base_height = self.config.lidar_height - mount.translation.z

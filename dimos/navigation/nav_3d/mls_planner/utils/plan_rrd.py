@@ -158,9 +158,7 @@ def _log_odometry(
     trail: list[tuple[float, float, float]],
     base_from_sensor: Transform | None,
 ) -> None:
-    """Log the sensor pose as a moving mid360_link transform with an XYZ axis
-    triad, plus the trajectory trail growing over time. The triad is a static
-    child of world/mid360_link, so it inherits this transform and sweeps along the path."""
+    """Log the moving sensor pose and its growing trajectory trail."""
     px, py, pz, qx, qy, qz, qw = pose
     rr.set_time(TIMELINE, timestamp=ts)
     rr.log(
@@ -477,8 +475,6 @@ def main(
 
         rr.log("world/goal", rr.Points3D([goal], colors=[[255, 0, 0]], radii=0.1), static=True)
 
-        # Static XYZ axis triads in the odometry sensor frame and the derived
-        # robot base frame.
         base_from_sensor = _base_from_sensor(store)
         entities = ["world/mid360_link/axes"] + (
             ["world/base_link/axes"] if base_from_sensor else []
@@ -498,7 +494,6 @@ def main(
                 ),
                 static=True,
             )
-        # also show the outline of the robot
         if base_from_sensor is not None:
             rr.log(
                 "world/base_link/outline",

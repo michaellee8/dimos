@@ -1,10 +1,22 @@
-//! A consumer-side transform client for native modules.
+// Copyright 2026 Dimensional Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Consumer-side transform client for native modules.
 //!
-//! Mirrors the Python `dimos.protocol.tf` semantics: a module subscribes to the
-//! `/tf` topic, every `TFMessage` edge is buffered per `(parent, child)` pair,
-//! and [`Tf::get`] answers a query by composing transforms along the shortest
-//! path through the frame graph. Lookups are nearest-in-time within a tolerance,
-//! not interpolated, matching the Python buffer.
+//! Each `/tf` edge is buffered per `(parent, child)`, and [`Tf::get`] composes
+//! the shortest path through the frame graph. Lookups are nearest-in-time within
+//! a tolerance, not interpolated.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
@@ -37,7 +49,7 @@ pub struct Transform {
 }
 
 impl Transform {
-    /// The transform as an `nalgebra` isometry, ready to apply to a point.
+    /// The transform as an isometry.
     pub fn isometry(&self) -> Isometry3<f64> {
         self.iso
     }
@@ -77,7 +89,7 @@ struct Sample {
     iso: Isometry3<f64>,
 }
 
-// One edge's time-sorted history, pruned to a fixed-duration window.
+// One edge's time-sorted history, capped to a fixed-duration window.
 struct TBuffer {
     buffer_size: f64,
     samples: Vec<Sample>,
@@ -231,7 +243,7 @@ impl MultiTBuffer {
         Some(steps.fold(first, |acc, step| acc.compose(&step)))
     }
 
-    // Shortest path of edges from parent to child (Python's BFS over the graph).
+    // Shortest path of edges from parent to child.
     fn bfs(
         &self,
         parent: &str,
@@ -394,7 +406,7 @@ mod tests {
         assert_eq!(inv.child, "base_link");
     }
 
-    // Mirrors test_tf_ros_example: a 30-degree yaw then a pure translation.
+    // A 30-degree yaw then a pure translation.
     #[test]
     fn composes_ros_example_chain() {
         let (tf, h) = tf_with(DEFAULT_TF_BUFFER_SIZE);
@@ -415,7 +427,7 @@ mod tests {
         assert_eq!(t.child, "end_effector");
     }
 
-    // Mirrors test_tf_main: world->robot->sensor multi-hop composition.
+    // world->robot->sensor multi-hop composition.
     #[test]
     fn composes_multi_hop_chain() {
         let (tf, h) = tf_with(DEFAULT_TF_BUFFER_SIZE);
