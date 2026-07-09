@@ -108,8 +108,12 @@ _ARM_BROKER_TRANSPORTS = {
     # Station → coordinator (LCM, cross-worker). right_controller_output carries
     # the delta pose stamped with the task name (routes to the TeleopIKTask);
     # teleop_buttons carries the engage / analog-trigger state.
+    # The topic MUST match the coordinator's coordinator_cartesian_command input,
+    # which resolves to the "/"-prefixed default topic — without the leading
+    # slash the poses publish to a topic the coordinator never subscribes to, so
+    # the arm engages but never moves.
     ("right_controller_output", PoseStamped): LCMTransport.spec(
-        "coordinator_cartesian_command", PoseStamped
+        "/coordinator_cartesian_command", PoseStamped
     ),
     ("teleop_buttons", Buttons): LCMTransport.spec("teleop_buttons", Buttons),
 }
