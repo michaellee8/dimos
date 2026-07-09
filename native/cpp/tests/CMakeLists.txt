@@ -13,9 +13,27 @@ add_executable(dimos_native_tests
   test_main.cpp
   test_transport.cpp
   test_log.cpp
+  test_transport_selection.cpp
 )
 target_link_libraries(dimos_native_tests PRIVATE dimos_native doctest::doctest)
 target_compile_options(dimos_native_tests PRIVATE -Wall -Wextra -Werror)
+
+# LcmTransport needs liblcm, which isn't always present (system pkg-config often
+# lacks it; it comes in via nix). Compile-check the adapter only when LCM is
+# discoverable, so the core suite still builds anywhere.
+find_package(PkgConfig QUIET)
+if(PkgConfig_FOUND)
+  pkg_check_modules(LCM IMPORTED_TARGET lcm)
+endif()
+if(LCM_FOUND)
+  message(STATUS "dimos_native: liblcm found, including LcmTransport compile check")
+  target_sources(dimos_native_tests PRIVATE test_lcm_transport.cpp)
+  target_link_libraries(dimos_native_tests PRIVATE PkgConfig::LCM)
+  find_package(Threads REQUIRED)
+  target_link_libraries(dimos_native_tests PRIVATE Threads::Threads)
+else()
+  message(STATUS "dimos_native: liblcm not found, skipping LcmTransport compile check")
+endif()
 
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(dimos_native_tests)
