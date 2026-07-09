@@ -130,7 +130,10 @@ Manual equivalent: [laptop] `rerun --port 9877` · [container]
 Viewer rules learned the hard way (BRINGUP_LOG Day 3): never launch GUI
 viewers inside the container (X11/GL crashes); `dimos run` defaults to
 viewer=rerun (NOT headless — use `--viewer none` for headless);
-rerun-web mode hung worker 0 — avoid until debugged.
+**rerun-web is KNOWN-BROKEN in-container** — root-caused via py-spy:
+rr.serve_grpc() GIL-spins inside dimos forkserver workers, starving every
+thread in worker 0 (dimos-core × rerun 0.29.2 bug, affects all robots'
+web mode; evidence in BRINGUP_LOG). Use rerun-connect.
 
 ## Not yet done
 
