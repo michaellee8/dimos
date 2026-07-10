@@ -71,7 +71,8 @@ teleop/
 │       └── static/index.html    # WebXR client
 ├── quest_hosted/
 │   ├── go2_hosted_connection.py # Go2 driver + hosted plane (transport-swap)
-│   ├── hosted_base.py           # Shared control-plane mixin + camera mux
+│   ├── arm_hosted_connection.py # Arm hosted plane → ControlCoordinator over LCM
+│   ├── hosted_base.py           # HostedConnectionMixin: shared control plane + camera mux
 │   ├── blueprints.py            # Pre-wired blueprints
 │   ├── README.md                # Channel/CF gotchas, threads, sidecars
 │   ├── hosted_teleop_module.py  # DEPRECATED — legacy self-connecting base
@@ -84,8 +85,8 @@ teleop/
 │       └── static/index.html    # Mobile sensor web app
 ├── utils/
 │   ├── teleop_transforms.py     # WebXR → robot frame math
-│   ├── recorder.py              # Generic SQLite recorder (writes .db + report.md on stop)
-│   ├── report.py                # generate_report(db_path) — read .db, emit report.md + PNGs
+│   ├── recorder.py              # Generic SQLite recorder (writes .db + report.json on stop)
+│   ├── report.py                # generate_report(db_path) — read .db, emit report.json
 │   └── stream_stats.py          # LiveStreamStats + pcts/loss_pct (shared math)
 └── blueprints.py                # Module blueprints for easy instantiation
 ```

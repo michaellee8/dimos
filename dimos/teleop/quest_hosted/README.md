@@ -12,17 +12,23 @@ per-process `BrokerProvider` (`dimos/protocol/pubsub/impl/webrtc/providers/`);
 blueprints bind `Cloudflare*`/`LiveKit*` transports to the streams of ONE
 module per robot so everything shares that single session:
 
-- **`go2_hosted_connection.py`** — Go2 driver + hosted plane in one module
-  (subclasses `GO2Connection`; the driver is `dedicated_worker=True`, so the
-  broker-bound streams must live in its process).
-- **`hosted_base.py`** — `HostedConnectionMixin`: the shared control plane
-  (state_json dispatch, cmd_ack, E-STOP latch, telemetry) + camera mux
-  (`dimos/teleop/utils/camera_mux.py`). A new robot shape implements its hooks.
+- **`hosted_base.py`** — `HostedConnectionMixin` (subclasses `CameraMuxMixin`):
+  the shared control plane — `state_json` dispatch, `cmd_ack`, E-STOP latch,
+  telemetry — plus the camera mux (`dimos/teleop/utils/camera_mux.py`). A new
+  robot shape mixes this in and implements its hooks.
+- **`go2_hosted_connection.py`** — `Go2HostedConnection`: Go2 driver + hosted
+  plane in one module (subclasses `GO2Connection` + the mixin; the driver is
+  `dedicated_worker=True`, so the broker-bound streams must live in its process).
+- **`arm_hosted_connection.py`** — `ArmHostedConnection`: hosted plane for
+  coordinator-driven arms (`ArmTeleopModule` + the mixin). No robot connection
+  to subclass — actuation runs through the `ControlCoordinator`, fed over LCM
+  (`/coordinator/cartesian_command`, `frame_id` = task name).
 - **`blueprints.py`** — wires the above to robots, cameras, and transports.
 - **`hosted_teleop_module.py`** / **`hosted_extensions.py`** — DEPRECATED,
   do not use for new work: the pre-transport-swap stack (the module owns its
-  own RTCPeerConnection). Still used by the `teleop-hosted-go2` blueprint;
-  delete once it migrates to the transport-swap module above.
+  own RTCPeerConnection). Still used by the `teleop-hosted-go2` /
+  `teleop-hosted-xarm7` blueprints; delete once those migrate to the
+  transport-swap modules above.
 
 The operator HTML lives in the [dimensional-teleop](https://github.com/dimensionalOS/dimensional-teleop)
 broker repo (`web/`), not here.

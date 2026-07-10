@@ -38,7 +38,9 @@ overrides. All broker settings can also be passed on the CLI, e.g.
 | `teleop-hosted-go2-transport` | Cloudflare | Drive + camera + minimap + click-to-nav (recommended) |
 | `teleop-hosted-go2-livekit` | LiveKit | Drive + camera + state; no minimap/click-nav yet |
 | `teleop-hosted-go2-multicam` | Cloudflare | Adds a second RealSense, operator-selectable, mux'd into one video track |
+| `teleop-hosted-xarm7-multicam` | Cloudflare | UFactory xArm7 IK via the ControlCoordinator, front + wrist RealSense |
 | `teleop-hosted-go2` | Cloudflare | Legacy `HostedTwistTeleopModule` wrapper (transport-swap above is preferred) |
+| `teleop-hosted-xarm7` | Cloudflare | Legacy `HostedArmTeleopModule` wrapper (multicam transport-swap above is preferred) |
 
 The transport blueprints bind `Cloudflare*` / `LiveKit*` transports directly to
 one module's streams (`Go2HostedConnection`), which shares a single broker
@@ -57,11 +59,13 @@ the robot blueprint decides what to do with it.
 |--------|-------|---------|
 | Desktop browser | **WASD** keyboard | `TwistStamped` → `cmd_vel` |
 | Phone | **On-screen WASD** | same path as keyboard |
-| Quest 3 | **Left thumbstick** Y → fwd/back, X → strafe; **Right thumbstick** X → yaw | `Joy` → derived twist on the robot |
+| Quest 3 (Go2) | **Left thumbstick** Y → fwd/back, X → strafe; **Right thumbstick** X → yaw | `Joy` → derived twist on the robot |
+| Quest 3 (xArm7) | **Controller poses** + analog triggers | `PoseStamped` → coordinator IK task; triggers → gripper |
 
-Shift = 2× speed, Ctrl = ½×. The operator can also send allow-listed posture
-commands (Stand, Sit, Damp, …), toggle obstacle avoidance / the head LED, pick
-the camera, E-STOP, and click the minimap to navigate.
+Shift = 2× speed, Ctrl = ½×. The operator can also send allow-listed sport
+commands (RecoveryStand, Sit, Damp, Hello, Stretch, FrontJump, FrontPounce),
+toggle obstacle avoidance / rage mode / the head LED, pick the camera, E-STOP,
+and click the minimap to navigate.
 
 ## Live metrics HUD
 
@@ -97,12 +101,14 @@ regenerate from an old .db with `python -m dimos.teleop.utils.report path.db`.
 | `video_max_width` / `video_max_fps` | `0` (source) | Publish-side caps for constrained uplinks |
 | `map_hz` / `odom_hz` | `2.0` / `15.0` | Minimap grid + robot-pose push rates (`0` = off) |
 | `speaker` | `true` | Play operator mic on the dog's speaker (needs broker `audio_in`) |
-| `max_nav_goal_m` | `100.0` | Reject click-to-nav goals beyond this (axis-aligned bound) |
-| `allow_acrobatics` | `false` | Gate FrontJump / FrontPounce off the default command allow-list |
+| `map_min_resolution` | `0.1` | Coarsen finer occupancy grids to this m/cell before encoding for the minimap |
+| `nav_yield_sec` | `1.0` | How long a live WASD twist suppresses the nav planner's `cmd_vel` |
 
 Broker settings live under `transports.broker.*`: `api_key` (required),
-`broker_url`, `robot_id`, `robot_name`, and — Cloudflare only — `audio_in`
-(operator→robot mic, opt-in) and `video_codec` (`h264` default).
+`broker_url`, `robot_id`, `robot_name` (`"robot"` default), `stun_url`,
+`video_codec` (`""` = aiortc default order; e.g. `h264`/`vp8`), and — for the
+operator→robot mic — `audio_in` (opt-in, ships dark until the robot has
+audio-out).
 
 ## How it connects
 
