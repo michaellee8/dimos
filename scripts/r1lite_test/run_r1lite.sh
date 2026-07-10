@@ -43,13 +43,7 @@ ON_ROBOT=0
 
 if [ "$ON_ROBOT" = "1" ]; then
     # Ensure the Galaxea stack is up (only possible when running locally).
-    if ! tmux ls 2>/dev/null | grep -q hdas; then
-        echo "[run_r1lite] Galaxea stack not running — booting R1LITEBody.d (~30s, arms twitch)"
-        ( cd "$HOME/galaxea/install/startup_config/share/startup_config/script" \
-          && ./robot_startup.sh boot ../sessions.d/ATCStandard/R1LITEBody.d )
-        sleep 30
-        tmux kill-session -t r1lite_teleop 2>/dev/null || true
-    fi
+    "$REPO_ROOT/scripts/r1lite_test/roslaunch.sh"
     # Headless box: no desktop viewer. Default to the web sidecar unless a
     # forwarded display exists (ssh -X) and the user asked for teleop.
     if [ "$WEB" = "0" ] && [ -z "$DISPLAY" ]; then

@@ -32,14 +32,12 @@ Consoles: **[laptop]** = plain laptop shell · **[robot]** = `ssh r1lite` ·
    ```bash
    source .venv/bin/activate && source /opt/ros/humble/setup.bash && export ROS_DOMAIN_ID=2
    ```
-4. **[robot] Stack** (if `tmux ls` shows nothing):
+4. **[robot] Stack** (arms/grippers twitch ~30s = HDAS health sign; kills
+   the GELLO teleop session to keep it off the arms):
    ```bash
-   cd ~/galaxea/install/startup_config/share/startup_config/script
-   ./robot_startup.sh boot ../sessions.d/ATCStandard/R1LITEBody.d
-   # wait ~30s (arms/grippers twitch = HDAS health sign), then:
-   tmux kill-session -t r1lite_teleop     # keep GELLO teleop off the arms
+   cd ~/dimos && ./scripts/r1lite_test/roslaunch.sh   # no-op if already up
    ```
-   Shutdown: `./robot_startup.sh kill`
+   Shutdown: `./scripts/r1lite_test/roslaunch.sh stop`
 
 ## Validated tests (all ✅, safe to recreate)
 

@@ -4,7 +4,9 @@
 # (repo is public — no credentials needed on the robot):
 #     git clone -b krishna/task/r1lite-integration \
 #         https://github.com/dimensionalOS/dimos.git ~/dimos
-#     cd ~/dimos && bash scripts/r1lite_test/r1lite_dimos_install.sh
+#     cd ~/dimos
+#     ./scripts/r1lite_test/roslaunch.sh        # stack up (final DDS check needs it)
+#     bash scripts/r1lite_test/r1lite_dimos_install.sh
 #
 # Idempotent; prompts before every host change. Host changes (with consent):
 #   docker.io (apt) · container "dimos-dev-r1lite" · py3.10 venv in it ·
@@ -104,7 +106,7 @@ import rclpy, dimos
 from dimos.robot.galaxea.r1lite.connection import R1LiteConnection
 R1LiteConnection.blueprint()
 print(\"    imports + blueprint: OK\")"'
-echo "    DDS cross-boundary check (needs the Galaxea stack running):"
+echo "    DDS cross-boundary check (needs the Galaxea stack running — ./scripts/r1lite_test/roslaunch.sh):"
 $DOCKER exec "$CONTAINER" bash -c 'cd /app && source .venv/bin/activate && source /opt/ros/humble/setup.bash && export ROS_DOMAIN_ID=2 && timeout 15 python - <<PYEOF
 import time, rclpy
 from rclpy.qos import QoSProfile, ReliabilityPolicy
