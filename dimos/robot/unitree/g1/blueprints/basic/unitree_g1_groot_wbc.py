@@ -297,8 +297,6 @@ if global_config.simulation == "mujoco":
         (ControlCoordinator, "twist_command", "cmd_vel"),
     ]
 else:
-    import os
-
     from dimos.hardware.sensors.lidar.pointlio.module import PointLio
     from dimos.mapping.ray_tracing.module import RayTracingVoxelMap
     from dimos.robot.unitree.g1.wholebody_connection import G1WholeBodyConnection
