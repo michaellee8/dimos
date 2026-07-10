@@ -437,6 +437,9 @@ jobs:
             # GitHub Actions only honours `container:` on Linux runners.
             container:
               image: ghcr.io/dimensionalos/ros-dev@${{ needs.compute-ros-pin.outputs.digest }}
+              # Hard-cap container RAM so a runaway test OOMs inside the container, not
+              # as a host global-OOM that takes out sshd/tmux.
+              options: --memory=6g --memory-swap=6g
               # Persist Nix state on the self-hosted runner's filesystem so
               # the ~3 GB module closures survive between jobs.
               volumes:
@@ -528,7 +531,8 @@ jobs:
           extra-trusted-public-keys = dimensionalos.cachix.org-1:20ynj6TjpoD3qTxkdNoeHtgs2G2pNvgAq1EQYLTHJXI=
           always-allow-substitutes = true
           build-users-group =
-          max-jobs = auto
+          # Substitute-only: everything should be compiled already and stored in Cachix.
+          max-jobs = 0
           EOF
           echo "/nix/var/nix/profiles/default/bin" >> "$GITHUB_PATH"
       - name: Fetch cmu_nav native modules from Cachix
