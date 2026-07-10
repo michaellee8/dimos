@@ -266,6 +266,7 @@ if global_config.simulation == "mujoco":
     _auto_dry_run = False
     _default_ramp_seconds = 0.0
     _decimation: int | None = 1
+    _n_workers = 2  # sim: keep the default worker count
     _arm_holder = TaskConfig(
         name="servo_arms",
         type="servo",
@@ -306,13 +307,17 @@ else:
     _backend = G1WholeBodyConnection.blueprint(release_sport_mode=True)
     _adapter_type = "transport_lcm"
     _adapter_address = ""
-    _tick_rate = 500.0
+    # The onboard Jetson can't sustain a 500 Hz tick; it collapses to ~90 Hz
+    # and starves the policy, so balance decays.
+    _tick_rate = 100.0
     # Real hardware: come up unarmed + dry-run; operator must click
     # Activate (10 s ramp) after verifying commands.
     _auto_arm = False
     _auto_dry_run = True
     _default_ramp_seconds = 10.0
-    _decimation = None  # task default (10) pairs with 500 Hz tick.
+    _decimation = 2  # 100 Hz tick / 2 = 50 Hz policy (training + sim rate).
+    # One process per heavy module; fewer workers starve the Rerun bridge.
+    _n_workers = 10
     # Real hardware needs the arms held -- kd damping alone would let
     # them sag toward singular configurations between trajectories.
     _arm_holder = TaskConfig(
@@ -450,6 +455,10 @@ _rerun_config: dict[str, Any] = {
     },
     "max_hz": {
         "world/coordinator_joint_state": 20.0,
+        # Raw state streams arrive at ~440 Hz; useful only as debug plots.
+        "world/g1/imu": 10.0,
+        "world/g1/motor_states": 10.0,
+        "world/g1/motor_command": 10.0,
         "world/odometry": 15.0,
         "world/global_map": 1.0,
         "world/global_costmap": 2.0,
@@ -520,5 +529,5 @@ _coordinator = ControlCoordinator.blueprint(
 unitree_g1_groot_wbc = (
     autoconnect(_backend, _coordinator, _nav_stack, _viewer())
     .remappings(cast("Any", _remappings))
-    .global_config(robot_model="unitree_g1")
+    .global_config(robot_model="unitree_g1", n_workers=_n_workers)
 )
