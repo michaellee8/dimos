@@ -107,8 +107,10 @@ regenerate from an old .db with `python -m dimos.teleop.utils.report path.db`.
 Broker settings live under `transports.broker.*`: `api_key` (required),
 `broker_url`, `robot_id`, `robot_name` (`"robot"` default), `stun_url`,
 `video_codec` (`""` = aiortc default order; e.g. `h264`/`vp8`), and — for the
-operator→robot mic — `audio_in` (opt-in, ships dark until the robot has
-audio-out).
+operator→robot mic — `audio_in` (opt-in). With `audio_in=true` the offer
+carries a recvonly audio transceiver; the broker pulls the operator's mic onto
+the session and the Go2 plays it on the dog's speaker (`speaker=true`, on by
+default).
 
 ## How it connects
 
