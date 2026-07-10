@@ -20,6 +20,14 @@ _Avoid_: extra group, passive target group, unconstrained target
 A motion recipe where the tool center point follows a straight Cartesian segment from its start pose to its target pose within configured Cartesian tolerance.
 _Avoid_: linear joint motion, linear motion
 
+**TCP target planning**:
+A manipulation-planning capability where the final tool center point pose is constrained but the intermediate path shape is not.
+_Avoid_: Cartesian planning when path shape is unspecified, linear TCP path planning
+
+**Cartesian servo / IK control**:
+A live manipulation-control capability that follows Cartesian commands through inverse kinematics during execution rather than producing an offline geometric path.
+_Avoid_: Cartesian planning, linear TCP path planning, TCP target planning
+
 **Linear TCP trajectory smoothing**:
 A manipulation-planning capability that makes a Linear TCP path executable without treating every intermediate Cartesian sample as a stop, while preserving Cartesian-line tolerance.
 _Avoid_: waypoint skipping, making linear motion faster
@@ -347,6 +355,54 @@ _Avoid_: backend-native action vector, opaque simulator action, stream transport
 **Benchmark episode config**:
 A backend-facing declaration of benchmark intent that names the task, robot, runtime constraints, and evaluation setup before any DimOS blueprint is launched.
 _Avoid_: hardware config, simulator config, blueprint config
+
+**Static spatial evaluation**:
+An evaluation where an agent may reason through multiple turns but must answer a grounded spatial question from one spatial snapshot without receiving new environment data.
+_Avoid_: short-horizon spatial evaluation, one-shot agent evaluation, embodied task-success evaluation, simulator rollout
+
+**Spatial snapshot**:
+An immutable bundle of synchronized robot observations and accumulated spatial belief available at one selected recording timestamp. It may contain state derived from earlier observations but never data from after the selected timestamp.
+_Avoid_: RGB frame when multiple spatial modalities are present, Scene source snapshot, recording
+
+**Spatial evaluation system**:
+The complete configured agent pathway evaluated against a spatial snapshot, including its model, instructions, spatial representations, tools, and adapters. The benchmark scores this pathway as one system rather than attributing performance to individual components.
+_Avoid_: model-only score, tool-only score, component-isolated spatial evaluation
+
+**Environment-scale spatial understanding**:
+The ability to answer grounded questions about robot orientation, navigable free space, structural regions, and their connectivity from a spatial snapshot. Object-to-object relations may serve as calibration checks but are not the primary evaluation target.
+_Avoid_: generic visual spatial reasoning, object-relation benchmark as the primary target
+
+**Map-grounded spatial evaluation**:
+A static spatial evaluation in which the complete spatial evaluation system answers questions from a supplied immutable map. The map may preserve sensor-derived imperfections, but its production and correctness are outside the evaluated system.
+_Avoid_: SLAM evaluation, sensor-grounded spatial evaluation, real-world map-accuracy benchmark
+
+**Sensor-grounded spatial evaluation**:
+A static spatial evaluation in which frozen lidar-derived observations are processed through the configured mapping and agent pathway, while a separate authoritative scene description is used only to generate and score questions. Mapping imperfections are therefore part of the evaluated system.
+_Avoid_: perfect-map input, oracle geometry exposed to the agent, map-grounded spatial evaluation
+
+**Full-map spatial snapshot**:
+A spatial snapshot produced after a fixed sensor replay has covered the benchmark scene. The resulting map is immutable during questioning and may retain errors caused by controlled sensor noise and the benchmark's source mapping pipeline.
+_Avoid_: perfect map, single-scan snapshot, interactive exploration during evaluation
+
+**Canonical benchmark map**:
+The fixed, agent-visible map supplied by a Map-grounded spatial evaluation. It may intentionally preserve errors from a sensor and mapping pipeline, but every evaluated system receives the same map and the benchmark does not score map production.
+_Avoid_: evaluation oracle, perfect map, mapper output generated during an evaluation run
+
+**Spatial evaluation noise profile**:
+A seeded model of sensing and localization imperfections applied to observations and poses before spatial mapping. It combines physical sensing limits with temporally correlated pose drift so the resulting map errors arise through the evaluated mapping pathway.
+_Avoid_: arbitrary costmap corruption, independent pose jitter, post-mapping image noise
+
+**Evaluation robot footprint**:
+A fixed two-dimensional collision volume representing the benchmark robot's occupied space and safety clearance. Spatial answers concern whether this complete volume can translate or rotate safely, not whether a point can pass through free space.
+_Avoid_: point robot, target-cell occupancy, abstract free-space query
+
+**Benchmark room**:
+A dataset-annotated navigable region whose boundary is physically expressed by walls and explicit openings in the authoritative scene geometry. Open-plan semantic subdivisions, closets, stairs, and inaccessible regions do not count as Benchmark rooms.
+_Avoid_: room label without a physical boundary, every enclosed polygon, semantic zone
+
+**Spatial query marker**:
+A neutral label placed at a location in an agent-visible spatial representation to identify a question referent without revealing room boundaries, semantics, connectivity, or the expected answer.
+_Avoid_: semantic room label, topology annotation, answer hint
 
 **Benchmark reset authority**:
 The control-plane responsibility for establishing a new benchmark episode state before simulation time advances.
