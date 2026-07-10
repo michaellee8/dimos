@@ -20,6 +20,7 @@
           cp -r ${./src} $out/dimos/mapping/ray_tracing/rust/src
           cp ${./Cargo.toml} $out/dimos/mapping/ray_tracing/rust/Cargo.toml
           cp ${./Cargo.lock} $out/dimos/mapping/ray_tracing/rust/Cargo.lock
+          cp -r ${./.cargo} $out/dimos/mapping/ray_tracing/rust/.cargo
 
           mkdir -p $out/native/rust
           cp -r ${dimos-repo}/native/rust/dimos-module $out/native/rust/dimos-module
@@ -34,7 +35,7 @@
           cargoRoot = "dimos/mapping/ray_tracing/rust";
           buildAndTestSubdir = "dimos/mapping/ray_tracing/rust";
 
-          cargoHash = "sha256-0d0dlNDvDplA7oWTyUWOCOlS74Zie8uMQ+ps6lXntOI=";
+          cargoHash = "sha256-6a8GHRSKI6mjg9HNbrestCud8xZtF8HaD0bWVMbl7N8=";
 
           meta.mainProgram = "voxel_ray_tracing";
         };

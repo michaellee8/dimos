@@ -3,11 +3,11 @@
     "dimos-repo": {
       "flake": false,
       "locked": {
-        "lastModified": 1782159599,
-        "narHash": "sha256-U2FwqtFzYen8Or50oTYGrqSi8vRePlS3m581ti2T56Q=",
+        "lastModified": 1783619334,
+        "narHash": "sha256-65zQgASItQ9/RIbo5XE7XEBbkJ++7NWiaj8n3e3JxJQ=",
         "ref": "main",
-        "rev": "0bfe9cbbc79c52afa1ccea783147438f89bd7cf2",
-        "revCount": 836,
+        "rev": "ec31b461e7b8dd92ad4760aced0b2555f0a76833",
+        "revCount": 915,
         "type": "git",
         "url": "file:../../../.."
       },
