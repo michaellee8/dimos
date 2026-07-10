@@ -36,6 +36,32 @@ CONTAINER=dimos-dev-r1lite
 IMAGE=ghcr.io/dimensionalos/ros-dev:dev
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
+# On-robot mode: this script also runs on the R1 Lite's own PC (see
+# r1lite_dimos_install.sh). Detected by the Galaxea install dir.
+ON_ROBOT=0
+[ -d /opt/galaxea/body ] && ON_ROBOT=1
+
+if [ "$ON_ROBOT" = "1" ]; then
+    # Ensure the Galaxea stack is up (only possible when running locally).
+    if ! tmux ls 2>/dev/null | grep -q hdas; then
+        echo "[run_r1lite] Galaxea stack not running — booting R1LITEBody.d (~30s, arms twitch)"
+        ( cd "$HOME/galaxea/install/startup_config/share/startup_config/script" \
+          && ./robot_startup.sh boot ../sessions.d/ATCStandard/R1LITEBody.d )
+        sleep 30
+        tmux kill-session -t r1lite_teleop 2>/dev/null || true
+    fi
+    # Headless box: no desktop viewer. Default to the web sidecar unless a
+    # forwarded display exists (ssh -X) and the user asked for teleop.
+    if [ "$WEB" = "0" ] && [ -z "$DISPLAY" ]; then
+        echo "[run_r1lite] on-robot + no DISPLAY: switching to --web viewer"
+        WEB=1
+    fi
+    if [ "$BLUEPRINT" = "r1lite-keyboard-teleop" ] && [ -z "$DISPLAY" ]; then
+        echo "[run_r1lite] ERROR: keyboard teleop needs a display. Reconnect with: ssh -X r1lite"
+        exit 1
+    fi
+fi
+
 # One-time provisioning: create the dev container if this machine doesn't
 # have it yet (fresh clone). Mounts THIS checkout at /app, host networking
 # (required for DDS multicast to the robot).
@@ -66,8 +92,10 @@ if [ "$WEB" = "1" ]; then
         docker exec -d "$CONTAINER" rerun --serve-web --port 9877 --memory-limit 2GB
         sleep 2
     fi
-    echo "[run_r1lite] BROWSER VIEWER:"
-    echo "    http://127.0.0.1:9090?url=rerun%2Bhttp%3A%2F%2Flocalhost%3A9877%2Fproxy"
+    echo "[run_r1lite] BROWSER VIEWER (open on any machine that can reach this one):"
+    for ip in 127.0.0.1 $(hostname -I); do
+        echo "    http://$ip:9090?url=rerun%2Bhttp%3A%2F%2F$ip%3A9877%2Fproxy"
+    done | head -4
 elif ! ss -tln | grep -q ':9877 '; then
     RERUN_BIN="$(command -v rerun || echo "$HOME/.local/bin/rerun")"
     if [ -x "$RERUN_BIN" ]; then
@@ -84,7 +112,7 @@ else
 fi
 
 echo "[run_r1lite] launching $BLUEPRINT in container (Ctrl-C stops it)"
-exec docker exec -it "$CONTAINER" bash -c "
+exec docker exec -it -e DISPLAY="$DISPLAY" "$CONTAINER" bash -c "
     cd /app &&
     source .venv/bin/activate &&
     source /opt/ros/humble/setup.bash &&

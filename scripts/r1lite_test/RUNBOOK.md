@@ -141,3 +141,20 @@ web mode; evidence in BRINGUP_LOG). Use rerun-connect.
   session; joint path is guarded off.
 - Mesh copy for LFS: `scp -r r1lite:~/galaxea/install/mobiman/share/mobiman/urdf/R1_Lite/meshes /tmp/`
 - `R1LiteConnection` module (all facts in `r1lite_config.py`).
+
+## Onboard deployment (dimos ON the robot — 2026-07-10)
+
+One-time install (run ON the robot): copy the installer over and run it —
+it prompts before every host change (docker, clone, image, venv, sysctls),
+is idempotent, and ends with a DDS cross-boundary verification. The
+container shares /dev/shm with the host — REQUIRED for same-host FastDDS
+(private /dev/shm = "topics visible, zero messages").
+
+Day-to-day on the robot: `cd ~/dimos && ./scripts/r1lite_test/run_r1lite.sh`
+— on-robot mode auto-boots the Galaxea stack if down, defaults to the
+--web sidecar (headless), prints browser URLs for every robot IP (open
+from the laptop over WiFi). Keyboard teleop onboard requires `ssh -X
+r1lite` (pygame window forwards to the laptop; rerun still cannot host
+input). Image note: ghcr images are private even though the repo is
+public — one docker login on the robot, or laptop-transfer via
+`docker save ghcr.io/dimensionalos/ros-dev:dev | ssh r1lite docker load`.
