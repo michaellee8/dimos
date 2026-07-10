@@ -204,6 +204,69 @@ TEST_CASE("a full input queue drops newest and caps at capacity") {
     CHECK(drained == kInputQueueCapacity);
 }
 
+TEST_CASE("Notifier does not lose a notification delivered before the wait") {
+    // The race the counter closes: a notify that lands after the loop snapshots
+    // seq but before it starts waiting. Old design (bare wait_for) would block
+    // the full timeout; the predicate now sees the count moved and returns at once.
+    Notifier notifier;
+    std::uint64_t seq = notifier.seq();
+    notifier.notify();
+
+    auto start = std::chrono::steady_clock::now();
+    notifier.wait_for(seq, std::chrono::seconds(5), [] { return false; });
+    auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK(elapsed < std::chrono::seconds(1));
+}
+
+TEST_CASE("Notifier wakes a waiter from another thread") {
+    Notifier notifier;
+    std::uint64_t seq = notifier.seq();
+    std::thread waker([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        notifier.notify();
+    });
+
+    auto start = std::chrono::steady_clock::now();
+    notifier.wait_for(seq, std::chrono::seconds(5), [] { return false; });
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    waker.join();
+
+    CHECK(elapsed < std::chrono::seconds(1));
+}
+
+TEST_CASE("Notifier waits out the timeout when no notification arrives") {
+    Notifier notifier;
+    std::uint64_t seq = notifier.seq();
+    auto start = std::chrono::steady_clock::now();
+    notifier.wait_for(seq, std::chrono::milliseconds(50), [] { return false; });
+    auto elapsed = std::chrono::steady_clock::now() - start;
+    CHECK(elapsed >= std::chrono::milliseconds(40));
+}
+
+TEST_CASE("a throwing handler is isolated and the loop keeps draining") {
+    Notifier notifier;
+    Builder builder({}, &notifier);
+    int handled = 0;
+    builder.input<Bytes>("data", identity_decode, [&](Bytes m) {
+        if (!m.empty() && m[0] == 0) {
+            throw std::runtime_error("boom");
+        }
+        ++handled;
+    });
+
+    Dispatch dispatch = builder.routes()[0].second;
+    uint8_t bad = 0;
+    uint8_t good = 1;
+    dispatch(&bad, 1);   // handler throws
+    dispatch(&good, 1);  // handler succeeds
+
+    InputPort* port = builder.input_ports()[0];
+    CHECK(port->drain_one());  // throw is caught, still counts as drained
+    CHECK(port->drain_one());  // subsequent message still processed
+    CHECK(handled == 1);
+}
+
 TEST_CASE("a decode error drops the message and never reaches the handler") {
     Notifier notifier;
     Builder builder({}, &notifier);

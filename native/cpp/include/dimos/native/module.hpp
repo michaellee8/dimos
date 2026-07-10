@@ -69,23 +69,40 @@ inline void install_signal_handlers() {
     std::signal(SIGTERM, dimos_native_handle_signal);
 }
 
-// Wakes the handle() dispatch loop when any input receives a message.
+// Wakes the handle() dispatch loop when any input receives a message. A
+// monotonic counter, bumped under the lock on every notify, lets the loop
+// snapshot the count before a drain round and detect a message that arrived
+// mid-round. The wait predicate sees the count move and skips the sleep, so a
+// notification delivered in the gap between "found the queues empty" and "start
+// waiting" is never lost. There is a single waiter, the dispatch loop.
 class Notifier {
 public:
     void notify() {
         {
             std::lock_guard<std::mutex> lock(m_);
+            ++pending_;
         }
-        cv_.notify_all();
+        cv_.notify_one();
     }
-    void wait_for(std::chrono::milliseconds timeout) {
+
+    // Snapshot the notification count. Take this before a drain round so a
+    // message that arrives during the round still blocks the following wait.
+    std::uint64_t seq() {
+        std::lock_guard<std::mutex> lock(m_);
+        return pending_;
+    }
+
+    // Wait until a notify lands after `seq`, `stop` fires, or the timeout elapses.
+    void wait_for(std::uint64_t seq, std::chrono::milliseconds timeout,
+                  const std::function<bool()>& stop) {
         std::unique_lock<std::mutex> lock(m_);
-        cv_.wait_for(lock, timeout);
+        cv_.wait_for(lock, timeout, [&] { return pending_ != seq || stop(); });
     }
 
 private:
     std::mutex m_;
     std::condition_variable cv_;
+    std::uint64_t pending_ = 0;
 };
 
 // Type-erased handle the dispatch loop uses to drain one message from an input.
@@ -130,7 +147,20 @@ public:
             msg = std::move(queue_.front());
             queue_.pop_front();
         }
-        handler_(std::move(msg));
+        // Isolate a throwing handler like make_dispatch isolates a bad decode:
+        // log, drop this message, keep the dispatch loop alive. Mirrors the
+        // Rust runtime, which catch_unwinds each handler.
+        try {
+            handler_(std::move(msg));
+        } catch (const std::exception& e) {
+            DIMOS_ERROR_THROTTLED(log::from_secs(1), "handler error",
+                                  log::Field("topic", topic_),
+                                  log::Field("error", std::string(e.what())));
+        } catch (...) {
+            DIMOS_ERROR_THROTTLED(log::from_secs(1), "handler error",
+                                  log::Field("topic", topic_),
+                                  log::Field("error", std::string("non-standard exception")));
+        }
         return true;
     }
 
@@ -328,6 +358,9 @@ protected:
     void default_handle() {
         constexpr auto kPoll = std::chrono::milliseconds(100);
         while (!shutdown_requested()) {
+            // Snapshot before draining so a message that lands mid-round blocks
+            // the wait below instead of sleeping until the poll timeout.
+            std::uint64_t seq = notifier_ != nullptr ? notifier_->seq() : 0;
             bool progressed = false;
             if (ports_ != nullptr) {
                 for (InputPort* port : *ports_) {
@@ -338,7 +371,7 @@ protected:
             }
             if (!progressed) {
                 if (notifier_ != nullptr) {
-                    notifier_->wait_for(kPoll);
+                    notifier_->wait_for(seq, kPoll, [this] { return shutdown_requested(); });
                 } else {
                     std::this_thread::sleep_for(kPoll);
                 }

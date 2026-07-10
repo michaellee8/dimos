@@ -14,7 +14,8 @@
 
 """The ping-pong example, built on the C++ native module SDK.
 
-C++ mirror of rust_ping_pong.py. The C++ SDK supports LCM only.
+Ping publishes a Twist at 5 Hz on data. Pong echoes each one back on confirm,
+stamped with its sample_config. The C++ SDK supports LCM only.
 
 Run with:
     python examples/native-modules/cpp_ping_pong.py
