@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -67,6 +68,27 @@ struct MockTransport : Transport {
 Bytes identity_decode(const uint8_t* d, std::size_t n) { return Bytes(d, d + n); }
 Bytes identity_encode(const Bytes& v) { return v; }
 
+// Minimal lcm-gen-shaped message, to exercise the default codecs.
+struct Pod {
+    std::int32_t v = 0;
+    int getEncodedSize() const { return static_cast<int>(sizeof(std::int32_t)); }
+    int encode(void* buf, int offset, int maxlen) const {
+        if (maxlen - offset < static_cast<int>(sizeof(std::int32_t))) return -1;
+        std::memcpy(static_cast<char*>(buf) + offset, &v, sizeof(std::int32_t));
+        return static_cast<int>(sizeof(std::int32_t));
+    }
+    int decode(const void* buf, int offset, int maxlen) {
+        if (maxlen - offset < static_cast<int>(sizeof(std::int32_t))) return -1;
+        std::memcpy(&v, static_cast<const char*>(buf) + offset, sizeof(std::int32_t));
+        return static_cast<int>(sizeof(std::int32_t));
+    }
+};
+
+struct Sink {
+    std::vector<int> got;
+    void on(const Pod& p) { got.push_back(p.v); }
+};
+
 template <class F>
 bool wait_until(F cond, std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -121,6 +143,35 @@ TEST_CASE("an inbound message routes through a handler to an output") {
     }
 
     CHECK(received == Bytes{1, 2, 3});
+    CHECK(wait_until([&] { return transport.has_published("/out"); }));
+
+    stop_workers(builder, workers);
+}
+
+TEST_CASE("member-function handler and default codecs route a message") {
+    MockTransport transport;
+    Notifier notifier;
+    Builder builder({{"in", "/in"}, {"out", "/out"}}, &notifier);
+
+    Sink sink;
+    Output<Pod> out = builder.output<Pod>("out");        // encoder defaults to lcm_encode<Pod>
+    builder.input<Pod>("in", &Sink::on, &sink);          // member fn + default decoder
+
+    for (const auto& route : builder.routes()) {
+        transport.subscribe(route.first, route.second);
+    }
+    auto workers = start_workers(builder, transport);
+
+    Pod m;
+    m.v = 9;
+    transport.deliver("/in", dimos::native::lcm_encode(m));
+    for (InputPort* port : builder.input_ports()) {
+        port->drain_one();
+    }
+    REQUIRE(sink.got.size() == 1);
+    CHECK(sink.got[0] == 9);
+
+    out.publish(m);
     CHECK(wait_until([&] { return transport.has_published("/out"); }));
 
     stop_workers(builder, workers);

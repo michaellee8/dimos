@@ -6,38 +6,45 @@
 // examples/native-modules/rust/src/pong.rs.
 
 #include <cstdint>
+#include <stdexcept>
 
 #include "dimos/native.hpp"
 #include "geometry_msgs/Twist.hpp"
 
 using dimos::native::Builder;
 using dimos::native::Config;
-using dimos::native::lcm_decode;
-using dimos::native::lcm_encode;
 using dimos::native::Module;
 using dimos::native::Output;
 using geometry_msgs::Twist;
 
+struct PongConfig {
+    std::int64_t sample_config;
+
+    void validate() const {
+        if (sample_config < 0 || sample_config > 1000) {
+            throw std::runtime_error("sample_config must be in [0, 1000]");
+        }
+    }
+};
+DIMOS_NATIVE_CONFIG(PongConfig, sample_config);
+
 class Pong : public Module {
 public:
     void build(Builder& builder, Config& config) override {
-        sample_config_ = config.require_in_range<std::int64_t>("sample_config", 0, 1000);
-        confirm_ = builder.output<Twist>("confirm", lcm_encode<Twist>);
-        builder.input<Twist>("data", lcm_decode<Twist>, [this](Twist msg) { on_data(msg); });
+        config_ = config.parse<PongConfig>();
+        confirm_ = builder.output<Twist>("confirm");
+        builder.input<Twist>("data", &Pong::on_data, this);
     }
 
 private:
     void on_data(const Twist& msg) {
-        Twist reply;
-        reply.linear = msg.linear;
-        reply.angular.x = 0.0;
-        reply.angular.y = 0.0;
-        reply.angular.z = static_cast<double>(sample_config_);
+        Twist reply = msg;
+        reply.angular.z = static_cast<double>(config_.sample_config);
         confirm_.publish(reply);
     }
 
     Output<Twist> confirm_;
-    std::int64_t sample_config_ = 0;
+    PongConfig config_;
 };
 
 int main() {

@@ -14,8 +14,6 @@
 using dimos::native::Builder;
 using dimos::native::Config;
 using dimos::native::Module;
-using dimos::native::lcm_decode;
-using dimos::native::lcm_encode;
 using dimos::native::Output;
 namespace logging = dimos::native::log;
 using geometry_msgs::Twist;
@@ -23,9 +21,8 @@ using geometry_msgs::Twist;
 class Ping : public Module {
 public:
     void build(Builder& builder, Config& /*config*/) override {
-        data_ = builder.output<Twist>("data", lcm_encode<Twist>);
-        builder.input<Twist>("confirm", lcm_decode<Twist>,
-                             [this](Twist echo) { on_confirm(echo); });
+        data_ = builder.output<Twist>("data");
+        builder.input<Twist>("confirm", &Ping::on_confirm, this);
     }
 
     void setup() override {

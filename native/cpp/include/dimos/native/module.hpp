@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "dimos/native/config.hpp"
+#include "dimos/native/lcm_codec.hpp"
 #include "dimos/native/log.hpp"
 #include "dimos/native/transport.hpp"
 
@@ -261,8 +262,18 @@ public:
         owned_inputs_.push_back(std::move(channel));
     }
 
+    // Register a member function as the handler, with the decoder defaulting to
+    // the generic lcm codec. `builder.input<Twist>("data", &Pong::on_data, this)`.
+    template <class T, class Self>
+    void input(const std::string& port, void (Self::*handler)(const T&), Self* self,
+               DecodeFn<T> decode = lcm_decode<T>) {
+        input<T>(port, std::move(decode),
+                 [self, handler](T msg) { (self->*handler)(msg); });
+    }
+
+    // Encoder defaults to the generic lcm codec, so LCM message types need none.
     template <class T>
-    Output<T> output(const std::string& port, EncodeFn<T> encode) {
+    Output<T> output(const std::string& port, EncodeFn<T> encode = lcm_encode<T>) {
         std::string topic = topic_for(port);
         auto queue = std::make_shared<PublishQueue>(topic);
         publish_queues_.push_back(queue);

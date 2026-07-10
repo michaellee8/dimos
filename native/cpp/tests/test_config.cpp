@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -13,6 +14,20 @@
 
 using dimos::native::Config;
 using nlohmann::json;
+
+namespace {
+struct RangedCfg {
+    std::int64_t value;
+    std::string name;
+
+    void validate() const {
+        if (value < 0 || value > 100) {
+            throw std::runtime_error("value out of range [0, 100]");
+        }
+    }
+};
+DIMOS_NATIVE_CONFIG(RangedCfg, value, name)
+}  // namespace
 
 TEST_CASE("require reads typed fields") {
     Config cfg(json{{"freq", 10.5}, {"name", "lidar"}, {"count", 3}, {"on", true}});
@@ -96,4 +111,26 @@ TEST_CASE("a null config behaves as empty") {
 TEST_CASE("a non-object config is rejected") {
     CHECK_THROWS_AS(Config(json(42)), std::runtime_error);
     CHECK_THROWS_AS(Config(json::array({1, 2})), std::runtime_error);
+}
+
+TEST_CASE("parse deserializes a typed config struct") {
+    Config cfg(json{{"value", 5}, {"name", "lidar"}});
+    RangedCfg c = cfg.parse<RangedCfg>();
+    CHECK(c.value == 5);
+    CHECK(c.name == "lidar");
+}
+
+TEST_CASE("parse rejects a missing field") {
+    Config cfg(json{{"value", 5}});
+    CHECK_THROWS_AS(cfg.parse<RangedCfg>(), std::runtime_error);
+}
+
+TEST_CASE("parse rejects an unknown field (one-to-one)") {
+    Config cfg(json{{"value", 5}, {"name", "x"}, {"extra", true}});
+    CHECK_THROWS_AS(cfg.parse<RangedCfg>(), std::runtime_error);
+}
+
+TEST_CASE("parse runs the config's validate()") {
+    Config cfg(json{{"value", 999}, {"name", "x"}});
+    CHECK_THROWS_AS(cfg.parse<RangedCfg>(), std::runtime_error);
 }

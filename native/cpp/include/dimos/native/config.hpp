@@ -22,6 +22,16 @@
 
 namespace dimos::native {
 
+namespace config_detail {
+// Call config.validate() if the type defines it, otherwise do nothing.
+template <class T>
+auto validate_if_present(const T& value, int) -> decltype(value.validate()) {
+    return value.validate();
+}
+template <class T>
+void validate_if_present(const T&, long) {}
+}  // namespace config_detail
+
 class Config {
 public:
     /// `obj` is the `config` value from the stdin JSON. A JSON null (a module
@@ -86,6 +96,30 @@ public:
         }
     }
 
+    /// Deserialize the whole config into a struct declared with
+    /// DIMOS_NATIVE_CONFIG. Enforces the same one-to-one key check as the
+    /// field-by-field API (every field present, no unknown fields) and runs the
+    /// struct's optional validate() method. Python owns all defaults, so a
+    /// missing field is an error, never a fallback.
+    template <class T>
+    T parse() {
+        T out;
+        try {
+            out = obj_.get<T>();
+        } catch (const std::exception& e) {
+            throw std::runtime_error(std::string("config: ") + e.what());
+        }
+        // Expected keys are the struct's own fields, recovered by re-serializing.
+        // Anything the module sent that isn't one of them is an unknown field.
+        nlohmann::json expected = out;
+        for (auto it = expected.begin(); it != expected.end(); ++it) {
+            consumed_.insert(it.key());
+        }
+        enforce_all_consumed();
+        config_detail::validate_if_present(out, 0);
+        return out;
+    }
+
     bool empty() const { return obj_.empty(); }
 
 private:
@@ -95,3 +129,8 @@ private:
 };
 
 }  // namespace dimos::native
+
+// Declare a config struct's fields once (mirrors Rust's #[native_config]).
+// Generates the JSON (de)serialization Config::parse<T>() uses. Every listed
+// field is required; add a `void validate() const` method for range checks.
+#define DIMOS_NATIVE_CONFIG(Type, ...) NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE(Type, __VA_ARGS__)
