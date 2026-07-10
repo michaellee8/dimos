@@ -187,7 +187,7 @@ export function renderArm(c) {
                  constant 16:9 area and the video letterboxes inside it via
                  object-contain, so the frame never resizes the layout. Starts
                  display:none; webrtc.js reveals it on track arrival. -->
-            <div class="relative w-full bg-black border border-[#2a2a2a] rounded-b-lg overflow-hidden" style="aspect-ratio:16/9;">
+            <div class="relative w-full bg-black border-x border-[#2a2a2a] overflow-hidden" style="aspect-ratio:16/9;">
                 <video id="robot-cam" autoplay muted playsinline
                     class="absolute inset-0 w-full h-full object-contain"
                     style="display:none;"></video>
@@ -198,6 +198,16 @@ export function renderArm(c) {
                 <!-- Bottom-right gripper chip. -->
                 <div class="absolute bottom-3 right-3">
                     <span class="pill pill-good"><span class="dot"></span><span id="arm-grip-chip">OPEN</span></span>
+                </div>
+            </div>
+            <!-- Bottom bar (mirrors go2): live-input pill + key hint under the stage. -->
+            <div class="border border-[#2a2a2a] rounded-b-lg p-3 flex items-center justify-between shrink-0 bg-bg-950">
+                <div class="flex items-center gap-3 text-xs text-gray-500">
+                    <span id="arm-live" class="pill pill-good"><span class="dot"></span>KEYBOARD LIVE</span>
+                    <span>Jog:
+                        <kbd class="px-1.5 py-0.5 bg-[#1f1f1f] rounded">W</kbd><kbd class="px-1.5 py-0.5 bg-[#1f1f1f] rounded">A</kbd><kbd class="px-1.5 py-0.5 bg-[#1f1f1f] rounded">S</kbd><kbd class="px-1.5 py-0.5 bg-[#1f1f1f] rounded">D</kbd><kbd class="px-1.5 py-0.5 bg-[#1f1f1f] rounded">Q</kbd><kbd class="px-1.5 py-0.5 bg-[#1f1f1f] rounded">E</kbd>
+                        &nbsp;<span class="text-gray-600">Shift</span> rot &nbsp;<span class="text-gray-600">Space</span> grip
+                    </span>
                 </div>
             </div>
         </div>
@@ -341,13 +351,28 @@ export function startArmLoop() {
         paintKeys();  // light up the on-screen key grid
 
         const chan = state.cmdChannel;
-        if (!chan || chan.readyState !== 'open') return;
+        const chanOk = !!chan && chan.readyState === 'open';
 
         const held = _held.size > 0;
         const gate = stallGate.sample(
             videoMediaTime(document.getElementById('robot-cam')), performance.now(), held,
         );
         state.videoStall = gate;
+
+        // Bottom-bar live pill (mirrors go2's kb-live): green when the command
+        // channel is open and not stalled/estopped; red with a reason otherwise.
+        const live = document.getElementById('arm-live');
+        if (live) {
+            const ok = chanOk && !gate.blocked && !_estopped;
+            live.className = 'pill ' + (ok ? 'pill-good' : 'pill-bad');
+            live.querySelector('.dot').nextSibling.textContent =
+                _estopped ? 'E-STOP LATCHED'
+                : gate.blocked ? 'JOG OFF — video stalled'
+                : !chanOk ? 'CONNECTING…'
+                : 'KEYBOARD LIVE';
+        }
+
+        if (!chanOk) return;
 
         // Send only while jogging (or one zero-twist on release / block / estop),
         // NOT every tick — flooding the datachannel with idle zero-twists competes
