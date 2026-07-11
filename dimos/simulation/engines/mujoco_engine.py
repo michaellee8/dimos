@@ -583,6 +583,8 @@ class MujocoEngine(SimulationEngine):
                 self._data.qpos[mapping.qpos_adr] = float(position)
             if mapping.dof_adr is not None:
                 self._data.qvel[mapping.dof_adr] = 0.0
+            if mapping.actuator_id is not None:
+                self._data.ctrl[mapping.actuator_id] = float(position)
         mujoco.mj_forward(self._model, self._data)
 
     def _sim_loop(self) -> None:
