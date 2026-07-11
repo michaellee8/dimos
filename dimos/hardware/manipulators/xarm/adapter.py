@@ -78,7 +78,17 @@ class XArmAdapter(ManipulatorAdapter):
                 print(f"ERROR: XArm at {self._ip} not reachable (connected=False)")
                 return False
 
+            # Clear any stale controller warn/error left by a previous session
+            # (e.g. a teleop fault) — otherwise set_mode/set_state below won't
+            # take and the arm starts degraded.
+            if self._arm.warn_code != 0:
+                self._arm.clean_warn()
+            if self._arm.error_code != 0:
+                logger.warning("xArm connected with error_code=%s; cleaning", self._arm.error_code)
+                self._arm.clean_error()
+
             # Initialize to servo mode for high-frequency control
+            self._arm.motion_enable(enable=True)
             self._arm.set_mode(_XARM_MODE_SERVO_CARTESIAN)  # Mode 1 = servo mode
             self._arm.set_state(0)
             self._control_mode = ControlMode.SERVO_POSITION
