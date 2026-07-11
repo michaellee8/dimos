@@ -8,7 +8,7 @@ DimOS also has an experimental local packaged-Python external module path for
 modules whose runtime dependencies should stay outside the main DimOS Python
 environment. See [External Python Modules](/docs/usage/external-python-modules.md) for the
 declaration/runtime split, supported `uv`/Pixi layouts, temporary launcher, and
-the `examples/external-python-module/` reference package.
+the `examples/external_python_module/` reference package.
 
 Some examples of modules are:
 

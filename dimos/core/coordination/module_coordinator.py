@@ -28,7 +28,11 @@ from dimos.core.coordination.coordinator_rpc import CoordinatorRPC
 from dimos.core.coordination.worker_manager import WorkerManager
 from dimos.core.coordination.worker_manager_external import WorkerManagerExternal
 from dimos.core.coordination.worker_manager_python import WorkerManagerPython
-from dimos.core.deployment.models import DeploymentSpec
+from dimos.core.deployment.models import DeploymentPlan, DeploymentSpec, ExternalModule
+from dimos.core.deployment.planner import (
+    plan_deployment,
+    reject_external_modules_without_deployment_spec,
+)
 from dimos.core.global_config import GlobalConfig, global_config
 from dimos.core.module import ModuleBase, ModuleSpec
 from dimos.core.resource import Resource
@@ -300,13 +304,15 @@ class ModuleCoordinator(Resource):
         deployment_spec: DeploymentSpec,
         blueprint_args: MutableMapping[str, Any] | None = None,
     ) -> ModuleCoordinator:
-        return cls.build(deployment_spec.blueprint, blueprint_args)
+        plan = plan_deployment(deployment_spec)
+        return cls.build(deployment_spec.blueprint, blueprint_args, deployment_plan=plan)
 
     @classmethod
     def build(
         cls,
         blueprint: Blueprint,
         blueprint_args: MutableMapping[str, Any] | None = None,
+        deployment_plan: DeploymentPlan | None = None,
     ) -> ModuleCoordinator:
         logger.info("Building the blueprint")
         global_config.update(**dict(blueprint.global_config_overrides))
@@ -319,9 +325,19 @@ class ModuleCoordinator(Resource):
         _run_configurators(blueprint)
         _check_requirements(blueprint)
         _verify_no_name_conflicts(blueprint)
+        if deployment_plan is None:
+            reject_external_modules_without_deployment_spec(
+                getattr(blueprint, "name", "blueprint"), _external_module_names(blueprint)
+            )
 
         logger.info("Starting the modules")
         coordinator = cls(g=global_config)
+        if deployment_plan is not None:
+            external_manager = cast(
+                "WorkerManagerExternal",
+                coordinator._managers[WorkerManagerExternal.deployment_identifier],
+            )
+            external_manager.configure_plan(deployment_plan)
         coordinator.start()
 
         _deploy_all_modules(blueprint, coordinator, global_config, blueprint_args)
@@ -377,6 +393,9 @@ class ModuleCoordinator(Resource):
         _check_requirements(blueprint)
         _verify_no_name_conflicts(blueprint)
         _verify_no_conflicts_with_existing(blueprint, self._transport_registry)
+        reject_external_modules_without_deployment_spec(
+            getattr(blueprint, "name", "blueprint"), _external_module_names(blueprint)
+        )
 
         # Reject duplicate modules.
         for bp in blueprint.active_blueprints:
@@ -716,6 +735,14 @@ def _verify_no_conflicts_with_existing(
                             f"{conn.type.__module__}.{conn.type.__name__} but an existing "
                             f"transport uses {existing_type.__module__}.{existing_type.__name__}"
                         )
+
+
+def _external_module_names(blueprint: Blueprint) -> list[str]:
+    return [
+        bp.module.__name__
+        for bp in blueprint.active_blueprints
+        if issubclass(bp.module, ExternalModule)
+    ]
 
 
 def _run_configurators(blueprint: Blueprint) -> None:

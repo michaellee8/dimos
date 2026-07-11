@@ -19,8 +19,10 @@ import signal
 import time
 
 from dimos.core.coordination.module_coordinator import ModuleCoordinator
-from dimos.core.deployment.planner import plan_deployment, prepare_local_package
+from dimos.core.coordination.worker_manager_external import prepare_deployment
+from dimos.core.deployment.planner import plan_deployment
 from dimos.core.deployment.ref import resolve_deployment_ref
+from dimos.core.global_config import global_config
 
 
 def _plan_dict(ref: str) -> dict[str, list[str]]:
@@ -29,6 +31,7 @@ def _plan_dict(ref: str) -> dict[str, list[str]]:
     return {
         "python_modules": [cls.__name__ for cls in plan.python_modules],
         "external_modules": [env.module_class.__name__ for env in plan.external_modules],
+        "external_worker_modules": [env.module_id for env in plan.external_modules],
     }
 
 
@@ -43,7 +46,7 @@ def main() -> None:
         print(json.dumps(_plan_dict(args.reference), indent=2))
         return
     if args.command == "prepare":
-        prepared = [" ".join(prepare_local_package(env)) for env in plan.external_modules]
+        prepared = prepare_deployment(plan, global_config)
         print(json.dumps({"prepared_external_modules": prepared}, indent=2))
         return
     coordinator = ModuleCoordinator.build_deployment(spec)

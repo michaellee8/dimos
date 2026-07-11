@@ -9,14 +9,22 @@ When adding a local packaged-Python external module:
 - Keep the coordinator-visible declaration lightweight. It should declare streams,
   config, RPCs, skills, and module refs without importing heavy runtime-only
   dependencies.
+- Put the runtime class import reference on the declaration with
+  `implementation = "package.module:RuntimeClass"`. Deployment policy belongs in
+  `DeploymentSpec.modules` / `ModuleDeployment`.
 - Put the runtime implementation in the packaged `python/` project. The runtime
   class should subclass the declaration and `Module`.
+- Use the sibling `python/pyproject.toml` convention for packaged-Python
+  implementations. Optional `python/pixi.toml` selects the Pixi-backed uv path.
 - Use declared RPCs, skills, streams, and module refs only. Do not rely on
   arbitrary Python object access, live instance passthrough, or pickle-based refs
   across the external boundary.
 - If the packaged runtime imports DimOS source, declare `dimos` as a local path
   dependency in the external project's `pyproject.toml`; `PYTHONPATH` alone does
   not install DimOS dependencies into the external `uv` environment.
+- Do not launch packaged runtime entrypoints directly from `WorkerManagerExternal`;
+  the local proof must use `ExternalWorker` so it matches the future remote/native
+  topology.
 - Demonstrate dependency isolation with a runtime-only dependency imported by the
   external implementation, not by the coordinator-visible declaration.
 - Treat `prepare` as environment materialization: uv-only packages should sync

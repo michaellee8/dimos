@@ -11,14 +11,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from pathlib import Path
 import time
 
 from pydantic import Field
 
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.core import rpc
-from dimos.core.deployment.models import DeploymentSpec, ExternalModule, LocalPythonPackage
+from dimos.core.deployment.models import DeploymentSpec, ExternalModule, ModuleDeployment
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
 
@@ -34,6 +33,8 @@ class ExampleHelper(Module):
 
 
 class ExampleExternalDeclaration(ExternalModule):
+    implementation = "example_external.runtime:ExampleExternalRuntime"
+
     config: ExampleExternalConfig
     requests: In[str]
     replies: Out[str]
@@ -88,11 +89,5 @@ deployment_spec = DeploymentSpec(
         ExampleClient.blueprint(),
         ExampleExternalDeclaration.blueprint(greeting="hi"),
     ),
-    external={
-        ExampleExternalDeclaration: LocalPythonPackage(
-            package_root=Path(__file__).parent,
-            declaration=ExampleExternalDeclaration,
-            runtime_ref="example_external.runtime:ExampleExternalRuntime",
-        )
-    },
+    modules={ExampleExternalDeclaration: ModuleDeployment()},
 )
