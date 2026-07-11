@@ -20,7 +20,7 @@ from dimos.core.global_config import global_config
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
 from dimos.navigation.cmu_nav.main import cmu_nav_rerun_config, create_cmu_nav
 from dimos.navigation.movement_manager.movement_manager import MovementManager
-from dimos.robot.unitree.g1.blueprints.unitree_g1_onboard import _unitree_g1_onboard
+from dimos.robot.unitree.g1.blueprints.basic.unitree_g1_onboard import _unitree_g1_onboard
 from dimos.robot.unitree.g1.config import G1, G1_LOCAL_PLANNER_PRECOMPUTED_PATHS
 from dimos.robot.unitree.g1.g1_rerun import (
     g1_odometry_tf_override,
@@ -28,7 +28,7 @@ from dimos.robot.unitree.g1.g1_rerun import (
 )
 from dimos.visualization.vis_module import vis_module
 
-unitree_g1_nav_onboard = (
+unitree_g1_cmu_nav = (
     autoconnect(
         _unitree_g1_onboard,
         create_cmu_nav(

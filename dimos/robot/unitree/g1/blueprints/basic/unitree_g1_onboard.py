@@ -19,7 +19,7 @@ import os
 
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.hardware.sensors.lidar.pointlio.module import PointLio
-from dimos.robot.unitree.g1.blueprints.unitree_g1_vis import unitree_g1_vis
+from dimos.robot.unitree.g1.blueprints.basic.unitree_g1_vis import unitree_g1_vis
 from dimos.robot.unitree.g1.effectors.high_level.dds_sdk import G1HighLevelDdsSdk
 
 # Underscore-prefixed: a shared sub-blueprint, not a runnable blueprint of its own.

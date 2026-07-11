@@ -294,7 +294,7 @@ if global_config.simulation == "mujoco":
         (ControlCoordinator, "twist_command", "cmd_vel"),
     ]
 else:
-    from dimos.robot.unitree.g1.wholebody_connection import G1WholeBodyConnection
+    from dimos.robot.unitree.g1.effectors.low_level.groot_wholebody import G1WholeBodyConnection
 
     # Real-hw backend: DDS connection module + transport_lcm adapter.
     _backend = G1WholeBodyConnection.blueprint(release_sport_mode=True)
