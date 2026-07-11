@@ -21,6 +21,7 @@ lidar, so this connection implements only the `Camera` spec: no `odom`/`lidar`/
 """
 
 from threading import Event, Thread
+import time
 from typing import Any
 
 from pydantic import Field
@@ -51,6 +52,7 @@ CAMERA_FY = 400.0
 CAMERA_CX = 272.0
 CAMERA_CY = 153.0
 CAMERA_INFO_REPUBLISH_S = 1.0  # re-emit static intrinsics on a timer for late subscribers
+CMD_REFRESH_S = 0.1  # walk() resend period; must stay well below booster_rpc.CMD_VEL_TIMEOUT_S
 
 
 class ConnectionConfig(ModuleConfig):
@@ -149,9 +151,9 @@ class K1Connection(Module, Camera):
             self._stop_event.wait(CAMERA_INFO_REPUBLISH_S)
 
     @rpc
-    def move(self, twist: Twist, duration: float = 0.0) -> bool:
+    def move(self, twist: Twist) -> bool:
         """Send a base velocity command to the robot."""
-        return self.hw.move(twist, duration)
+        return self.hw.move(twist)
 
     @rpc
     def standup(self) -> bool:
@@ -178,8 +180,12 @@ class K1Connection(Module, Camera):
         if duration <= 0:
             return "Specify a positive duration (seconds); compute it from the distance and speed."
         twist = Twist(linear=Vector3(x, y, 0.0), angular=Vector3(0.0, 0.0, yaw))
-        if not self.move(twist, duration=duration):
-            return "Failed to move."
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            if not self.move(twist):
+                return "Failed to move."
+            time.sleep(CMD_REFRESH_S)
+        self.move(Twist(linear=Vector3(0.0, 0.0, 0.0), angular=Vector3(0.0, 0.0, 0.0)))
         return f"Moved at velocity=({x}, {y}, {yaw}) for {duration}s then stopped."
 
     @skill

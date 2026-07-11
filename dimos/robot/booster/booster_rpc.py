@@ -119,18 +119,11 @@ class BoosterRPCConnection:
         )
         return backpressure(subject)
 
-    def move(self, twist: Twist, duration: float = 0.0) -> bool:
+    def move(self, twist: Twist) -> bool:
         # DimOS Twist (SI, body frame: +x fwd, +y left, +z yaw CCW) -> booster (vx, vy, vyaw).
-        now = time.monotonic()
         with self._cmd_lock:
             self._latest = (twist.linear.x, twist.linear.y, twist.angular.z)
-            self._deadline = now + (duration if duration > 0 else self.cmd_vel_timeout)
-        if duration > 0:
-            # Discrete "move for N seconds then stop" (the walk skill): block, then expire.
-            time.sleep(duration)
-            with self._cmd_lock:
-                self._latest = (0.0, 0.0, 0.0)
-                self._deadline = time.monotonic()
+            self._deadline = time.monotonic() + self.cmd_vel_timeout
         return True
 
     def _sender_loop(self) -> None:

@@ -82,14 +82,6 @@ class TestMoveIsNonBlocking:
         conn.move(_twist(vx=0.9, vyaw=0.3))
         assert conn._latest == (0.9, 0.0, 0.3)
 
-    def test_duration_move_blocks_then_goes_stale(self, conn):
-        # The discrete "move for N seconds" path (walk skill) blocks the caller,
-        # then lets the command expire.
-        start = time.perf_counter()
-        conn.move(_twist(vx=0.4), duration=0.1)
-        assert time.perf_counter() - start >= 0.1
-        assert conn._latest == (0.0, 0.0, 0.0)
-
 
 class TestSenderLoop:
     def test_sends_latest_while_active(self, conn):
