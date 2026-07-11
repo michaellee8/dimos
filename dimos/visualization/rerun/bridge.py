@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import field
+import re
 import signal
 import socket
 import subprocess
@@ -42,12 +43,11 @@ from rerun.blueprint import Blueprint
 from toolz import pipe  # type: ignore[import-untyped]
 
 from dimos.core.core import rpc
-from dimos.core.global_config import global_config
 from dimos.core.module import Module, ModuleConfig
-from dimos.protocol.pubsub.impl.lcmpubsub import LCM
-from dimos.protocol.pubsub.impl.zenohpubsub import Zenoh
+from dimos.protocol.pubsub.impl.lcmpubsub import LCMPubSubBase
+from dimos.protocol.pubsub.impl.zenohpubsub import ZenohPubSubBase
 from dimos.protocol.pubsub.patterns import Glob, pattern_matches
-from dimos.protocol.pubsub.spec import SubscribeAllCapable
+from dimos.protocol.pubsub.topic import Topic
 from dimos.protocol.service.lcmservice import autoconf
 from dimos.utils.generic import get_local_ips
 from dimos.utils.logging_config import setup_logger
@@ -59,6 +59,7 @@ from dimos.visualization.rerun.constants import (
     RerunOpenOption,
 )
 from dimos.visualization.rerun.init import rerun_init
+from dimos.visualization.rerun.native_bridge import start_native_rerun_bridge
 
 # TODO OUT visual annotations
 #
@@ -74,9 +75,7 @@ from dimos.visualization.rerun.init import rerun_init
 # automatically spy an all the transports and read visualization hints
 #
 # Temporarily we are using these "sideloading" visual_override={} dict on the bridge
-# to define custom visualizations for specific topics
-#
-# as well as pubsubs={} to specify which protocols to listen to.
+# to define custom visualizations for specific topics.
 
 # TODO better TF processing
 #
@@ -107,6 +106,8 @@ BlueprintFactory: TypeAlias = Callable[[], "Blueprint"]
 
 RerunMulti: TypeAlias = "list[tuple[str, Archetype]]"
 RerunData: TypeAlias = "Archetype | RerunMulti"
+
+_NATIVE_TYPES = ("sensor_msgs.Image", "sensor_msgs.PointCloud2")
 
 
 def is_rerun_multi(data: Any) -> TypeGuard[RerunMulti]:
@@ -165,49 +166,7 @@ def _default_blueprint() -> Blueprint:
     )
 
 
-def _default_pubsubs(config: Any = None) -> list[SubscribeAllCapable[Any, Any]]:
-    """Select the pubsub backend matching the active transport.
-
-    All channels including TF flow over the active transport, so the bridge
-    listens only on that backend. To also bridge external LCM publishers while
-    running Zenoh, pass an explicit ``pubsubs=[Zenoh(), LCM()]``.
-    """
-    transport = getattr(config, "transport", None) or global_config.transport
-    if transport == "zenoh":
-        return [Zenoh()]
-    return [LCM()]
-
-
-def _resolve_pubsubs(config: Any) -> list[SubscribeAllCapable[Any, Any]]:
-    """Return explicit pubsubs when truly overridden, else transport defaults.
-
-    Older blueprints commonly passed ``pubsubs=[LCM()]`` as the effective
-    default. Preserve the newer transport-driven behavior for that legacy
-    value, but honor explicit non-default overrides such as custom backends.
-    """
-    fields_set: set[str] = cast("set[str]", getattr(config, "model_fields_set", set()))
-    pubsubs = cast(
-        "list[SubscribeAllCapable[Any, Any]] | None",
-        getattr(config, "pubsubs", None),
-    )
-    if "pubsubs" in fields_set and pubsubs is not None:
-        is_legacy_default = len(pubsubs) == 1 and isinstance(pubsubs[0], LCM)
-        if not is_legacy_default:
-            return pubsubs
-    return _default_pubsubs(getattr(config, "g", config))
-
-
 class Config(ModuleConfig):
-    """Configuration for RerunBridgeModule.
-
-    The pubsubs field is accepted for backwards compatibility. The legacy
-    ``[LCM()]`` value is treated as the old default and replaced by the
-    transport-driven runtime default. Explicit non-default overrides are still
-    honored.
-    """
-
-    pubsubs: list[SubscribeAllCapable[Any, Any]] = field(default_factory=lambda: [LCM()])
-
     visual_override: dict[Glob | str, Callable[[Any], Archetype] | None] = field(
         default_factory=dict
     )
@@ -228,20 +187,7 @@ Config.model_rebuild(_types_namespace={"Archetype": Archetype, "Blueprint": Blue
 
 
 class RerunBridgeModule(Module):
-    """Bridge that logs messages from pubsubs to Rerun.
-
-    Spawns its own Rerun viewer and subscribes to all topics on each provided
-    pubsub. Any message that has a to_rerun() method is automatically logged.
-
-    Example:
-        from dimos.protocol.pubsub.impl.lcmpubsub import LCM
-
-        lcm = LCM()
-        bridge = RerunBridgeModule(pubsubs=[lcm])
-        bridge.start()
-        # All messages with to_rerun() are now logged to Rerun
-        bridge.stop()
-    """
+    """Bridge the active transport to Rerun."""
 
     config: Config
     dedicated_worker = True
@@ -257,6 +203,8 @@ class RerunBridgeModule(Module):
         self._last_log = {}
         self._override_cache: dict[str, Callable[[Any], RerunData | None]] = {}
         self._frame_attached: dict[str, str] = {}
+        self._decode_topics: dict[str, bool] = {}
+        self._native_enabled = False
 
     @property
     def host(self) -> str:
@@ -321,6 +269,57 @@ class RerunBridgeModule(Module):
         if topic_str.startswith("dimos/"):
             topic_str = "/" + topic_str.removeprefix("dimos/")
         return f"{self.config.entity_prefix}{topic_str}"
+
+    def _decode_in_python(self, topic: Any) -> bool:
+        lcm_type = topic.lcm_type
+        if lcm_type is None:
+            return False
+
+        entity_path = self._get_entity_path(topic)
+        decode = self._decode_topics.get(entity_path)
+        if decode is None:
+            overrides = [
+                converter
+                for pattern, converter in self.config.visual_override.items()
+                if pattern_matches(pattern, entity_path)
+            ]
+            decode = not any(converter is None for converter in overrides) and (
+                lcm_type.msg_name not in _NATIVE_TYPES
+                or bool(overrides)
+                or not self._native_enabled
+            )
+            self._decode_topics[entity_path] = decode
+        return decode
+
+    def _on_packet(self, payload: bytes, topic: Any) -> None:
+        self._on_message(topic.lcm_type.lcm_decode(payload), topic)
+
+    def _subscribe_python(self, pubsub: LCMPubSubBase | ZenohPubSubBase) -> Callable[[], None]:
+        if not self._native_enabled or isinstance(pubsub, ZenohPubSubBase):
+            return pubsub.subscribe_all(self._on_packet, self._decode_in_python)
+
+        for pattern, converter in self.config.visual_override.items():
+            if isinstance(pattern, Glob) and converter is not None:
+                return pubsub.subscribe_all(self._on_packet, self._decode_in_python)
+
+        native_types = "|".join(re.escape(name) for name in _NATIVE_TYPES)
+        heavy = f"(?:{native_types})"
+        branches = [f"(?!(?:.*)#{heavy}$).*"]
+        for entity_path, converter in self.config.visual_override.items():
+            if (
+                isinstance(entity_path, str)
+                and converter is not None
+                and entity_path.startswith(self.config.entity_prefix)
+            ):
+                topic = entity_path.removeprefix(self.config.entity_prefix)
+                branches.append(f"{re.escape(topic)}#{heavy}")
+        subscription_pattern = re.compile(f"^(?:{'|'.join(branches)})$")
+
+        def on_packet(payload: bytes, topic: Any) -> None:
+            if self._decode_in_python(topic):
+                self._on_packet(payload, topic)
+
+        return pubsub.subscribe(Topic(subscription_pattern), on_packet)
 
     def _on_message(self, msg: Any, topic: Any) -> None:
         """Handle incoming message - log to rerun."""
@@ -440,23 +439,46 @@ class RerunBridgeModule(Module):
         if self.config.blueprint:
             rr.send_blueprint(_with_graph_tab(self.config.blueprint()))
 
-        # Resolve pubsubs lazily — the module-level global_config singleton in worker
-        # processes doesn't have CLI overrides. Use self.config.g which is the parent's
-        # updated config, passed via the worker kwargs.
-        pubsubs = _resolve_pubsubs(self.config)
+        transport = self.config.g.transport
+        pubsub: LCMPubSubBase | ZenohPubSubBase
+        if transport == "zenoh":
+            pubsub = ZenohPubSubBase()
+            lcm_url = ""
+            zenoh_mode = pubsub.config.mode
+            zenoh_connect = pubsub.config.connect
+            zenoh_listen = pubsub.config.listen
+        else:
+            pubsub = LCMPubSubBase()
+            lcm_url = pubsub.config.url
+            zenoh_mode = ""
+            zenoh_connect = []
+            zenoh_listen = []
 
-        # Start pubsubs and subscribe to all messages
-        for pubsub in pubsubs:
-            logger.info(f"bridge listening on {pubsub.__class__.__name__}")
-            if hasattr(pubsub, "start"):
-                pubsub.start()
-            unsub = pubsub.subscribe_all(self._on_message)
-            self.register_disposable(Disposable(unsub))
+        self._native_enabled = self.config.topic_to_entity is None
+        if self._native_enabled:
+            python_patterns = [
+                f"^(?:{pattern.pattern if isinstance(pattern, Glob) else re.escape(pattern)})$"
+                for pattern in self.config.visual_override
+            ]
+            native = start_native_rerun_bridge(
+                backend=transport,
+                connect_url=connect_url,
+                entity_prefix=self.config.entity_prefix,
+                g=self.config.g,
+                lcm_url=lcm_url,
+                max_hz=self.config.max_hz,
+                python_patterns=python_patterns,
+                recording_id=rr.get_recording_id(),
+                zenoh_connect=zenoh_connect,
+                zenoh_listen=zenoh_listen,
+                zenoh_mode=zenoh_mode,
+            )
+            self.register_disposable(Disposable(native.stop))
 
-        # Add pubsub stop as disposable
-        for pubsub in pubsubs:
-            if hasattr(pubsub, "stop"):
-                self.register_disposable(Disposable(pubsub.stop))  # type: ignore[union-attr]
+        logger.info(f"bridge listening on {pubsub.__class__.__name__}")
+        pubsub.start()
+        self.register_disposable(Disposable(self._subscribe_python(pubsub)))
+        self.register_disposable(Disposable(pubsub.stop))
 
         self._log_static()
 
@@ -585,6 +607,7 @@ class RerunBridgeModule(Module):
     def stop(self) -> None:
         self._override_cache.clear()
         self._frame_attached.clear()
+        self._decode_topics.clear()
         super().stop()
 
 
@@ -593,7 +616,7 @@ def run_bridge(
     rerun_open: RerunOpenOption = RERUN_OPEN_DEFAULT,
     rerun_web: bool = RERUN_ENABLE_WEB,
 ) -> None:
-    """Start a RerunBridgeModule with default LCM config and block until interrupted."""
+    """Start a RerunBridgeModule and block until interrupted."""
     autoconf(check_only=True)
 
     bridge = RerunBridgeModule(
