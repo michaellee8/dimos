@@ -18,6 +18,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 import math
 from pathlib import Path
+import threading
 from typing import Any
 
 import pytest
@@ -29,6 +30,7 @@ from dimos.teleop.openarm_mini.calibration import (
     OPENARM_MINI_ARM_JOINT_NAMES,
     OpenArmMiniCalibration,
     OpenArmMiniMotorCalibration,
+    OpenArmMiniSide,
     save_calibration,
 )
 from dimos.teleop.openarm_mini.feetech import (
@@ -39,7 +41,6 @@ from dimos.teleop.openarm_mini.teleop_module import (
     OpenArmMiniTeleopModule,
     OpenArmMiniTeleopModuleConfig,
 )
-from dimos.teleop.runtime.types import TeleopCommand
 
 
 class _FakeBus:
@@ -72,14 +73,12 @@ class _FailingBus:
         raise self._exc
 
 
-def _payload(command: TeleopCommand | None) -> JointState:
+def _payload(command: JointState | None) -> JointState:
     assert command is not None
-    payload = command.payload
-    assert isinstance(payload, JointState)
-    return payload
+    return command
 
 
-def _calibration(side: str) -> OpenArmMiniCalibration:
+def _calibration(side: OpenArmMiniSide) -> OpenArmMiniCalibration:
     return OpenArmMiniCalibration(
         side=side,
         motors={
@@ -219,9 +218,16 @@ def test_config_rejects_invalid_or_duplicate_enabled_sides() -> None:
     with pytest.raises(ValueError, match="at least 1"):
         OpenArmMiniTeleopModuleConfig(enabled_sides=())
     with pytest.raises(ValueError, match="Input should be 'left' or 'right'"):
-        OpenArmMiniTeleopModuleConfig(enabled_sides=("center",))
+        OpenArmMiniTeleopModuleConfig.model_validate({"enabled_sides": ("center",)})
     with pytest.raises(ValueError, match="duplicate"):
         OpenArmMiniTeleopModuleConfig(enabled_sides=("left", "left"))
+
+
+def test_config_rejects_non_positive_tick_period() -> None:
+    with pytest.raises(ValueError, match="greater than 0"):
+        OpenArmMiniTeleopModuleConfig(tick_period_s=0.0)
+    with pytest.raises(ValueError, match="greater than 0"):
+        OpenArmMiniTeleopModuleConfig(tick_period_s=-0.1)
 
 
 def test_config_resolves_default_and_configured_target_joint_names() -> None:
@@ -381,23 +387,96 @@ def test_teleop_module_returns_none_when_bus_read_raises_runtime_error(
     assert command is None
 
 
-def test_teleop_module_publishes_joint_command_payload(mocker: Any) -> None:
-    module = OpenArmMiniTeleopModule()
-    try:
-        joint = JointState({"name": ["openarm_left_joint1"], "position": [0.1]})
+def test_tick_publishes_direct_joint_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: Any,
+) -> None:
+    left_path, right_path = _write_calibrations(tmp_path)
+    _patch_buses(monkeypatch, {"left": _FakeBus(_readings())})
+
+    with _connected_module(_configured_config(left_path, right_path)) as module:
         publish = mocker.patch.object(module.joint_command, "publish")
+        module.tick()
 
-        module.publish_command_payload(joint)
+    published = publish.call_args.args[0]
+    assert isinstance(published, JointState)
+    assert published.name == [f"openarm_left_joint{i}" for i in range(1, 8)]
 
-        publish.assert_called_once_with(joint)
+
+def test_tick_suppresses_failed_read_and_recovers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: Any,
+) -> None:
+    left_path, right_path = _write_calibrations(tmp_path)
+    left_bus = _FakeBus(_readings())
+    _patch_buses(monkeypatch, {"left": left_bus})
+
+    with _connected_module(_configured_config(left_path, right_path)) as module:
+        publish = mocker.patch.object(module.joint_command, "publish")
+        mocker.patch.object(
+            left_bus, "read_positions", side_effect=[RuntimeError("read"), _readings()]
+        )
+
+        module.tick()
+        module.tick()
+
+    publish.assert_called_once()
+
+
+def test_start_is_idempotent_and_stop_cleans_worker_and_bus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mocker: Any,
+) -> None:
+    left_path, right_path = _write_calibrations(tmp_path)
+    left_bus = _FakeBus(_readings())
+    _patch_buses(monkeypatch, {"left": left_bus})
+    module = _module(_configured_config(left_path, right_path, tick_period_s=10.0))
+    starts: list[threading.Thread] = []
+    original_start = threading.Thread.start
+    mocker.patch.object(module, "tick")
+
+    def record_start(thread: threading.Thread) -> None:
+        starts.append(thread)
+        original_start(thread)
+
+    monkeypatch.setattr(threading.Thread, "start", record_start)
+
+    try:
+        module.start()
+        module.start()
+        assert len(starts) == 1
+        assert left_bus.connected
+
+        module.stop()
+
+        assert module._thread is None
+        assert left_bus.disconnected
     finally:
         module.stop()
 
 
-def test_teleop_module_rejects_non_joint_command_payload() -> None:
-    module = OpenArmMiniTeleopModule()
+def test_polling_loop_logs_unexpected_exceptions_without_tight_loop(
+    mocker: Any,
+) -> None:
+    module = OpenArmMiniTeleopModule(tick_period_s=0.01)
     try:
-        with pytest.raises(TypeError, match="unsupported"):
-            module.publish_command_payload("not-a-joint-state")
+        waits: list[float] = []
+        mocker.patch.object(module, "tick", side_effect=RuntimeError("boom"))
+        logged = mocker.patch.object(teleop_module.logger, "exception")
+
+        def wait_once(timeout: float) -> bool:
+            waits.append(timeout)
+            module._stop_event.set()
+            return True
+
+        mocker.patch.object(module._stop_event, "wait", side_effect=wait_once)
+
+        module._run_loop()
+
+        logged.assert_called_once()
+        assert waits == [pytest.approx(0.01, abs=0.01)]
     finally:
         module.stop()

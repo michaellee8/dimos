@@ -12,16 +12,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""OpenArm Mini teleop module using the shared teleop runtime."""
+"""OpenArm Mini teleop module."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
+import threading
+import time
 from typing import Annotated, Literal, Self
 
 from pydantic import Field, model_validator
 
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
+from dimos.core.core import rpc
+from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import Out
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.robot.manipulators.openarm.config import openarm_joints
@@ -37,8 +42,6 @@ from dimos.teleop.openarm_mini.feetech import (
     OpenArmMiniLeaderReader,
 )
 from dimos.teleop.openarm_mini.mapping import combine_side_commands, map_side_readings
-from dimos.teleop.runtime.teleop_module import TeleopModule, TeleopModuleConfig
-from dimos.teleop.runtime.types import TeleopCommand
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -46,7 +49,7 @@ OPENARM_MINI_UNCONFIGURED_PORT = ""
 OpenArmMiniTargetJointNames = Annotated[tuple[str, ...], Field(min_length=7, max_length=7)]
 
 
-class OpenArmMiniTeleopModuleConfig(TeleopModuleConfig):
+class OpenArmMiniTeleopModuleConfig(ModuleConfig):
     """Config for OpenArm Mini leader teleoperation.
 
     Runtime startup is intentionally non-interactive: calibration paths point to
@@ -57,6 +60,7 @@ class OpenArmMiniTeleopModuleConfig(TeleopModuleConfig):
     # Default to one side so running the concrete module directly only requires
     # one leader calibration/port override. Dual-arm blueprints opt into both.
     backend: Literal["openarm_mini"] = "openarm_mini"
+    tick_period_s: float = Field(default=0.02, gt=0.0)
     port_left: str = OPENARM_MINI_UNCONFIGURED_PORT
     port_right: str = OPENARM_MINI_UNCONFIGURED_PORT
     left_calibration_path: Path | None = None
@@ -107,7 +111,7 @@ class OpenArmMiniTeleopModuleConfig(TeleopModuleConfig):
         return tuple(configured)
 
 
-class OpenArmMiniTeleopModule(TeleopModule):
+class OpenArmMiniTeleopModule(Module):
     """Teleop module for OpenArm Mini leader devices."""
 
     config: OpenArmMiniTeleopModuleConfig  # type: ignore[assignment]
@@ -119,10 +123,38 @@ class OpenArmMiniTeleopModule(TeleopModule):
         self._previous_positions_by_side: dict[OpenArmMiniSide, dict[str, float]] = {}
         self._last_read_error: str | None = None
         self._teleop_connected = False
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
 
     @property
     def openarm_mini_config(self) -> OpenArmMiniTeleopModuleConfig:
         return self.config
+
+    @rpc
+    def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            logger.warning("OpenArm Mini teleop polling worker is already running")
+            return
+        super().start()
+        self._stop_event.clear()
+        try:
+            self.connect_teleop()
+            self._thread = threading.Thread(target=self._run_loop, daemon=True)
+            self._thread.start()
+        except Exception:
+            self._stop_event.set()
+            self._thread = None
+            self.disconnect_teleop()
+            raise
+
+    @rpc
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(DEFAULT_THREAD_JOIN_TIMEOUT)
+            self._thread = None
+        self.disconnect_teleop()
+        super().stop()
 
     def connect_teleop(self) -> None:
         if self._teleop_connected:
@@ -163,7 +195,7 @@ class OpenArmMiniTeleopModule(TeleopModule):
         self._last_read_error = None
         self._teleop_connected = False
 
-    def get_current_command(self) -> TeleopCommand | None:
+    def get_current_command(self) -> JointState | None:
         openarm_mini = self.openarm_mini_config
         if not self._teleop_connected or not openarm_mini.authority_active:
             return None
@@ -194,12 +226,23 @@ class OpenArmMiniTeleopModule(TeleopModule):
 
         self._last_read_error = None
         self._previous_positions_by_side = next_previous_positions_by_side
-        return TeleopCommand(payload=combine_side_commands(side_commands))
+        return combine_side_commands(side_commands)
 
-    def publish_command_payload(self, payload: object) -> None:
-        """Publish OpenArm Mini teleop commands to the coordinator joint stream."""
-        if not isinstance(payload, JointState):
-            raise TypeError(
-                f"unsupported OpenArm Mini teleop payload type: {type(payload).__name__}"
-            )
-        self.joint_command.publish(payload)
+    def tick(self) -> None:
+        """Run one synchronous OpenArm Mini polling iteration."""
+        if self._stop_event.is_set():
+            return
+        command = self.get_current_command()
+        if command is not None:
+            self.joint_command.publish(command)
+
+    def _run_loop(self) -> None:
+        next_tick_time = time.monotonic()
+        while not self._stop_event.is_set():
+            try:
+                self.tick()
+            except Exception:
+                logger.exception("Unexpected OpenArm Mini teleop polling worker error")
+            next_tick_time += self.openarm_mini_config.tick_period_s
+            sleep_s = max(0.0, next_tick_time - time.monotonic())
+            self._stop_event.wait(sleep_s)
