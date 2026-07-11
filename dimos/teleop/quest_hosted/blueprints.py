@@ -35,6 +35,7 @@ from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.nav_msgs.OccupancyGrid import OccupancyGrid
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.msgs.std_msgs.Bool import Bool
 from dimos.navigation.replanning_a_star.module import ReplanningAStarPlanner
 from dimos.robot.manipulators.xarm.blueprints.teleop import (
     coordinator_teleop_xarm6,
@@ -98,27 +99,6 @@ class WristCamera(RealSenseCamera):
     pass
 
 
-# Broker-bound streams for ArmHostedConnection — all live on the one module so
-# they share the single BrokerProvider session.
-_ARM_BROKER_TRANSPORTS = {
-    ("cmd_raw", bytes): CloudflareTransport.spec("cmd_unreliable"),
-    ("state_json", bytes): CloudflareTransport.spec("state_reliable"),
-    ("telemetry_out", bytes): CloudflareTransport.spec("state_reliable_back"),
-    ("mux_image", Image): CloudflareVideoTransport.spec(),
-    # Station → coordinator (LCM, cross-worker). right_controller_output carries
-    # the delta pose stamped with the task name (routes to the TeleopIKTask);
-    # teleop_buttons carries the engage / analog-trigger state.
-    # The topic MUST match the coordinator's coordinator_cartesian_command input,
-    # which resolves to the "/"-prefixed default topic — without the leading
-    # slash the poses publish to a topic the coordinator never subscribes to, so
-    # the arm engages but never moves.
-    ("right_controller_output", PoseStamped): LCMTransport.spec(
-        "/coordinator_cartesian_command", PoseStamped
-    ),
-    ("teleop_buttons", Buttons): LCMTransport.spec("teleop_buttons", Buttons),
-}
-
-
 # Two-camera XArm hosted teleop: front/overview = cam1, wrist = cam2,
 # operator-selectable via camera_select, mux'd into one video track. One
 # blueprint per arm; pass --simulation for MuJoCo, omit it for real hardware.
@@ -130,54 +110,123 @@ _ARM_BROKER_TRANSPORTS = {
 #   MujocoSimModule; we override it (same class = same module) with one that
 #   also renders the overview cam. 848×480 matches RealSense and stays wide
 #   enough for the latency stamp (needs ≥768px).
-def _teleop_hosted_xarm(coordinator, *, sim_path, dof):
-    if global_config.simulation:
-        cameras = (
-            MujocoSimModule.blueprint(
-                address=str(sim_path),
-                headless=False,
-                dof=dof,
-                camera_name="wrist_camera",
-                camera2_name="env_camera",
-                width=848,
-                height=480,
-            ),
-        )
-        remaps = [
-            (MujocoSimModule, "color_image2", "cam1_in"),  # env overview → cam1
-            (MujocoSimModule, "color_image", "cam2_in"),  # wrist → cam2
-        ]
-    else:
-        cameras = (
-            FrontCamera.blueprint(camera_name="front", enable_depth=False, enable_pointcloud=False),
-            WristCamera.blueprint(camera_name="wrist", enable_depth=False, enable_pointcloud=False),
-        )
-        remaps = [
-            (FrontCamera, "color_image", "cam1_in"),
-            (WristCamera, "color_image", "cam2_in"),
-        ]
+#
+# The .transports() dict binds every broker-bound stream to CloudflareTransport
+# so they share the one BrokerProvider session. LCM topics that feed the
+# coordinator (cartesian_command, ee_twist, gripper) MUST carry the leading
+# slash to match its default "/"-prefixed inputs — without it the arm engages
+# but never moves.
 
-    return (
-        autoconnect(
-            ArmHostedConnection.blueprint(task_names={"right": "teleop_xarm"}),
-            coordinator,
-            *cameras,
-        )
-        .remappings(remaps)
-        .transports(
-            {
-                **_ARM_BROKER_TRANSPORTS,
-                # Cameras → station over LCM (cameras run in other workers).
-                ("cam1_in", Image): LCMTransport.spec("cam1_in", Image),
-                ("cam2_in", Image): LCMTransport.spec("cam2_in", Image),
-            }
-        )
-        .global_config(viewer="none")
+if global_config.simulation:
+    _xarm6_cameras = (
+        MujocoSimModule.blueprint(
+            address=str(XARM6_SIM_PATH),
+            headless=False,
+            dof=6,
+            camera_name="wrist_camera",
+            camera2_name="env_camera",
+            width=848,
+            height=480,
+        ),
     )
+    _xarm6_remaps = [
+        (MujocoSimModule, "color_image2", "cam1_in"),  # env overview → cam1
+        (MujocoSimModule, "color_image", "cam2_in"),  # wrist → cam2
+    ]
+else:
+    _xarm6_cameras = (
+        FrontCamera.blueprint(camera_name="front", enable_depth=False, enable_pointcloud=False),
+        WristCamera.blueprint(camera_name="wrist", enable_depth=False, enable_pointcloud=False),
+    )
+    _xarm6_remaps = [
+        (FrontCamera, "color_image", "cam1_in"),
+        (WristCamera, "color_image", "cam2_in"),
+    ]
+
+teleop_hosted_xarm6 = (
+    autoconnect(
+        ArmHostedConnection.blueprint(task_names={"right": "teleop_xarm"}),
+        coordinator_teleop_xarm6,
+        *_xarm6_cameras,
+    )
+    .remappings(_xarm6_remaps)
+    .transports(
+        {
+            ("cmd_raw", bytes): CloudflareTransport.spec("cmd_unreliable"),
+            ("state_json", bytes): CloudflareTransport.spec("state_reliable"),
+            ("telemetry_out", bytes): CloudflareTransport.spec("state_reliable_back"),
+            ("mux_image", Image): CloudflareVideoTransport.spec(),
+            ("right_controller_output", PoseStamped): LCMTransport.spec(
+                "/coordinator_cartesian_command", PoseStamped
+            ),
+            ("teleop_buttons", Buttons): LCMTransport.spec("teleop_buttons", Buttons),
+            ("coordinator_ee_twist_command", TwistStamped): LCMTransport.spec(
+                "/coordinator_ee_twist_command", TwistStamped
+            ),
+            ("gripper_command", Bool): LCMTransport.spec("/gripper_command", Bool),
+            # Cameras → station over LCM (cameras run in other workers).
+            ("cam1_in", Image): LCMTransport.spec("cam1_in", Image),
+            ("cam2_in", Image): LCMTransport.spec("cam2_in", Image),
+        }
+    )
+    .global_config(viewer="none")
+)
 
 
-teleop_hosted_xarm6 = _teleop_hosted_xarm(coordinator_teleop_xarm6, sim_path=XARM6_SIM_PATH, dof=6)
-teleop_hosted_xarm7 = _teleop_hosted_xarm(coordinator_teleop_xarm7, sim_path=XARM7_SIM_PATH, dof=7)
+if global_config.simulation:
+    _xarm7_cameras = (
+        MujocoSimModule.blueprint(
+            address=str(XARM7_SIM_PATH),
+            headless=False,
+            dof=7,
+            camera_name="wrist_camera",
+            camera2_name="env_camera",
+            width=848,
+            height=480,
+        ),
+    )
+    _xarm7_remaps = [
+        (MujocoSimModule, "color_image2", "cam1_in"),  # env overview → cam1
+        (MujocoSimModule, "color_image", "cam2_in"),  # wrist → cam2
+    ]
+else:
+    _xarm7_cameras = (
+        FrontCamera.blueprint(camera_name="front", enable_depth=False, enable_pointcloud=False),
+        WristCamera.blueprint(camera_name="wrist", enable_depth=False, enable_pointcloud=False),
+    )
+    _xarm7_remaps = [
+        (FrontCamera, "color_image", "cam1_in"),
+        (WristCamera, "color_image", "cam2_in"),
+    ]
+
+teleop_hosted_xarm7 = (
+    autoconnect(
+        ArmHostedConnection.blueprint(task_names={"right": "teleop_xarm"}),
+        coordinator_teleop_xarm7,
+        *_xarm7_cameras,
+    )
+    .remappings(_xarm7_remaps)
+    .transports(
+        {
+            ("cmd_raw", bytes): CloudflareTransport.spec("cmd_unreliable"),
+            ("state_json", bytes): CloudflareTransport.spec("state_reliable"),
+            ("telemetry_out", bytes): CloudflareTransport.spec("state_reliable_back"),
+            ("mux_image", Image): CloudflareVideoTransport.spec(),
+            ("right_controller_output", PoseStamped): LCMTransport.spec(
+                "/coordinator_cartesian_command", PoseStamped
+            ),
+            ("teleop_buttons", Buttons): LCMTransport.spec("teleop_buttons", Buttons),
+            ("coordinator_ee_twist_command", TwistStamped): LCMTransport.spec(
+                "/coordinator_ee_twist_command", TwistStamped
+            ),
+            ("gripper_command", Bool): LCMTransport.spec("/gripper_command", Bool),
+            # Cameras → station over LCM (cameras run in other workers).
+            ("cam1_in", Image): LCMTransport.spec("cam1_in", Image),
+            ("cam2_in", Image): LCMTransport.spec("cam2_in", Image),
+        }
+    )
+    .global_config(viewer="none")
+)
 
 
 __all__ = [

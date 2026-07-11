@@ -41,8 +41,11 @@ from reactivex.disposable import Disposable
 from dimos.core.core import rpc
 from dimos.core.stream import In, Out
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
 from dimos.msgs.sensor_msgs.Image import Image
+from dimos.msgs.std_msgs.Bool import Bool
 from dimos.protocol.pubsub.impl.webrtc.providers.spec import shutdown_all_providers
+from dimos.robot.manipulators.common.topics import EEF_TWIST_TASK_NAME
 from dimos.teleop.quest.quest_extensions import ArmTeleopConfig, ArmTeleopModule
 from dimos.teleop.quest.quest_types import Hand
 from dimos.teleop.quest_hosted.hosted_base import HostedConnectionMixin
@@ -79,9 +82,15 @@ class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
     cam2_in: In[Image]
     video_stats: Out[VideoStats]  # operator-side getStats() relay, recorder tap
 
+    coordinator_ee_twist_command: Out[TwistStamped]
+    gripper_command: Out[Bool]
+
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._hosted_init(["cam1", "cam2"])
+        from dimos_lcm.geometry_msgs import TwistStamped as LCMTwistStamped
+
+        self._decoders[LCMTwistStamped._get_packed_fingerprint()] = self._on_twist_bytes
         # While the E-STOP latch (from _hosted_init) is set, hands are held
         # disengaged and no poses are published — the coordinator's
         # TeleopIKTask keeps its last target, so the arm freezes in place.
@@ -146,6 +155,29 @@ class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
         robot_pose = webxr_to_robot(msg, is_left_controller=(hand == Hand.LEFT))
         with self._lock:
             self._current_poses[hand] = robot_pose
+
+    def _on_twist_bytes(self, data: bytes) -> None:
+        """Browser keyboard EE-twist → coordinator's eef_twist task. Re-stamp
+        frame_id with the task name so the coordinator routes it, and drop it
+        while E-STOP is latched (mirrors the pose gate)."""
+        if self._estopped:
+            return
+        msg = TwistStamped.lcm_decode(data)
+        self._cmd_stats.record(msg.ts, nbytes=len(data))
+        self.coordinator_ee_twist_command.publish(
+            TwistStamped(
+                frame_id=EEF_TWIST_TASK_NAME,
+                linear=[msg.linear.x, msg.linear.y, msg.linear.z],
+                angular=[msg.angular.x, msg.angular.y, msg.angular.z],
+                ts=msg.ts,
+            )
+        )
+
+    def _handle_robot_msg(self, kind: Any, msg: dict[str, Any]) -> None:
+        """Robot-specific state_reliable JSON. gripper: browser keyboard cockpit
+        toggle → the coordinator's eef_twist gripper (Bool on gripper_command)."""
+        if kind == "gripper":
+            self.gripper_command.publish(Bool(data=bool(msg.get("closed", False))))
 
     # ─── E-STOP gating over the inherited control loop ────────────────
 
