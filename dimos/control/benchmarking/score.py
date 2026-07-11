@@ -19,7 +19,7 @@ run as a flat per-run JSON; this reads those recordings, scores each geometrical
 against its reference path (``score_run``), and emits the operating-point map +
 tolerance->max-safe-speed inversion in the existing JSON metric format.
 
-    python -m dimos.utils.benchmarking.score <recordings_dir> [--tolerances 5,10,15]
+    python -m dimos.control.benchmarking.score <recordings_dir> [--tolerances 5,10,15]
 """
 
 from __future__ import annotations
@@ -30,13 +30,13 @@ import json
 import math
 from pathlib import Path
 
+from dimos.control.benchmarking.benchmark import RunRecording
+from dimos.control.benchmarking.scoring import ExecutedTrajectory, TrajectoryTick, score_run
+from dimos.control.benchmarking.tuning import OperatingPoint, OperatingPointMap, invert_tolerance
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.utils.benchmarking.benchmark import RunRecording
-from dimos.utils.benchmarking.scoring import ExecutedTrajectory, TrajectoryTick, score_run
-from dimos.utils.benchmarking.tuning import OperatingPoint, OperatingPointMap, invert_tolerance
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()

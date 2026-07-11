@@ -40,7 +40,7 @@ odom automatically::
 
     dimos run unitree-go2-rpp-benchmark
     # afterwards, score offline:
-    python -m dimos.utils.benchmarking.score data/benchmark/go2
+    python -m dimos.control.benchmarking.score data/benchmark/go2
 
 To drive paths from some OTHER source instead of the benchmark, launch the
 controller alone: ``dimos run unitree-go2-rpp-controller``.
@@ -48,13 +48,13 @@ controller alone: ``dimos run unitree-go2-rpp-controller``.
 
 from __future__ import annotations
 
+from dimos.control.benchmarking.benchmark import Benchmarker
 from dimos.core.coordination.blueprints import autoconnect
 from dimos.core.transport import LCMTransport
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.robot.unitree.go2.blueprints.basic.unitree_go2_rpp_controller import (
     unitree_go2_rpp_controller,
 )
-from dimos.utils.benchmarking.benchmark import Benchmarker
 
 # The Benchmarker's ``odom`` In must read the same topic the controller emits leg
 # odom on (/go2/odom). path/speed/cmd_vel/gate already share names+topics with

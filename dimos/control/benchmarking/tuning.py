@@ -40,13 +40,13 @@ import json
 from pathlib import Path
 import subprocess
 
-from dimos.control.tasks.feedforward_gain_compensator import FeedforwardGainConfig
-from dimos.utils.benchmarking.plant import TwistBasePlantParams
-from dimos.utils.benchmarking.velocity_profile import (
+from dimos.control.benchmarking.plant import TwistBasePlantParams
+from dimos.control.benchmarking.velocity_profile import (
     GO2_VX_MAX,
     GO2_WZ_MAX,
     VelocityProfileConfig,
 )
+from dimos.control.tasks.feedforward_gain_compensator import FeedforwardGainConfig
 
 SCHEMA_VERSION = 1
 # SCHEMA_VERSION       = breaking field/type change.
@@ -720,7 +720,7 @@ def FopdtChannelParamsLike(dc: FopdtChannelDC):
     """Lightweight adapter: derive_config wants a TwistBasePlantParams
     (made of FopdtChannelParams), but the artifact stores them as
     FopdtChannelDC. Return a duck-typed object with .K, .tau, .L."""
-    from dimos.utils.benchmarking.plant import FopdtChannelParams
+    from dimos.control.benchmarking.plant import FopdtChannelParams
 
     return FopdtChannelParams(K=dc.K, tau=dc.tau, L=dc.L)
 

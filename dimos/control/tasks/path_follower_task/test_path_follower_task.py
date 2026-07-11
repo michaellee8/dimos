@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import math
 
+from dimos.control.benchmarking.paths import circle, straight_line
+from dimos.control.benchmarking.velocity_profile import VelocityProfileConfig
 from dimos.control.task import CoordinatorState, JointStateSnapshot
 from dimos.control.tasks.feedforward_gain_compensator import FeedforwardGainConfig
 from dimos.control.tasks.path_follower_task.path_follower_task import (
@@ -30,8 +32,6 @@ from dimos.core.global_config import global_config as _gc
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.utils.benchmarking.paths import circle, straight_line
-from dimos.utils.benchmarking.velocity_profile import VelocityProfileConfig
 
 _JOINTS = ["go2/vx", "go2/vy", "go2/wz"]
 

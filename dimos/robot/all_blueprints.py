@@ -150,7 +150,7 @@ all_modules = {
     "b-box-navigation-module": "dimos.navigation.bbox_navigation.BBoxNavigationModule",
     "b1-connection-module": "dimos.robot.unitree.b1.connection.B1ConnectionModule",
     "basic-path-follower": "dimos.navigation.basic_path_follower.module.BasicPathFollower",
-    "benchmarker": "dimos.utils.benchmarking.benchmark.Benchmarker",
+    "benchmarker": "dimos.control.benchmarking.benchmark.Benchmarker",
     "camera-module": "dimos.hardware.sensors.camera.module.CameraModule",
     "cartesian-motion-controller": "dimos.manipulation.control.servo_control.cartesian_motion_controller.CartesianMotionController",
     "click-start-goal-router": "dimos.navigation.cmu_nav.modules.click_start_goal_router.click_start_goal_router.ClickStartGoalRouter",

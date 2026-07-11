@@ -21,21 +21,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from dimos.control.task import CoordinatorState, JointStateSnapshot
-from dimos.control.tasks.rpp_path_follower_task.rpp_path_follower_task import (
-    RPPPathFollowerTask,
-    create_task,
-)
-from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
-from dimos.msgs.geometry_msgs.Quaternion import Quaternion
-from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.utils.benchmarking.paths import circle, straight_line
-from dimos.utils.benchmarking.plant import (
+from dimos.control.benchmarking.paths import circle, straight_line
+from dimos.control.benchmarking.plant import (
     FopdtChannelParams,
     TwistBasePlantParams,
     TwistBasePlantSim,
 )
-from dimos.utils.benchmarking.tuning import (
+from dimos.control.benchmarking.tuning import (
     FeedforwardDC,
     FopdtChannelDC,
     PlantModelDC,
@@ -44,6 +36,14 @@ from dimos.utils.benchmarking.tuning import (
     TuningConfig,
     VelocityProfileDC,
 )
+from dimos.control.task import CoordinatorState, JointStateSnapshot
+from dimos.control.tasks.rpp_path_follower_task.rpp_path_follower_task import (
+    RPPPathFollowerTask,
+    create_task,
+)
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 
 _JOINTS = ["go2/vx", "go2/vy", "go2/wz"]
 

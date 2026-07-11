@@ -20,6 +20,12 @@ from typing import Any
 import pygame
 
 from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
+
+# Gate event codes published on KeyboardTeleop.gate for tools that need
+# operator-confirmation per step. Defined in a dependency-free module so offline
+# consumers (e.g. the benchmark scorer) don't pull pygame just to read them;
+# re-exported here for back-compat with `from keyboard_teleop import GATE_*`.
+from dimos.control.benchmarking.gate import GATE_ADVANCE, GATE_QUIT, GATE_SKIP
 from dimos.core.core import rpc
 from dimos.core.module import Module
 from dimos.core.stream import Out
@@ -27,12 +33,6 @@ from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.msgs.std_msgs.Int8 import Int8
-
-# Gate event codes published on KeyboardTeleop.gate for tools that need
-# operator-confirmation per step. Defined in a dependency-free module so offline
-# consumers (e.g. the benchmark scorer) don't pull pygame just to read them;
-# re-exported here for back-compat with `from keyboard_teleop import GATE_*`.
-from dimos.utils.benchmarking.gate import GATE_ADVANCE, GATE_QUIT, GATE_SKIP
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()

@@ -23,6 +23,21 @@ from types import SimpleNamespace
 
 import pytest
 
+from dimos.control.benchmarking.benchmark import (
+    CompletionMonitor,
+    OdomRecorder,
+    RunRecording,
+    path_set,
+    shift_path_to_start_at_pose,
+)
+from dimos.control.benchmarking.paths import circle, straight_line
+from dimos.control.benchmarking.plant import (
+    FopdtChannelParams,
+    TwistBasePlantParams,
+    TwistBasePlantSim,
+)
+from dimos.control.benchmarking.score import score_dir
+from dimos.control.benchmarking.tuning import TuningConfig
 from dimos.control.task import CoordinatorState, JointStateSnapshot
 from dimos.control.tasks.rpp_path_follower_task.rpp_path_follower_task import (
     DEFAULT_ARTIFACT_PATH,
@@ -32,21 +47,6 @@ from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
-from dimos.utils.benchmarking.benchmark import (
-    CompletionMonitor,
-    OdomRecorder,
-    RunRecording,
-    path_set,
-    shift_path_to_start_at_pose,
-)
-from dimos.utils.benchmarking.paths import circle, straight_line
-from dimos.utils.benchmarking.plant import (
-    FopdtChannelParams,
-    TwistBasePlantParams,
-    TwistBasePlantSim,
-)
-from dimos.utils.benchmarking.score import score_dir
-from dimos.utils.benchmarking.tuning import TuningConfig
 
 _JOINTS = ["go2/vx", "go2/vy", "go2/wz"]
 

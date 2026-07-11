@@ -30,7 +30,7 @@ detects completion **from odom alone** (within a goal tolerance of the path's
 last pose AND near-zero velocity for a short dwell, or a per-run timeout), and
 writes the run (reference path + executed trace + metadata) to disk as one flat
 JSON. It does NOT score inline — scoring is a separate offline step (see
-:mod:`dimos.utils.benchmarking.score`).
+:mod:`dimos.control.benchmarking.score`).
 
 Launch as a SEPARATE process from the controller::
 
@@ -52,6 +52,15 @@ from typing import Any, Literal
 import numpy as np
 from reactivex.disposable import Disposable
 
+from dimos.control.benchmarking.gate import GATE_QUIT, GATE_SKIP
+from dimos.control.benchmarking.paths import (
+    circle,
+    rounded_square,
+    single_corner,
+    smooth_corner,
+    square,
+    straight_line,
+)
 from dimos.core.core import rpc
 from dimos.core.module import Module, ModuleConfig
 from dimos.core.stream import In, Out
@@ -62,15 +71,6 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path as NavPath
 from dimos.msgs.std_msgs.Float32 import Float32
 from dimos.msgs.std_msgs.Int8 import Int8
-from dimos.utils.benchmarking.gate import GATE_QUIT, GATE_SKIP
-from dimos.utils.benchmarking.paths import (
-    circle,
-    rounded_square,
-    single_corner,
-    smooth_corner,
-    square,
-    straight_line,
-)
 from dimos.utils.logging_config import setup_logger
 from dimos.utils.path_utils import get_project_root
 

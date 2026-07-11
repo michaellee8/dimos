@@ -38,6 +38,8 @@ import math
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING, Any
 
+from dimos.control.benchmarking.tuning import TuningConfig
+from dimos.control.benchmarking.velocity_profile import PathSpeedCap, VelocityProfileConfig
 from dimos.control.tasks.feedforward_gain_compensator import (
     FeedforwardGainCompensator,
     FeedforwardGainConfig,
@@ -52,8 +54,6 @@ from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.protocol.service.spec import BaseConfig
-from dimos.utils.benchmarking.tuning import TuningConfig
-from dimos.utils.benchmarking.velocity_profile import PathSpeedCap, VelocityProfileConfig
 from dimos.utils.logging_config import setup_logger
 
 if TYPE_CHECKING:

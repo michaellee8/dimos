@@ -31,6 +31,11 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
+from dimos.control.benchmarking.velocity_profile import (
+    PathSpeedCap,
+    PathSpeedCapProtocol,
+    VelocityProfileConfig,
+)
 from dimos.control.task import (
     BaseControlTask,
     ControlMode,
@@ -53,11 +58,6 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.navigation.replanning_a_star.controllers import PController
 from dimos.navigation.replanning_a_star.path_distancer import PathDistancer
 from dimos.protocol.service.spec import BaseConfig
-from dimos.utils.benchmarking.velocity_profile import (
-    PathSpeedCap,
-    PathSpeedCapProtocol,
-    VelocityProfileConfig,
-)
 from dimos.utils.logging_config import setup_logger
 from dimos.utils.trigonometry import angle_diff
 
