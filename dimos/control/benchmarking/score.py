@@ -29,6 +29,7 @@ from dataclasses import asdict
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 from dimos.control.benchmarking.benchmark import RunRecording
 from dimos.control.benchmarking.scoring import ExecutedTrajectory, TrajectoryTick, score_run
@@ -93,10 +94,10 @@ def load_recordings(recordings_dir: str | Path) -> list[RunRecording]:
 
 def score_recordings(
     recs: list[RunRecording], tolerances_cm: list[float]
-) -> tuple[OperatingPointMap, list[dict]]:
+) -> tuple[OperatingPointMap, list[dict[str, Any]]]:
     """Score every recording into an operating-point map + per-run diagnostics."""
     points: list[OperatingPoint] = []
-    runs: list[dict] = []
+    runs: list[dict[str, Any]] = []
     for rec in recs:
         ref = rec.reference_path()
         executed = _executed_from_recording(rec)
@@ -153,7 +154,9 @@ def _plot_cte_vs_speed(points: list[OperatingPoint], out: Path, robot: str) -> N
     plt.close(fig)
 
 
-def _canonicalize(ref: list, exec_: list) -> tuple[list, list]:
+def _canonicalize(
+    ref: list[tuple[float, float]], exec_: list[tuple[float, float]]
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
     """Rigid-transform a run into the canonical path frame: reference start ->
     (0,0), initial heading -> +x; same transform on the executed trajectory."""
     if len(ref) < 2:
@@ -166,13 +169,13 @@ def _canonicalize(ref: list, exec_: list) -> tuple[list, list]:
             break
     c, s = math.cos(-th), math.sin(-th)
 
-    def tf(pts):
+    def tf(pts: list[tuple[float, float]]) -> list[tuple[float, float]]:
         return [((x - ox) * c - (y - oy) * s, (x - ox) * s + (y - oy) * c) for x, y in pts]
 
     return tf(ref), tf(exec_)
 
 
-def _plot_xy(runs: list[dict], out: Path, robot: str) -> None:
+def _plot_xy(runs: list[dict[str, Any]], out: Path, robot: str) -> None:
     import matplotlib
 
     matplotlib.use("Agg")

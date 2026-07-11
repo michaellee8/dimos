@@ -26,7 +26,7 @@ from __future__ import annotations
 import numpy as np
 from numpy.typing import NDArray
 
-from dimos.msgs.nav_msgs import Path
+from dimos.msgs.nav_msgs.Path import Path
 
 
 class VelocityProfiler:
