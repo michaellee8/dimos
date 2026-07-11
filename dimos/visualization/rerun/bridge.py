@@ -367,9 +367,8 @@ class RerunBridgeModule(Module):
 
         # Pay decode + to_rerun for Rust-owned Image/PointCloud2, but do not
         # rr.log them (Rust already logs those into the same recording).
-        if (
-            self.config.force_python_heavy_ingest
-            and not self._python_owns_native_logging(topic, entity_path)
+        if self.config.force_python_heavy_ingest and not self._python_owns_native_logging(
+            topic, entity_path
         ):
             return
 
