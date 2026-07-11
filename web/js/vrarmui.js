@@ -212,15 +212,17 @@ export function buildArmCockpit(scene, _headPos) {
     scene.add(console_.mesh);
     _panel = console_;
 
-    // Stats panel — sits to the RIGHT of the two camera screens, in the same
-    // horizontal row (matching their y/z), toed-in toward the operator like a
-    // third screen. Screens: w=1.24 at x=±0.65, y=1.52, z=-1.62 (see vrarm.js
-    // SCREEN); the right edge of the right panel is ~1.27, so centre this just
-    // past it. Shows the same telemetry grid as the go2 VR cockpit.
-    const stats = new Panel({ wM: 0.44, hM: 0.70, cw: 400, ch: 640, opacity: 0.96 });
-    stats.mesh.position.set(1.58, 1.52, -1.62);
-    stats.mesh.rotation.y = -0.55;  // toe-in toward the operator (> screen yaw)
-    stats.mesh.renderOrder = 3;
+    // Stats panel — the third screen in the curved cockpit, to the RIGHT of the
+    // two camera screens and wrapping toward the operator. The camera screens sit
+    // on an arc (x=±0.65, z=-1.62, yaw ∓0.20); this continues that arc one panel
+    // further right, but pulled FORWARD (z less negative) and yawed harder so it
+    // faces the operator and sits in front of — not behind — the right screen.
+    // Same height/row (y=1.52) as the screens. renderOrder above the screens so
+    // it never z-fights into them at the seam.
+    const stats = new Panel({ wM: 0.5, hM: 0.70, cw: 440, ch: 620, opacity: 0.97 });
+    stats.mesh.position.set(1.42, 1.52, -1.28);
+    stats.mesh.rotation.y = -0.7;  // face the operator (harder toe-in than screens)
+    stats.mesh.renderOrder = 4;
     scene.add(stats.mesh);
 
     let lastStatsMs = 0;  // repaint the 1Hz panels (cmd latency etc.), not per frame
