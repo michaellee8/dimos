@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import field
+import os
 import re
 import signal
 import socket
@@ -181,6 +182,12 @@ class Config(ModuleConfig):
     rerun_web: bool = RERUN_ENABLE_WEB
     web_port: int = RERUN_WEB_VIEWER_PORT
     blueprint: BlueprintFactory | None = _default_blueprint
+    # Experiment flag: when True, Python also subscribes/decodes/to_rerun() for
+    # default Image/PointCloud2 (Rust still rr.log's them; Python does not).
+    # Off by default. Set DIMOS_RERUN_FORCE_PYTHON_HEAVY=1 to enable.
+    force_python_heavy_ingest: bool = field(
+        default_factory=lambda: os.getenv("DIMOS_RERUN_FORCE_PYTHON_HEAVY", "") == "1"
+    )
 
 
 Config.model_rebuild(_types_namespace={"Archetype": Archetype, "Blueprint": Blueprint})
@@ -270,6 +277,21 @@ class RerunBridgeModule(Module):
             topic_str = "/" + topic_str.removeprefix("dimos/")
         return f"{self.config.entity_prefix}{topic_str}"
 
+    def _python_owns_native_logging(self, topic: Any, entity_path: str) -> bool:
+        """True when Python (not Rust) should rr.log this native Image/PointCloud2."""
+        lcm_type = topic.lcm_type
+        if lcm_type is None or lcm_type.msg_name not in _NATIVE_TYPES:
+            return True
+        if not self._native_enabled:
+            return True
+        overrides = [
+            converter
+            for pattern, converter in self.config.visual_override.items()
+            if pattern_matches(pattern, entity_path)
+        ]
+        # Callable override => Python owns visualization for this entity.
+        return any(converter is not None for converter in overrides)
+
     def _decode_in_python(self, topic: Any) -> bool:
         lcm_type = topic.lcm_type
         if lcm_type is None:
@@ -287,6 +309,7 @@ class RerunBridgeModule(Module):
                 lcm_type.msg_name not in _NATIVE_TYPES
                 or bool(overrides)
                 or not self._native_enabled
+                or self.config.force_python_heavy_ingest
             )
             self._decode_topics[entity_path] = decode
         return decode
@@ -295,7 +318,11 @@ class RerunBridgeModule(Module):
         self._on_message(topic.lcm_type.lcm_decode(payload), topic)
 
     def _subscribe_python(self, pubsub: LCMPubSubBase | ZenohPubSubBase) -> Callable[[], None]:
-        if not self._native_enabled or isinstance(pubsub, ZenohPubSubBase):
+        if (
+            not self._native_enabled
+            or self.config.force_python_heavy_ingest
+            or isinstance(pubsub, ZenohPubSubBase)
+        ):
             return pubsub.subscribe_all(self._on_packet, self._decode_in_python)
 
         for pattern, converter in self.config.visual_override.items():
@@ -336,6 +363,14 @@ class RerunBridgeModule(Module):
         rerun_data: RerunData | None = self._visual_override_for_entity_path(entity_path)(msg)
 
         if not rerun_data:
+            return
+
+        # Pay decode + to_rerun for Rust-owned Image/PointCloud2, but do not
+        # rr.log them (Rust already logs those into the same recording).
+        if (
+            self.config.force_python_heavy_ingest
+            and not self._python_owns_native_logging(topic, entity_path)
+        ):
             return
 
         # TFMessage for example returns list of (entity_path, archetype) tuples
@@ -455,6 +490,11 @@ class RerunBridgeModule(Module):
             zenoh_listen = []
 
         self._native_enabled = self.config.topic_to_entity is None
+        if self.config.force_python_heavy_ingest:
+            logger.warning(
+                "force_python_heavy_ingest enabled: Python will subscribe/decode/to_rerun "
+                "Image and PointCloud2, but will not rr.log them (Rust remains sole logger)"
+            )
         if self._native_enabled:
             python_patterns = [
                 f"^(?:{pattern.pattern if isinstance(pattern, Glob) else re.escape(pattern)})$"
