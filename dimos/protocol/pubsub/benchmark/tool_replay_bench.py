@@ -29,19 +29,83 @@ Wrap with `taskset -c 0-3` / `tc netem` for constrained profiles.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 import json
 import os
 from pathlib import Path
 import threading
 import time
+from typing import Any, TypeVar
 
 from dimos.core.core import rpc
 from dimos.core.module import Module
-from dimos.core.stream import In
+from dimos.core.stream import In, Out, Stream
+from dimos.core.transport import PubSubTransport
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
+
+T = TypeVar("T")
+
+
+class CompressedCodec(PubSubTransport[T]):
+    """Image↔CompressedImage codec over any inner transport.
+
+    Bench-only utility: rejected as public API in #2831 (transports shouldn't
+    peek into messages), kept here so raw-vs-codec cells stay comparable.
+    The wire carries a typed sensor_msgs.CompressedImage; ts/frame_id survive.
+    With decode=False subscribers receive the CompressedImage as-is.
+    """
+
+    def __init__(
+        self,
+        inner: PubSubTransport[Any],
+        format: str = "jpeg",
+        quality: int = 75,
+        max_width: int | None = None,
+        decode: bool = True,
+    ) -> None:
+        if isinstance(inner, CompressedCodec):
+            raise ValueError("CompressedCodec cannot wrap another CompressedCodec")
+        super().__init__(inner.topic)
+        self.inner = inner
+        self.format = format
+        self.quality = quality
+        self.max_width = max_width
+        self.decode = decode
+
+    def __reduce__(self):  # type: ignore[no-untyped-def]
+        return (
+            CompressedCodec,
+            (self.inner, self.format, self.quality, self.max_width, self.decode),
+        )
+
+    def broadcast(self, stream: Out[T] | None, msg: T) -> None:
+        from dimos.msgs.sensor_msgs.CompressedImage import (
+            CompressedImage,
+        )  # deferred to avoid pulling in cv2/rerun
+
+        if not isinstance(msg, CompressedImage):
+            msg = CompressedImage.from_image(  # type: ignore[assignment]
+                msg,  # type: ignore[arg-type]
+                format=self.format,  # type: ignore[arg-type]
+                quality=self.quality,
+                max_width=self.max_width,
+            )
+        self.inner.broadcast(stream, msg)
+
+    def subscribe(
+        self, callback: Callable[[T], Any], selfstream: Stream[T] | None = None
+    ) -> Callable[[], None]:
+        cb = (lambda m: callback(m.decode())) if self.decode else callback
+        return self.inner.subscribe(cb, selfstream)  # type: ignore[no-any-return]
+
+    def start(self) -> None:
+        self.inner.start()
+
+    def stop(self) -> None:
+        self.inner.stop()
 
 
 class BenchSink(Module):
@@ -49,7 +113,7 @@ class BenchSink(Module):
 
     color_image: In[Image]
 
-    def __init__(self, out_path: str = "", work_ms: float = 0.0, **kwargs) -> None:
+    def __init__(self, out_path: str = "", work_ms: float = 0.0, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._out_path = out_path
         self._work_ms = work_ms
@@ -155,7 +219,7 @@ def main() -> None:
 
     from dimos.core.coordination.blueprints import autoconnect
     from dimos.core.coordination.module_coordinator import ModuleCoordinator
-    from dimos.core.transport import CompressedCodec, LCMTransport
+    from dimos.core.transport import LCMTransport
     from dimos.msgs.sensor_msgs.CompressedImage import CompressedImage
     from dimos.robot.get_all_blueprints import get_blueprint_by_name
 

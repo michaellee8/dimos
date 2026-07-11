@@ -24,9 +24,10 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from dimos.core.transport import CompressedCodec, LCMTransport, ZenohTransport
+from dimos.core.transport import LCMTransport, ZenohTransport
 from dimos.msgs.sensor_msgs.CompressedImage import CompressedImage
 from dimos.msgs.sensor_msgs.Image import Image, ImageFormat
+from dimos.protocol.pubsub.benchmark.tool_replay_bench import CompressedCodec
 from dimos.protocol.service.zenohservice import ZenohSessionPool
 
 
