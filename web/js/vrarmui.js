@@ -33,7 +33,6 @@ export const aui = {
 };
 
 function nextNonce() { return ++aui.nonce; }
-function chanReady() { return state.stateChannel && state.stateChannel.readyState === 'open'; }
 
 // ── Panel: canvas → CanvasTexture → plane, with hit regions (from vrui.js) ──
 class Panel {
@@ -134,21 +133,14 @@ function renderConsole(p) {
     p.pill(150, 74, 130, 44, `L ${aui.engaged.left ? 'ON' : '—'}`, aui.engaged.left);
     p.pill(292, 74, 130, 44, `R ${aui.engaged.right ? 'ON' : '—'}`, aui.engaged.right);
 
-    // E-STOP / clear — always reachable, big.
+    // E-STOP / clear — always reachable, big. (Latency/transport live on the
+    // dedicated stats panel now, so the console no longer prints a stats line.)
     if (aui.estopped) {
         p.chip('estop_clear', 24, 168, 540, 130, 'E-STOP LATCHED — CLEAR', 'error');
     } else {
         const pend = [...aui.pending.values()].some((v) => v.id === 'estop');
         p.chip('estop', 24, 168, 540, 130, 'E-STOP', pend ? 'pending' : 'idle');
     }
-
-    // Stats line (transport + robot-measured cmd latency).
-    x.fillStyle = C.dim; x.font = '500 18px ui-monospace, monospace';
-    const cmd = state.liveStats.cmd;
-    const lat = cmd && cmd.latency_ms != null ? `${Math.round(cmd.latency_ms)}ms` : '—';
-    const hz = cmd && cmd.rate_hz != null ? `${Math.round(cmd.rate_hz)}Hz` : '—';
-    const tl = transportLabel ? transportLabel() : (state.activeRobot?.transport || '');
-    x.fillText(`cmd ${lat} · ${hz} · ${tl}`, 600, 96);
 }
 
 // Stats panel — transport header + the shared hudDetailRows() grid (cmd
