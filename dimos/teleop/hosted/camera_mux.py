@@ -12,30 +12,37 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Operator-facing camera mux for hosted teleop modules.
+"""Camera mux module: N camera inputs → one composited video frame.
 
-Mixin over a ``Module`` that owns a ``mux_image: Out[Image]`` port. Collects
-the latest frame per named camera, composites the operator-selected subset
-(single frame passthrough, or hstack scaled to the shortest tile), applies
-publish-side width/fps caps, and optionally appends the latency-stamp strip.
+Standalone Module (not a mixin) that collects the latest frame per named
+camera, composites the operator-selected subset (single passthrough, or hstack
+scaled to the shortest tile), applies width/fps caps, and optionally appends
+the latency-stamp strip. The composited ``mux_image`` output binds straight to
+a ``CloudflareVideoTransport`` / ``LiveKitVideoTransport`` in the blueprint.
 
-Extracted from ``Go2HostedConnection`` so arm stations can reuse it;
-the stamp cell constants MUST stay in sync with webrtc.js readLatencyStamp.
+Operator camera selection arrives on ``camera_select`` (broker state plane).
+Not StreamModule (that is one-In-one-Out); this has N image Ins.
 """
 
 from __future__ import annotations
 
+import json
 import threading
 import time
+from typing import Any
 
 import numpy as np
+from reactivex.disposable import Disposable
 
+from dimos.core.core import rpc
+from dimos.core.module import Module, ModuleConfig
+from dimos.core.stream import In, Out
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
-# Frame-embedded capture time for glass-to-glass latency (see module docstring).
+# Frame-embedded capture time for glass-to-glass latency (see webrtc.js).
 # MSB-first: SYNC then time. Constants MUST match webrtc.js readLatencyStamp.
 _STAMP_CELL_PX = 16  # cell width — big enough to survive H.264 compression
 _STAMP_STRIP_PX = 16  # height of the appended timestamp band, in rows
@@ -44,18 +51,44 @@ _STAMP_TIME_BITS = 44  # ms since epoch (~41 bits) + headroom
 _STAMP_CELLS = len(_STAMP_SYNC) + _STAMP_TIME_BITS
 
 
-class CameraMuxMixin:
-    """Camera mux for hosted teleop: latest-frame cache → composite → mux_image.
+class CameraMuxConfig(ModuleConfig):
+    cameras: list[str] = ["cam1", "cam2"]  # ordered; first is the boot default
+    video_max_width: int = 0
+    video_max_fps: float = 0.0
+    latency_stamp: bool = False
 
-    Host module contract:
-      - ``mux_image: Out[Image]`` port declared on the host.
-      - config provides ``video_max_width: int``, ``video_max_fps: float``,
-        ``latency_stamp: bool`` (0/0.0/False = off).
-      - host calls ``_mux_init(cameras)`` in ``__init__`` with the ordered
-        camera names (e.g. ``["cam1", "cam2"]``; first entry is the boot
-        default selection), and subscribes each camera stream to
-        ``lambda img: self._on_cam("cam1", img)``.
-    """
+
+class CameraMuxModule(Module):
+    """Composite selected camera inputs into one ``mux_image`` for the video track."""
+
+    config: CameraMuxConfig
+
+    # One In per camera (wired in the blueprint), plus operator selection.
+    cam1: In[Image]
+    cam2: In[Image]
+    camera_select: In[bytes]  # broker state: operator picks which cams to show
+    mux_image: Out[Image]  # → CloudflareVideoTransport / LiveKitVideoTransport
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Init mux state (latest-frame cache, selection, fps stamp)."""
+        super().__init__(**kwargs)
+        self._mux_init(self.config.cameras)
+
+    @rpc
+    def start(self) -> None:
+        """Subscribe each camera In to the frame cache + camera_select."""
+        for cam, port in (("cam1", self.cam1), ("cam2", self.cam2)):
+            if cam not in self._cam_order or port is None:
+                continue  # only wire cameras that exist as ports and in config
+            self.register_disposable(
+                Disposable(port.subscribe(lambda img, cam=cam: self._on_cam(cam, img)))
+            )
+        self.register_disposable(Disposable(self.camera_select.subscribe(self._set_cam_selection)))
+
+    @rpc
+    def stop(self) -> None: ...
+
+    # ─── mux state ────────────────────────────────────────────────────
 
     def _mux_init(self, cameras: list[str]) -> None:
         """Set up mux state: known camera order, default selection = first cam."""
@@ -65,15 +98,17 @@ class CameraMuxMixin:
         self._cam_selected: list[str] = self._cam_order[:1]
         self._last_mux_pub = 0.0  # monotonic stamp for the video_max_fps cap
 
+    # ─── frame handling ───────────────────────────────────────────────
+
     def _on_cam(self, cam: str, img: Image) -> None:
-        """Cache the latest frame; if `cam` is selected, fps-cap then publish."""
+        """Cache the latest frame; if selected, fps-cap then composite+publish."""
         with self._cam_lock:
             self._cam_frames[cam] = img
             shown = cam in self._cam_selected
         if not shown:
             return
         # FPS cap before any mux/encode work — skipping here is nearly free.
-        max_fps = self.config.video_max_fps  # type: ignore[attr-defined]
+        max_fps = self.config.video_max_fps
         if max_fps > 0:
             now = time.monotonic()
             if now - self._last_mux_pub < 1.0 / max_fps:
@@ -81,11 +116,11 @@ class CameraMuxMixin:
             self._last_mux_pub = now
         out = self._composite()
         if out is not None:
-            self.mux_image.publish(out)  # type: ignore[attr-defined]
+            self.mux_image.publish(out)
 
     def _composite(self) -> Image | None:
-        """Selected frames → one Image: single passthrough, else hstack scaled to
-        min height. None if nothing cached yet. Always even-sized (see _even_dims)."""
+        """Selected frames → one Image (single passthrough, else hstack to min
+        height). Even-sized (libx264). None if nothing cached."""
         with self._cam_lock:
             order = [c for c in self._cam_order if c in self._cam_selected]
             imgs = [self._cam_frames[c] for c in order if c in self._cam_frames]
@@ -128,7 +163,7 @@ class CameraMuxMixin:
     def _downscale(self, img: Image) -> Image:
         """Cap publish width at config.video_max_width (0 = off). Runs before
         _stamp so the strip's 16px cells stay decodable at the sent size."""
-        max_w = self.config.video_max_width  # type: ignore[attr-defined]
+        max_w = self.config.video_max_width
         if max_w <= 0 or img.data.ndim < 2:
             return img
         h, w = img.data.shape[:2]
@@ -142,7 +177,7 @@ class CameraMuxMixin:
     def _stamp(self, img: Image) -> Image:
         """Append (not overwrite) a bottom strip encoding capture time as B/W
         cells; the operator reads then crops it. No-op unless latency_stamp."""
-        if not self.config.latency_stamp:  # type: ignore[attr-defined]
+        if not self.config.latency_stamp:
             return img
 
         ms = int(time.time() * 1000)
@@ -164,9 +199,26 @@ class CameraMuxMixin:
         out = np.vstack([data, strip])
         return Image(data=out, format=img.format, frame_id=img.frame_id)
 
-    def _set_cam_selection(self, cams: list[str]) -> None:
-        """camera_select: filter to known names (fallback first cam), then
-        republish immediately so the view flips without waiting for a frame."""
+    def _set_cam_selection(self, data: bytes) -> None:
+        """camera_select payload → filter to known cams, republish immediately.
+
+        Fed by the shared ``state_reliable`` plane (the provider fans one inbound
+        channel to every subscriber), so this sees ALL state kinds — estop,
+        nav_goal, sport_cmd, etc. We act only on ``{"type":"camera_select",
+        "cams":[...]}`` and silently ignore the rest (other modules own them),
+        then republish at once so the view flips without waiting for a frame."""
+        if isinstance(data, (bytes, bytearray)):
+            data = bytes(data)
+            if not data.startswith(b"{"):
+                return  # non-JSON frame on the shared plane — not ours
+            data = data.decode()
+        try:
+            msg = json.loads(data)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(msg, dict) or msg.get("type") != "camera_select":
+            return  # a different kind on the shared plane — not ours
+        cams = msg.get("cams", [])
         if not isinstance(cams, list):  # untrusted wire payload (e.g. null)
             cams = []
         sel = [c for c in cams if c in self._cam_order] or self._cam_order[:1]
@@ -175,7 +227,7 @@ class CameraMuxMixin:
         logger.info("camera selection → %s", sel)
         out = self._composite()
         if out is not None:
-            self.mux_image.publish(out)  # type: ignore[attr-defined]
+            self.mux_image.publish(out)
 
     def _mux_state(self) -> list[str]:
         """Current selection, for the telemetry payload."""

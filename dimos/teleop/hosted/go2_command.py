@@ -1,0 +1,458 @@
+# Copyright 2026 Dimensional Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Go2 command plane: operator command / E-STOP / drive dispatch.
+
+A PLAIN module (does NOT subclass GO2Connection). It reaches the driver via an
+RPC ref — ``go2: GO2Connection`` is auto-injected as an RPCClient — and calls
+the driver's ``@rpc`` command methods (``sport_command``, ``set_rage_mode``,
+``standup``, ``move`` ...) directly, keeping synchronous return values for acks.
+
+Split: driver calls = RPC (robot-internal); operator-facing planes = transport.
+Operator commands arrive on ``state_json`` (transport, from the broker); acks go
+back on ``cmd_ack`` (transport). Drive is a guarded STREAM filter (not per-frame
+RPC): raw operator cmd_vel in → E-STOP/stale/reorder/nav-yield guard →
+``cmd_vel_out`` → the driver's ``cmd_vel`` port. Runs co-located (n_workers=1)
+with the mux / stats / driver modules so all broker transports share one session.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import time
+from typing import Any
+
+from dimos_lcm.std_msgs import Bool
+from reactivex.disposable import Disposable
+
+from dimos.core.core import rpc
+from dimos.core.module import Module, ModuleConfig
+from dimos.core.stream import In, Out
+from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Twist import Twist
+from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
+from dimos.robot.unitree.go2.connection import GO2Connection
+from dimos.teleop.hosted.command_executor import SerializedCommandMixin
+from dimos.utils.logging_config import setup_logger
+
+logger = setup_logger()
+
+# Operator-allowed sport commands → SPORT_CMD api_id (robot-side allow-list).
+ALLOWED_SPORT_CMDS: dict[str, int] = {
+    "StandDown": 1005,
+    "RecoveryStand": 1006,
+    "Sit": 1009,
+    "Hello": 1016,
+    "Stretch": 1017,
+    "Damp": 1001,
+    "FrontPounce": 1032,  # acrobatic — leaps
+    "FrontJump": 1031,  # acrobatic — leaps
+}
+_POSTURE_SPORT_CMDS = frozenset({"StandDown", "RecoveryStand", "Sit", "Damp"})
+_ACROBATIC_SPORT_CMDS = frozenset({"FrontPounce", "FrontJump"})
+
+
+def _is_zero_twist(t: Twist) -> bool:
+    """True when the drive command has no linear/angular velocity (idle joystick)."""
+    return (
+        t.linear.x == 0.0
+        and t.linear.y == 0.0
+        and t.linear.z == 0.0
+        and t.angular.x == 0.0
+        and t.angular.y == 0.0
+        and t.angular.z == 0.0
+    )
+
+
+class Go2CommandConfig(ModuleConfig):
+    cmd_stale_after_sec: float = 0.5
+    damp_on_operator_lost: bool = False
+    max_nav_goal_m: float = 100.0
+    allow_acrobatics: bool = False
+
+
+class Go2CommandModule(Module, SerializedCommandMixin):
+    """Operator command/E-STOP/drive plane, driving GO2Connection over RPC."""
+
+    config: Go2CommandConfig
+
+    # RPC ref to the driver module (framework injects an RPCClient). Used for
+    # DISCRETE commands (sport/mode/light/estop) that need return values.
+    go2: GO2Connection
+
+    # Operator-facing planes over transport.
+    state_json: In[bytes]  # broker state_reliable (also read by stats mod)
+    cmd_ack: Out[bytes]  # → state_reliable_back (command acks)
+
+    # Manual drive plane: raw operator cmd_vel IN, guarded here, republished as
+    # clean tele_cmd_vel OUT to MovementManager (which arbitrates manual vs nav
+    # and owns the driver's cmd_vel). Nav drive is not routed here.
+    cmd_vel_in: In[Twist]  # raw operator drive (broker cmd_unreliable)
+    tele_cmd_vel: Out[Twist]  # guarded manual drive → MovementManager
+
+    cmd_vel_stamped: Out[TwistStamped]  # decoded operator cmd for the recorder
+    goal_request: Out[PoseStamped]  # click-to-nav goal → planner
+    robot_state: Out[bytes]  # posture/rage/battery → stats module telemetry
+    stop_movement: Out[Bool]  # cancel the planner (on E-STOP / operator-lost)
+
+    def __init__(self, **kwargs: Any) -> None:
+        """Init command state (executor, safety epoch, posture, drive timers)."""
+        super().__init__(**kwargs)
+        self._cmd_init()
+        self._estopped = False
+        self._rage_active = False
+        self._obstacle_avoidance = True
+        self._light = 0.0
+        self._posture = "StandReady"
+        self._last_cmd_ts = 0.0
+        self._last_cmd_nonzero = False  # was the last forwarded drive frame moving?
+
+    @rpc
+    def start(self) -> None:
+        """Wire state_json/drive/nav subscriptions; start the command executor."""
+        super().start()
+        self._cmd_start()
+        self.register_disposable(Disposable(self.state_json.subscribe(self._on_state_json)))
+        self.register_disposable(Disposable(self.cmd_vel_in.subscribe(self._on_cmd_vel_in)))
+        self._publish_robot_state()
+
+    @rpc
+    def stop(self) -> None:
+        """Shut the executor."""
+        self._cmd_stop()
+        super().stop()
+
+    def _send_ack(self, nonce: Any, ok: bool) -> None:
+        """Publish a cmd_ack on the broker-back channel."""
+        try:
+            self.cmd_ack.publish(json.dumps({"type": "cmd_ack", "nonce": nonce, "ok": ok}).encode())
+        except Exception:
+            logger.warning("cmd_ack publish failed", exc_info=True)
+
+    # ─── inbound command dispatch (state_json over transport) ─────────
+
+    def _on_state_json(self, data: Any) -> None:
+        """Dispatch command/estop kinds; ignore stats kinds (stats module owns)."""
+        if isinstance(data, str):
+            data = data.encode()
+        if not data.startswith(b"{"):
+            return
+        try:
+            msg = json.loads(data)
+        except ValueError:
+            logger.warning("state_reliable: malformed JSON: %r", data[:80])
+            return
+
+        kind = msg.get("type")
+        if kind == "estop":
+            self._handle_estop(msg.get("nonce"))
+        elif kind == "estop_clear":
+            self._handle_estop_clear(msg.get("nonce"))
+        elif kind == "operator_lost":  # synthetic, injected by the provider
+            self._on_operator_lost()
+        elif kind == "sport_cmd":
+            self._handle_sport_cmd(msg)
+        elif kind == "set_mode":
+            self._handle_set_mode(msg)
+        elif kind == "obstacle_avoidance":
+            self._handle_obstacle_avoidance(msg)
+        elif kind == "light":
+            self._handle_light(msg)
+        elif kind == "nav_goal":
+            self._handle_nav_goal(msg)
+        elif kind == "nav_cancel":
+            self._handle_nav_cancel(msg.get("nonce"))
+
+    # ─── E-STOP + operator-loss ───────────────────────────────────────
+
+    def _handle_estop(self, nonce: Any) -> None:
+        """Latch E-STOP (drive filter reads the latch → stops cmd_vel_out
+        instantly), bump safety epoch, urgently Damp via go2 RPC."""
+        self._estopped = True
+        self._bump_safety_epoch()
+        logger.warning("E-STOP latched by operator")
+        self._cancel_nav()
+
+        def task(_ep: int) -> bool:
+            ok = bool(self.go2.sport_command(ALLOWED_SPORT_CMDS["Damp"]))
+            if ok:
+                self._posture = "Damp"
+                self._publish_robot_state()
+            return ok
+
+        self._submit_cmd("estop", nonce, task, urgent=True)
+
+    def _handle_estop_clear(self, nonce: Any) -> None:
+        """Un-latch; cancel any active plan; does not move the robot."""
+        self._cancel_nav()
+        self._estopped = False
+        logger.warning("E-STOP cleared by operator")
+        self._send_ack(nonce, True)
+
+    def _on_operator_lost(self) -> None:
+        """Stop motion, bump epoch, clear nonces, optionally Damp."""
+        logger.warning("operator link lost — stopping motion")
+        self._bump_safety_epoch()
+        self._cancel_nav()
+        with self._cmd_lock:
+            self._nonce_results.clear()
+        try:
+            self.go2.stop_movement()
+        except Exception:
+            logger.exception("stop_movement on operator loss failed")
+        if self.config.damp_on_operator_lost:
+            self._submit_cmd(
+                "damp_on_operator_lost",
+                None,
+                lambda _ep: bool(self.go2.sport_command(ALLOWED_SPORT_CMDS["Damp"])),
+                urgent=True,
+            )
+
+    # ─── discrete commands (RPC to the driver) ────────────────────────
+
+    def _handle_sport_cmd(self, msg: dict[str, Any]) -> None:
+        """Allow-listed sport cmd → go2.sport_command(api_id) RPC → ack."""
+        name = msg.get("name")
+        nonce = msg.get("nonce")
+
+        if name == "StandReady":
+            self._submit_cmd("StandReady", nonce, self._stand_ready_task)
+            return
+
+        api_id = ALLOWED_SPORT_CMDS.get(name) if isinstance(name, str) else None
+        if api_id is None:
+            logger.warning("sport_cmd: disallowed/unknown name %r", name)
+            self._send_ack(nonce, False)
+            return
+        if name in _ACROBATIC_SPORT_CMDS and not self.config.allow_acrobatics:
+            logger.warning("sport_cmd: %s blocked (allow_acrobatics=False)", name)
+            self._send_ack(nonce, False)
+            return
+
+        def task(_ep: int) -> bool:
+            ok = bool(self.go2.sport_command(api_id))
+            if ok and name in _POSTURE_SPORT_CMDS:
+                self._posture = name
+                self._publish_robot_state()
+            return ok
+
+        self._submit_cmd(f"sport_cmd {name}", nonce, task, urgent=(name == "Damp"))
+
+    def _stand_ready_task(self, epoch: int) -> bool:
+        """Standup → RecoveryStand → BalanceStand → joystick via go2 RPC, aborts
+        if E-STOP / operator-lost fires after submission (epoch-fenced)."""
+
+        def _step(label: str, ok: object) -> bool:
+            if not ok:
+                logger.warning("StandReady: %s failed", label)
+            return bool(ok)
+
+        def _fenced_sleep(sec: float) -> bool:
+            time.sleep(sec)
+            if not self._safety_ok(epoch):
+                logger.warning("StandReady aborted: E-STOP / operator-lost mid-sequence")
+                return False
+            return True
+
+        if not _step("standup", self.go2.standup()):
+            return False
+        if not _fenced_sleep(3.0):
+            return False
+        if not _step("RecoveryStand", self.go2.sport_command(ALLOWED_SPORT_CMDS["RecoveryStand"])):
+            return False
+        if not _fenced_sleep(0.3):
+            return False
+        if not _step("balance_stand", self.go2.balance_stand()):
+            return False
+        if not _fenced_sleep(0.3):
+            return False
+        if not _step("switch_joystick", self.go2.switch_joystick(True)):
+            return False
+        self._posture = "StandReady"
+        self._publish_robot_state()
+        return True
+
+    def _handle_set_mode(self, msg: dict[str, Any]) -> None:
+        """Speed mode. normal/high are browser-side scale only; only the rage
+        boundary toggles firmware."""
+        mode = msg.get("mode")
+        nonce = msg.get("nonce")
+        if mode not in ("normal", "high", "rage"):
+            logger.warning("set_mode: unknown mode %r", mode)
+            self._send_ack(nonce, False)
+            return
+        want_rage = mode == "rage"
+
+        def task(epoch: int) -> bool:
+            if want_rage == self._rage_active:
+                return True
+            ok = bool(self.go2.set_rage_mode(want_rage))
+            if not self._safety_ok(epoch):
+                logger.warning("set_mode aborted: E-STOP / operator-lost mid-toggle")
+                return False
+            if ok:
+                self._rage_active = want_rage
+                self._publish_robot_state()
+            logger.info("set_mode: rage=%s ok=%s", want_rage, ok)
+            return ok
+
+        self._submit_cmd(f"set_mode {mode}", nonce, task)
+
+    def _handle_obstacle_avoidance(self, msg: dict[str, Any]) -> None:
+        """Toggle the Go2's onboard obstacle avoidance on/off."""
+        enabled = bool(msg.get("enabled"))
+        nonce = msg.get("nonce")
+
+        def task(_ep: int) -> bool:
+            ok = bool(self.go2.set_obstacle_avoidance(enabled))
+            if ok:
+                self._obstacle_avoidance = enabled
+                self._publish_robot_state()
+            logger.info("obstacle_avoidance: enabled=%s ok=%s", enabled, ok)
+            return ok
+
+        self._submit_cmd(f"obstacle_avoidance {enabled}", nonce, task)
+
+    def _handle_light(self, msg: dict[str, Any]) -> None:
+        """Head-LED brightness 0..1 → firmware level 0-10."""
+        nonce = msg.get("nonce")
+        raw = msg.get("brightness")
+        if raw is None:
+            raw = 1.0 if msg.get("enabled") else 0.0  # legacy on/off toggle
+        try:
+            brightness = float(raw)
+        except (TypeError, ValueError):
+            logger.warning("light: malformed brightness %r", raw)
+            self._send_ack(nonce, False)
+            return
+        if math.isnan(brightness):
+            self._send_ack(nonce, False)
+            return
+        brightness = max(0.0, min(1.0, brightness))
+        level = round(brightness * 10)
+
+        def task(_ep: int) -> bool:
+            ok = bool(self.go2.set_light(level))
+            if ok:
+                self._light = brightness
+                self._publish_robot_state()
+            logger.info("light: brightness=%.1f (level %d) ok=%s", brightness, level, ok)
+            return ok
+
+        self._submit_cmd(f"light {brightness:.1f}", nonce, task)
+
+    # ─── click-to-navigate ────────────────────────────────────────────
+
+    def _handle_nav_goal(self, msg: dict[str, Any]) -> None:
+        """Operator map click → PoseStamped goal for the planner."""
+        nonce = msg.get("nonce")
+        if self._estopped:
+            logger.warning("nav_goal rejected: E-STOP latched")
+            self._send_ack(nonce, False)
+            return
+        try:
+            x, y = float(msg["x"]), float(msg["y"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning("nav_goal: malformed %r", msg)
+            self._send_ack(nonce, False)
+            return
+        limit = self.config.max_nav_goal_m
+        if not (math.isfinite(x) and math.isfinite(y)) or abs(x) > limit or abs(y) > limit:
+            logger.warning("nav_goal: out-of-range (%r, %r)", x, y)
+            self._send_ack(nonce, False)
+            return
+        pose = PoseStamped(
+            ts=time.time(), frame_id="world", position=[x, y, 0.0], orientation=[0, 0, 0, 1]
+        )
+        try:
+            self.goal_request.publish(pose)
+        except Exception:
+            logger.warning("nav_goal publish failed", exc_info=True)
+            self._send_ack(nonce, False)
+            return
+        logger.info("nav_goal: (%.2f, %.2f)", x, y)
+        self._send_ack(nonce, True)
+
+    def _handle_nav_cancel(self, nonce: Any) -> None:
+        """Operator cancel-plan button → stop the planner."""
+        self._cancel_nav()
+        logger.info("nav_cancel: plan cancelled by operator")
+        self._send_ack(nonce, True)
+
+    def _cancel_nav(self) -> None:
+        """Tell the planner to stop (publish stop_movement)."""
+        try:
+            msg = Bool()
+            msg.data = True
+            self.stop_movement.publish(msg)
+        except Exception:
+            logger.debug("nav cancel publish failed", exc_info=True)
+
+    # ─── manual drive guard (stream filter → cmd_vel_out, NOT RPC) ────
+
+    def _on_cmd_vel_in(self, twist: Twist) -> None:
+        """Guard raw operator drive — E-STOP gate, stale/future/out-of-order
+        drop — then republish on tele_cmd_vel to MovementManager, which
+        arbitrates it against the planner and owns the driver's cmd_vel."""
+        if self._estopped:
+            return  # latched: no motion until estop_clear
+        ts = float(twist.ts)
+        age = time.time() - ts
+        if age > self.config.cmd_stale_after_sec:
+            logger.debug("dropping stale cmd_vel: age=%.3fs", age)
+            return
+        if age < 0:  # future-stamped (clock skew / corrupt ts): don't let it
+            # advance _last_cmd_ts, or every in-order frame until wall-clock
+            # catches up would be dropped as "out-of-order" (drive stall).
+            logger.debug("dropping future-stamped cmd_vel: age=%.3fs", age)
+            return
+        if ts <= self._last_cmd_ts:
+            logger.debug("dropping out-of-order cmd_vel: ts=%.3f last=%.3f", ts, self._last_cmd_ts)
+            return
+        self._last_cmd_ts = ts
+
+        # The operator streams drive continuously, including zero-velocity frames
+        # while the joystick is centred. MovementManager treats ANY tele_cmd_vel
+        # as active manual drive and cancels the active nav plan (_cancel_goal),
+        # so forwarding idle zeros would kill every point-and-click goal on
+        # arrival. Forward moving frames always; forward a zero ONLY as the
+        # release edge (previous frame was moving) so a manual stop still
+        # propagates, then stay silent until the operator moves again.
+        moving = not _is_zero_twist(twist)
+        if not moving and not self._last_cmd_nonzero:
+            return  # idle joystick — don't preempt nav
+        self._last_cmd_nonzero = moving
+
+        # The operator sends TwistStamped on cmd_unreliable; MovementManager
+        # wants a plain Twist, so strip the header before republishing.
+        self.tele_cmd_vel.publish(Twist(linear=twist.linear, angular=twist.angular))
+
+    # ─── robot-authoritative state → stats module ─────────────────────
+
+    def _robot_state(self) -> dict[str, Any]:
+        return {
+            "posture": self._posture,
+            "rage": self._rage_active,
+            "obstacle_avoidance": self._obstacle_avoidance,
+            "light": self._light,
+            "estopped": self._estopped,
+        }
+
+    def _publish_robot_state(self) -> None:
+        """Push posture/rage/obstacle/light/estopped on robot_state."""
+        try:
+            self.robot_state.publish(json.dumps(self._robot_state()).encode())
+        except Exception:
+            logger.debug("robot_state publish failed", exc_info=True)
