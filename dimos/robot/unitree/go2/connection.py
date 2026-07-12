@@ -73,6 +73,9 @@ class ConnectionConfig(ModuleConfig):
     # TF parent frame of the internal odometry (odom_frame_id -> base_link).
     # Rename (e.g. "go2_odom") when another odom source owns the tree root
     odom_frame_id: str = "world"
+    # Play operator audio on the dog's speaker. Feeds the
+    # broker provider's process-local audio sink into the driver's WebRTC PC.
+    audio_in: bool = False
 
 
 class Go2ConnectionProtocol(Protocol):
@@ -281,6 +284,7 @@ class GO2Connection(Module, Camera, Pointcloud):
         self.connection = make_connection(
             self.config.ip, self.config.g, aes_128_key=self.config.aes_128_key
         )
+        self._speaker_track: Any = None  # operator-audio track (audio_in)
 
         if hasattr(self.connection, "camera_info_static"):
             self.camera_info_static = self.connection.camera_info_static
@@ -322,8 +326,49 @@ class GO2Connection(Module, Camera, Pointcloud):
 
         self.connection.set_obstacle_avoidance(self.config.g.obstacle_avoidance)
 
+        if self.config.audio_in:
+            from dimos.protocol.pubsub.impl.webrtc.providers.spec import set_audio_sink
+
+            set_audio_sink(self._on_audio_frame)
+            self._attach_speaker()
+
+    def _on_audio_frame(self, pcm: bytes, sample_rate: int, channels: int) -> None:
+        """Operator mic frame → the dog's speaker track (best-effort)."""
+        track = self._speaker_track
+        if track is not None:
+            track.push(pcm, sample_rate, channels)
+
+    def _attach_speaker(self) -> None:
+        """Feed the dog PC's negotiated audio m-line: replaceTrack + enable the
+        audio channel. Best-effort — sim/replay have no PC and just skip."""
+        from dimos.robot.unitree.go2.speaker import PCMAudioTrack
+
+        drv = getattr(self.connection, "conn", None)  # unitree_webrtc_connect driver
+        loop = getattr(self.connection, "loop", None)
+        pc = getattr(drv, "pc", None)
+        if drv is None or pc is None or loop is None:
+            logger.debug("speaker: connection has no WebRTC PC (sim/replay) — skipped")
+            return
+        try:
+            sender = next((t.sender for t in pc.getTransceivers() if t.kind == "audio"), None)
+            if sender is None:
+                logger.warning("speaker: dog PC has no audio transceiver")
+                return
+            self._speaker_track = PCMAudioTrack()
+            loop.call_soon_threadsafe(sender.replaceTrack, self._speaker_track)
+            loop.call_soon_threadsafe(drv.datachannel.switchAudioChannel, True)
+            logger.debug("speaker: operator audio track attached")
+        except Exception:
+            self._speaker_track = None
+            logger.exception("speaker attach failed — operator audio won't play on the dog")
+
     @rpc
     def stop(self) -> None:
+        if self.config.audio_in:
+            from dimos.protocol.pubsub.impl.webrtc.providers.spec import set_audio_sink
+
+            set_audio_sink(None)  # drop the provider's ref to this module's sink
+
         # Best-effort steps: teardown must always reach the WebRTC disconnect.
         try:
             self.liedown()
@@ -407,6 +452,33 @@ class GO2Connection(Module, Camera, Pointcloud):
         logger.info("Rage Mode", enabled=enable)
         return result
 
+    @rpc
+    def sport_command(self, api_id: int) -> bool:
+        """Send a parameterless SPORT_MOD command by api_id (Hello, Damp, ...)."""
+        return self.connection.sport_command(api_id)
+
+    @rpc
+    def set_light(self, level: int) -> bool:
+        """Head-LED brightness level 0-10 (0 = off)."""
+        return self.connection.set_light(level)
+
+    @rpc
+    def set_obstacle_avoidance(self, enabled: bool = True) -> bool:
+        """Toggle the onboard obstacle avoidance."""
+        return self.connection.set_obstacle_avoidance(enabled)
+
+    @rpc
+    def switch_joystick(self, enable: bool = True) -> bool:
+        """Firmware joystick listening on/off (WASD stick emulation needs it on)."""
+        return self.connection.switch_joystick(enable)
+
+    @rpc
+    def stop_movement(self) -> None:
+        """Zero the base immediately (webrtc deadman stop)."""
+        stop = getattr(self.connection, "stop_movement", None)
+        if stop is not None:
+            stop()
+
     def _on_lowstate(self, msg: LowStateMsg) -> None:
         """Cache the latest low-level state push (battery, IMU, motors, etc.)."""
         self._latest_lowstate = msg
@@ -418,6 +490,12 @@ class GO2Connection(Module, Camera, Pointcloud):
         Use this skill to answer battery / power / charge questions. Returns
         None if no low-level state has been received yet.
         """
+        return self.battery_soc()
+
+    @rpc
+    def battery_soc(self) -> int | None:
+        """Battery SOC 0-100 (or None until lowstate arrives). Plain RPC — no
+        skill-log spam, for the hosted telemetry poll."""
         try:
             return int(self._latest_lowstate["data"]["bms_state"]["soc"])  # type: ignore[index]
         except (KeyError, TypeError, ValueError):
