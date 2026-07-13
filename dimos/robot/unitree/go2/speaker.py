@@ -100,3 +100,60 @@ class PCMAudioTrack(MediaStreamTrack):
             frame.time_base = fractions.Fraction(1, sample_rate)
             self._pts += samples
             return frame
+
+
+class Go2Speaker:
+    """Operator mic → the dog's speaker: owns the track + its PC wiring.
+
+    Keeps the WebRTC plumbing (reaching into the vendor driver's PC to swap the
+    audio sender's track) out of GO2Connection. Wire it up with::
+
+        speaker = Go2Speaker()
+        set_audio_sink(speaker.push)      # provider → operator PCM frames
+        speaker.attach(connection)        # PCM frames → the dog's speaker
+        ...
+        speaker.detach()
+    """
+
+    def __init__(self) -> None:
+        self._track: PCMAudioTrack | None = None
+
+    def push(self, pcm: bytes, sample_rate: int, channels: int) -> None:
+        """Operator mic frame → the speaker track. No-op until attached."""
+        track = self._track
+        if track is not None:
+            track.push(pcm, sample_rate, channels)
+
+    def attach(self, connection: Any) -> bool:
+        """Feed the dog PC's negotiated audio m-line: replaceTrack + enable the
+        audio channel. Best-effort — sim/replay have no PC and just skip."""
+        drv = getattr(connection, "conn", None)  # unitree_webrtc_connect driver
+        loop = getattr(connection, "loop", None)
+        pc = getattr(drv, "pc", None)
+        if drv is None or pc is None or loop is None:
+            logger.debug("speaker: connection has no WebRTC PC (sim/replay) — skipped")
+            return False
+        try:
+            sender = next((t.sender for t in pc.getTransceivers() if t.kind == "audio"), None)
+            if sender is None:
+                logger.warning("speaker: dog PC has no audio transceiver")
+                return False
+            self._track = PCMAudioTrack()
+            loop.call_soon_threadsafe(sender.replaceTrack, self._track)
+            loop.call_soon_threadsafe(drv.datachannel.switchAudioChannel, True)
+            logger.debug("speaker: operator audio track attached")
+            return True
+        except Exception:
+            self._track = None
+            logger.exception("speaker attach failed — operator audio won't play on the dog")
+            return False
+
+    def detach(self) -> None:
+        """Stop and drop the track so a stop()/start() cycle doesn't leak it."""
+        track = self._track
+        self._track = None
+        if track is not None:
+            try:
+                track.stop()
+            except Exception:
+                logger.debug("speaker track stop failed", exc_info=True)

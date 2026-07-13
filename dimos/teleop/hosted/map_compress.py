@@ -125,9 +125,7 @@ class MapCompressModule(Module):
             "png_b64": png_b64,
         }
         data = json.dumps(payload, separators=(",", ":")).encode()
-        # Coarsening usually keeps this under the ceiling; a high-entropy grid
-        # can still exceed it, and an oversized send destabilizes the channel —
-        # drop it rather than blow the datachannel.
+        # Drop oversized frames rather than destabilize the datachannel.
         if len(data) > self._MAX_MAP_BYTES:
             logger.warning("map payload too large (%d bytes), dropping frame", len(data))
             self._last_map_pub = now  # don't retry the same oversized frame immediately

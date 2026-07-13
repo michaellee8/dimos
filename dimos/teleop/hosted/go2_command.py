@@ -92,9 +92,7 @@ class Go2CommandConfig(ModuleConfig):
     damp_on_operator_lost: bool = False
     max_nav_goal_m: float = 100.0
     allow_acrobatics: bool = False
-    # Robot-side drive clamps — the operator client is untrusted over the
-    # internet, so browser-side scaling is NOT a safety boundary. Conservative
-    # Go2 envelope; the rage mode's ~2.5 m/s is handled firmware-side.
+    # Robot-side drive clamps (untrusted operator; browser scaling isn't a boundary).
     max_linear_mps: float = 1.5
     max_angular_rps: float = 2.0
 
@@ -104,17 +102,14 @@ class Go2CommandModule(Module, SerializedCommandMixin):
 
     config: Go2CommandConfig
 
-    # RPC ref to the driver module (framework injects an RPCClient). Used for
-    # DISCRETE commands (sport/mode/light/estop) that need return values.
+    # RPC ref to the driver (framework injects an RPCClient) for discrete commands.
     go2: GO2Connection
 
-    # Operator-facing planes over transport.
     state_json: In[bytes]  # broker state_reliable (also read by stats mod)
     cmd_ack: Out[bytes]  # → state_reliable_back (command acks)
 
-    # Manual drive plane: raw operator cmd_vel IN, guarded here, republished as
-    # clean tele_cmd_vel OUT to MovementManager (which arbitrates manual vs nav
-    # and owns the driver's cmd_vel). Nav drive is not routed here.
+    # Manual drive: raw operator cmd_vel IN, guarded, republished as tele_cmd_vel
+    # to MovementManager (which arbitrates manual vs nav and owns cmd_vel).
     cmd_vel_in: In[Twist]  # raw operator drive (broker cmd_unreliable)
     tele_cmd_vel: Out[Twist]  # guarded manual drive → MovementManager
 
@@ -317,11 +312,9 @@ class Go2CommandModule(Module, SerializedCommandMixin):
         def task(epoch: int) -> bool:
             if want_rage == self._rage_active:
                 return True
-            # set_rage_mode is a ~2.3 s blocking firmware sequence (BalanceStand,
-            # sleeps, SwitchJoystick(True)) that runs driver-side past any E-STOP.
-            # We can't fence inside it over RPC, so if a safety event fired during
-            # the call, actively re-Damp — the driver's trailing SwitchJoystick /
-            # BalanceStand may have re-enabled motion after the E-STOP's Damp.
+            # set_rage_mode is a ~2.3s blocking driver sequence we can't fence over
+            # RPC; if E-STOP fired during it, re-Damp (its trailing BalanceStand/
+            # SwitchJoystick may have re-enabled motion past the E-STOP's Damp).
             ok = bool(self.go2.set_rage_mode(want_rage))
             if not self._safety_ok(epoch):
                 logger.warning("set_mode aborted: E-STOP / operator-lost mid-toggle — re-Damping")
@@ -438,18 +431,14 @@ class Go2CommandModule(Module, SerializedCommandMixin):
             return  # latched: no motion until estop_clear
         ts = float(twist.ts)
         if not math.isfinite(ts):
-            # A NaN ts passes every comparison below (NaN > x, NaN < 0, NaN <= x
-            # are all False), so it would be forwarded AND poison _last_cmd_ts —
-            # after which ts <= NaN is False forever, disabling the reorder guard.
+            # NaN ts passes every comparison below and would poison _last_cmd_ts.
             logger.debug("dropping non-finite cmd_vel ts: %r", twist.ts)
             return
         age = time.time() - ts
         if age > self.config.cmd_stale_after_sec:
             logger.debug("dropping stale cmd_vel: age=%.3fs", age)
             return
-        if age < 0:  # future-stamped (clock skew / corrupt ts): don't let it
-            # advance _last_cmd_ts, or every in-order frame until wall-clock
-            # catches up would be dropped as "out-of-order" (drive stall).
+        if age < 0:  # future-stamped: don't advance _last_cmd_ts (would stall drive)
             logger.debug("dropping future-stamped cmd_vel: age=%.3fs", age)
             return
         if ts <= self._last_cmd_ts:
@@ -457,17 +446,8 @@ class Go2CommandModule(Module, SerializedCommandMixin):
             return
         self._last_cmd_ts = ts
 
-        # The operator streams drive continuously, including zero-velocity frames
-        # while the joystick is centred. MovementManager treats ANY tele_cmd_vel
-        # as active manual drive and cancels the active nav plan (_cancel_goal),
-        # so forwarding idle zeros would kill every point-and-click goal on
-        # arrival. Forward moving frames always; forward a zero ONLY as the
-        # release edge (previous frame was moving) so a manual stop still
-        # propagates, then stay silent until the operator moves again.
-        # The operator client is untrusted (internet): reject non-finite and
-        # clamp to the Go2 envelope robot-side. Browser scaling is not a safety
-        # boundary — a buggy/malicious client can send inf/NaN/huge velocities.
-        # The driver only reads linear.x/linear.y/angular.z; clamp those in place.
+        # Untrusted operator: reject non-finite and clamp to the Go2 envelope
+        # (driver only reads linear.x/linear.y/angular.z).
         if not _all_finite(twist):
             logger.warning("dropping non-finite cmd_vel")
             return
@@ -477,13 +457,14 @@ class Go2CommandModule(Module, SerializedCommandMixin):
         twist.linear.y = _clamp(twist.linear.y, -lin_max, lin_max)
         twist.angular.z = _clamp(twist.angular.z, -ang_max, ang_max)
 
+        # Idle zeros would make MovementManager cancel the nav plan, so forward a
+        # zero only as the release edge (prev frame moving), then stay silent.
         moving = not _is_zero_twist(twist)
         if not moving and not self._last_cmd_nonzero:
             return  # idle joystick — don't preempt nav
         self._last_cmd_nonzero = moving
 
-        # The operator sends TwistStamped on cmd_unreliable; MovementManager
-        # wants a plain Twist, so strip the header before republishing.
+        # Strip the header (MovementManager wants a plain Twist).
         self.tele_cmd_vel.publish(Twist(linear=twist.linear, angular=twist.angular))
 
     # ─── robot-authoritative state → stats module ─────────────────────

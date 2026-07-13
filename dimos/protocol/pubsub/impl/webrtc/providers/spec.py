@@ -72,9 +72,8 @@ class Provider(Protocol):
 _providers: dict[ProviderConfig, Provider] = {}
 _providers_lock = threading.Lock()
 
-# Persisted audio sink: applied to providers already live AND to any created
-# later (a module may call set_audio_sink before its transport builds the
-# provider — e.g. GO2Connection.start() runs before the first broker publish).
+# Persisted audio sink — applied to live providers AND any created later (a
+# module may call set_audio_sink before its transport builds the provider).
 _audio_sink: Callable[[bytes, int, int], None] | None = None
 
 
@@ -132,8 +131,7 @@ class ProviderConfig(BaseModel):
             if self not in _providers:
                 prov = self._create()
                 _providers[self] = prov
-                # Apply any sink registered before this provider existed, so an
-                # audio_in module that started first still gets operator frames.
+                # Apply a sink registered before this provider existed.
                 if _audio_sink is not None:
                     setter = getattr(prov, "set_audio_frame_callback", None)
                     if setter is not None:

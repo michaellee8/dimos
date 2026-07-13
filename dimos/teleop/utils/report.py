@@ -122,10 +122,8 @@ def _read_all(store: SqliteStore) -> dict[str, list[Any]]:
             out[name] = []
             continue
         stream: Any = store.stream(name, msg_type)
-        # Stream.__iter__ yields Observation[T]; we want the payload for the
-        # stats math, but also carry the recorder's ingress wall-clock
-        # (tags["reception_ts"]) onto it so latency (recv minus sender .ts) is
-        # available. Best-effort: unset on older recordings.
+        # Carry the recorder's ingress wall-clock (tags["reception_ts"]) onto the
+        # payload for latency math. Best-effort: unset on older recordings.
         msgs = []
         for obs in stream:
             msg = obs.data
@@ -167,8 +165,7 @@ def _summary(records: list[Any], stall_factor: float = 3.0) -> dict[str, Any]:
         stall_thresh = stall_factor * float(np.median(intervals_ms))
         stalls = [iv for iv in intervals_ms if iv > stall_thresh]
 
-    # Command-link latency: robot ingress minus operator send-stamp. Only >0
-    # values (a negative means clock skew, not a real measurement).
+    # Command-link latency: robot ingress minus operator send-stamp (>0 only).
     lat_ms = [
         (m._recv_ts - float(m.ts)) * 1000.0
         for m in records

@@ -42,7 +42,9 @@ from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.sensor_msgs.CameraInfo import CameraInfo
 from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
+from dimos.protocol.pubsub.impl.webrtc.providers.spec import set_audio_sink
 from dimos.robot.unitree.connection import UnitreeWebRTCConnection
+from dimos.robot.unitree.go2.speaker import Go2Speaker
 from dimos.robot.unitree.type.lowstate import LowStateMsg
 from dimos.spec.perception import Camera, Pointcloud
 from dimos.utils.decorators.decorators import cached_property, simple_mcache
@@ -293,7 +295,7 @@ class GO2Connection(Module, Camera, Pointcloud):
             aes_128_key=self.config.aes_128_key,
             velocity_api=self.config.velocity_api,
         )
-        self._speaker_track: Any = None  # operator-audio track (audio_in)
+        self._speaker = Go2Speaker()  # operator → dog speaker (audio_in)
 
         if hasattr(self.connection, "camera_info_static"):
             self.camera_info_static = self.connection.camera_info_static
@@ -336,59 +338,14 @@ class GO2Connection(Module, Camera, Pointcloud):
         self.connection.set_obstacle_avoidance(self.config.g.obstacle_avoidance)
 
         if self.config.audio_in:
-            from dimos.protocol.pubsub.impl.webrtc.providers.spec import set_audio_sink
-
-            set_audio_sink(self._on_audio_frame)
-            self._attach_speaker()
-
-    def _on_audio_frame(self, pcm: bytes, sample_rate: int, channels: int) -> None:
-        """Operator mic frame → the dog's speaker track (best-effort)."""
-        track = self._speaker_track
-        if track is not None:
-            track.push(pcm, sample_rate, channels)
-
-    def _attach_speaker(self) -> None:
-        """Feed the dog PC's negotiated audio m-line: replaceTrack + enable the
-        audio channel. Best-effort — sim/replay have no PC and just skip."""
-        from dimos.robot.unitree.go2.speaker import PCMAudioTrack
-
-        drv = getattr(self.connection, "conn", None)  # unitree_webrtc_connect driver
-        loop = getattr(self.connection, "loop", None)
-        pc = getattr(drv, "pc", None)
-        if drv is None or pc is None or loop is None:
-            logger.debug("speaker: connection has no WebRTC PC (sim/replay) — skipped")
-            return
-        try:
-            sender = next((t.sender for t in pc.getTransceivers() if t.kind == "audio"), None)
-            if sender is None:
-                logger.warning("speaker: dog PC has no audio transceiver")
-                return
-            self._speaker_track = PCMAudioTrack()
-            loop.call_soon_threadsafe(sender.replaceTrack, self._speaker_track)
-            loop.call_soon_threadsafe(drv.datachannel.switchAudioChannel, True)
-            logger.debug("speaker: operator audio track attached")
-        except Exception:
-            self._speaker_track = None
-            logger.exception("speaker attach failed — operator audio won't play on the dog")
-
-    def _detach_speaker(self) -> None:
-        """Stop and drop the speaker track so a stop()/start() cycle doesn't leak
-        it. Mirrors the sink deregistration; best-effort (the PC may be gone)."""
-        track = self._speaker_track
-        self._speaker_track = None
-        if track is not None:
-            try:
-                track.stop()
-            except Exception:
-                logger.debug("speaker track stop failed", exc_info=True)
+            set_audio_sink(self._speaker.push)  # provider → operator PCM frames
+            self._speaker.attach(self.connection)  # PCM frames → the dog's speaker
 
     @rpc
     def stop(self) -> None:
         if self.config.audio_in:
-            from dimos.protocol.pubsub.impl.webrtc.providers.spec import set_audio_sink
-
             set_audio_sink(None)  # drop the provider's ref to this module's sink
-            self._detach_speaker()  # stop + clear the speaker track (symmetry)
+            self._speaker.detach()  # stop + clear the speaker track
 
         # Best-effort steps: teardown must always reach the WebRTC disconnect.
         try:
