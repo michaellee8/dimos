@@ -272,6 +272,8 @@ class RecorderConfig(MemoryModuleConfig):
     # read the active remappings from inside the module (AFAIK), so this config
     # arg does the per-stream rename directly.
     stream_remapping: dict[str, str] = Field(default_factory=dict)
+    # Port names that inherently have no pose to anchor (command streams, etc.).
+    poseless_streams: list[str] = Field(default_factory=list)
 
 
 PoseSetter = Callable[[Any], "Awaitable[Pose | None]"]
@@ -380,16 +382,17 @@ class Recorder(MemoryModule):
         """
 
         async def on_msg(msg: Any) -> None:
+            recv_ts = time.time()  # wall-clock at ingress
             ts = self._resolve_ts(name, msg)
             pose = await self._resolve_pose(name, msg, ts)
-            if not pose:
+            if not pose and name not in self.config.poseless_streams:
                 logger.warning(
                     "[%s] No pose for time %s (msg ts: %s), storing without pose",
                     name,
                     ts,
                     getattr(msg, "ts", None),
                 )
-            stream.append(msg, ts=ts, pose=pose)
+            stream.append(msg, ts=ts, pose=pose, tags={"reception_ts": recv_ts})
 
         self.process_observable(input_topic.pure_observable(), on_msg)
 
