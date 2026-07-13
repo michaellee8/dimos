@@ -54,7 +54,7 @@ which index maps to which joint (matches `arm_joint1..6`).
 
 ## Step 3 — dimos coordinator on real hardware (feedback first)
 ```bash
-dimos run coordinator-a1z --can-port can0
+dimos --can-port can0 run coordinator-a1z
 ```
 This builds the `a1z` adapter (real), enables motors (auto_enable), and ticks at 100 Hz.
 Watch the log for `Added hardware arm` + joint state flowing. No trajectory is commanded
@@ -64,7 +64,7 @@ yet — the coordinator just holds/reads. Ctrl-C to stop (adapter disables motor
 Two terminals. Keep the power switch in reach; be ready to Ctrl-C.
 ```bash
 # Terminal A — planner + coordinator + Meshcat
-dimos run a1z-planner-coordinator --can-port can0 \
+dimos --can-port can0 run a1z-planner-coordinator \
   -o manipulationmodule.visualization.backend=meshcat
 # Terminal B — interactive planning client
 python -m dimos.manipulation.planning.examples.manipulation_client
@@ -82,7 +82,7 @@ all-positive target is out of range for j3 and the planner will refuse (good).
 
 ## Step 5 — teleop
 ```bash
-dimos run keyboard-teleop-a1z --can-port can0     # + open http://localhost:7000
+dimos --can-port can0 run keyboard-teleop-a1z     # + open http://localhost:7000
 ```
 Keys drive the end-effector via IK (W/S/A/D/Q/E linear, R/F T/G Y/H angular, Esc quit).
 Start with small motions; the SDK's soft e-stops backstop a runaway.

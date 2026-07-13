@@ -37,7 +37,7 @@ than at module import.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from dimos.hardware.manipulators.spec import (
     ControlMode,
@@ -45,9 +45,6 @@ from dimos.hardware.manipulators.spec import (
     ManipulatorInfo,
 )
 from dimos.utils.logging_config import setup_logger
-
-if TYPE_CHECKING:
-    from dimos.hardware.manipulators.registry import AdapterRegistry
 
 logger = setup_logger()
 
@@ -278,11 +275,6 @@ class A1ZAdapter:
 
     def read_force_torque(self) -> list[float] | None:
         return None
-
-
-def register(registry: AdapterRegistry) -> None:
-    """Legacy direct-registration hook (registry also discovers via _registry.py)."""
-    registry.register("a1z", A1ZAdapter)
 
 
 __all__ = ["A1ZAdapter"]
