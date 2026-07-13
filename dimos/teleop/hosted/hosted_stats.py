@@ -20,8 +20,10 @@ Owns the operator↔robot state plane that is NOT robot-command-specific:
   which share the same inbound channel (the provider fans one inbound channel
   to every subscriber),
 - taps ``cmd_raw`` for command-link latency/rate stats,
-- pushes the periodic ``robot_telemetry`` frame (cmd stats + robot state) back
-  to the operator on ``telemetry_out`` (state_reliable_back).
+- pushes the periodic telemetry frame (cmd stats + soc + robot state) to the
+  operator on ``telemetry_out`` (state_reliable_back), and the same payload on
+  ``robot_telemetry`` (local LCM) so the recorder can capture it — the broker
+  channel is outbound-only and can't be tapped locally.
 
 Robot-authoritative UI state (posture/rage/battery) arrives on ``robot_state``
 from the command module, so telemetry reflects reality.
@@ -64,6 +66,7 @@ class HostedStatsModule(Module):
     cmd_raw: In[bytes]  # cmd_unreliable stats tap
     robot_state: In[bytes]  # robot-authoritative UI state from the command module
     telemetry_out: Out[bytes]  # → CloudflareTransport("state_reliable_back")
+    robot_telemetry: Out[bytes]  # same payload on a local stream → recorder (LCM)
     video_stats: Out[VideoStats]
     cmd_vel_stamped: Out[TwistStamped]  # decoded operator cmd → recorder (LCM)
 
@@ -166,9 +169,10 @@ class HostedStatsModule(Module):
             interval = 1.0 / max(self.config.telemetry_hz, 0.1)
             warned = False  # log the first failure of a streak, not every tick
             while not self._stop_event.is_set():
-                payload = json.dumps(self._telemetry_payload())
+                data = json.dumps(self._telemetry_payload()).encode()
                 try:
-                    self.telemetry_out.publish(payload.encode())
+                    self.telemetry_out.publish(data)  # → operator (broker)
+                    self.robot_telemetry.publish(data)  # → recorder (local LCM)
                     warned = False
                 except Exception:
                     if not warned:

@@ -16,7 +16,8 @@
 """Transport-stats report from a recorded teleop ``.db``.
 
 Reads the streams a ``TeleopRecorder`` writes (twist, poses, buttons, video
-stats) and emits ``report.json`` next to it.
+stats, robot_telemetry) and emits ``report.json`` next to it. Command-link
+latency is read straight off the robot's recorded ``robot_telemetry`` frames.
 The math (percentiles, rate, jitter, stalls) is the same one the live HUD
 uses — both go through ``stream_stats``.
 
@@ -79,6 +80,7 @@ def generate_report(db_path: Path, out_dir: Path | None = None) -> Path:
     store.start()
     try:
         records = _read_all(store)
+        telemetry = _read_telemetry(store)
     finally:
         store.stop()
 
@@ -87,6 +89,7 @@ def generate_report(db_path: Path, out_dir: Path | None = None) -> Path:
     summaries = {name: _summary(rs, stall_factor=3.0) for name, rs in twist_streams.items()}
     active = {n: s for n, s in summaries.items() if s.get("rate_hz")}
     video_summary = _summarize_video(records.get("video_stats", []))
+    telemetry_summary = _summarize_telemetry(telemetry)
 
     duration_s = _run_duration(records)
     timestamp = datetime.fromtimestamp(db_path.stat().st_mtime).strftime("%Y%m%d_%H%M%S")
@@ -96,6 +99,7 @@ def generate_report(db_path: Path, out_dir: Path | None = None) -> Path:
         "duration_s": round(duration_s, 3),
         "streams": active,
         "video": video_summary,
+        "telemetry": telemetry_summary,
     }
 
     # Name the report after the .db stem so runs don't clobber and the pair
@@ -122,17 +126,26 @@ def _read_all(store: SqliteStore) -> dict[str, list[Any]]:
             out[name] = []
             continue
         stream: Any = store.stream(name, msg_type)
-        # Carry the recorder's ingress wall-clock (tags["reception_ts"]) onto the
-        # payload for latency math. Best-effort: unset on older recordings.
-        msgs = []
-        for obs in stream:
-            msg = obs.data
-            recv = obs.tags.get("reception_ts") if obs.tags else None
-            if recv is not None:
-                msg._recv_ts = float(recv)
-            msgs.append(msg)
-        out[name] = msgs
+        out[name] = [obs.data for obs in stream]
     return out
+
+
+def _read_telemetry(store: SqliteStore) -> list[dict[str, Any]]:
+    """Decode the recorded ``robot_telemetry`` JSON frames (raw bytes stream).
+
+    Each frame carries the robot's own live cmd-link stats (``cmd``: latency /
+    jitter / rate, already computed by ``LiveStreamStats``) plus soc/state, so
+    the report reads latency straight off these instead of recomputing it.
+    """
+    if "robot_telemetry" not in set(store.list_streams()):
+        return []
+    frames: list[dict[str, Any]] = []
+    for obs in store.stream("robot_telemetry", bytes):
+        try:
+            frames.append(json.loads(obs.data))
+        except (ValueError, TypeError):
+            continue
+    return frames
 
 
 def _run_duration(records: dict[str, list[Any]]) -> float:
@@ -149,8 +162,8 @@ def _summary(records: list[Any], stall_factor: float = 3.0) -> dict[str, Any]:
     """Stats for one twist/pose/buttons stream.
 
     Rate/jitter come from each message's ``.ts`` (sender stamp, clock-sync
-    calibrated). ``latency_ms`` (recv minus send) is included when the recording has
-    the ingress wall-clock (``_recv_ts`` from tags["reception_ts"]).
+    calibrated). Command-link latency is reported separately from the recorded
+    ``robot_telemetry`` stream (see ``_summarize_telemetry``).
 
     Buttons lacks ``.ts``, so rate/jitter are ``None``.
     """
@@ -165,21 +178,40 @@ def _summary(records: list[Any], stall_factor: float = 3.0) -> dict[str, Any]:
         stall_thresh = stall_factor * float(np.median(intervals_ms))
         stalls = [iv for iv in intervals_ms if iv > stall_thresh]
 
-    # Command-link latency: robot ingress minus operator send-stamp (>0 only).
-    lat_ms = [
-        (m._recv_ts - float(m.ts)) * 1000.0
-        for m in records
-        if getattr(m, "_recv_ts", None) is not None and getattr(m, "ts", None) is not None
-    ]
-    lat_ms = [v for v in lat_ms if v > 0]
-
     return {
         "count": count,
         "rate_hz": (len(tss) - 1) / span if span > 0 else None,
         "jitter_ms": pcts(intervals_ms),
-        "latency_ms": pcts(lat_ms),
         "stall_count": len(stalls),
         "stall_total_s": sum(stalls) / 1000.0,
+    }
+
+
+def _summarize_telemetry(frames: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Aggregate recorded ``robot_telemetry`` frames, or None if none recorded.
+
+    Latency/jitter/rate come straight off the robot's own live ``cmd`` stats
+    (``LiveStreamStats`` snapshots, arrival-time minus send-stamp) — no
+    recomputation. soc is summarized as the run's min/last.
+    """
+    if not frames:
+        return None
+
+    def cmd_col(key: str) -> list[float]:
+        return [
+            float(f["cmd"][key])
+            for f in frames
+            if isinstance(f.get("cmd"), dict) and f["cmd"].get(key) is not None
+        ]
+
+    socs = [int(f["soc"]) for f in frames if f.get("soc") is not None]
+    return {
+        "count": len(frames),
+        "latency_ms": pcts(cmd_col("latency_ms")),
+        "jitter_ms": pcts(cmd_col("jitter_ms")),
+        "rate_hz": pcts(cmd_col("rate_hz")),
+        "soc_min": min(socs) if socs else None,
+        "soc_last": socs[-1] if socs else None,
     }
 
 
