@@ -52,13 +52,15 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from dimos.constants import STATE_DIR
+from dimos.constants import DEFAULT_CAPACITY_COLOR_IMAGE, STATE_DIR
 from dimos.core.coordination.blueprints import Blueprint, autoconnect
 from dimos.core.global_config import global_config
 from dimos.core.stream import In
+from dimos.core.transport import pSHMTransport
 from dimos.learning.collection.episode_monitor import EpisodeMonitorModule
 from dimos.learning.collection.recorder import CollectionRecorder
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.sensor_msgs.Image import Image
 from dimos.robot.unitree.g1.blueprints.basic.unitree_g1_groot_wbc import unitree_g1_groot_wbc
 from dimos.robot.unitree.g1.quest_teleop import G1QuestTeleopModule
 
@@ -91,15 +93,33 @@ def _camera_if_real() -> tuple[Blueprint, ...]:
     return (RealSenseCamera.blueprint(enable_pointcloud=False),)
 
 
-unitree_g1_teleop = autoconnect(
-    unitree_g1_groot_wbc,
-    G1QuestTeleopModule.blueprint(),
-    *_camera_if_real(),
-    EpisodeMonitorModule.blueprint(),  # default button_map: toggle=B, discard=Y
-    G1CollectionRecorder.blueprint(db_path=_session_db()),
-).remappings(
-    [
-        (G1QuestTeleopModule, "left_controller_output", "coordinator_cartesian_command"),
-        (G1QuestTeleopModule, "right_controller_output", "coordinator_cartesian_command"),
-    ]
+unitree_g1_teleop = (
+    autoconnect(
+        unitree_g1_groot_wbc,
+        G1QuestTeleopModule.blueprint(),
+        *_camera_if_real(),
+        EpisodeMonitorModule.blueprint(),  # default button_map: toggle=B, discard=Y
+        G1CollectionRecorder.blueprint(db_path=_session_db()),
+    )
+    .remappings(
+        [
+            (G1QuestTeleopModule, "left_controller_output", "coordinator_cartesian_command"),
+            (G1QuestTeleopModule, "right_controller_output", "coordinator_cartesian_command"),
+        ]
+    )
+    # Camera frames stay off the LCM bus: every consumer (quest module,
+    # recorder, viewer bridge) is on-box, and raw images multicast over LCM
+    # make each subscribing process pay receive+decode per frame — measured
+    # at ~31 MB/s and a starved coordinator tick loop on the Orin. SHM is
+    # zero-copy; an unconsumed stream costs only the producer's write.
+    .transports(
+        {
+            ("color_image", Image): pSHMTransport(
+                "/color_image", default_capacity=DEFAULT_CAPACITY_COLOR_IMAGE
+            ),
+            ("depth_image", Image): pSHMTransport(
+                "/depth_image", default_capacity=DEFAULT_CAPACITY_COLOR_IMAGE
+            ),
+        }
+    )
 )
