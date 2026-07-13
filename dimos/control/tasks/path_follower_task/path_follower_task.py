@@ -525,13 +525,6 @@ class PathFollowerTask(BaseControlTask):
         )
         return True
 
-    def update_odom(self, odom: PoseStamped) -> None:
-        # Pose now flows in through compute()'s CoordinatorState (sourced
-        # from the twist-base adapter's read_odometry → joint positions).
-        # This setter is kept as a no-op-or-override seam so out-of-tree
-        # callers that still pump odom externally don't break.
-        self._current_odom = odom
-
     def set_path(self, path: Path, odom: PoseStamped | None = None) -> None:
         """Coordinator broadcast hook for nav-stack-emitted paths.
 
