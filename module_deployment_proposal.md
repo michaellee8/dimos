@@ -90,12 +90,64 @@ HeavyDetector  gpu     gpu      WorkerManagerExternal -> ExternalWorker -> Pytho
 
 ### Process topology
 
-```text
-normal Module -> WorkerManagerPython -> PythonWorker
-ExternalModule -> WorkerManagerExternal -> ExternalWorker -> runtime
+The deployment path keeps ordinary Python and externally deployed implementations visibly separate while preserving one coordinator-facing module graph:
+
+```mermaid
+flowchart LR
+    subgraph CoordinatorMachine[Coordinator machine]
+        subgraph CoordinatorProcess[Coordinator process]
+            Coordinator[ModuleCoordinator]
+            PythonManager[WorkerManagerPython]
+            ExternalManager[WorkerManagerExternal]
+            Session[TargetSession\nlocal or SSH access]
+            Client[ExternalWorkerClient]
+            Envelope[ModuleLaunchEnvelope]
+
+            Coordinator --> PythonManager
+            Coordinator --> ExternalManager
+            ExternalManager --> Session
+            ExternalManager --> Client
+            ExternalManager --> Envelope
+        end
+
+        subgraph PythonWorkerProcess[PythonWorker process]
+            PythonWorker[PythonWorker]
+            NormalModule[normal Python Module object]
+            PythonWorker --> NormalModule
+        end
+
+        PythonManager --> PythonWorker
+    end
+
+    subgraph TargetMachine[Execution target machine\nmay be the coordinator machine]
+        subgraph ExternalWorkerProcess[ExternalWorker process\none per machine per run]
+            ExternalWorker[ExternalWorker]
+        end
+
+        subgraph ImplementationProcesses[implementation processes]
+            PythonEntrypoint[thin Python entrypoint]
+            NativeProcess[native subprocess]
+        end
+
+        ExternalWorker --> PythonEntrypoint
+        ExternalWorker --> NativeProcess
+    end
+
+    Session -. prepare / transfer / bootstrap .-> ExternalWorker
+    Client <-- control RPC / optional SSH tunnel --> ExternalWorker
+    Envelope --> ExternalWorker
 ```
 
-The external runtime is a thin Python entrypoint for packaged Python or a direct native subprocess for native code. Local external deployment uses this same route; SSH changes target access and control tunneling, not the route itself.
+Normal modules stay on the `WorkerManagerPython -> PythonWorker` route. An `ExternalModule` follows `WorkerManagerExternal -> ExternalWorker -> runtime`: the runtime is a thin Python entrypoint for packaged Python or a direct native subprocess for native code. `TargetSession` prepares source, artifacts, and reusable environments before the worker exists; `ExternalWorkerClient` controls the already-running target-side worker after bootstrap.
+
+Local external deployment uses the same graph with the target machine equal to the coordinator machine. SSH changes target access and the control tunnel, not the module route or the DimOS stream graph.
+
+The control path shown above is deliberately separate from module streams. Section 6 describes that boundary; Section 5 assigns the detailed lifecycle responsibilities to each participant.
+
+```text
+Normal module:   ModuleCoordinator -> WorkerManagerPython -> PythonWorker
+External module: ModuleCoordinator -> WorkerManagerExternal -> ExternalWorker -> runtime
+```
 
 ## 4. Package layout convention
 
