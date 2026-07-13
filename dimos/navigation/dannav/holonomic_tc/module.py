@@ -622,9 +622,6 @@ class DanHolonomicTC(Module):
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._core = _HolonomicPathFollower(self.config)
-        # Latched cancel. stop_movement=True stops the follow AND blocks incoming
-        # paths, so the upstream planner re-feeding its stale route can't restart
-        # us. Cleared by stop_movement=False (a fresh goal/click resumes nav).
         self._cancelled = False
 
     @rpc
@@ -647,10 +644,6 @@ class DanHolonomicTC(Module):
         self._core.handle_odom(msg)
 
     def _on_path(self, path: Path) -> None:
-        # While cancelled, ignore paths entirely. The upstream local planner keeps
-        # re-publishing its committed route (mls goes silent on cancel but never
-        # clears repulsive's route), and without this that stale route would
-        # instantly restart the follow the moment stop_movement stopped us.
         if self._cancelled:
             return
         # The planner owns path safety: it sends the route as far as it is safe,
@@ -662,7 +655,6 @@ class DanHolonomicTC(Module):
             self._core.start_planning(path)
 
     def _on_stop(self, msg: Bool) -> None:
-        # True = cancel + latch (block re-feeds); False = resume (a fresh goal).
         self._cancelled = bool(msg.data)
         logger.warning(
             "[CANCELDBG] DanHolonomicTC stop_movement=%s -> cancelled=%s", msg.data, self._cancelled
