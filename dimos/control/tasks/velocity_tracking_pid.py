@@ -24,7 +24,7 @@ Each channel (vx, vy, wz) has an independent PID with anti-windup.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -47,18 +47,10 @@ class VelocityPIDConfig:
 class VelocityTrackingConfig:
     """Configuration for all three velocity channels."""
 
-    vx: VelocityPIDConfig = None  # type: ignore[assignment]
-    vy: VelocityPIDConfig = None  # type: ignore[assignment]
-    wz: VelocityPIDConfig = None  # type: ignore[assignment]
+    vx: VelocityPIDConfig = field(default_factory=VelocityPIDConfig)
+    vy: VelocityPIDConfig = field(default_factory=VelocityPIDConfig)
+    wz: VelocityPIDConfig = field(default_factory=VelocityPIDConfig)
     dt: float = 0.1  # control period (s)
-
-    def __post_init__(self) -> None:
-        if self.vx is None:
-            self.vx = VelocityPIDConfig(kp=1.0, ki=0.0, kd=0.0, output_min=-1.0, output_max=1.0)
-        if self.vy is None:
-            self.vy = VelocityPIDConfig(kp=1.0, ki=0.0, kd=0.0, output_min=-1.0, output_max=1.0)
-        if self.wz is None:
-            self.wz = VelocityPIDConfig(kp=1.0, ki=0.0, kd=0.0, output_min=-1.0, output_max=1.0)
 
 
 class SingleChannelPID:
