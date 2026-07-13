@@ -581,6 +581,9 @@ class ControlCoordinator(Module):
                 try:
                     xyt = read_odometry()
                 except Exception:
+                    logger.exception(
+                        f"read_odometry() raised on hardware {hw.component.hardware_id!r}"
+                    )
                     continue
                 if xyt is None or len(xyt) < 3:
                     continue
