@@ -57,13 +57,13 @@ _INDICATOR_RADIUS = 15
 class KeyboardTeleop(Module):
     """Pygame-based keyboard control. Outputs Twist on cmd_vel.
 
-    Also emits operator "gate" events on ``gate: Out[str]`` for tools
+    Also emits operator "gate" events on ``gate: Out[Int8]`` for tools
     that need to pause for operator confirmation between steps (e.g. the
-    one-terminal Go2 characterization blueprint). Three keys:
-    ``ENTER`` -> ``"advance"``, ``K`` -> ``"skip"``, ``Backspace`` ->
-    ``"quit"``. Existing blueprints that don't wire the ``gate`` port
-    are unaffected — the events publish into a stream nobody listens
-    to.
+    one-terminal Go2 characterization blueprint). Three keys publish int
+    codes: ``ENTER`` -> ``Int8(GATE_ADVANCE)`` (0), ``K`` ->
+    ``Int8(GATE_SKIP)`` (1), ``Backspace`` -> ``Int8(GATE_QUIT)`` (2).
+    Existing blueprints that don't wire the ``gate`` port are unaffected
+    — the events publish into a stream nobody listens to.
     """
 
     cmd_vel: Out[Twist]
