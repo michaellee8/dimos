@@ -14,15 +14,15 @@
 
 """Unit tests for Go2CommandModule's operator-command handling.
 
-No robot / no WebRTC: the command logic is exercised on a bare instance
-(``object.__new__``) with a mocked ``go2`` RPC ref and only the attributes the
-tested methods touch. Covers the safety-relevant paths — sport allow-list,
-E-STOP latch + fence, nonce dedup, and the drive guard (stale/future/reorder).
+No robot / no WebRTC: the command logic is exercised with a small harness that
+initializes the command-plane fields, a mocked ``go2`` RPC ref, and only the
+streams the tested methods touch. Covers the safety-relevant paths — sport
+allow-list, E-STOP latch + fence, nonce dedup, and the drive guard
+(stale/future/reorder).
 """
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 from types import SimpleNamespace
@@ -33,14 +33,14 @@ import pytest
 
 from dimos.teleop.hosted.go2_command import ALLOWED_SPORT_CMDS, Go2CommandModule
 
-_live_executors: list[ThreadPoolExecutor] = []
+_live_modules: list[_CommandHarness] = []
 
 
 @pytest.fixture(autouse=True)
 def _reap_cmd_executors():
     yield
-    while _live_executors:
-        _live_executors.pop().shutdown(wait=True)
+    while _live_modules:
+        _live_modules.pop()._cmd_stop()
     deadline = time.time() + 2.0
     while time.time() < deadline and any(
         t.name.startswith("HostedCmd-") for t in threading.enumerate()
@@ -48,37 +48,40 @@ def _reap_cmd_executors():
         time.sleep(0.005)
 
 
+class _CommandHarness(Go2CommandModule):
+    """A Go2CommandModule harness with just the command-path dependencies."""
+
+    def __init__(self) -> None:
+        self.go2 = MagicMock()
+        self.config = SimpleNamespace(
+            cmd_stale_after_sec=0.5,
+            damp_on_operator_lost=False,
+            max_nav_goal_m=100.0,
+            allow_acrobatics=False,
+            max_linear_mps=1.5,
+            max_angular_rps=2.0,
+        )
+        self._cmd_init()
+        self._cmd_start()
+        self._estopped = False
+        self._rage_active = False
+        self._obstacle_avoidance = True
+        self._light = 0.0
+        self._posture = "StandReady"
+        self._last_cmd_ts = 0.0
+        self._last_cmd_nonzero = False
+        self.cmd_ack = MagicMock()
+        self.tele_cmd_vel = MagicMock()
+        self.robot_state = MagicMock()
+        self.goal_request = MagicMock()
+        self.stop_movement = MagicMock()
+
+
 def _bare() -> Go2CommandModule:
     """A Go2CommandModule with only the fields the command paths need."""
-    m = object.__new__(Go2CommandModule)
-    m.go2 = MagicMock()
-    m.config = SimpleNamespace(
-        cmd_stale_after_sec=0.5,
-        damp_on_operator_lost=False,
-        max_nav_goal_m=100.0,
-        allow_acrobatics=False,
-        max_linear_mps=1.5,
-        max_angular_rps=2.0,
-    )
-    m._estopped = False
-    m._rage_active = False
-    m._obstacle_avoidance = True
-    m._light = 0.0
-    m._posture = "StandReady"
-    m._last_cmd_ts = 0.0
-    m._last_cmd_nonzero = False
-    m._cmd_pending = 0
-    m._cmd_lock = threading.Lock()
-    m._safety_epoch = 0
-    m._nonce_results = {}
-    m._cmd_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="HostedCmdTest")
-    m.cmd_ack = MagicMock()
-    m.tele_cmd_vel = MagicMock()
-    m.robot_state = MagicMock()
-    m.goal_request = MagicMock()
-    m.stop_movement = MagicMock()
-    _live_executors.append(m._cmd_executor)
-    return m
+    module = _CommandHarness()
+    _live_modules.append(module)
+    return module
 
 
 def _twist(ts: float, *, vx: float = 0.3) -> Any:

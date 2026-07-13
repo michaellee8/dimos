@@ -32,6 +32,7 @@ import threading
 import time
 from typing import Any
 
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
@@ -55,6 +56,7 @@ class SerializedCommandMixin:
         self._cmd_lock = threading.Lock()
         self._safety_epoch = 0
         self._nonce_results: dict[Any, tuple[bool | None, float]] = {}
+        self._cmd_urgent_threads: set[threading.Thread] = set()
 
     def _cmd_start(self) -> None:
         """Create the single worker; call from start()."""
@@ -62,9 +64,16 @@ class SerializedCommandMixin:
 
     def _cmd_stop(self) -> None:
         """Shut down the worker (cancel pending); call from stop()."""
+        self._bump_safety_epoch()
         if self._cmd_executor is not None:
-            self._cmd_executor.shutdown(wait=False, cancel_futures=True)
+            self._cmd_executor.shutdown(wait=True, cancel_futures=True)
             self._cmd_executor = None
+        for thread in self._take_urgent_threads():
+            if thread is threading.current_thread():
+                continue
+            thread.join(timeout=DEFAULT_THREAD_JOIN_TIMEOUT)
+            if thread.is_alive():
+                logger.warning("Urgent command thread did not stop cleanly: %s", thread.name)
 
     # ─── safety epoch (E-STOP / operator-lost fence) ──────────────────
 
@@ -78,6 +87,12 @@ class SerializedCommandMixin:
         """True while no E-STOP / operator-lost has fired since `epoch`."""
         with self._cmd_lock:
             return self._safety_epoch == epoch
+
+    def _take_urgent_threads(self) -> list[threading.Thread]:
+        with self._cmd_lock:
+            threads = list(self._cmd_urgent_threads)
+            self._cmd_urgent_threads.clear()
+            return threads
 
     # ─── submission ───────────────────────────────────────────────────
 
@@ -152,7 +167,18 @@ class SerializedCommandMixin:
             self._send_ack(nonce, ok)
 
         if urgent:
-            threading.Thread(target=runner, daemon=True, name=f"HostedCmd-{label}").start()
+
+            def urgent_runner() -> None:
+                try:
+                    runner()
+                finally:
+                    with self._cmd_lock:
+                        self._cmd_urgent_threads.discard(thread)
+
+            thread = threading.Thread(target=urgent_runner, daemon=True, name=f"HostedCmd-{label}")
+            with self._cmd_lock:
+                self._cmd_urgent_threads.add(thread)
+            thread.start()
             return
 
         executor = self._cmd_executor

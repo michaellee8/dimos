@@ -51,9 +51,7 @@ class _Mux(CameraMuxModule):
 
 def _make(cameras: list[str], **cfg: object) -> _Mux:
     """Construct without triggering CameraMuxModule.__init__ / Module.__init__."""
-    mux = object.__new__(_Mux)
-    _Mux.__init__(mux, cameras, **cfg)
-    return mux
+    return _Mux(cameras, **cfg)
 
 
 def _img(w: int, h: int) -> Image:

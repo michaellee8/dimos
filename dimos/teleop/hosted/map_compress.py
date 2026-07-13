@@ -68,13 +68,15 @@ class MapCompressModule(Module):
     @rpc
     def start(self) -> None:
         """Subscribe costmap (if map_hz>0) and odom (if odom_hz>0)."""
+        super().start()
         if self.config.map_hz > 0:
             self.register_disposable(Disposable(self.global_costmap.subscribe(self._on_costmap)))
         if self.config.odom_hz > 0:
             self.register_disposable(Disposable(self.odom.subscribe(self._on_odom)))
 
     @rpc
-    def stop(self) -> None: ...
+    def stop(self) -> None:
+        super().stop()
 
     def _on_costmap(self, grid: OccupancyGrid) -> None:
         """Throttle, coarsen, colorize, PNG-encode and push the map to the

@@ -78,6 +78,7 @@ class CameraMuxModule(Module):
     @rpc
     def start(self) -> None:
         """Subscribe each camera In to the frame cache + camera_select."""
+        super().start()
 
         def _sink(cam: str) -> Callable[[Image], None]:
             return lambda img: self._on_cam(cam, img)
@@ -89,7 +90,8 @@ class CameraMuxModule(Module):
         self.register_disposable(Disposable(self.camera_select.subscribe(self._set_cam_selection)))
 
     @rpc
-    def stop(self) -> None: ...
+    def stop(self) -> None:
+        super().stop()
 
     # ─── mux state ────────────────────────────────────────────────────
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,14 +30,20 @@ import pytest
 from dimos.teleop.quest_hosted.hosted_teleop_module import HostedTeleopModule
 
 
+class _HostedHarness(HostedTeleopModule):
+    """HostedTeleopModule harness with only state-message/config dependencies."""
+
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(broker_api_key="", robot_id="", robot_name="")
+        self._state_back_channel = MagicMock()
+        self._state_back_channel.readyState = "open"
+        self._state_channel = None
+
+
 @pytest.fixture
 def module():
     """Bare ``HostedTeleopModule`` with a mocked open state-back channel."""
-    m = HostedTeleopModule.__new__(HostedTeleopModule)
-    m._state_back_channel = MagicMock()
-    m._state_back_channel.readyState = "open"
-    m._state_channel = None
-    return m
+    return _HostedHarness()
 
 
 def _sent_payload(module) -> dict:
