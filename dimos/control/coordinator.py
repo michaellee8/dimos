@@ -55,8 +55,10 @@ from dimos.hardware.drive_trains.spec import (
 from dimos.hardware.manipulators.spec import ManipulatorAdapter
 from dimos.hardware.whole_body.spec import WholeBodyAdapter
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
+from dimos.msgs.geometry_msgs.Quaternion import Quaternion
 from dimos.msgs.geometry_msgs.Twist import Twist
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
+from dimos.msgs.geometry_msgs.Vector3 import Vector3
 from dimos.msgs.nav_msgs.Path import Path
 from dimos.msgs.sensor_msgs.JointState import JointState
 from dimos.msgs.std_msgs.Float32 import Float32
@@ -582,9 +584,6 @@ class ControlCoordinator(Module):
                     continue
                 if xyt is None or len(xyt) < 3:
                     continue
-                from dimos.msgs.geometry_msgs.Quaternion import Quaternion
-                from dimos.msgs.geometry_msgs.Vector3 import Vector3
-
                 return PoseStamped(
                     ts=time.perf_counter(),
                     position=Vector3(float(xyt[0]), float(xyt[1]), 0.0),
