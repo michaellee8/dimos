@@ -94,6 +94,10 @@ class MovementManager(Module):
             return
 
         logger.debug("Goal", x=round(msg.x, 1), y=round(msg.y, 1), z=round(msg.z, 1))
+        # A fresh goal resumes navigation: release any latched teleop cancel so the
+        # follower will accept the new route (it ignores paths while cancelled).
+        logger.warning("[CANCELDBG] MovementManager CLICK -> stop_movement=False (resume) + goal")
+        self.stop_movement.publish(Bool(data=False))
         self.way_point.publish(msg)
         self.goal.publish(msg)
 

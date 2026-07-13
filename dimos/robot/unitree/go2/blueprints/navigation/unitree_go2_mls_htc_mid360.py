@@ -248,6 +248,9 @@ unitree_go2_mls_htc_mid360 = autoconnect(
             base_link_from_mid360().inverse().translation.y,
             base_link_from_mid360().inverse().translation.z,
         ],
+        # Fine-trim: the measured mount offset over-compensated slightly; nudge the
+        # body center (footprint + viz box) 0.1 m forward toward the head.
+        forward_trim=0.1,
     ),
     GoalRelay.blueprint().remappings([(GoalRelay, "odometry", "body_odometry")]),
     RepulsiveFieldNative.blueprint(
