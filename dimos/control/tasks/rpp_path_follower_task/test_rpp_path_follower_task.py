@@ -202,8 +202,6 @@ def test_drives_to_arrival_forward_only(artifact_path):
     """End-to-end: drive a straight against the FOPDT plant; arrives, and the
     forward-only contract holds (vy == 0, vx >= 0) every tick."""
     path, art = artifact_path
-    from dimos.core.global_config import global_config as gc  # noqa: F401 (task uses _gc)
-
     task = _task(path, speed=0.7)
     plant = TwistBasePlantSim(
         TwistBasePlantParams(
