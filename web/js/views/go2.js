@@ -812,8 +812,14 @@ function onRobotState(s) {
         ui.posture = s.posture;
         dirty = true;
     }
-    if (typeof s.estopped === 'boolean' && s.estopped !== ui.estopped) {
-        ui.estopped = s.estopped;
+    // E-STOP latch is sticky: telemetry may RAISE it (a robot-side stop the
+    // operator didn't trigger — hardware button, safety supervisor) but must
+    // NEVER lower it. A robot_telemetry frame generated before the robot
+    // processed the operator's estop carries estopped:false; clearing the local
+    // latch from it would release E-STOP and resume a held-key twist. Only the
+    // re-arm button clears ui.estopped.
+    if (s.estopped === true && !ui.estopped) {
+        ui.estopped = true;
         dirty = true;
     }
     // Robot-confirmed camera stall — dormant (guarded no-op) until the dimos

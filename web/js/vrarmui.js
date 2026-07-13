@@ -196,7 +196,9 @@ export function onCmdAck(msg) {
 // robot_telemetry.state handler (wired via state.onRobotState) — authoritative.
 export function onRobotState(s) {
     if (s.engaged) aui.engaged = { left: !!s.engaged.left, right: !!s.engaged.right };
-    if (typeof s.estopped === 'boolean') aui.estopped = s.estopped;
+    // Sticky E-STOP latch: telemetry may raise it, never lower it (a stale
+    // pre-estop frame would release the latch). Only re-arm clears aui.estopped.
+    if (s.estopped === true) aui.estopped = true;
     _dirty();
 }
 

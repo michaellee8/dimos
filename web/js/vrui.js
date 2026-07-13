@@ -241,7 +241,9 @@ export function onCmdAck(msg) { resolveAck(msg.nonce, !!msg.ok); }
 export function onRobotState(s) {
     if (vui.pending.size > 0) return;  // don't fight a command mid-flight
     if (typeof s.posture === 'string' && POSTURE_STATE[s.posture]) vui.posture = s.posture;
-    if (typeof s.estopped === 'boolean') vui.estopped = s.estopped;
+    // Sticky E-STOP latch: telemetry may raise it, never lower it (a stale
+    // pre-estop frame would release the latch and resume drive). Only re-arm clears.
+    if (s.estopped === true) vui.estopped = true;
     if (typeof s.obstacle_avoidance === 'boolean') vui.obstacleAvoid = s.obstacle_avoidance;
     if (typeof s.light === 'number') vui.light = s.light;
     if (Array.isArray(s.cams) && s.cams.length) vui.selectedCams = s.cams.filter((c) => CAMS.some((k) => k.id === c));

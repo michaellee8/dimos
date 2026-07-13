@@ -32,7 +32,13 @@ export const POSTURE_STATE = {
 // the dedicated estop type (new robots) + a legacy Damp for older ones; fire-
 // and-forget on the reliable channel. `nonce` bumps and returns the view's id.
 export function sendEstop(chan, nonce) {
-    if (!chan || chan.readyState !== 'open') return;
+    // Channel down: motion still halts (local latch + the robot's cmd_vel
+    // deadman once twists stop), but the robot-side estop latch isn't set —
+    // warn so it's diagnosable rather than silent.
+    if (!chan || chan.readyState !== 'open') {
+        console.warn('[estop] state channel not open — latched locally, robot not notified');
+        return;
+    }
     chan.send(JSON.stringify({ type: 'estop', nonce: nonce() }));
     chan.send(JSON.stringify({ type: 'sport_cmd', name: 'Damp', nonce: nonce() }));
 }
