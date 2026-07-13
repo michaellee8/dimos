@@ -187,6 +187,60 @@ def square(side: float = 2.0, step: float = 0.05) -> Path:
     return _path_from_xy(xs, ys)
 
 
+# Full-pose paths: commanded yaw DECOUPLED from the path tangent. These
+# exercise what only a holonomic full-pose tracker can do — the planner
+# commands orientation independently of travel direction (tunnel-style
+# constrained spaces). A pursuit follower that faces the travel direction
+# cannot execute these; do not run them against RPP.
+
+
+def straight_rotate(
+    length: float = 3.0, yaw_end: float = math.pi / 2.0, step: float = 0.05
+) -> Path:
+    """Translate straight along +x while the commanded yaw ramps 0 -> yaw_end."""
+    n = round(length / step)
+    return Path(poses=[_pose(i * step, 0.0, yaw_end * i / n) for i in range(n + 1)])
+
+
+def strafe_line(length: float = 2.0, step: float = 0.05) -> Path:
+    """Strafe sideways: positions run along +y while the commanded yaw stays 0.
+
+    Unlike :func:`sidestep_1m` (an off-axis GOAL a pursuit follower may
+    turn-and-drive to), this is a dense lateral path whose commanded yaw makes
+    turning wrong: it must be executed as pure lateral translation.
+    """
+    n = round(length / step)
+    return Path(poses=[_pose(0.0, i * step, 0.0) for i in range(n + 1)])
+
+
+def circle_offset_heading(
+    radius: float = 1.0, offset: float = math.pi / 4.0, n_points: int = 100
+) -> Path:
+    """The `circle` geometry, but the commanded yaw is tangent + ``offset``.
+
+    A fixed offset from the tangent means the robot must translate along the
+    circle while holding its nose rotated off the direction of travel — the
+    crab-walk case.
+    """
+    poses: list[PoseStamped] = []
+    for i in range(n_points + 1):
+        theta = 2.0 * math.pi * i / n_points
+        x = radius * math.sin(theta)
+        y = radius * (1.0 - math.cos(theta))
+        tangent = math.atan2(math.sin(theta), math.cos(theta))
+        poses.append(_pose(x, y, tangent + offset))
+    return Path(poses=poses)
+
+
+def fullpose_path_set() -> dict[str, Path]:
+    """Battery for the holonomic full-pose tracker benchmark."""
+    return {
+        "straight_rotate_90": straight_rotate(length=3.0, yaw_end=math.pi / 2.0),
+        "strafe_left_2m": strafe_line(length=2.0),
+        "circle_offset_45": circle_offset_heading(radius=1.0, offset=math.pi / 4.0),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Battery registry
 # ---------------------------------------------------------------------------
@@ -468,8 +522,10 @@ def multi_trajectory_to_svg(
 
 __all__ = [
     "circle",
+    "circle_offset_heading",
     "default_battery",
     "figure_eight",
+    "fullpose_path_set",
     "multi_trajectory_to_svg",
     "path_to_svg",
     "rounded_square",
@@ -477,6 +533,8 @@ __all__ = [
     "slalom",
     "smooth_corner",
     "square",
+    "strafe_line",
     "straight_line",
+    "straight_rotate",
     "trajectory_to_svg",
 ]

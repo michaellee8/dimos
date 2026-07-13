@@ -18,6 +18,12 @@ Source-agnostic: an :class:`ExecutedTrajectory` from sim and from hardware
 score identically. Scoring is purely geometric against the reference
 :class:`~dimos.msgs.nav_msgs.Path.Path` (cross-track error, heading error,
 arrival) — no time-parameterized reference is needed.
+
+Heading error is measured against the path's COMMANDED per-pose yaw,
+interpolated at the nearest point on the path — not against the segment
+tangent. For tangent-stamped batteries the two coincide; for full-pose paths
+(commanded yaw decoupled from travel direction) only the commanded yaw
+measures pose-tracking accuracy.
 """
 
 from __future__ import annotations
@@ -103,13 +109,15 @@ def nearest_segment(
     return idx, float(dists[idx]), float(t[idx])
 
 
-def _segment_yaw(path_xy: NDArray[np.float64], seg_idx: int) -> float:
-    if len(path_xy) < 2:
-        return 0.0
-    seg_idx = max(0, min(seg_idx, len(path_xy) - 2))
-    dx = path_xy[seg_idx + 1, 0] - path_xy[seg_idx, 0]
-    dy = path_xy[seg_idx + 1, 1] - path_xy[seg_idx, 1]
-    return float(math.atan2(dy, dx))
+def _reference_yaw(yaws_unwrapped: NDArray[np.float64], seg_idx: int, t_along_seg: float) -> float:
+    """Commanded yaw at the foot of the projection: the per-pose yaw linearly
+    interpolated (on the unwrapped sequence) along the nearest segment."""
+    if len(yaws_unwrapped) < 2:
+        return float(yaws_unwrapped[0]) if len(yaws_unwrapped) else 0.0
+    seg_idx = max(0, min(seg_idx, len(yaws_unwrapped) - 2))
+    y0 = yaws_unwrapped[seg_idx]
+    y1 = yaws_unwrapped[seg_idx + 1]
+    return float(y0 + t_along_seg * (y1 - y0))
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +149,9 @@ def score_run(reference_path: Path, executed: ExecutedTrajectory) -> ScoreResult
     path_xy = _path_xy(reference_path)
     if len(path_xy) == 0:
         return ScoreResult(arrived=executed.arrived, n_ticks=len(executed.ticks))
+    path_yaws = np.unwrap(
+        np.array([p.orientation.euler[2] for p in reference_path.poses], dtype=np.float64)
+    ).astype(np.float64)
 
     cte_sq: list[float] = []
     cte_abs: list[float] = []
@@ -151,11 +162,11 @@ def score_run(reference_path: Path, executed: ExecutedTrajectory) -> ScoreResult
 
     for tick in executed.ticks:
         pt = np.array([tick.pose.position.x, tick.pose.position.y], dtype=np.float64)
-        seg_idx, d, _ = nearest_segment(pt, path_xy)
+        seg_idx, d, t_along = nearest_segment(pt, path_xy)
         cte_abs.append(d)
         cte_sq.append(d * d)
 
-        path_yaw = _segment_yaw(path_xy, seg_idx)
+        path_yaw = _reference_yaw(path_yaws, seg_idx, t_along)
         he = abs(angle_diff(tick.pose.orientation.euler[2], path_yaw))
         he_abs.append(he)
         he_sq.append(he * he)

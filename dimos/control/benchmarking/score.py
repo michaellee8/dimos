@@ -108,6 +108,8 @@ def score_recordings(
                 cte_max=s.cte_max,
                 cte_rms=s.cte_rms,
                 arrived=s.arrived,
+                heading_err_rms=s.heading_err_rms,
+                heading_err_max=s.heading_err_max,
             )
         )
         runs.append(
@@ -116,6 +118,8 @@ def score_recordings(
                 "speed": rec.speed,
                 "cte_max": s.cte_max,
                 "cte_rms": s.cte_rms,
+                "heading_err_rms": s.heading_err_rms,
+                "heading_err_max": s.heading_err_max,
                 "arrived": s.arrived,
                 "reason": rec.reason,
                 "ref": [(p[0], p[1]) for p in rec.reference],
@@ -203,7 +207,8 @@ def _plot_xy(runs: list[dict], out: Path, robot: str) -> None:
                 [p[0] for p in ex_c],
                 [p[1] for p in ex_c],
                 lw=1.3,
-                label=f"v={r['speed']:g} (cte_max={r['cte_max'] * 100:.0f}cm"
+                label=f"v={r['speed']:g} (cte_max={r['cte_max'] * 100:.0f}cm, "
+                f"he_rms={math.degrees(r.get('heading_err_rms', 0.0)):.0f}deg"
                 f"{'' if r['arrived'] else ', NOT arrived'})",
             )
         ax.set_title(name)

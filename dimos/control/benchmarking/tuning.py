@@ -189,6 +189,10 @@ class OperatingPoint:
     cte_max: float
     cte_rms: float
     arrived: bool
+    # Pose-tracking accuracy vs the path's commanded yaw (rad). Defaulted so
+    # pre-existing serialized maps load unchanged.
+    heading_err_rms: float = 0.0
+    heading_err_max: float = 0.0
 
 
 @dataclass

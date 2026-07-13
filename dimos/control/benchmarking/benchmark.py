@@ -55,6 +55,7 @@ from reactivex.disposable import Disposable
 from dimos.control.benchmarking.gate import GATE_QUIT, GATE_SKIP
 from dimos.control.benchmarking.paths import (
     circle,
+    fullpose_path_set,
     rounded_square,
     single_corner,
     smooth_corner,
@@ -97,6 +98,14 @@ def path_set() -> dict[str, NavPath]:
         "rounded_square": rounded_square(side=2.0, arc_radius=0.5),
         "circle": circle(radius=1.0),
     }
+
+
+BATTERIES: dict[str, Any] = {
+    # Tangent-heading battery for pursuit followers (RPP).
+    "hardware": path_set,
+    # Decoupled-heading battery for the holonomic full-pose tracker.
+    "fullpose": fullpose_path_set,
+}
 
 
 def shift_path_to_start_at_pose(path: NavPath, start_pose: PoseStamped) -> NavPath:
@@ -362,6 +371,7 @@ class BenchmarkerConfig(ModuleConfig):
     """
 
     robot: str = "go2"
+    battery: Literal["hardware", "fullpose"] = "hardware"
     speeds: str = "0.3,0.5,0.7,0.9,1.0"
     tolerances: str = "5,10,15"  # cm — carried through to the offline scorer
     goal_tolerance: float = 0.25  # m — arrival radius around the last pose
@@ -420,14 +430,15 @@ class Benchmarker(Module):
         speeds = [float(s) for s in cfg.speeds.split(",") if s.strip()]
         out_root = Path(cfg.out_dir).expanduser() if cfg.out_dir else DEFAULT_OUT_DIR / cfg.robot
         out_root.mkdir(parents=True, exist_ok=True)
+        battery = BATTERIES[cfg.battery]()
 
         logger.info(
-            f"Benchmarker: {cfg.robot} speeds={speeds} over {len(path_set())} paths "
-            f"(gate_source={cfg.gate_source}, out={out_root})"
+            f"Benchmarker: {cfg.robot} battery={cfg.battery} speeds={speeds} over "
+            f"{len(battery)} paths (gate_source={cfg.gate_source}, out={out_root})"
         )
 
         idx = 0
-        for path_name, path in path_set().items():
+        for path_name, path in battery.items():
             for speed in speeds:
                 if cfg.gate_source == "stream":
                     logger.info(
@@ -512,6 +523,7 @@ def main() -> None:
 
     ap = argparse.ArgumentParser(description="Path-following benchmark (pub/sub)")
     ap.add_argument("--robot", default="go2")
+    ap.add_argument("--battery", choices=sorted(BATTERIES), default="hardware")
     ap.add_argument("--speeds", default="0.3,0.5,0.7,0.9,1.0")
     ap.add_argument("--gate-source", choices=["stream", "auto"], default="auto")
     ap.add_argument("--timeout", type=float, default=60.0)
@@ -520,6 +532,7 @@ def main() -> None:
 
     Benchmarker(
         robot=args.robot,
+        battery=args.battery,
         speeds=args.speeds,
         gate_source=args.gate_source,
         timeout=args.timeout,

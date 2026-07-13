@@ -24,13 +24,14 @@ from types import SimpleNamespace
 import pytest
 
 from dimos.control.benchmarking.benchmark import (
+    BATTERIES,
     CompletionMonitor,
     OdomRecorder,
     RunRecording,
     path_set,
     shift_path_to_start_at_pose,
 )
-from dimos.control.benchmarking.paths import circle, straight_line
+from dimos.control.benchmarking.paths import circle, straight_line, straight_rotate
 from dimos.control.benchmarking.plant import (
     FopdtChannelParams,
     TwistBasePlantParams,
@@ -100,6 +101,16 @@ def test_path_set_is_the_full_battery():
         "rounded_square",
         "circle",
     }
+
+
+def test_battery_registry_selects_fullpose_paths():
+    assert set(BATTERIES) == {"hardware", "fullpose"}
+    fullpose = BATTERIES["fullpose"]()
+    assert set(fullpose) == {"straight_rotate_90", "strafe_left_2m", "circle_offset_45"}
+    # The point of the battery: commanded yaw decoupled from the tangent.
+    strafe = fullpose["strafe_left_2m"]
+    assert all(abs(p.orientation.euler[2]) < 1e-9 for p in strafe.poses)
+    assert strafe.poses[-1].position.y > 1.0  # travel is +y while yaw is 0
 
 
 def test_anchor_shifts_path_to_pose():
@@ -272,3 +283,71 @@ def test_end_to_end_controller_benchmark_scoring(tmp_path):
     # tracked a straight line reasonably well
     assert pt.cte_max < 0.3
     assert len(opm.tolerance_inversion) == 2
+
+
+def test_end_to_end_fullpose_benchmark_scoring(tmp_path):
+    """Same decoupled chain, full-pose flavor: the holonomic follower tracks a
+    translate-while-rotating path against the FOPDT sim, completion fires from
+    odom, and the offline scorer reports heading error against the COMMANDED
+    yaw (which the tangent-facing followers could not keep small)."""
+    from dimos.control.tasks.holonomic_pose_follower_task.holonomic_pose_follower_task import (
+        create_task as create_holonomic_task,
+    )
+
+    art = TuningConfig.from_json(DEFAULT_ARTIFACT_PATH)
+    task = create_holonomic_task(
+        SimpleNamespace(
+            name="holonomic_follower", joint_names=_JOINTS, priority=10, params={"speed": 0.5}
+        ),
+        None,
+    )
+    plant = TwistBasePlantSim(
+        TwistBasePlantParams(
+            vx=FopdtChannelParams(art.plant.vx.K, art.plant.vx.tau, art.plant.vx.L),
+            vy=FopdtChannelParams(art.plant.vy.K, art.plant.vy.tau, art.plant.vy.L),
+            wz=FopdtChannelParams(art.plant.wz.K, art.plant.wz.tau, art.plant.wz.L),
+        )
+    )
+    plant.reset(0.0, 0.0, 0.0, 0.1)
+
+    ref = shift_path_to_start_at_pose(
+        straight_rotate(length=3.0), _pose(plant.x, plant.y, plant.yaw)
+    )
+    task.set_path(ref, _pose(plant.x, plant.y, plant.yaw))
+
+    recorder = OdomRecorder()
+    monitor = _monitor(ref, dwell_s=0.3)
+    done = False
+    for k in range(800):
+        out = task.compute(_state(plant.x, plant.y, plant.yaw, t=k * 0.1))
+        cvx, cvy, cwz = out.velocities if out is not None else (0.0, 0.0, 0.0)
+        recorder.on_cmd_vel(Twist(linear=Vector3(cvx, cvy, 0.0), angular=Vector3(0.0, 0.0, cwz)))
+        recorder.on_odom(_pose(plant.x, plant.y, plant.yaw), now=k * 0.1)
+        lin, ang = recorder.body_speed()
+        if monitor.update(plant.x, plant.y, lin, ang, k * 0.1):
+            done = True
+            break
+        plant.step(cvx, cvy, cwz, 0.1)
+    assert done, "odom-based completion never fired"
+
+    rec = RunRecording.from_path(
+        robot="go2",
+        path_name="straight_rotate_90",
+        speed=0.5,
+        reference=ref,
+        goal_tolerance=0.25,
+        velocity_threshold=0.05,
+        timeout=60.0,
+    )
+    rec.arrived = True
+    rec.reason = "goal+stop"
+    rec.ticks = recorder.snapshot()
+    rec.to_json(tmp_path / "go2_straight_rotate_90_v0.50_000.json")
+
+    opm = score_dir(tmp_path, tolerances_cm=[10, 15], plots=False)
+    pt = opm.points[0]
+    assert pt.arrived
+    assert pt.cte_max < 0.3
+    # Pose tracking is what gets measured: heading error vs the commanded yaw
+    # stays small even though the commanded yaw diverges 90deg from the tangent.
+    assert pt.heading_err_rms < 0.15
