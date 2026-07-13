@@ -51,6 +51,22 @@ class PController:
         self._speed = speed
         self._control_frequency = control_frequency
 
+    @property
+    def speed(self) -> float:
+        return self._speed
+
+    @speed.setter
+    def speed(self, value: float) -> None:
+        self._speed = value
+
+    @property
+    def k_angular(self) -> float:
+        return self._k_angular
+
+    @k_angular.setter
+    def k_angular(self, value: float) -> None:
+        self._k_angular = value
+
     def advance(self, lookahead_point: NDArray[np.float64], current_odom: PoseStamped) -> Twist:
         current_pos = np.array([current_odom.position.x, current_odom.position.y])
         direction = lookahead_point - current_pos

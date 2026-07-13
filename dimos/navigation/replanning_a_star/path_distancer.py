@@ -30,6 +30,14 @@ class PathDistancer:
         self._path = np.array([[p.position.x, p.position.y] for p in path.poses])
         self._cumulative_dists = _make_cumulative_distance_array(self._path)
 
+    @property
+    def lookahead_dist(self) -> float:
+        return self._lookahead_dist
+
+    @lookahead_dist.setter
+    def lookahead_dist(self, value: float) -> None:
+        self._lookahead_dist = value
+
     def find_lookahead_point(self, start_idx: int) -> NDArray[np.float64]:
         """
         Given a path, and a precomputed array of cumulative distances, find the

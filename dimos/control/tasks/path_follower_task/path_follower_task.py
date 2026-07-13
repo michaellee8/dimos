@@ -147,8 +147,8 @@ class PathFollowerTask(BaseControlTask):
         self._joint_names = frozenset(config.joint_names)
 
         self._controller = PController(global_config, config.speed, config.control_frequency)
-        # Override the class-level _k_angular for this instance only.
-        self._controller._k_angular = config.k_angular
+        # Override the default k_angular for this instance only.
+        self._controller.k_angular = config.k_angular
         self._pid: VelocityTrackingPID | None = (
             VelocityTrackingPID(config.pid_config) if config.pid_config else None
         )
@@ -371,7 +371,7 @@ class PathFollowerTask(BaseControlTask):
         # speed so straights get a long, stable horizon and slow corners get a
         # short, tight one. lookahead_speed_scale == 0 keeps the fixed dist.
         if self._config.lookahead_speed_scale > 0.0:
-            self._distancer._lookahead_dist = float(
+            self._distancer.lookahead_dist = float(
                 np.clip(
                     self._config.lookahead_speed_scale * self._v_cur,
                     self._config.lookahead_min,
@@ -434,10 +434,10 @@ class PathFollowerTask(BaseControlTask):
             return False
         if speed is not None:
             self._config.speed = speed
-            self._controller._speed = speed  # PController exposes _speed
+            self._controller.speed = speed
         if k_angular is not None:
             self._config.k_angular = k_angular
-            self._controller._k_angular = k_angular
+            self._controller.k_angular = k_angular
         if lookahead_dist is not None:
             # Takes effect when the next start_path() rebuilds the PathDistancer.
             self._config.lookahead_dist = lookahead_dist
@@ -569,7 +569,7 @@ class PathFollowerTask(BaseControlTask):
             return
         speed = float(speed)
         self._config.speed = speed
-        self._controller._speed = speed  # PController exposes _speed
+        self._controller.speed = speed
         self._apply_profile_speed(speed)
         logger.info(f"PathFollowerTask '{self._name}': set_speed({speed:.3f})")
 
