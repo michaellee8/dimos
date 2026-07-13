@@ -53,7 +53,7 @@ from typing import Any, Literal
 import numpy as np
 from reactivex.disposable import Disposable
 
-from dimos.constants import STATE_DIR
+from dimos.constants import DEFAULT_THREAD_JOIN_TIMEOUT, STATE_DIR
 from dimos.control.benchmarking.gate import GATE_QUIT, GATE_SKIP
 from dimos.control.benchmarking.paths import (
     circle,
@@ -368,6 +368,11 @@ class BenchmarkerConfig(ModuleConfig):
     out_dir: str | None = None
 
 
+# Queue sentinel pushed on stop() to unblock a gate wait (distinct from the
+# real GATE_ADVANCE/SKIP/QUIT codes); the loop then observes _stop_event.
+_GATE_STOP = -1
+
+
 class Benchmarker(Module):
     """Publishes the path battery + speeds, records odom, detects odom-based
     completion, and writes per-run recordings. Pure pub/sub — never calls into
@@ -387,6 +392,8 @@ class Benchmarker(Module):
         super().__init__(**kwargs)
         self._gate_queue = queue.Queue()
         self._recorder = OdomRecorder()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
 
     @rpc
     def start(self) -> None:
@@ -398,7 +405,21 @@ class Benchmarker(Module):
             self.register_disposable(Disposable(self.gate.subscribe(self._on_gate_event)))
         # Run on a background thread so start() returns immediately (the session
         # is operator-paced and easily outlives the start RPC's timeout).
-        threading.Thread(target=self._run, name="benchmarker", daemon=True).start()
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, name="benchmarker", daemon=True)
+        self._thread.start()
+
+    @rpc
+    def stop(self) -> None:
+        # Signal the session loop to exit and wake a blocked gate wait, then
+        # join the thread before tearing down the module's transports.
+        self._stop_event.set()
+        self._gate_queue.put(_GATE_STOP)
+        thread = self._thread
+        if thread is not None:
+            thread.join(DEFAULT_THREAD_JOIN_TIMEOUT)
+            self._thread = None
+        super().stop()
 
     def _on_gate_event(self, msg: Int8) -> None:
         self._gate_queue.put(int(msg.data))
@@ -422,12 +443,16 @@ class Benchmarker(Module):
         idx = 0
         for path_name, path in path_set().items():
             for speed in speeds:
+                if self._stop_event.is_set():
+                    return
                 if cfg.gate_source == "stream":
                     logger.info(
                         f"[{path_name} v={speed:.2f}] reposition+aim robot, then ENTER "
                         f"(K=skip, Backspace=quit)"
                     )
                     ev = self._wait_gate()
+                    if self._stop_event.is_set():
+                        return
                     if ev == GATE_QUIT:
                         logger.info("operator quit — ending session")
                         return
@@ -489,6 +514,8 @@ class Benchmarker(Module):
     def _await_completion(self, monitor: CompletionMonitor, timeout_s: float) -> tuple[bool, str]:
         deadline = time.perf_counter() + timeout_s
         while time.perf_counter() < deadline:
+            if self._stop_event.is_set():
+                return False, "stopped"
             pose = self._recorder.latest_pose()
             if pose is not None:
                 lin, ang = self._recorder.body_speed()
