@@ -3,6 +3,8 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
     # Relative git+file: will be deprecated (nix#12281) but there's no
     # viable alternative for reaching local path deps outside the flake dir currently
@@ -14,43 +16,113 @@
     dimos-repo = { url = "git+file:../../../../..?ref=jeff/feat/local_plan"; flake = false; };
   };
 
-  outputs = { self, nixpkgs, flake-utils, dimos-repo }:
+  outputs = { self, nixpkgs, rust-overlay, flake-utils, dimos-repo }:
     flake-utils.lib.eachDefaultSystem (system:
       let
-        pkgs = import nixpkgs { inherit system; };
+        overlays = [ (import rust-overlay) ];
+        pkgs = import nixpkgs { inherit system overlays; };
 
+        cargoRoot = "dimos/navigation/nav_3d/repulsive_local_planner/rust";
+
+        # Assemble a source tree that also contains the two local path deps
+        # (dimos-module + dimos-module-macros) the crate references via
+        # ../../../../../native/rust. Shared by native + cross builds.
         src = pkgs.runCommand "dimos-repulsive-field-src" {} ''
-          mkdir -p $out/dimos/navigation/nav_3d/repulsive_local_planner/rust
-          cp -r ${./src} $out/dimos/navigation/nav_3d/repulsive_local_planner/rust/src
-          cp ${./Cargo.toml} $out/dimos/navigation/nav_3d/repulsive_local_planner/rust/Cargo.toml
-          cp ${./Cargo.lock} $out/dimos/navigation/nav_3d/repulsive_local_planner/rust/Cargo.lock
+          mkdir -p $out/${cargoRoot}
+          cp -r ${./src} $out/${cargoRoot}/src
+          cp ${./Cargo.toml} $out/${cargoRoot}/Cargo.toml
+          cp ${./Cargo.lock} $out/${cargoRoot}/Cargo.lock
 
           mkdir -p $out/native/rust
           cp -r ${dimos-repo}/native/rust/dimos-module $out/native/rust/dimos-module
           cp -r ${dimos-repo}/native/rust/dimos-module-macros $out/native/rust/dimos-module-macros
         '';
-      in {
-        packages.default = pkgs.rustPlatform.buildRustPackage {
+
+        # Pinned stable toolchain with the aarch64-musl cross-target bundled.
+        # Used as the compiler in the cross build.
+        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+          targets = [
+            "aarch64-unknown-linux-musl"
+          ];
+        };
+
+        rustPlatform = pkgs.makeRustPlatform {
+          cargo = rustToolchain;
+          rustc = rustToolchain;
+        };
+
+        # Cross pkgs set — used only to pull in the musl GCC cross-linker.
+        pkgsCrossArm64 = import nixpkgs {
+          inherit system;
+          crossSystem.config = "aarch64-unknown-linux-musl";
+        };
+
+        commonArgs = {
           pname = "dimos-repulsive-field";
           version = "0.1.0";
-
           inherit src;
-          cargoRoot = "dimos/navigation/nav_3d/repulsive_local_planner/rust";
-          buildAndTestSubdir = "dimos/navigation/nav_3d/repulsive_local_planner/rust";
+          inherit cargoRoot;
+          buildAndTestSubdir = cargoRoot;
+          cargoHash = "sha256-2g1oWdr4RyMFoujGo+QPd52661oNt6hAsuHBwzGNOdQ=";
+          meta.mainProgram = "repulsive_field";
+        };
 
-          # Binary-only build: just the repulsive_field bin (native feature is
-          # the default, and the bin requires it). No lib/wasm/web, no tests.
+        # ── native build (host system) ──────────────────────────────────────
+        # Binary-only: just the repulsive_field bin (native feature is the
+        # default, and the bin requires it). No lib/wasm/web, no tests.
+        buildNative = pkgs.rustPlatform.buildRustPackage (commonArgs // {
           cargoBuildFlags = [ "--bin" "repulsive_field" ];
           doCheck = false;
-
-          cargoHash = "sha256-2g1oWdr4RyMFoujGo+QPd52661oNt6hAsuHBwzGNOdQ=";
-
-          # Keep the output light: only $out/bin/repulsive_field.
           postInstall = ''
             rm -rf $out/lib
           '';
+        });
 
-          meta.mainProgram = "repulsive_field";
+        # ── generic cross build ─────────────────────────────────────────────
+        # Overrides build/install so cargo targets the foreign triple and the
+        # binary is picked up from the target-specific output directory.
+        buildCross = rustTarget: ccPkgs:
+          let
+            targetSnake = builtins.replaceStrings ["-"] ["_"] rustTarget;
+            targetUpper = pkgs.lib.toUpper targetSnake;
+            ccBinDir    = "${ccPkgs.stdenv.cc}/bin";
+            ccPrefix    = ccPkgs.stdenv.cc.targetPrefix;
+          in
+          rustPlatform.buildRustPackage (commonArgs // {
+            pname = "dimos-repulsive-field-${rustTarget}";
+            doCheck = false;
+
+            buildPhase = ''
+              runHook preBuild
+              ( cd ${cargoRoot} && cargo build --release --target ${rustTarget} --bin repulsive_field )
+              runHook postBuild
+            '';
+
+            installPhase = ''
+              runHook preInstall
+              mkdir -p $out/bin
+              install -m755 ${cargoRoot}/target/${rustTarget}/release/repulsive_field $out/bin/repulsive_field
+              # Keep the output binary-only.
+              rm -rf $out/lib
+              runHook postInstall
+            '';
+
+            # Tell cargo which linker to use for the foreign target.
+            "CARGO_TARGET_${targetUpper}_LINKER" = "${ccBinDir}/${ccPrefix}cc";
+
+            # Tell cc-rs (build scripts compiling any C deps) which cross
+            # toolchain to use, so it doesn't fall back to host clang with a
+            # wrong sysroot.
+            "CC_${targetSnake}"  = "${ccBinDir}/${ccPrefix}cc";
+            "CXX_${targetSnake}" = "${ccBinDir}/${ccPrefix}c++";
+            "AR_${targetSnake}"  = "${ccBinDir}/${ccPrefix}ar";
+          });
+
+      in {
+        packages = {
+          default = buildNative;
+          repulsive_field-aarch64 =
+            buildCross "aarch64-unknown-linux-musl" pkgsCrossArm64;
         };
       });
 }
