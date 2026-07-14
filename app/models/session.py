@@ -20,7 +20,13 @@ class TeleopSession(Base):
     # Tenant boundary: the API key's owner. Visibility/auth filter on this.
     owner_id: Mapped[str | None] = Column(String, nullable=True, index=True)
     state: Mapped[str] = Column(String, default="idle")  # idle | active | disconnected
+    # Backend for this session: "cloudflare" (default) | "livekit". Set at
+    # create_session; drives the transport-specific branches.
+    transport: Mapped[str] = Column(String, nullable=False, default="cloudflare")
     cf_session_id: Mapped[str] = Column(String, nullable=True)
+
+    # LiveKit room isn't stored — derived from the session id on demand
+    # (services.livekit.room_name).
 
     # Video the robot offered (sendonly m=video), extracted from its SDP at
     # create_session. The actual CF publish (/tracks/new) happens in
@@ -34,6 +40,13 @@ class TeleopSession(Base):
     # Lives here (not the operator-cleared _robot_channel_ids map) so it survives
     # operator leave/rejoin; gone only when the robot session row is.
     state_back_channel_id: Mapped[int | None] = Column(Integer, nullable=True)
+    # Same stale-push story as state_back for the robot→operator map channel.
+    map_channel_id: Mapped[int | None] = Column(Integer, nullable=True)
+    # Operator mic track (m=audio sendonly in the operator's join offer) —
+    # published on the operator's CF session, pulled onto the robot's in the
+    # bridge. Cleared with the operator slot.
+    operator_audio_mid: Mapped[str | None] = Column(String, nullable=True)
+    operator_audio_track_name: Mapped[str | None] = Column(String, nullable=True)
 
     # Active operator (null = no one controlling)
     operator_id: Mapped[str | None] = Column(String, nullable=True)
@@ -47,3 +60,5 @@ class TeleopSession(Base):
 
     created_at: Mapped[datetime] = Column(DateTime(timezone=True), default=_utcnow)
     last_heartbeat: Mapped[datetime | None] = Column(DateTime(timezone=True), nullable=True)
+    # Refreshed by /op-heartbeat; a reaper evicts silent-drop operators.
+    last_operator_heartbeat: Mapped[datetime | None] = Column(DateTime(timezone=True), nullable=True)

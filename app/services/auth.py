@@ -6,8 +6,9 @@ The app-level identity is the (verified) email claim, so API key ownership,
 robot-ID namespacing and session ownership are all keyed by email.
 """
 
+import asyncio
 import logging
-import threading
+import time
 
 import httpx
 from fastapi import HTTPException, Security
@@ -24,30 +25,41 @@ api_key_header = APIKeyHeader(name="X-Robot-API-Key", auto_error=False)
 # In-memory robot API keys (dev bootstrap only — prod uses dtk_* keys in DB)
 ROBOT_API_KEYS: dict[str, str] = {}
 
-# --- Cognito JWKS cache ---
+# --- Cognito JWKS cache. Hourly TTL so a key rotation doesn't need a restart.
+_JWKS_TTL_SEC = 3600
 
-_jwks_lock = threading.Lock()
+_jwks_lock = asyncio.Lock()
 _jwks_keys: dict[str, dict] = {}  # kid -> JWK
+_jwks_fetched_at = 0.0
 
 
-def _fetch_jwks() -> dict[str, dict]:
+async def _fetch_jwks() -> dict[str, dict]:
     url = f"{settings.cognito_issuer}/.well-known/jwks.json"
-    resp = httpx.get(url, timeout=10)
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(url)
     resp.raise_for_status()
     return {k["kid"]: k for k in resp.json()["keys"]}
 
 
-def _get_jwk(kid: str) -> dict | None:
-    with _jwks_lock:
-        if kid not in _jwks_keys:
-            try:
-                _jwks_keys.update(_fetch_jwks())
-            except Exception as e:
-                log.error("JWKS fetch failed: %s", e)
-        return _jwks_keys.get(kid)
+async def _get_jwk(kid: str) -> dict | None:
+    # Fast path: cached + fresh, no lock or I/O.
+    global _jwks_fetched_at
+    now = time.monotonic()
+    if kid in _jwks_keys and now - _jwks_fetched_at < _JWKS_TTL_SEC:
+        return _jwks_keys[kid]
+    # Lock collapses concurrent misses into one fetch.
+    async with _jwks_lock:
+        if kid in _jwks_keys and time.monotonic() - _jwks_fetched_at < _JWKS_TTL_SEC:
+            return _jwks_keys[kid]
+        try:
+            _jwks_keys.update(await _fetch_jwks())
+            _jwks_fetched_at = time.monotonic()
+        except Exception as e:
+            log.error("JWKS fetch failed: %s", e)
+    return _jwks_keys.get(kid)
 
 
-def decode_token(token: str) -> dict:
+async def decode_token(token: str) -> dict:
     """Verify a Cognito ID token and return our app-level claims.
 
     The returned dict keeps the historical shape: `sub` is the user's email
@@ -58,7 +70,7 @@ def decode_token(token: str) -> dict:
     except JWTError as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
 
-    jwk = _get_jwk(kid)
+    jwk = await _get_jwk(kid)
     if jwk is None:
         raise HTTPException(status_code=401, detail="Invalid token: unknown key id")
 
@@ -89,7 +101,7 @@ async def get_current_user(
     """Extract user from Bearer Cognito ID token."""
     if credentials is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    return decode_token(credentials.credentials)
+    return await decode_token(credentials.credentials)
 
 
 async def get_robot_id(api_key: str | None = Security(api_key_header)) -> str:
@@ -106,6 +118,12 @@ async def get_robot_id(api_key: str | None = Security(api_key_header)) -> str:
         async with async_session() as db:
             key_record = await validate_api_key(db, api_key)
             if key_record:
+                if not key_record.robot_id:
+                    # Multiple such keys share owner_id as identity; ops should fix.
+                    log.warning(
+                        "API key %s... has no robot_id; using owner_id as identity",
+                        api_key[:12],
+                    )
                 return key_record.robot_id or key_record.owner_id
 
     raise HTTPException(status_code=401, detail="Invalid robot credentials")
@@ -139,7 +157,7 @@ async def get_operator_or_robot(
         robot_id = await get_robot_id(api_key)
         return {"sub": robot_id, "role": "robot"}
     if credentials is not None:
-        return decode_token(credentials.credentials)
+        return await decode_token(credentials.credentials)
     raise HTTPException(status_code=401, detail="Not authenticated")
 
 

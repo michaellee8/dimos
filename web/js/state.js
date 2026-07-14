@@ -1,21 +1,28 @@
 // Shared mutable state — every other module imports from here.
 
+// ?broker= is dev-only — in prod it would let a phishing link redirect every
+// api() call (and the Cognito bearer token) to an attacker-controlled origin.
+const isLocalDev = ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname);
+const brokerParam = new URLSearchParams(window.location.search).get('broker') || '';
+
 export const state = {
     // Auth (Cognito ID + refresh tokens)
     token: localStorage.getItem('teleop_token') || '',
     refreshToken: localStorage.getItem('teleop_refresh') || '',
     userEmail: localStorage.getItem('teleop_email') || '',
-    brokerOverride: new URLSearchParams(window.location.search).get('broker') || '',
+    brokerOverride: isLocalDev ? brokerParam : '',
 
     // WebRTC + WebXR
+    setupInProgress: false,  // setupWebRTC re-entry guard
     pc: null,
+    room: null,          // LiveKit Room (livekit transport only; null for cloudflare)
     cmdChannel: null,
     stateChannel: null,
     stateBackChannel: null,
+    mapChannel: null,       // robot → operator map (occupancy grid + odom), unreliable
+    micTrack: null,         // operator mic MediaStreamTrack (starts muted; cockpit toggles)
     xrSession: null,
     xrRefSpace: null,
-    gl: null,
-    lastSendTime: 0,
     activeRobot: null,
 
     // Clock sync
@@ -28,9 +35,16 @@ export const state = {
     videoStatsTimer: null,
     videoStatsPrev: null,
 
+    // Operator liveness heartbeat to broker
+    opHeartbeatTimer: null,
+
     // Keyboard
     kbInterval: null,
     kbKeys: new Set(),
+
+    // Speed bar (go2 cockpit): {lin, ang} multipliers applied in buildTwist.
+    // Normal 0.5 / High 1.0 m/s envelope; Rage uses firmware mode + full scale.
+    speedScale: { lin: 0.5, ang: 0.5 },
 
     // Live metrics — single source of truth for the browser HUD + VR quad.
     // Nothing here is sent anywhere; pure local display state.
@@ -39,28 +53,30 @@ export const state = {
         rttMs: null,        // best clock-sync RTT (ms)
         offsetMs: 0,
         cmdHz: 0,           // command-send rate (twists for kb, poses for VR)
-        cmd: null,          // robot-measured: {latency_ms, jitter_ms, loss_pct, rate_hz}
+        cmd: null,          // robot-measured: {latency_ms, jitter_ms, rate_hz, throughput_bps}
+        soc: null,          // robot battery state-of-charge (%), from robot_telemetry
+        iceType: null,      // selected ICE path: 'direct' | 'stun' | 'turn' | null
+        stampStripPx: 0,    // benchmark strip rows appended below the frame (0 = not stamping)
     },
+    onCmdAck: null,         // optional view hook: (msg) => void for {type:cmd_ack,nonce,ok}
+    onRobotState: null,     // optional view hook: (state) => void for robot_telemetry.state
+    onMap: null,            // optional view hook: (msg) => void for {type:map,...} occupancy grid
+    onOdom: null,           // optional view hook: (msg) => void for {type:odom,x,y,yaw,ts}
+    onMicReady: null,       // optional view hook: () => void once the mic track is captured
+    driveEnabled: true,     // gates WASD; go2 cockpit sets false until Stand/Drive
+    poseMode: false,        // PoseStand: buildTwist maps keys to body-pose axes
+    // Video-freshness drive gate (stall.js): stalled drives the overlay/HUD,
+    // blocked suppresses twist sends (stall OR post-stall neutral gate).
+    videoStall: { stalled: false, blocked: false, armed: false },
     cmdSendCount: 0,        // rolling counter; sampled into cmdHz once/sec
-    hudTimer: null,
+    hudTimer: null,         // floating-HUD interval (keyboard/VR views)
+    armHudTimer: null,      // arm cockpit inline-telemetry interval
 
-    // VR stats quad (canvas → texture).
-    statsCanvas: null,
-    statsCtx: null,
-    statsTex: null,
-    statsBuf: null,
-
-    // Video quad (WebGL).
-    quadProgram: null,
-    quadBuf: null,
-    quadTex: null,
-    quadUniforms: null,
-
+    // (VR rendering state lives in vr.js — three.js renderer/scene singletons.)
     xrSupported: false,
 };
 
 // Dev-only: behave like a logged-in user on localhost.
-const isLocalDev = ['localhost', '127.0.0.1', '0.0.0.0'].includes(window.location.hostname);
 if (isLocalDev && !state.token) {
     state.token = 'dev-token';
     state.userEmail = 'dev@local';
@@ -71,15 +87,14 @@ export const CLOCK_SYNC_BURST_COUNT = 5;
 export const CLOCK_SYNC_BURST_INTERVAL_MS = 400;
 export const CLOCK_SYNC_DRIFT_INTERVAL_MS = 30000;  // post-burst drift cadence
 export const VIDEO_STATS_INTERVAL_MS = 1000;
+export const OP_HEARTBEAT_INTERVAL_MS = 5000;  // matches broker's ~20s reap window
 
 // Probed once at boot; awaited by loadRobots() to pick the right Connect handler.
+// immersive-vr only: headsets (Quest) support it, phones don't
 export const xrDetection = (async () => {
     if (!navigator.xr) return false;
-    const ar = await navigator.xr.isSessionSupported('immersive-ar').catch(() => false);
-    if (ar) { state.xrSupported = true; return true; }
-    const vr = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
-    state.xrSupported = vr;
-    return vr;
+    state.xrSupported = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
+    return state.xrSupported;
 })();
 
 export function escHtml(s) {

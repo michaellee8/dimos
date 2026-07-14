@@ -1,241 +1,276 @@
-// Immersive WebXR scene: video on a textured quad in front of the viewer,
-// stats quad in the upper-right, controller poses + Joy streamed each frame.
+// Immersive WebXR cockpit (Three.js). The Go2 cockpit ported to VR:
+//   MAP left · CAMERA front-centre · BUTTONS right · STATS far-right column.
+// Passthrough (AR) when the headset offers it. Drive is thumbstick → the same
+// TwistStamped the keyboard sends; buttons are controller-ray clicks (vrui.js).
+// Audio is intentionally out of scope here.
 
-import { geometry_msgs, sensor_msgs, std_msgs } from 'https://esm.sh/jsr/@dimos/msgs@0.1.4';
+import * as THREE from 'three';
+
+import { geometry_msgs, std_msgs } from 'https://esm.sh/jsr/@dimos/msgs@0.1.4';
 import { disconnect } from './disconnect.js';
-import { drawStatsQuad, initStatsQuad } from './hud.js';
+import { sendEstop } from './go2cmd.js';
+import { sampleCmdHz } from './hud.js';
+import { createStallGate, videoMediaTime } from './stall.js';
 import { sendInterval, state } from './state.js';
 import { send } from './webrtc.js';
+import { getVRRenderer } from './vrrenderer.js';
+import { buildCockpit, onCmdAck, onMap, onOdom, onRobotState, vui } from './vrui.js';
 
-function _compileShader(type, src) {
-    const gl = state.gl;
-    const s = gl.createShader(type);
-    gl.shaderSource(s, src);
-    gl.compileShader(s);
-    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
-        throw new Error('shader: ' + gl.getShaderInfoLog(s));
-    }
-    return s;
+const HEAD = new THREE.Vector3(0, 1.55, 0);  // nominal eye point panels face
+// Camera panel — front centre, 16:9. Cluster geometry must agree with
+// buildCockpit's CAM_HALF_W / PANEL_Y / PANEL_Z (map + stats sit flush).
+const CAM = { w: 1.4, h: 0.7875, x: 0, y: 1.52, z: -1.6 };
+const STICK_DEADZONE = 0.12;
+
+let renderer = null, scene = null, camera = null;
+let cockpit = null, controllers = [];
+let videoMesh = null, videoTex = null;
+let stallGate = null;
+let camEl = null;  // #robot-cam, resolved once per session (not per frame)
+const raycaster = new THREE.Raycaster();
+// Reused scratch for per-frame raycasting — avoid allocating in the XR loop.
+const _rayOrigin = new THREE.Vector3();
+const _rayDir = new THREE.Vector3();
+
+function buildScene() {
+    scene = new THREE.Scene();
+    camera = new THREE.PerspectiveCamera(70, 1, 0.05, 100);
+
+    // Camera panel (robot video). Placeholder colour until frames arrive.
+    videoMesh = new THREE.Mesh(
+        new THREE.PlaneGeometry(CAM.w, CAM.h),
+        new THREE.MeshBasicMaterial({ color: 0x0d0e0e }),
+    );
+    videoMesh.position.set(CAM.x, CAM.y, CAM.z);
+    // Flat (+Z toward user), NOT lookAt: map/stats sit coplanar flush against
+    // this panel's edges, so any tilt here would split the seams open.
+    videoMesh.renderOrder = 1;
+    scene.add(videoMesh);
+
+    cockpit = buildCockpit(scene, HEAD);
 }
 
-function initVideoQuad() {
-    const gl = state.gl;
-    const vs = `
-        attribute vec2 aPos; attribute vec2 aUV; varying vec2 vUV;
-        uniform mat4 uMVP;
-        void main() { vUV = aUV; gl_Position = uMVP * vec4(aPos, 0.0, 1.0); }`;
-    const fs = `
-        precision mediump float; varying vec2 vUV; uniform sampler2D uTex;
-        void main() { gl_FragColor = texture2D(uTex, vUV); }`;
-    state.quadProgram = gl.createProgram();
-    gl.attachShader(state.quadProgram, _compileShader(gl.VERTEX_SHADER, vs));
-    gl.attachShader(state.quadProgram, _compileShader(gl.FRAGMENT_SHADER, fs));
-    gl.linkProgram(state.quadProgram);
-
-    // Quad centered at origin, 1.2m wide × 0.675m tall (16:9), half-extents
-    // below. Interleaved pos(x,y) + uv; V flipped so the video isn't upside-down.
-    const w = 0.6, h = 0.3375;
-    const verts = new Float32Array([
-        -w, -h, 0, 1,   w, -h, 1, 1,   w, h, 1, 0,
-        -w, -h, 0, 1,   w, h, 1, 0,   -w, h, 0, 0,
+function initControllers() {
+    // Laser + reticle per controller; 'selectstart' = ray-click a panel.
+    const lineGeo = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -5),
     ]);
-    state.quadBuf = gl.createBuffer();
-    gl.bindBuffer(gl.ARRAY_BUFFER, state.quadBuf);
-    gl.bufferData(gl.ARRAY_BUFFER, verts, gl.STATIC_DRAW);
-
-    state.quadTex = gl.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, state.quadTex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
-    state.quadUniforms = {
-        mvp: gl.getUniformLocation(state.quadProgram, 'uMVP'),
-        tex: gl.getUniformLocation(state.quadProgram, 'uTex'),
-        aPos: gl.getAttribLocation(state.quadProgram, 'aPos'),
-        aUV: gl.getAttribLocation(state.quadProgram, 'aUV'),
-    };
-}
-
-function initGL() {
-    const canvas = document.getElementById('canvas');
-    state.gl = canvas.getContext('webgl', { xrCompatible: true, alpha: true });
-    if (!state.gl) throw new Error('WebGL not supported');
-    state.gl.clearColor(0, 0, 0, 0);
-    initVideoQuad();
-    initStatsQuad();
-}
-
-// column-major 4x4 multiply (a * b), arrays of length 16.
-function mat4mul(a, b) {
-    const o = new Float32Array(16);
-    for (let c = 0; c < 4; c++)
-        for (let r = 0; r < 4; r++)
-            o[c * 4 + r] =
-                a[r] * b[c * 4] + a[4 + r] * b[c * 4 + 1] +
-                a[8 + r] * b[c * 4 + 2] + a[12 + r] * b[c * 4 + 3];
-    return o;
-}
-
-// World-stationary in local-floor — the headset moves around the quad (like
-// a TV on a wall), not the other way round. local-floor's origin is where
-// the user started, so these absolute coords sit in front of them.
-const PANEL_POS_X = 0.0;
-const PANEL_POS_Y = 1.4;   // ~eye height (floor-relative)
-const PANEL_POS_Z = -1.5;  // 1.5m forward
-const videoQuadWorldModel = new Float32Array([
-    1, 0, 0, 0,
-    0, 1, 0, 0,
-    0, 0, 1, 0,
-    PANEL_POS_X, PANEL_POS_Y, PANEL_POS_Z, 1,
-]);
-
-function drawVideoQuad(frame, glLayer) {
-    const gl = state.gl;
-    const v = document.getElementById('robot-cam');
-    if (!v || v.readyState < 2 || !v.videoWidth) return;  // no frame yet
-    const pose = frame.getViewerPose(state.xrRefSpace);
-    if (!pose) return;
-
-    gl.disable(gl.DEPTH_TEST);  // HUD-style panel: always visible
-    gl.bindTexture(gl.TEXTURE_2D, state.quadTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, v);
-
-    gl.useProgram(state.quadProgram);
-    gl.bindBuffer(gl.ARRAY_BUFFER, state.quadBuf);
-    gl.enableVertexAttribArray(state.quadUniforms.aPos);
-    gl.vertexAttribPointer(state.quadUniforms.aPos, 2, gl.FLOAT, false, 16, 0);
-    gl.enableVertexAttribArray(state.quadUniforms.aUV);
-    gl.vertexAttribPointer(state.quadUniforms.aUV, 2, gl.FLOAT, false, 16, 8);
-    gl.uniform1i(state.quadUniforms.tex, 0);
-
-    for (const view of pose.views) {
-        const vp = glLayer.getViewport(view);
-        gl.viewport(vp.x, vp.y, vp.width, vp.height);
-        // World-stationary: projection * world→eye * worldModel.
-        const viewProj = mat4mul(view.projectionMatrix, view.transform.inverse.matrix);
-        const mvp = mat4mul(viewProj, videoQuadWorldModel);
-        gl.uniformMatrix4fv(state.quadUniforms.mvp, false, mvp);
-        gl.drawArrays(gl.TRIANGLES, 0, 6);
+    for (let i = 0; i < 2; i++) {
+        const ctrl = renderer.xr.getController(i);
+        const laser = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xb0e1f0, transparent: true, opacity: 0.5 }));
+        laser.scale.z = 1;
+        ctrl.add(laser);
+        const dot = new THREE.Mesh(
+            new THREE.SphereGeometry(0.012, 12, 12),
+            new THREE.MeshBasicMaterial({ color: 0xb0e1f0 }),
+        );
+        dot.visible = false;
+        ctrl.userData.dot = dot;
+        scene.add(dot);
+        ctrl.addEventListener('selectstart', () => onSelect(ctrl));
+        scene.add(ctrl);
+        controllers.push(ctrl);
     }
 }
 
-function processTracking(frame) {
+// Ray-click: intersect the cockpit panel meshes from this controller.
+function onSelect(ctrl) {
+    const hit = raycastPanels(ctrl);
+    if (hit) cockpit.onClick(hit.object.userData.panel, hit.uv);
+}
+
+function raycastPanels(ctrl) {
+    _rayOrigin.setFromMatrixPosition(ctrl.matrixWorld);
+    _rayDir.set(0, 0, -1).applyQuaternion(ctrl.quaternion).normalize();
+    raycaster.set(_rayOrigin, _rayDir);
+    const hits = raycaster.intersectObjects(cockpit.meshes, false);
+    return hits.length ? hits[0] : null;
+}
+
+// Bind (or rebind) the robot video to the camera panel; crop the benchmark
+// strip via the texture UV window (same effect as the DOM clip-path).
+function updateVideoTexture() {
+    const v = camEl;
+    if (!v || v.readyState < 2 || !v.videoWidth) return;
+    if (!videoTex || videoTex.image !== v) {
+        videoTex?.dispose();
+        videoTex = new THREE.VideoTexture(v);
+        videoTex.colorSpace = THREE.SRGBColorSpace;
+        videoMesh.material.dispose();
+        videoMesh.material = new THREE.MeshBasicMaterial({ map: videoTex });
+    }
+    const strip = state.liveStats.stampStripPx || 0;
+    const frac = strip && v.videoHeight ? strip / v.videoHeight : 0;
+    videoTex.offset.y = frac;
+    videoTex.repeat.y = 1 - frac;
+}
+
+// Thumbstick → TwistStamped, identical shape/scale to keyboard.js buildTwist.
+// Left stick: forward/back + strafe. Right stick X: turn. Grip = boost/slow.
+let lastDriveSend = 0;
+let twistSeq = 0;
+let wasDriving = false;
+
+function driveFromSticks(frame) {
     const now = performance.now();
-    if (now - state.lastSendTime < sendInterval) return;
-    state.lastSendTime = now;
+    if (now - lastDriveSend < sendInterval) return;
+    lastDriveSend = now;
 
-    // Modality-agnostic: we just stream poses + Joy. The robot blueprint
-    // decides what to do with them (arm IK or thumbstick → base velocity).
-    for (const inputSource of frame.session.inputSources) {
-        const trackingSpace = inputSource.gripSpace || inputSource.targetRaySpace;
-        if (!trackingSpace) continue;
-        const handedness = inputSource.handedness;
-        if (handedness !== 'left' && handedness !== 'right') continue;
-
-        const pose = frame.getPose(trackingSpace, state.xrRefSpace);
-        if (!pose) continue;
-
-        const pos = pose.transform.position;
-        const rot = pose.transform.orientation;
-        const nowMs = Date.now() + state.clockOffsetMs;
-        const stamp = new std_msgs.Time({
-            sec: Math.floor(nowMs / 1000),
-            nsec: (nowMs % 1000) * 1_000_000,
-        });
-
-        const poseStamped = new geometry_msgs.PoseStamped({
-            header: new std_msgs.Header({ stamp, frame_id: handedness }),
-            pose: new geometry_msgs.Pose({
-                position: new geometry_msgs.Point({ x: pos.x, y: pos.y, z: pos.z }),
-                orientation: new geometry_msgs.Quaternion({ x: rot.x, y: rot.y, z: rot.z, w: rot.w }),
-            }),
-        });
-        send(poseStamped.encode());
-
-        const gamepad = inputSource.gamepad;
-        if (gamepad) {
-            // Quest Touch thumbstick lives at axes[2]/[3]; [0]/[1] is the
-            // dead legacy touchpad. Packed into Joy axes[0]/[1] for the robot.
-            const stickX = gamepad.axes[2] ?? gamepad.axes[0] ?? 0.0;
-            const stickY = gamepad.axes[3] ?? gamepad.axes[1] ?? 0.0;
-            const axes = [
-                stickX,
-                stickY,
-                gamepad.buttons[0]?.value ?? 0.0,
-                gamepad.buttons[1]?.value ?? 0.0,
-            ];
-            const buttons = [];
-            for (let i = 0; i < gamepad.buttons.length; i++) {
-                buttons.push(gamepad.buttons[i]?.pressed ? 1 : 0);
-            }
-            const joyMsg = new sensor_msgs.Joy({
-                header: new std_msgs.Header({ stamp, frame_id: handedness }),
-                axes_length: axes.length,
-                buttons_length: buttons.length,
-                axes,
-                buttons,
-            });
-            send(joyMsg.encode());
-        }
+    // Read sticks FIRST: the stall gate needs the held-state to keep drive
+    // blocked after a freeze clears until the operator releases the stick
+    // (else a held stick lunges the robot the instant video unfreezes).
+    let lx = 0, ly = 0, rx = 0, boost = 1;
+    for (const src of frame.session.inputSources) {
+        const gp = src.gamepad;
+        if (!gp) continue;
+        const ax = gp.axes;
+        const sx = ax[2] ?? ax[0] ?? 0, sy = ax[3] ?? ax[1] ?? 0;
+        if (src.handedness === 'left') { lx += sx; ly += sy; }
+        else if (src.handedness === 'right') { rx += sx; }
+        if (gp.buttons[1]?.pressed) boost = src.handedness === 'right' ? 2.0 : 0.5;  // grip
+        if (gp.buttons[5]?.pressed) triggerEstop();  // B/Y — hardware E-STOP
     }
+    const dz = (n) => (Math.abs(n) < STICK_DEADZONE ? 0 : n);
+    const fwd = -dz(ly), strafe = -dz(lx), turn = -dz(rx);
+    const held = fwd !== 0 || strafe !== 0 || turn !== 0;
+
+    // Video-freshness gate — don't drive blind on a frozen frame.
+    const gate = stallGate.sample(videoMediaTime(camEl), now, held);
+    state.videoStall = gate;
+
+    const canDrive = state.driveEnabled && !vui.estopped && !gate.blocked
+        && state.cmdChannel && state.cmdChannel.readyState === 'open';
+    if (!canDrive) {
+        if (wasDriving) { sendTwist(0, 0, 0); wasDriving = false; }  // one stop then quiet
+        return;
+    }
+    if (fwd === 0 && strafe === 0 && turn === 0) {
+        if (wasDriving) { sendTwist(0, 0, 0); wasDriving = false; }
+        return;
+    }
+    const sp = state.speedScale || { lin: 0.5, ang: 0.5 };
+    sendTwist(fwd * boost * sp.lin, strafe * boost * sp.lin, turn * boost * sp.ang);
+    wasDriving = true;
 }
 
-function onXRFrame(time, frame) {
-    if (!state.xrSession) return;
-    state.xrSession.requestAnimationFrame(onXRFrame);
-    processTracking(frame);
-
-    const gl = state.gl;
-    const glLayer = state.xrSession.renderState.baseLayer;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, glLayer.framebuffer);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-    drawVideoQuad(frame, glLayer);
-    sampleCmdHz(time);                                              // VR has no DOM hudTimer
-    drawStatsQuad(frame, glLayer, mat4mul, videoQuadWorldModel);    // anchored to the video quad
+function sendTwist(lx, ly, az) {
+    if (!state.cmdChannel || state.cmdChannel.readyState !== 'open') return;
+    const nowMs = Date.now() + state.clockOffsetMs;
+    const ts = new std_msgs.Time({ sec: Math.floor(nowMs / 1000), nsec: (nowMs % 1000) * 1_000_000 });
+    twistSeq = (twistSeq + 1) & 0x7fffffff;
+    const twist = new geometry_msgs.TwistStamped({
+        header: new std_msgs.Header({ stamp: ts, frame_id: 'vr', seq: twistSeq }),
+        twist: new geometry_msgs.Twist({
+            linear: new geometry_msgs.Vector3({ x: lx, y: ly, z: 0 }),
+            angular: new geometry_msgs.Vector3({ x: 0, y: 0, z: az }),
+        }),
+    });
+    state.cmdChannel.send(twist.encode());
+    state.cmdSendCount++;
 }
 
-// Roll cmdSendCount → liveStats.cmdHz once per second. The browser HUD's
-// hudTimer does this for the DOM view; VR drives it off the XR frame loop.
+let _estopCooldown = 0;
+function triggerEstop() {
+    const now = performance.now();
+    if (now < _estopCooldown || vui.estopped) return;
+    _estopCooldown = now + 1500;  // debounce the physical button
+    vui.estopped = true;
+    sendEstop(state.stateChannel, () => ++vui.nonce);
+    cockpit.panels.forEach((p) => p.markDirty());
+}
+
+// Roll cmdSendCount → cmdHz once/sec off the frame loop (VR has no DOM hudTimer).
 let lastCmdSampleMs = 0;
-function sampleCmdHz(nowMs) {
+function tickCmdHz(nowMs) {
     if (!lastCmdSampleMs) { lastCmdSampleMs = nowMs; return; }
-    const dt = (nowMs - lastCmdSampleMs) / 1000;
-    if (dt < 1.0) return;
-    state.liveStats.cmdHz = state.cmdSendCount / dt;
-    state.cmdSendCount = 0;
+    if (nowMs - lastCmdSampleMs < 1000) return;
+    sampleCmdHz((nowMs - lastCmdSampleMs) / 1000);
     lastCmdSampleMs = nowMs;
 }
 
-export async function startVR() {
-    const canvas = document.getElementById('canvas');
-    canvas.style.display = 'block';
-    initGL();
+// Continuous hover: point each controller, highlight the hovered chip, park a
+// reticle at the hit point. Allocation-free (runs every XR frame): clear all
+// panels, then set the one each ray hits.
+function updateHover() {
+    for (const p of cockpit.panels) p.setHover(null);
+    for (const ctrl of controllers) {
+        const dot = ctrl.userData.dot;
+        const hit = raycastPanels(ctrl);
+        if (!hit) { dot.visible = false; continue; }
+        dot.visible = true;
+        dot.position.copy(hit.point);
+        const panel = hit.object.userData.panel;
+        panel.setHover(panel.hitTest(hit.uv));
+    }
+}
 
-    let session = null;
+function onFrame(timeMs, frame) {
+    // #robot-cam is created by webrtc.js ontrack (after startVR); resolve it
+    // once it appears, then reuse — no per-frame DOM query for the session.
+    if (!camEl) camEl = document.getElementById('robot-cam');
+    if (frame) { driveFromSticks(frame); }
+    updateHover();
+    updateVideoTexture();
+    // Dim the camera panel + tint when the robot's video is stalled/blank.
+    if (videoMesh.material.map) {
+        const stalled = vui.robotVideoStalled || state.videoStall?.stalled;
+        videoMesh.material.color.setHex(stalled ? 0x552222 : 0xffffff);
+    }
+    cockpit.tick(timeMs);
+    tickCmdHz(timeMs);
+    renderer.render(scene, camera);
+}
+
+export async function startVR() {
+    lastCmdSampleMs = 0; lastDriveSend = 0; wasDriving = false;
+    stallGate = createStallGate();
+    state.videoStall = { stalled: false, blocked: false, armed: false };
+    document.getElementById('canvas').style.display = 'block';
+    renderer = getVRRenderer();  // one shared renderer across all VR cockpits
+    // Fresh scene per session so panels/hover state don't leak across connects.
+    buildScene();
+    controllers = [];
+
+    // Passthrough (AR) when available; opaque VR otherwise. Must run inside
+    // the Connect click gesture.
+    let session = null, ar = false;
     try {
         session = await navigator.xr.requestSession('immersive-ar', {
-            requiredFeatures: ['local-floor'],
-            optionalFeatures: ['hand-tracking'],
+            requiredFeatures: ['local-floor'], optionalFeatures: ['hand-tracking'],
         });
+        ar = true;
     } catch (e) {
         session = await navigator.xr.requestSession('immersive-vr', {
-            requiredFeatures: ['local-floor'],
-            optionalFeatures: ['hand-tracking'],
+            requiredFeatures: ['local-floor'], optionalFeatures: ['hand-tracking'],
         });
     }
+    // AR: transparent clear so passthrough shows; VR: dark backdrop.
+    scene.background = ar ? null : new THREE.Color(0x0a0b0b);
+    renderer.setClearAlpha(ar ? 0 : 1);
 
     state.xrSession = session;
-    // Real Quest needs an explicit makeXRCompatible — the xrCompatible flag
-    // at context creation isn't enough (the emulator is lenient about this).
-    await state.gl.makeXRCompatible();
-    const glLayer = new XRWebGLLayer(session, state.gl);
-    await session.updateRenderState({ baseLayer: glLayer });
-    state.xrRefSpace = await session.requestReferenceSpace('local-floor');
+    await renderer.xr.setSession(session);
+    state.xrRefSpace = renderer.xr.getReferenceSpace();
+    initControllers();
+
+    // Route acks + robot-state + map onto the VR cockpit (like go2.js does DOM).
+    state.onCmdAck = onCmdAck;
+    state.onRobotState = onRobotState;
+    state.onMap = onMap;
+    state.onOdom = onOdom;
 
     session.addEventListener('end', () => {
         state.xrSession = null;
+        state.onCmdAck = state.onRobotState = state.onMap = state.onOdom = null;
+        renderer.setAnimationLoop(null);
+        cockpit?.dispose();
+        cockpit = null;
+        // Release the camera panel's GPU resources too (buildScene makes fresh
+        // ones each connect; without this they orphan across reconnect cycles).
+        videoTex?.dispose(); videoTex = null;
+        videoMesh?.geometry.dispose(); videoMesh?.material.dispose(); videoMesh = null;
+        camEl = null;
         disconnect();
     });
-    session.requestAnimationFrame(onXRFrame);
+    renderer.setAnimationLoop(onFrame);
 }
