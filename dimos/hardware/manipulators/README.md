@@ -1,155 +1,88 @@
-# Manipulator Drivers
+# Manipulator Adapters
 
-This module provides manipulator arm drivers: Protocol-only with injectable adapters.
+Hardware IO for manipulator arms. Each arm gets an adapter that wraps its vendor SDK and exposes a standard Protocol; the `ControlCoordinator` drives every arm through that Protocol.
 
-## Architecture Overview
+To integrate a new arm, follow **[Adding a Custom Arm](../../../docs/capabilities/manipulation/adding_a_custom_arm.md)**. This README is a quick reference for what lives here.
+
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Driver (Module)                        │
-│  - Owns threading (control loop, monitor loop)              │
-│  - Publishes joint_state, robot_state                       │
-│  - Subscribes to joint_position_command, joint_velocity_cmd │
-│  - Exposes RPC methods (move_joint, enable_servos, etc.)    │
+│              ControlCoordinator (100Hz tick loop)            │
+│  - Reads state from every adapter                           │
+│  - Runs tasks (trajectory, servo, velocity, eef_twist, ...) │
+│  - Arbitrates per-joint conflicts by priority               │
 └─────────────────────┬───────────────────────────────────────┘
-                      │ uses
+                      │ calls Protocol methods
 ┌─────────────────────▼───────────────────────────────────────┐
-│              Adapter (implements Protocol)                   │
-│  - Handles SDK communication                                 │
-│  - Unit conversions (radians ↔ vendor units)                │
-│  - Swappable: XArmAdapter, PiperAdapter, MockAdapter        │
+│              Adapter (implements the Protocol)               │
+│  - Wraps the vendor SDK                                      │
+│  - Converts vendor units to SI                               │
+│  - Swappable: XArmAdapter, PiperAdapter, MockAdapter, ...    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Key Benefits
+Adapters hold no threading and no ports. The coordinator owns the control loop and calls into the adapter each tick. Blueprints and robot configs live under `dimos/robot/manipulators/<arm>/`, not here.
 
-- **Testable**: Inject `MockAdapter` for unit tests without hardware
-- **Flexible**: Each arm controls its own threading/timing
-- **Simple**: No ABC inheritance required - just implement the Protocol
-- **Type-safe**: Full type checking via `ManipulatorAdapter` Protocol
-
-## Directory Structure
+## Directory structure
 
 ```
 manipulators/
-├── spec.py              # ManipulatorAdapter Protocol + shared types
-├── registry.py          # Adapter registry (lazy _registry.py manifests)
-├── mock/
-│   ├── _registry.py  # Declares "mock" → adapter import path
-│   └── adapter.py       # MockAdapter for testing
-├── xarm/
-│   ├── _registry.py
-│   ├── adapter.py       # XArmAdapter (SDK wrapper)
-└── piper/
-    ├── _registry.py
-    ├── adapter.py       # PiperAdapter (SDK wrapper)
+├── spec.py       # ManipulatorAdapter Protocol + shared types
+├── registry.py   # Lazy adapter registry (discovers _registry.py manifests)
+├── a750/         # A-750 6-DOF (serial)
+├── base/         # Shared adapter helpers
+├── mock/         # MockAdapter — no hardware, reference implementation
+├── openarm/      # OpenArm bimanual (raw SocketCAN, no vendor SDK)
+├── piper/        # Piper (CAN)
+├── sim/          # ShmMujocoAdapter — MuJoCo simulation
+└── xarm/         # xArm 6/7 (TCP/IP)
 ```
 
-## Quick Start
+Every arm directory holds `adapter.py` plus a `_registry.py` manifest. There are no `__init__.py` files: these are PEP 420 namespace packages, so import submodules directly.
 
-### Using a Driver Directly
+## Registered adapters
+
+| `adapter_type` | Class | Transport |
+|---|---|---|
+| `a750` | `A750Adapter` | Serial |
+| `mock` | `MockAdapter` | None |
+| `openarm` | `OpenArmAdapter` | SocketCAN |
+| `piper` | `PiperAdapter` | CAN |
+| `sim_mujoco` | `ShmMujocoAdapter` | Shared memory |
+| `xarm` | `XArmAdapter` | TCP/IP |
 
 ```python
-from dimos.hardware.manipulators.xarm import XArm
+from dimos.hardware.manipulators.registry import adapter_registry
 
-arm = XArm(ip="192.168.1.185", dof=6)
-arm.start()
-arm.enable_servos()
-arm.move_joint([0, 0, 0, 0, 0, 0])
-arm.stop()
+adapter_registry.available()                              # list registered names
+adapter_registry.create("xarm", address="192.168.1.185", dof=6)
 ```
 
-### Using Blueprints
-
-```python
-from dimos.hardware.manipulators.xarm.blueprints import xarm_trajectory
-
-coordinator = xarm_trajectory.build()
-coordinator.loop()
-```
-
-### Testing Without Hardware
-
-```python
-from dimos.hardware.manipulators.mock import MockAdapter
-from dimos.hardware.manipulators.xarm import XArm
-
-arm = XArm(adapter=MockAdapter(dof=6))
-arm.start()  # No hardware needed!
-arm.move_joint([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])
-```
-
-## Adding a New Arm
-
-1. **Create the adapter** (`adapter.py`):
-
-```python
-class MyArmAdapter:  # No inheritance needed - just match the Protocol
-    def __init__(self, ip: str = "192.168.1.100", dof: int = 6) -> None:
-        self._ip = ip
-        self._dof = dof
-
-    def connect(self) -> bool: ...
-    def disconnect(self) -> None: ...
-    def read_joint_positions(self) -> list[float]: ...
-    def write_joint_positions(self, positions: list[float], velocity: float = 1.0) -> bool: ...
-    # ... implement other Protocol methods
-```
-
-2. **Declare it in a manifest** (`_registry.py`, stdlib imports only):
-
-```python
-ADAPTER_FACTORIES = {
-    "myarm": "dimos.hardware.manipulators.myarm.adapter:MyArmAdapter",
-}
-```
-
-3. **Create the driver** (`arm.py`):
-
-```python
-from dimos.core.core import rpc
-from dimos.core.module import Module, ModuleConfig
-from dimos.core.stream import In, Out
-from .adapter import MyArmAdapter
-
-class MyArm(Module[MyArmConfig]):
-    joint_state: Out[JointState]
-    robot_state: Out[RobotState]
-    joint_position_command: In[JointCommand]
-
-    def __init__(self, adapter=None, **kwargs):
-        super().__init__(**kwargs)
-        self.adapter = adapter or MyArmAdapter(
-            ip=self.config.ip,
-            dof=self.config.dof,
-        )
-        # ... setup control loops
-```
-
-3. **Create blueprints** (`blueprints.py`) for common configurations.
+Discovery is lazy. The registry loads each `_registry.py` manifest (stdlib imports only) to learn the names, and imports the adapter module itself only on `create()`. A missing vendor SDK therefore fails loudly at `create()` rather than silently dropping the arm.
 
 ## ManipulatorAdapter Protocol
 
-All adapters must implement these core methods:
+Duck-typed, defined in `spec.py`. No inheritance: match the signatures.
 
 | Category | Methods |
 |----------|---------|
-| Connection | `connect()`, `disconnect()`, `is_connected()` |
-| Lifecycle | `activate()`, `deactivate()` |
-| Info | `get_info()`, `get_dof()`, `get_limits()` |
-| State | `read_joint_positions()`, `read_joint_velocities()`, `read_joint_efforts()` |
-| Motion | `write_joint_positions()`, `write_joint_velocities()`, `write_stop()` |
-| Servo | `write_enable()`, `read_enabled()`, `write_clear_errors()` |
-| Mode | `set_control_mode()`, `get_control_mode()` |
+| Connection | `connect`, `disconnect`, `is_connected` |
+| Lifecycle | `activate`, `deactivate` |
+| Info | `get_info`, `get_dof`, `get_limits` |
+| Mode | `set_control_mode`, `get_control_mode` |
+| State | `read_joint_positions`, `read_joint_velocities`, `read_joint_efforts`, `read_state`, `read_error` |
+| Motion | `write_joint_positions`, `write_joint_velocities`, `write_stop` |
+| Servo | `write_enable`, `read_enabled`, `write_clear_errors` |
 
-Optional methods (return `None`/`False` if unsupported):
-- `read_cartesian_position()`, `write_cartesian_position()`
-- `read_gripper_position()`, `write_gripper_position()`
-- `read_force_torque()`
+Optional, return `None` or `False` when unsupported and never raise:
+`read_cartesian_position`, `write_cartesian_position`, `read_gripper_position`, `write_gripper_position`, `read_force_torque`.
 
-## Unit Conventions
+`mock/adapter.py` implements all of them and is the reference to copy.
 
-All adapters convert to/from SI units:
+## Unit conventions
+
+Everything crossing the adapter boundary is SI.
 
 | Quantity | Unit |
 |----------|------|
@@ -158,3 +91,7 @@ All adapters convert to/from SI units:
 | Torque | Nm |
 | Position | meters |
 | Force | Newtons |
+
+## Testing without hardware
+
+Set `adapter_type="mock"` on the `HardwareComponent` in a blueprint. The whole coordinator and planner path runs unchanged. Most arm configs expose a `mock_without_address=True` flag that does this automatically when no address is set.
