@@ -55,7 +55,7 @@ broker repo (`web/`), not here.
    so the operator HUD can show what *arrived* — the operator only knows what
    it *sent*.
 
-## Datachannels (this is the trickiest part)
+## Datachannels
 
 CF Realtime bridges datachannels **publisher → subscriber, one direction
 only**. That's why we need two reliable channels — one for each direction:
