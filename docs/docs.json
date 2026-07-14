@@ -365,6 +365,10 @@
       "destination": "/coding-agents/testing"
     },
     {
+      "source": "/docs/coding-agents/adding_a_new_arm.md",
+      "destination": "/coding-agents/adding_a_new_arm"
+    },
+    {
       "source": "/docs/coding-agents/worktrees.md",
       "destination": "/coding-agents/worktrees"
     },

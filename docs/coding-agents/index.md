@@ -6,6 +6,7 @@ title: "For Agents"
 ├── style.md (code style guidelines for dimos)
 ├── code-quality-rules.md (code-quality rules agents scan/fix against)
 ├── testing.md (docs about writing tests)
+├── adding_a_new_arm.md (integrating a manipulator arm: adapter, config, blueprints)
 ├── docs (these are docs about writing docs)
 │   ├── codeblocks.md
 │   ├── doclinks.md
