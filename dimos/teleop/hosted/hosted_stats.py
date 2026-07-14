@@ -27,6 +27,10 @@ Owns the operator↔robot state plane that is NOT robot-command-specific:
 
 Robot-authoritative UI state (posture/rage/battery) arrives on ``robot_state``
 from the command module, so telemetry reflects reality.
+
+Robot-agnostic: the ``go2`` RPC ref (battery SOC) is OPTIONAL, so robots without
+battery telemetry (e.g. the arm) reuse this module unchanged — ``soc`` is simply
+omitted from the telemetry frame.
 """
 
 from __future__ import annotations
@@ -59,8 +63,9 @@ class HostedStatsModule(Module):
 
     config: HostedStatsConfig
 
-    # RPC ref to the driver, for battery SOC pulled in the telemetry loop.
-    go2: GO2Connection
+    # Optional RPC ref to a driver, for battery SOC pulled in the telemetry loop.
+    # Robots without battery telemetry (the arm) leave it unbound → soc omitted.
+    go2: GO2Connection | None = None
 
     state_json: In[bytes]  # broker state_reliable (fanned; also read by command mod)
     cmd_raw: In[bytes]  # cmd_unreliable stats tap
@@ -151,18 +156,20 @@ class HostedStatsModule(Module):
     # ─── telemetry (robot → operator) ─────────────────────────────────
 
     def _telemetry_payload(self) -> dict[str, Any]:
-        """One robot_telemetry frame: cmd stats + latest robot_state + battery."""
-        try:
-            soc = self.go2.battery_soc()
-        except Exception:
-            soc = None
-        return {
+        """One robot_telemetry frame: cmd stats + latest robot_state + battery
+        (soc only when a driver ref is bound; omitted otherwise, e.g. the arm)."""
+        payload: dict[str, Any] = {
             "type": "robot_telemetry",
             "cmd": self._cmd_stats.snapshot(),
-            "soc": soc,
             "state": self._latest_state,
             "robot_ts": time.time(),
         }
+        if self.go2 is not None:
+            try:
+                payload["soc"] = self.go2.battery_soc()
+            except Exception:
+                payload["soc"] = None
+        return payload
 
     def _start_telemetry(self) -> None:
         def runner() -> None:
