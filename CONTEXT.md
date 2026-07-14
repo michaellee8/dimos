@@ -4,6 +4,58 @@ DimOS describes robots, actuators, control surfaces, and manipulation planning u
 
 ## Language
 
+**QA inspection workspace**:
+A read-only spatial-benchmark view that keeps the question briefing and spatial evidence together while verifying agreement among a voxel map snapshot, public query geometry, and private oracle evidence.
+_Avoid_: debug plot, benchmark dashboard, presentation view
+
+**Top-down 2.5D plan**:
+A top-down spatial representation that preserves the map's height signal through restrained shading while placing planar QA evidence in its native ground-plane geometry.
+_Avoid_: flat map, perspective scene as the primary QA representation
+
+**Sensor-first QA map**:
+A QA representation whose base layer is the observed voxel map; active query evidence and oracle-derived walls, openings, and topology are precise overlays rather than a reconstructed replacement. Coverage-trajectory provenance is absent from the default canvas.
+_Avoid_: oracle-first plan, reconstructed map as observed data
+
+**Neutral sensor rendering**:
+A rendering rule that shows the current single-height voxel map in one subdued neutral tone so color remains available for QA evidence.
+_Avoid_: elevation ramp for a single-height scan, synthetic architectural shading
+
+**Contextual oracle linework**:
+Low-emphasis private oracle overlays that provide review context without being mistaken for observed sensor data or the active query.
+_Avoid_: full oracle plan as the base layer, unlabelled private geometry
+
+**Evidence-key grouping**:
+A dashboard legend that separates agent-visible evidence from private oracle context and labels the latter as private.
+_Avoid_: tooltip-only layer explanations, ungrouped overlay legend
+
+**Meaning-based QA palette**:
+A fixed visual vocabulary: gray for observed maps, magenta for active query geometry, red for private walls, green for private openings, and violet for private room topology. Coverage-trajectory provenance has no default visual color.
+_Avoid_: predicate-specific color schemes, colors whose meaning changes between QA items
+
+**QA-first canvas**:
+A benchmark representation limited to evidence relevant to the active map-question instance; mapping-provenance trajectory and terminal pose are excluded by default.
+_Avoid_: map-generation debugging canvas, trajectory-led QA representation
+
+**Cascading QA selector**:
+A reviewer-facing selection model that narrows map-question instances by predicate, then scene/sample, then map variant using readable labels rather than opaque IDs.
+_Avoid_: opaque-ID-first selector, unstructured instance list
+
+**Readable sample label**:
+A QA selector label that combines the development or held-out scene ordinal with the full public question text.
+_Avoid_: question text without disambiguation, opaque scene or instance IDs as the primary label
+
+**Deterministic default QA selection**:
+The first development sample in stable corpus order, rendered against its clean map variant when no explicit selection is supplied.
+_Avoid_: random default sample, selection-required initial view
+
+**Derived private architectural relief**:
+A review-only wall and doorway rendering extruded from the private 2-D barrier and opening geometry with fixed presentation dimensions; it is not observed lidar or sourced architectural dimensions.
+_Avoid_: observed 3-D wall model, reconstructed public map
+
+**Synthetic coverage trajectory**:
+A deterministic, collision-validated path generated from private scene geometry to simulate the lidar observations used to produce one scene's voxel-map snapshots; it is not a recorded robot run.
+_Avoid_: collected trajectory, demonstration trajectory, source-data trajectory
+
 **Planning group**:
 A named subset of a robot model's joints and frames that can be selected as a planning unit.
 _Avoid_: move group, joint group
