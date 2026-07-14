@@ -9,8 +9,6 @@ Realtime or LiveKit SFU — so you don't need to open any inbound ports on the
 robot's network. It works behind a home router, on Wi-Fi, wired LAN, or
 cellular.
 
-![The hosted teleop operator console: live video, minimap, command bar, and the metrics HUD](assets/operator_ui.png)
-
 ## How it works
 
 There are three pieces: the **robot**, the **broker**, and the **operator's
