@@ -12,12 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""E2E for tenant isolation. Run: cd app && python test_tenant_isolation.py
-
-No framework (matches repo). Fakes auth via headers and stubs Cloudflare so
-it exercises the real endpoints + DB filtering without network/Cognito.
-"""
-
 import os
 import tempfile
 
@@ -102,7 +96,7 @@ with TestClient(app) as c:
 
     check("admin sees all robots", names("admin@x:admin") == {"r1", "r2", "r3"})
 
-    create("alice", "r1")  # reconnect same robot_id
+    create("alice", "r1")
     check("reconnect dedups (no duplicate r1)", sorted(names("alice")) == ["r1", "r2"])
 
 print(f"\n{'ALL PASS' if PASS[0] == 0 else str(PASS[0]) + ' FAILED'}")

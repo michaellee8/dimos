@@ -12,18 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Passive-first rate limiting (HARDENING_PLAN C2).
-
-Token buckets keyed by (caller, route class), applied as ASGI middleware.
-PASSIVE by default: when a bucket runs dry we log the would-be 429 and let
+"""PASSIVE by default: when a bucket runs dry we log the would-be 429 and let
 the request through — flip RATE_LIMIT_ENFORCE=true once a week of logs shows
 the limits don't bite legitimate traffic.
 
 Only sensitive routes are classed; heartbeats and everything unlisted are
 exempt (they're high-frequency by design and self-limit via session auth).
 
-No external deps (repo stays requirements-light); pure logic lives in
-TokenBucket so tests can drive it with a fake clock.
+Pure logic lives in TokenBucket so tests can drive it with a fake clock.
 """
 
 import hashlib
@@ -45,7 +41,6 @@ LIMITS: dict[str, tuple[float, float]] = {
 
 
 def classify(method: str, path: str) -> str | None:
-    """Map a request to a route class; None = unlimited."""
     if not path.startswith("/api/v1/"):
         return None
     p = path[len("/api/v1") :]
@@ -55,12 +50,10 @@ def classify(method: str, path: str) -> str | None:
         return "turn_credentials"
     if method == "POST" and (p == "/sessions" or p.endswith("/join")):
         return "session_join"
-    return None  # heartbeats, lists, leave, bridge, … unlimited
+    return None
 
 
 class TokenBucket:
-    """Classic token bucket; clock injectable for tests."""
-
     def __init__(self, capacity: float, refill_per_sec: float, now: float) -> None:
         self.capacity = capacity
         self.refill = refill_per_sec
@@ -81,8 +74,6 @@ class TokenBucket:
 
 
 class RateLimiter:
-    """(caller, class) → TokenBucket, with size-bounded pruning."""
-
     _MAX_BUCKETS = 10_000  # ~100B each; prune idle ones past this
 
     def __init__(self, enforce: bool, clock=time.monotonic) -> None:
@@ -91,8 +82,8 @@ class RateLimiter:
         self.buckets: dict[tuple[str, str], TokenBucket] = {}
 
     def check(self, caller: str, route_class: str) -> tuple[bool, int]:
-        """Returns (allowed, retry_after_sec). Passive mode still counts, so
-        the logs show exactly what enforcement would have blocked."""
+        """Passive mode still counts, so the logs show exactly what enforcement
+        would have blocked."""
         now = self.clock()
         key = (caller, route_class)
         bucket = self.buckets.get(key)
@@ -134,7 +125,6 @@ def caller_id(request: Request) -> str:
 
 
 def install(app, enforce: bool) -> RateLimiter:
-    """Attach the middleware; returns the limiter (tests poke its clock)."""
     limiter = RateLimiter(enforce=enforce)
 
     @app.middleware("http")

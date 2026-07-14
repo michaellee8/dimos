@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""API key management endpoints for developers."""
-
 from fastapi import APIRouter, Depends, HTTPException
 from models.database import get_db
 from pydantic import BaseModel
@@ -25,8 +23,8 @@ router = APIRouter(prefix="/keys", tags=["keys"])
 
 
 class CreateKeyRequest(BaseModel):
-    name: str  # Human-readable label, e.g. "Lab Robot 01"
-    robot_id: str | None = None  # Optional robot association
+    name: str
+    robot_id: str | None = None
 
 
 class CreateKeyResponse(BaseModel):
@@ -57,14 +55,7 @@ async def create_key(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate a new API key for robot authentication.
-
-    The full key is returned ONCE in this response. Store it securely —
-    it cannot be retrieved again.
-
-    Usage in DimOS:
-        RemoteTeleopModule(api_key="dtk_live_...", robot_name="My Robot")
-    """
+    """The full key is returned ONCE in this response; it cannot be retrieved again."""
     key_record, plaintext = await create_api_key(
         db=db,
         owner_id=user["sub"],
@@ -86,7 +77,6 @@ async def list_keys(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all active API keys for the authenticated user."""
     keys = await list_api_keys(db=db, owner_id=user["sub"])
     return KeyListResponse(
         keys=[
@@ -109,7 +99,6 @@ async def delete_key(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Revoke an API key. The key will immediately stop working."""
     success = await revoke_api_key(db=db, key_id=key_id, owner_id=user["sub"])
     if not success:
         raise HTTPException(status_code=404, detail="Key not found or already revoked")

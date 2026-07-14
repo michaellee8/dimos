@@ -17,47 +17,41 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Deployment environment: "prod" | "dev". Defaults to prod (fail-safe).
+    # Defaults to prod (fail-safe).
     environment: str = "prod"
 
-    # Cloudflare Realtime SFU
     cf_teleop_app_id: str = ""
     cf_teleop_app_secret: str = ""
     cf_sfu_base_url: str = "https://rtc.live.cloudflare.com/v1/apps"
 
-    # Cloudflare TURN service (same account, separate key — created in the
-    # dashboard under Realtime → TURN). Optional: unset means STUN-only,
-    # which only works for clients on UDP-open networks.
+    # Separate key from the SFU app (dashboard → Realtime → TURN). Unset means
+    # STUN-only, which only works for clients on UDP-open networks.
     cf_turn_key_id: str = ""
     cf_turn_api_token: str = ""
     cf_turn_base_url: str = "https://rtc.live.cloudflare.com/v1/turn"
 
-    # LiveKit (alternative backend, per-session via `transport`). URL is dialed
-    # by clients; key/secret mint room JWTs server-side. Unset → LiveKit sessions
-    # 503; Cloudflare (the default) is unaffected.
+    # Unset → LiveKit sessions 503; Cloudflare (the default) is unaffected.
     livekit_url: str = ""  # wss://<host> (self-hosted) or LiveKit Cloud project URL
     livekit_api_key: str = ""
     livekit_api_secret: str = ""
-    livekit_token_ttl_sec: int = 3600  # JWT lifetime; clients reconnect within it
+    livekit_token_ttl_sec: int = 3600
 
-    # Cognito (operator auth). The broker only verifies tokens; sign-in
-    # happens between the SPA and Cognito directly.
+    # The broker only verifies tokens; sign-in happens between the SPA and
+    # Cognito directly.
     cognito_region: str = "us-east-2"
     cognito_user_pool_id: str = ""
     cognito_client_id: str = ""
 
-    # CORS
     public_origin: str = "https://teleop.dimensionalos.com"
 
-    # Rate limiting (ratelimit.py). Passive by default: dry buckets only log
-    # the would-be 429. Flip to true after the logs show clean limits.
+    # Passive by default: dry buckets only log the would-be 429. Flip to true
+    # after the logs show clean limits.
     rate_limit_enforce: bool = False
 
-    # Database
     database_url: str = "sqlite+aiosqlite:///./teleop.db"
 
-    # Server. Loopback by default — Caddy is the only public entry; anything
-    # that really wants a public bind must opt in with HOST=0.0.0.0.
+    # Loopback by default — Caddy is the only public entry; anything that really
+    # wants a public bind must opt in with HOST=0.0.0.0.
     host: str = "127.0.0.1"
     port: int = 8450
 

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Cloudflare Realtime SFU API client."""
-
 import asyncio
 import logging
 
@@ -57,8 +55,6 @@ class CloudflareSessionGoneError(CloudflareRealtimeError):
 
 
 class CloudflareRealtime:
-    """Thin client for Cloudflare Realtime SFU REST API."""
-
     def __init__(self) -> None:
         self.base_url = settings.cf_api_url
         self.headers = {
@@ -71,7 +67,7 @@ class CloudflareRealtime:
 
         Returns RTCPeerConnection-shaped iceServers dicts (urls + username +
         credential), including turns:...:443?transport=tcp so UDP-blocked
-        clients can relay over TLS. Caller handles fallback to STUN-only.
+        clients can relay over TLS.
         """
         url = (
             f"{settings.cf_turn_base_url}/keys/"
@@ -120,12 +116,11 @@ class CloudflareRealtime:
     async def add_tracks(self, session_id: str, tracks: list[dict]) -> dict:
         """Pull/push tracks onto an existing connected session via /tracks/new.
 
-        Used for the operator's video subscribe AFTER its PC is connected and
-        datachannels are bridged. A remote (pulled) track makes CF set
-        `requiresImmediateRenegotiation: true` in the response — the caller
-        must drive setRemoteDescription(offer)/answer on the operator PC and
-        POST the answer back via renegotiate(). Returns the raw CF response
-        (sessionDescription + requiresImmediateRenegotiation)."""
+        A remote (pulled) track makes CF set `requiresImmediateRenegotiation:
+        true` in the response — the caller must drive
+        setRemoteDescription(offer)/answer on the operator PC and POST the
+        answer back via renegotiate().
+        """
         url = f"{self.base_url}/sessions/{session_id}/tracks/new"
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -146,7 +141,7 @@ class CloudflareRealtime:
 
     async def renegotiate(self, session_id: str, sdp_answer: str) -> None:
         """Submit the operator's SDP answer after a pull set
-        requiresImmediateRenegotiation. PUT /sessions/{id}/renegotiate."""
+        requiresImmediateRenegotiation."""
         url = f"{self.base_url}/sessions/{session_id}/renegotiate"
         async with httpx.AsyncClient() as client:
             resp = await client.put(
@@ -219,7 +214,6 @@ class CloudflareRealtime:
         it is NOT auto-reaped when the subscriber leaves (the 30s GC is
         media-only). So the robot's reverse push (state_reliable_back) must be
         closed on operator disconnect, else re-push errors repeated_local_track.
-        Best-effort: log and swallow failures (the channel may already be gone).
         """
         url = f"{self.base_url}/sessions/{session_id}/datachannels/close"
         try:

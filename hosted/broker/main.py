@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""dimos-teleop: Session microservice for hosted teleoperation."""
-
 import asyncio
 from contextlib import asynccontextmanager
 import logging
@@ -21,12 +19,8 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-# Configure the root logger before any module-level loggers get created so
-# log.info / log.error calls in services/* and routers/* actually reach
-# uvicorn's stderr (and therefore journald). Without this the root logger
-# stays at WARNING and every INFO log below is silently dropped — which is
-# why CF SDP exchange / track-add / datachannel-bridge detail wasn't
-# showing up in journal even though the log calls exist.
+# Must run before any module-level loggers get created, else the root logger
+# stays at WARNING and every INFO log below is silently dropped.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -43,7 +37,6 @@ from services.auth import register_robot_key
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: init DB (creates tables if missing)
     await init_db()
 
     if settings.environment == "dev":
@@ -73,11 +66,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Passive unless RATE_LIMIT_ENFORCE=true — see ratelimit.py. Module-level
-# handle so tests (and a future admin toggle) can flip .enforce at runtime.
+# Module-level handle so tests (and a future admin toggle) can flip .enforce
+# at runtime.
 rate_limiter = install_rate_limit(app, enforce=settings.rate_limit_enforce)
 
-# Prometheus /metrics — loopback-only in prod (Caddy doesn't proxy it).
+# Loopback-only in prod (Caddy doesn't proxy it).
 install_metrics(app)
 
 app.include_router(auth.router, prefix="/api/v1")

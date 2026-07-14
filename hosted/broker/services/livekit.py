@@ -30,7 +30,7 @@ log = logging.getLogger(__name__)
 
 
 class LiveKitError(Exception):
-    """LiveKit backend unavailable or misconfigured."""
+    pass
 
 
 def _require_configured() -> None:
@@ -41,7 +41,6 @@ def _require_configured() -> None:
 
 
 def room_name(session_id: str) -> str:
-    """Per-session room: a fresh robot connect = a fresh room, no stale state."""
     return f"sess-{session_id}"
 
 

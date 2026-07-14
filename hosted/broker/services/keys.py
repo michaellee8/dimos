@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""API key generation, validation, and management."""
-
 from datetime import datetime, timezone
 import hashlib
 import secrets
@@ -31,9 +29,9 @@ LAST_USED_THROTTLE_SECONDS = 60
 
 
 def generate_api_key(environment: str = "live") -> str:
-    """Generate a new API key. Returns plaintext (shown to user once)."""
+    """Returns plaintext, shown to the user once."""
     prefix = KEY_PREFIX_LIVE if environment == "live" else KEY_PREFIX_DEV
-    random_part = secrets.token_hex(20)  # 40 hex chars
+    random_part = secrets.token_hex(20)
     return f"{prefix}{random_part}"
 
 
@@ -43,7 +41,6 @@ def hash_key(plaintext_key: str) -> str:
 
 
 def get_key_prefix(plaintext_key: str) -> str:
-    """Extract displayable prefix from a key (e.g. dtk_live_a3f2...)."""
     return plaintext_key[:14]
 
 
@@ -54,14 +51,13 @@ async def create_api_key(
     robot_id: str | None = None,
     environment: str = "live",
 ) -> tuple[APIKey, str]:
-    """Create a new API key. Returns (db record, plaintext key).
+    """Returns (db record, plaintext key).
 
     The plaintext key is returned ONCE and never stored.
     Robot IDs are namespaced to the owner to prevent cross-tenant collisions.
     """
     plaintext = generate_api_key(environment)
 
-    # Namespace robot_id to prevent cross-tenant impersonation
     namespaced_robot_id = f"{owner_id}:{robot_id}" if robot_id else None
 
     key_record = APIKey(
@@ -78,17 +74,12 @@ async def create_api_key(
 
 
 async def validate_api_key(db: AsyncSession, plaintext_key: str) -> APIKey | None:
-    """Validate an API key. Returns the key record if valid, None otherwise.
-
-    Throttles last_used_at updates to avoid write-per-request on SQLite.
-    """
     hashed = hash_key(plaintext_key)
     result = await db.execute(
         select(APIKey).where(APIKey.key_hash == hashed, APIKey.revoked == False)  # noqa: E712
     )
     key_record = result.scalar_one_or_none()
     if key_record:
-        # Throttle last_used_at writes (only if >60s stale).
         # SQLite has no native timezone support, so the column comes back
         # tz-naive even though we wrote tz-aware. Normalize to UTC before
         # subtracting; otherwise this raises TypeError on every call after
@@ -106,7 +97,6 @@ async def validate_api_key(db: AsyncSession, plaintext_key: str) -> APIKey | Non
 
 
 async def list_api_keys(db: AsyncSession, owner_id: str) -> list[APIKey]:
-    """List all API keys for an owner (non-revoked)."""
     result = await db.execute(
         select(APIKey)
         .where(APIKey.owner_id == owner_id, APIKey.revoked == False)  # noqa: E712
@@ -116,7 +106,6 @@ async def list_api_keys(db: AsyncSession, owner_id: str) -> list[APIKey]:
 
 
 async def revoke_api_key(db: AsyncSession, key_id: str, owner_id: str) -> bool:
-    """Revoke an API key. Returns True if found and revoked."""
     result = await db.execute(
         update(APIKey)
         .where(APIKey.id == key_id, APIKey.owner_id == owner_id, APIKey.revoked == False)  # noqa: E712

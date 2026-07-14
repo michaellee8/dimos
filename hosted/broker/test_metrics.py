@@ -12,13 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Metrics endpoint tests. Run: cd app && python test_metrics.py
-
-No framework (matches repo). Verifies /metrics serves prometheus text,
-request counters label by route template (not raw path), and the reaper's
-session gauge refresh works against the real DB.
-"""
-
 import asyncio
 import os
 import tempfile
@@ -64,7 +57,6 @@ with TestClient(app=main.app) as c:
         "teleop_http_requests_total" in r.text and "teleop_sessions" in r.text,
     )
 
-    # Generate traffic, confirm it lands under the route TEMPLATE label.
     c.get("/health")
     r2 = c.post(
         "/api/v1/sessions",
@@ -78,7 +70,6 @@ with TestClient(app=main.app) as c:
     check("labels use route template", 'route="/api/v1/sessions"' in body)
     check("latency histogram present", "teleop_http_request_seconds_bucket" in body)
 
-    # Reaper gauge refresh reads the real DB.
     asyncio.run(_refresh_session_gauge())
     body = c.get("/metrics").text
     check("session gauge reflects created session", 'teleop_sessions{state="idle"} 1.0' in body)

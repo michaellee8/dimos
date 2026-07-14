@@ -12,9 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Prometheus metrics (HARDENING_PLAN D2).
-
-Bare prometheus_client — the fastapi instrumentator pins a newer starlette
+"""Bare prometheus_client — the fastapi instrumentator pins a newer starlette
 than fastapi 0.115 allows, and all we need is a registry + one middleware.
 
 /metrics is intentionally NOT proxied by the Caddyfile, so it is reachable
@@ -65,14 +63,12 @@ RATE_LIMIT_HITS = Counter(
 
 
 def install(app) -> None:
-    """Request middleware + /metrics endpoint."""
-
     @app.middleware("http")
     async def _observe(request: Request, call_next):
         start = time.monotonic()
         response = await call_next(request)
-        # Route template (e.g. /api/v1/sessions/{session_id}/join), not the
-        # raw path — raw paths explode label cardinality with session ids.
+        # Route template, not the raw path — raw paths explode label
+        # cardinality with session ids.
         route = getattr(request.scope.get("route"), "path", None)
         if route:  # unmatched paths (404 probes) are deliberately not labeled
             HTTP_REQUESTS.labels(request.method, route, str(response.status_code)).inc()

@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Session lifecycle endpoints."""
-
 import asyncio
 from datetime import datetime, timedelta, timezone
 import logging
@@ -44,15 +42,13 @@ STATE_CHANNEL_NAME = "state_reliable"
 # publisher → subscriber per name, so the reverse direction needs its own name
 # rather than reusing `state_reliable`.
 STATE_BACK_CHANNEL_NAME = "state_reliable_back"
-# Robot → operator, unreliable + unordered. Carries the map (occupancy grid);
-# its own channel so large/bursty payloads don't head-of-line-block the reliable
-# state_back plane (pongs, telemetry). Room to grow into pointclouds.
+# Own channel so large/bursty map payloads don't head-of-line-block the reliable
+# state_back plane (pongs, telemetry).
 MAP_CHANNEL_NAME = "map_unreliable"
 
-# Per-session map of channel-name → robot-side SCTP id. Holds both subscriber
-# ids (cmd_unreliable, state_reliable that the robot reads) and the publisher
-# id for state_reliable_back (which the robot writes). Heartbeat surfaces each
-# id under a role-appropriate field name.
+# channel-name → robot-side SCTP id. Holds both the ids the robot subscribes to
+# (cmd, state) and the ids it publishes (state_back, map); heartbeat surfaces
+# each under a role-appropriate field name.
 _robot_channel_ids: dict[str, dict[str, int]] = {}
 
 # Pending CF renegotiation offers for the ROBOT (audio pull inverts the offerer
@@ -60,8 +56,7 @@ _robot_channel_ids: dict[str, dict[str, int]] = {}
 # next heartbeat ack, answered via /renegotiate-robot. Transient per bridge.
 _pending_robot_renegotiations: dict[str, str] = {}
 
-# Serializes bridge writes against leave/delete per session. setdefault is
-# GIL-atomic; never deleted (sessions are bounded).
+# setdefault is GIL-atomic; never deleted (sessions are bounded).
 _session_locks: dict[str, asyncio.Lock] = {}
 
 
@@ -69,7 +64,6 @@ def _session_lock(session_id: str) -> asyncio.Lock:
     return _session_locks.setdefault(session_id, asyncio.Lock())
 
 
-# session_ids awaiting the operator's video-pull SDP answer.
 _pending_video_renegotiations: set[str] = set()
 
 # Operator liveness: client heartbeats every 5s; reaper drops binding after 20s
@@ -91,19 +85,10 @@ def _utc(dt: datetime | None) -> datetime | None:
     return dt.replace(tzinfo=timezone.utc)
 
 
-# ─── Request/Response schemas ────────────────────────────────────────
-
-
 class CreateSessionRequest(BaseModel):
-    # Optional: the broker derives the canonical robot_id from the API key.
-    # When provided it must match (guards against misconfigured robots).
     robot_id: str | None = None
     robot_name: str
-    # Validated by the schema, so an unknown transport is a 422 before any
-    # handler code runs (no manual check needed downstream).
     transport: Literal["cloudflare", "livekit"] = "cloudflare"
-    # Required for cloudflare (broker relays it to CF); unused for livekit,
-    # which does its own SDP negotiation directly with the LiveKit server.
     sdp_offer: str | None = None
 
 
@@ -115,19 +100,16 @@ class CreateSessionResponse(BaseModel):
 
 
 class LiveKitSessionResponse(BaseModel):
-    """Robot create / operator join response for the LiveKit backend."""
-
     session_id: str
     transport: str = "livekit"
     url: str
     token: str
     room: str
-    role: str | None = None  # set on operator join, omitted on robot create
+    role: str | None = None
 
 
 class JoinSessionRequest(BaseModel):
-    role: str = "operator"  # operator | viewer
-    # Required for cloudflare; unused for livekit (see CreateSessionRequest).
+    role: str = "operator"
     sdp_offer: str | None = None
 
 
@@ -144,12 +126,8 @@ class BridgeDatachannelResponse(BaseModel):
     state_channel_id: int
     state_back_channel_id: int
     map_channel_id: int
-    # CF renegotiation offer from the post-bridge video pull. None when the
-    # robot published no video or the pull failed (video degrades, datachannels
-    # still work). Operator answers it via /renegotiate-answer.
+    # Operator answers this via /renegotiate-answer.
     video_offer: str | None = None
-    # Why video_offer is null, surfaced to the operator console: "ok" |
-    # "no_published_track" | "publish_error" | "pull_error" | "no_offer".
     video_status: str = "ok"
 
 
@@ -170,7 +148,7 @@ class SessionInfo(BaseModel):
     robot_id: str
     robot_name: str
     state: str
-    transport: str = "cloudflare"  # so the operator app picks the right client
+    transport: str = "cloudflare"
     operator_id: str | None
     rtt_ms: float | None
     packet_loss_pct: float | None
@@ -185,13 +163,10 @@ class TurnCredentialsResponse(BaseModel):
     ice_servers: list[dict]
 
 
-# Fallback when TURN is unconfigured (dev) or the mint fails: STUN-only,
-# which still connects clients on UDP-open networks.
 ICE_SERVERS = [{"urls": "stun:stun.cloudflare.com:3478"}]
 
 
 async def _mint_ice_servers() -> list[dict]:
-    """STUN + short-lived TURN relay credentials, STUN-only on any failure."""
     if not settings.cf_turn_key_id or not settings.cf_turn_api_token:
         return ICE_SERVERS
     try:
@@ -203,15 +178,7 @@ async def _mint_ice_servers() -> list[dict]:
 
 @router.get("/turn-credentials", response_model=TurnCredentialsResponse)
 async def turn_credentials(identity: dict = Depends(get_operator_or_robot)):
-    """Short-lived ICE servers for either side of the call.
-
-    Clients fetch this BEFORE building their RTCPeerConnection — TURN must be
-    in the initial config for relay candidates to gather with the offer.
-    """
     return TurnCredentialsResponse(ice_servers=await _mint_ice_servers())
-
-
-# ─── Robot endpoints ─────────────────────────────────────────────────
 
 
 async def _create_livekit_session(
@@ -220,11 +187,6 @@ async def _create_livekit_session(
     robot_id: str,
     db: AsyncSession,
 ) -> LiveKitSessionResponse:
-    """Robot create for LiveKit: persist the row, mint the robot's publish token.
-    No SDP/CF round-trip.
-
-    Id assigned up front so the room name (derived from it) is known before the
-    insert. Mint before commit so a failed mint never persists an unusable row."""
     if not settings.livekit_configured:
         raise HTTPException(status_code=503, detail="LiveKit backend not configured")
 
@@ -270,19 +232,11 @@ async def create_session(
     owner_id: str = Depends(get_robot_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Robot registers itself. Creates a backend session (Cloudflare SFU or
-    LiveKit room, per ``body.transport``).
-
-    owner_id (the API key's owner) is the tenant boundary. robot_id is a
-    robot-supplied label distinguishing multiple robots under one key; empty
-    is fine (the session is still unique by id), it just disables reconnect
-    dedup below.
-    """
     robot_id = body.robot_id or ""
 
     # Same robot reconnecting → close its stale session. Scoped to (owner,
     # robot_id) so one robot can't disconnect another's; skipped for unnamed
-    # robots (would collapse distinct ones). Transport-agnostic.
+    # robots (would collapse distinct ones).
     if robot_id:
         existing = await db.execute(
             select(TeleopSession).where(
@@ -297,13 +251,11 @@ async def create_session(
     if body.transport == "livekit":
         return await _create_livekit_session(body, owner_id, robot_id, db)
 
-    # transport is a validated Literal, so anything here is "cloudflare".
     if not body.sdp_offer:
         raise HTTPException(status_code=422, detail="sdp_offer required for cloudflare transport")
 
-    # Record the robot's sendonly m=video (mid + trackName) from the offer. The
-    # actual publish happens later via /tracks/new in bridge_datachannel — CF
-    # ignores a `tracks` array on /sessions/new, so we only stash the ids here.
+    # CF ignores a `tracks` array on /sessions/new, so only stash the ids here;
+    # the actual publish happens later via /tracks/new in bridge_datachannel.
     published_mid: str | None = None
     published_track_name: str | None = None
     video = extract_video_track(body.sdp_offer)
@@ -348,8 +300,6 @@ async def create_session(
         session_id=session.id,
         cf_session_id=cf_result["cf_session_id"],
         sdp_answer=cf_result["sdp_answer"],
-        # Static STUN: clients fetch minted TURN from /turn-credentials and
-        # never read this field. Minting here would be a wasted CF round-trip.
         ice_servers=ICE_SERVERS,
     )
 
@@ -361,7 +311,6 @@ async def heartbeat(
     owner_id: str = Depends(get_robot_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Robot reports connection quality metrics."""
     session = await db.get(TeleopSession, session_id)
     if not session or session.owner_id != owner_id:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -373,8 +322,6 @@ async def heartbeat(
     session.last_heartbeat = datetime.now(timezone.utc)
     await db.commit()
 
-    # LiveKit robots learn operator presence from room events directly, so there
-    # are no SCTP ids to surface — heartbeat is metrics/liveness only.
     if session.transport == "livekit":
         return {"ack": True}
 
@@ -385,8 +332,7 @@ async def heartbeat(
         "state_channel_subscriber_id": chan_ids.get(STATE_CHANNEL_NAME),
         "state_back_channel_publisher_id": chan_ids.get(STATE_BACK_CHANNEL_NAME),
         "map_channel_publisher_id": chan_ids.get(MAP_CHANNEL_NAME),
-        # CF offer from the operator-audio pull, handed over exactly once; the
-        # robot answers via /renegotiate-robot.
+        # Operator-audio pull offer, handed over once; robot answers via /renegotiate-robot.
         "renegotiate_offer": _pending_robot_renegotiations.pop(session_id, None),
     }
 
@@ -397,14 +343,13 @@ async def delete_session(
     owner_id: str = Depends(get_robot_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Robot going offline."""
     session = await db.get(TeleopSession, session_id)
     if not session or session.owner_id != owner_id:
         raise HTTPException(status_code=404, detail="Session not found")
 
     async with _session_lock(session_id):
         # CF has no session-delete; close the state_back push (else next
-        # reconnect hits repeated_local_track) and log the orphans for ops.
+        # reconnect hits repeated_local_track).
         if session.transport == "cloudflare":
             back_ids = [
                 i for i in (session.state_back_channel_id, session.map_channel_id) if i is not None
@@ -430,11 +375,7 @@ async def delete_session(
         await db.commit()
 
 
-# ─── Operator endpoints ──────────────────────────────────────────────
-
-
 def _owns(session: TeleopSession, user: dict) -> bool:
-    """Operator may touch only their own robots (admin sees all)."""
     return user.get("role") == "admin" or session.owner_id == user["sub"]
 
 
@@ -443,10 +384,8 @@ async def list_sessions(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List available robots (active sessions) the caller owns."""
-    # Hide sessions whose heartbeat has gone stale — the reaper runs at
-    # ROBOT_HEARTBEAT_TIMEOUT_SEC / OP_REAPER_INTERVAL_SEC cadence, but
-    # filtering here closes the window between silence and disconnected state.
+    # Filtering on freshness here closes the window between robot silence and
+    # the reaper flipping state to disconnected.
     fresh = datetime.now(timezone.utc) - timedelta(seconds=ROBOT_HEARTBEAT_TIMEOUT_SEC)
     q = select(TeleopSession).where(
         TeleopSession.state.in_(["idle", "active"]),
@@ -474,8 +413,6 @@ async def list_sessions(
 
 
 async def _claim_operator_slot(db: AsyncSession, session_id: str, user_id: str) -> bool:
-    """Atomic claim. True on success (or idempotent same-user re-join),
-    False if another operator holds it or the row is disconnected."""
     stmt = (
         update(TeleopSession)
         .where(
@@ -498,8 +435,6 @@ async def _claim_operator_slot(db: AsyncSession, session_id: str, user_id: str) 
 
 
 async def _release_operator_slot(db: AsyncSession, session_id: str, user_id: str) -> None:
-    """Undo a claim when post-claim work fails. user_id in WHERE guards
-    against evicting a different operator who slipped in."""
     await db.execute(
         update(TeleopSession)
         .where(
@@ -521,20 +456,17 @@ async def join_session(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Operator or viewer joins a session."""
     session = await db.get(TeleopSession, session_id)
     if not session or session.state == "disconnected" or not _owns(session, user):
         raise HTTPException(status_code=404, detail="Session not found")
-    # Refuse a stale robot even if the reaper hasn't caught up yet.
     last_hb = _utc(session.last_heartbeat)
     if last_hb is None or (
         datetime.now(timezone.utc) - last_hb > timedelta(seconds=ROBOT_HEARTBEAT_TIMEOUT_SEC)
     ):
         raise HTTPException(status_code=404, detail="Robot heartbeat stale — reconnect required")
-    # Robot's CF session id can be None while heartbeats still land (post-410
-    # invalidation, or if create_session persisted the row without one).
-    # JoinSessionResponse.robot_cf_session_id is typed str; returning None
-    # here would trip pydantic serialization → 500. Fail fast with 409.
+    # cf_session_id can be None while heartbeats still land (post-410
+    # invalidation); robot_cf_session_id is typed str, so returning None would
+    # trip pydantic → 500. Fail fast with 409.
     if session.transport == "cloudflare" and not session.cf_session_id:
         raise HTTPException(status_code=409, detail="Robot CF session not established")
 
@@ -551,8 +483,6 @@ async def join_session(
                 status_code=409,
                 detail=f"Session already has operator: {current.operator_id}",
             )
-        # The claim persisted operator_id/state; reflect that on the in-handler
-        # row so downstream code (and the final return) sees fresh values.
         await db.refresh(session)
 
     if session.transport == "livekit":
@@ -561,11 +491,9 @@ async def join_session(
                 await _release_operator_slot(db, session_id, user_id)
             raise HTTPException(status_code=503, detail="LiveKit backend not configured")
         room = livekit.room_name(session.id)
-        # LiveKit enforces one participant per identity per room, so a second
-        # join with the same identity force-disconnects the first. Distinguish
-        # the operator (one, exclusive) from viewers, and make each viewer
-        # unique, so opening a viewer tab (or a viewer at all) can't kick the
-        # live operator out of the room.
+        # LiveKit force-disconnects an existing participant when a second joins
+        # with the same identity; the per-viewer uuid suffix keeps a viewer tab
+        # from kicking the live operator.
         if body.role == "operator":
             identity = f"op-{user_id}"
         else:
@@ -575,7 +503,7 @@ async def join_session(
                 identity=identity,
                 name=user_id,
                 room=room,
-                can_publish=False,  # operator drives via data; no media uplink
+                can_publish=False,
             )
         except LiveKitError as e:
             if body.role == "operator":
@@ -594,8 +522,6 @@ async def join_session(
             await _release_operator_slot(db, session_id, user_id)
         raise HTTPException(status_code=422, detail="sdp_offer required for cloudflare transport")
 
-    # Join datachannels-clean (no video track here). Video is pulled after the
-    # bridge, once the operator PC is connected — see bridge_datachannel.
     try:
         cf_result = await cf_client.create_session(body.sdp_offer)
     except CloudflareRealtimeError as e:
@@ -614,9 +540,6 @@ async def join_session(
 
     if body.role == "operator":
         session.operator_cf_session_id = operator_cf_id
-        # Operator mic (m=audio sendonly), if the offer carries one: recorded
-        # here, published + pulled onto the robot in the bridge — the exact
-        # mirror of the robot's video, reversed.
         audio = extract_audio_track(body.sdp_offer)
         session.operator_audio_mid = audio[0] if audio else None
         session.operator_audio_track_name = audio[1] if audio else None
@@ -636,7 +559,7 @@ async def join_session(
         cf_session_id=operator_cf_id,
         sdp_answer=cf_result["sdp_answer"],
         robot_cf_session_id=session.cf_session_id,
-        ice_servers=ICE_SERVERS,  # see create_session
+        ice_servers=ICE_SERVERS,
         role=body.role,
     )
 
@@ -648,20 +571,12 @@ _PULL_RETRY_DELAYS = (0.3, 0.6, 1.0, 1.5, 2.0)
 
 
 async def _pull_robot_video(session: TeleopSession) -> tuple[str | None, str]:
-    """Publish the robot's local video track, then pull it onto the operator.
-
-    Returns ``(video_offer, video_status)``. CF ignores a `tracks` array on
-    /sessions/new, so the publisher is registered here via /tracks/new once the
-    robot PC is connected; the operator then pulls it (a remote pull returns
-    CF's renegotiation offer). All best-effort — the caller degrades to no-video
-    on any failure rather than failing the bridge.
-    """
+    # CF silently ignores a `tracks` array on /sessions/new, so the publisher is
+    # registered here via /tracks/new before the operator can pull it. All
+    # best-effort — degrade to no-video on failure rather than failing the bridge.
     if not session.published_video_track_name:
         return None, "no_published_track"
 
-    # Register the robot's local (publishable) track. /sessions/new's tracks
-    # array is silently ignored by CF, so this explicit publish is what actually
-    # exposes the track for the operator to pull.
     try:
         await cf_client.add_tracks(
             session.cf_session_id,
@@ -695,9 +610,8 @@ async def _pull_robot_video(session: TeleopSession) -> tuple[str | None, str]:
 
         sd = pull.get("sessionDescription") or {}
         if sd.get("sdp"):
-            # Use CF's offer whenever present — don't also require
-            # requiresImmediateRenegotiation (CF omits it when the operator's
-            # recvonly m=video section already existed).
+            # Don't gate on requiresImmediateRenegotiation — CF omits it when the
+            # operator's recvonly m=video section already existed.
             return sd["sdp"], "ok"
 
         track_errs = [t.get("errorCode") for t in pull.get("tracks", []) if t.get("errorCode")]
@@ -712,12 +626,6 @@ async def _pull_robot_video(session: TeleopSession) -> tuple[str | None, str]:
 
 
 async def _pull_operator_audio(session: TeleopSession) -> str | None:
-    """Publish the operator's mic track, then pull it onto the ROBOT's session.
-
-    The reverse of _pull_robot_video. Returns CF's renegotiation offer for the
-    robot (handed to it via the next heartbeat ack) or None. Best-effort — no
-    operator audio just means a silent link, never a failed bridge.
-    """
     if not session.operator_audio_track_name:
         return None
     try:
@@ -775,8 +683,8 @@ async def bridge_datachannel(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Bridge cmd_unreliable. Call after operator's PC is 'connected' — CF
-    rejects /datachannels/new on a half-negotiated session."""
+    """Call after the operator's PC is 'connected' — CF rejects
+    /datachannels/new on a half-negotiated session."""
     session = await db.get(TeleopSession, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -797,9 +705,8 @@ async def _bridge_datachannel_locked(
     # CF requires each /datachannels/new call to be one direction (all local
     # OR all remote) — hence 4 separate calls, don't re-bundle.
     forward_names = [CMD_CHANNEL_NAME, STATE_CHANNEL_NAME]
-    # Close prior robot→operator pushes (state_back + map; CF doesn't auto-reap)
-    # or the re-push hits repeated_local_track_error. cmd/state are
-    # operator-published and replaced when the operator's CF session changes.
+    # Close prior robot→operator pushes; CF doesn't auto-reap, so re-push would
+    # hit repeated_local_track_error.
     stale_back_ids = [
         i for i in (session.state_back_channel_id, session.map_channel_id) if i is not None
     ]
@@ -807,8 +714,8 @@ async def _bridge_datachannel_locked(
         await cf_client.close_datachannels(session.cf_session_id, stale_back_ids)
         session.state_back_channel_id = None
         session.map_channel_id = None
-    # Track local pushes so a later failure can close them (remotes don't
-    # need rollback — only locals block re-push with repeated_local_track).
+    # Only locals need rollback tracking — remotes don't block re-push with
+    # repeated_local_track.
     created_pushes: list[tuple[str, list[int]]] = []
 
     async def _rollback_pushes() -> None:
@@ -816,7 +723,6 @@ async def _bridge_datachannel_locked(
             await cf_client.close_datachannels(sid, ids)
 
     try:
-        # operator → robot: cmd + state. Operator publishes, robot subscribes.
         op_pub = await cf_client.add_datachannels(
             session.operator_cf_session_id,
             [{"location": "local", "dataChannelName": name} for name in forward_names],
@@ -837,8 +743,6 @@ async def _bridge_datachannel_locked(
         )
         robot_sub_ids = {e["dataChannelName"]: int(e["id"]) for e in robot_sub}
 
-        # robot → operator channels (state_back + map): fresh push each connect
-        # (stale ones closed above); operator subscribes to them.
         back_names = [STATE_BACK_CHANNEL_NAME, MAP_CHANNEL_NAME]
         robot_pub = await cf_client.add_datachannels(
             session.cf_session_id,
@@ -860,11 +764,10 @@ async def _bridge_datachannel_locked(
         )
         op_sub_ids = {e["dataChannelName"]: int(e["id"]) for e in op_sub}
     except CloudflareSessionGoneError as e:
-        # CF reaped one of the sessions (usually the robot's, after an idle
-        # timeout or its own PC drop). Clear the stale id so the next bridge
-        # short-circuits on "CF sessions not ready" instead of round-tripping
-        # to CF for another 410; return 409 so the client stops treating
-        # this as a generic backend failure.
+        # CF reaped a session. Clear the stale id so the next bridge short-circuits
+        # on "CF sessions not ready" instead of round-tripping to CF for another
+        # 410; return 409 so the client re-provisions rather than treating it as a
+        # generic backend failure.
         await _rollback_pushes()
         if e.session_id == session.cf_session_id:
             session.cf_session_id = None
@@ -884,10 +787,8 @@ async def _bridge_datachannel_locked(
                 status_code=409,
                 detail="Operator CF session expired — rejoin",
             )
-        # Session-gone that matches neither stored id (stale in-memory row or
-        # a CF body that didn't name the session). Still a re-provision case,
-        # not a broker fault — 409 so the client retries the join flow instead
-        # of treating it as a backend outage (was an opaque 502; DM-6).
+        # Session-gone matching neither stored id: still a re-provision case,
+        # not a broker fault — 409 (was an opaque 502; DM-6).
         log.warning(
             "bridge: unmatched CF session gone (cf=%s) session=%s: %s",
             e.session_id,
@@ -900,8 +801,8 @@ async def _bridge_datachannel_locked(
         )
     except CloudflareRealtimeError as e:
         await _rollback_pushes()
-        # Log server-side too — the detail otherwise only reaches the browser
-        # console, which made the 2026-07-01 bridge 502 hard to attribute.
+        # Log server-side — the detail otherwise only reaches the browser console
+        # (made the 2026-07-01 bridge 502 hard to attribute).
         log.warning(
             "bridge: CF datachannel bridge failed session=%s: %s", session.id, e.detail[:200]
         )
@@ -933,29 +834,25 @@ async def _bridge_datachannel_locked(
             detail=f"Cloudflare missing DataChannel id for: {', '.join(missing)}",
         )
 
-    # Heartbeat surfaces robot-side ids. Robot subscribes to cmd + state,
-    # publishes state_back + map — keep them all under one channel-name map.
     _robot_channel_ids[session.id] = {
         **robot_sub_ids,
         STATE_BACK_CHANNEL_NAME: robot_pub_ids[STATE_BACK_CHANNEL_NAME],
         MAP_CHANNEL_NAME: robot_pub_ids[MAP_CHANNEL_NAME],
     }
-    # Persist the fresh robot→operator push ids on the session row (survive
-    # operator leave, unlike _robot_channel_ids) so the NEXT reconnect can close
-    # these stale pushes before re-pushing.
+    # Persist on the row (unlike _robot_channel_ids, these survive operator leave)
+    # so the NEXT reconnect can close these stale pushes before re-pushing.
     session.state_back_channel_id = robot_pub_ids[STATE_BACK_CHANNEL_NAME]
     session.map_channel_id = robot_pub_ids[MAP_CHANNEL_NAME]
     await db.commit()
 
-    # Best-effort video pull — datachannels stay up if it fails.
     video_offer, video_status = await _pull_robot_video(session)
     if video_offer:
         _pending_video_renegotiations.add(session.id)
     else:
         _pending_video_renegotiations.discard(session.id)
 
-    # Best-effort operator-audio pull onto the robot. CF's renegotiation offer
-    # is for the ROBOT — stash it for the next heartbeat ack to hand over.
+    # CF's renegotiation offer here is for the ROBOT — stash it for the next
+    # heartbeat ack to hand over.
     audio_offer = await _pull_operator_audio(session)
     if audio_offer:
         _pending_robot_renegotiations[session.id] = audio_offer
@@ -979,8 +876,6 @@ async def renegotiate_answer(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Operator submits its SDP answer to the video-pull renegotiation offer
-    returned by bridge-datachannel."""
     session = await db.get(TeleopSession, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1005,7 +900,7 @@ async def renegotiate_answer(
             status_code=502,
             detail=f"Cloudflare renegotiate failed: {e.detail}",
         )
-    except Exception as e:  # httpx network/timeout etc — 502 like the other CF handlers
+    except Exception as e:
         raise HTTPException(
             status_code=502,
             detail=f"Cloudflare renegotiate failed ({type(e).__name__}): {e}",
@@ -1020,8 +915,6 @@ async def renegotiate_robot(
     owner_id: str = Depends(get_robot_owner),
     db: AsyncSession = Depends(get_db),
 ):
-    """Robot submits its SDP answer to the operator-audio pull offer it received
-    on a heartbeat ack (the robot's only renegotiation path)."""
     session = await db.get(TeleopSession, session_id)
     if not session or session.owner_id != owner_id:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1036,7 +929,7 @@ async def renegotiate_robot(
             status_code=502,
             detail=f"Cloudflare renegotiate failed: {e.detail}",
         )
-    except Exception as e:  # httpx network/timeout etc — 502 like the other CF handlers
+    except Exception as e:
         raise HTTPException(
             status_code=502,
             detail=f"Cloudflare renegotiate failed ({type(e).__name__}): {e}",
@@ -1050,7 +943,6 @@ async def op_heartbeat(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Operator liveness ping; refreshes last_operator_heartbeat."""
     session = await db.get(TeleopSession, session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1068,7 +960,6 @@ async def leave_session(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Operator or viewer leaves."""
     session = await db.get(TeleopSession, session_id)
     if not session or not _owns(session, user):
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1076,16 +967,14 @@ async def leave_session(
     user_id = user["sub"]
 
     if session.operator_id == user_id:
-        # Log the reason — it's the only way the journal can distinguish the
-        # disconnect button (user_initiated) from a page reload (pagehide),
-        # which is exactly what the 2026-07-01 demo churn hunt needed.
+        # reason distinguishes the disconnect button (user_initiated) from a page
+        # reload (pagehide) in the journal — needed for the 2026-07-01 churn hunt.
         log.info(
             "operator leave: session=%s operator=%s reason=%s",
             session_id,
             user_id,
             body.reason,
         )
-        # Same rationale as delete_session: serialize with bridges.
         async with _session_lock(session_id):
             session.operator_id = None
             session.operator_cf_session_id = None
@@ -1106,7 +995,6 @@ async def session_status(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get session status and connection quality."""
     session = await db.get(TeleopSession, session_id)
     if not session or not _owns(session, user):
         raise HTTPException(status_code=404, detail="Session not found")
@@ -1124,11 +1012,7 @@ async def session_status(
     )
 
 
-# ─── Operator liveness reaper ────────────────────────────────────
-
-
 async def _reap_stale_operators() -> None:
-    """Evict operators whose last heartbeat is older than the timeout."""
     threshold = datetime.now(timezone.utc) - timedelta(seconds=OP_HEARTBEAT_TIMEOUT_SEC)
     async with async_session() as db:
         stale = (
@@ -1147,13 +1031,13 @@ async def _reap_stale_operators() -> None:
         for s in stale:
             async with _session_lock(s.id):
                 # Re-read under the lock: an op-heartbeat can land between the
-                # SELECT above and here, refreshing last_operator_heartbeat on a
-                # different db session. Without this refresh + re-check we'd
-                # commit the stale in-memory row and evict a live operator.
+                # SELECT and here on a different db session. Without this
+                # refresh + re-check we'd commit the stale row and evict a live
+                # operator.
                 await db.refresh(s)
                 last_hb = _utc(s.last_operator_heartbeat)
                 if s.state != "active" or last_hb is None or last_hb >= threshold:
-                    continue  # recovered, already reaped, or changed hands
+                    continue
                 idle = (datetime.now(timezone.utc) - last_hb).total_seconds()
                 log.warning(
                     "reaping stale operator session=%s operator=%s idle_for=%.1fs",
@@ -1175,9 +1059,6 @@ async def _reap_stale_operators() -> None:
 
 
 async def _reap_stale_robots() -> None:
-    """Disconnect robots whose last heartbeat is older than the timeout —
-    blueprint termination without a graceful DELETE leaves the row as
-    idle/active forever otherwise."""
     threshold = datetime.now(timezone.utc) - timedelta(seconds=ROBOT_HEARTBEAT_TIMEOUT_SEC)
     async with async_session() as db:
         stale = (
@@ -1195,16 +1076,14 @@ async def _reap_stale_robots() -> None:
         )
         for s in stale:
             async with _session_lock(s.id):
-                # Re-read under the lock: a heartbeat can land between the SELECT
-                # above and here, refreshing last_heartbeat on a different db
-                # session. Without this we'd commit the stale row and disconnect
-                # a live robot — and since heartbeat never resets state, it would
-                # stay 'disconnected' (invisible in list_sessions) forever while
-                # still heartbeating 200. Mirrors _reap_stale_operators.
+                # Re-read under the lock (see _reap_stale_operators): without it
+                # we'd disconnect a live robot, and since heartbeat never resets
+                # state it would stay 'disconnected' (invisible in list_sessions)
+                # forever while still heartbeating 200.
                 await db.refresh(s)
                 last_hb = _utc(s.last_heartbeat)
                 if s.state == "disconnected" or last_hb is None or last_hb >= threshold:
-                    continue  # reconnected or already reaped
+                    continue
                 idle = (datetime.now(timezone.utc) - last_hb).total_seconds()
                 log.warning(
                     "reaping stale robot session=%s robot=%s idle_for=%.1fs",
@@ -1231,7 +1110,6 @@ async def _reap_stale_robots() -> None:
 
 
 async def _refresh_session_gauge() -> None:
-    """teleop_sessions{state=…} for /metrics, piggybacked on the reaper tick."""
     async with async_session() as db:
         rows = (
             await db.execute(
@@ -1244,8 +1122,7 @@ async def _refresh_session_gauge() -> None:
 
 
 async def operator_reaper_loop() -> None:
-    """Background task: reap silent operators and stale robots.
-    Launched from main.py lifespan."""
+    """Launched from main.py lifespan."""
     while True:
         try:
             await _reap_stale_operators()
