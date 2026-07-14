@@ -12,28 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Hosted-teleop connection for coordinator-driven arms (transport-swap pattern).
+"""Arm hosted-teleop command module (module-based hosted pattern).
 
-The arm sibling of ``Go2HostedConnection``: ONE module colocating every
-broker-bound stream so all hosted transports share the per-process
-BrokerProvider session. There is no robot connection to subclass — actuation
-runs through the ControlCoordinator, which this module feeds over LCM:
+The arm analog of ``Go2CommandModule`` — the operator command/E-STOP plane for a
+coordinator-driven arm. Unlike the Go2 (a stateless per-command RPC driver), the
+arm streams a continuous engage/delta-pose at ``control_loop_hz``, so this module
+SUBCLASSES ``ArmTeleopModule`` to inherit that control loop, engage handling, and
+the LCM fingerprint decoder table. There is no robot driver to hold an RPC ref
+to: actuation runs through the ControlCoordinator, fed over LCM.
 
-    operator (WebXR) ──cmd_unreliable──▶ cmd_raw ─┐
+    operator (WebXR) ──cmd_unreliable──▶ cmd_raw ─┐  (PoseStamped/Joy/TwistStamped
+                                                  │   fingerprint-dispatched)
                                                   ├─ engage/delta-pose loop
-    coordinator ◀── /coordinator/cartesian_command┘   (frame_id = task name)
-                ◀── /teleop/buttons                    (analog triggers → gripper)
+    coordinator ◀── /coordinator_cartesian_command┘   (frame_id = task name)
+                ◀── /teleop_buttons                     (analog triggers → gripper)
+    coordinator ◀── /coordinator_ee_twist_command       (browser keyboard EE-twist)
+                ◀── /gripper_command                     (gripper toggle, Bool)
 
-    cam1_in/cam2_in (RealSense over LCM) ──▶ mux ──▶ mux_image ──▶ CF video
-
-Teleop logic (engage gating, delta poses, task routing) comes from
-``ArmTeleopModule``; the hosted plane from ``HostedConnectionMixin``.
-Operator bytes arrive on In-streams instead of the quest module's local
-WebSocket, so the embedded web server is never started.
+The state plane (E-STOP / gripper JSON) arrives on ``state_json`` — the SAME
+broker ``state_reliable`` channel the stats + camera-mux modules also read (the
+provider fans one inbound channel to every subscriber); each filters for its own
+``type``. Camera selection is owned by ``CameraMuxModule``; video_stats /
+clock_report by ``HostedStatsModule``. This module owns estop / gripper.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from reactivex.disposable import Disposable
@@ -42,58 +47,50 @@ from dimos.core.core import rpc
 from dimos.core.stream import In, Out
 from dimos.msgs.geometry_msgs.PoseStamped import PoseStamped
 from dimos.msgs.geometry_msgs.TwistStamped import TwistStamped
-from dimos.msgs.sensor_msgs.Image import Image
 from dimos.msgs.std_msgs.Bool import Bool
 from dimos.protocol.pubsub.impl.webrtc.providers.spec import shutdown_all_providers
 from dimos.robot.manipulators.common.topics import EEF_TWIST_TASK_NAME
 from dimos.teleop.quest.quest_extensions import ArmTeleopConfig, ArmTeleopModule
 from dimos.teleop.quest.quest_types import Hand
-from dimos.teleop.quest_hosted.hosted_base import HostedConnectionMixin
 from dimos.teleop.utils.teleop_transforms import webxr_to_robot
-from dimos.teleop.utils.video_stats import VideoStats
 from dimos.utils.logging_config import setup_logger
 
 logger = setup_logger()
 
 
-class ArmHostedConnectionConfig(ArmTeleopConfig):
+class ArmCommandConfig(ArmTeleopConfig):
     # task_names ("left"/"right" → coordinator task name) and control_loop_hz
     # come from ArmTeleopConfig; server_port is unused (no local web server).
-    telemetry_hz: float = 3.0  # robot → operator HUD telemetry push rate
-    # Publish-side video caps (0 = source rate/resolution), applied at the mux.
-    video_max_width: int = 0
-    video_max_fps: float = 0.0
-    latency_stamp: bool = False  # benchmark: append capture-time strip
+    pass
 
 
-class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
-    """Operator ⇄ coordinator bridge + camera mux, one broker session."""
+class ArmCommandModule(ArmTeleopModule):
+    """Operator command/E-STOP plane for a coordinator-driven arm."""
 
-    config: ArmHostedConnectionConfig
+    config: ArmCommandConfig
 
-    # Broker-bound (bind CF/LiveKit transports to these in the blueprint).
-    cmd_raw: In[bytes]  # LCM PoseStamped/Joy from the operator, fingerprint-dispatched
-    state_json: In[bytes]  # JSON control plane: camera_select / estop / video_stats
-    telemetry_out: Out[bytes]  # robot_telemetry + cmd_ack, state_reliable_back
-    mux_image: Out[Image]
+    # Broker-bound (bind Cloudflare* transports to these in the blueprint).
+    cmd_raw: In[bytes]  # cmd_unreliable: LCM PoseStamped/Joy/TwistStamped, dispatched
+    state_json: In[bytes]  # state_reliable JSON (fanned; estop/gripper here)
+    cmd_ack: Out[bytes]  # → state_reliable_back (command acks)
+    robot_state: Out[bytes]  # robot-authoritative UI state → stats module telemetry
 
-    # Local (LCM) side. left/right_controller_output and buttons are inherited.
-    cam1_in: In[Image]
-    cam2_in: In[Image]
-    video_stats: Out[VideoStats]  # operator-side getStats() relay, recorder tap
-
-    coordinator_ee_twist_command: Out[TwistStamped]
-    gripper_command: Out[Bool]
+    # Robot-internal, over LCM. left/right_controller_output + teleop_buttons are
+    # inherited from ArmTeleopModule (bound to the coordinator in the blueprint).
+    coordinator_ee_twist_command: Out[TwistStamped]  # browser keyboard EE-twist
+    gripper_command: Out[Bool]  # gripper toggle
 
     def __init__(self, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._hosted_init(["cam1", "cam2"])
+        self._estopped = False
+        # Browser keyboard EE-twist rides cmd_unreliable alongside the VR pose:
+        # register its LCM fingerprint on the inherited dispatch table.
         from dimos_lcm.geometry_msgs import TwistStamped as LCMTwistStamped
 
         self._decoders[LCMTwistStamped._get_packed_fingerprint()] = self._on_twist_bytes
-        # While the E-STOP latch (from _hosted_init) is set, hands are held
-        # disengaged and no poses are published — the coordinator's
-        # TeleopIKTask keeps its last target, so the arm freezes in place.
+        # While the E-STOP latch is set, hands are held disengaged and no poses
+        # are published — the coordinator's TeleopIKTask keeps its last target,
+        # so the arm freezes in place.
 
     # No local WebSocket server — the operator connects through the broker.
     def _start_server(self) -> None:
@@ -111,27 +108,21 @@ class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
             (self.state_json, self._on_state_json),
         ):
             self.register_disposable(Disposable(stream.subscribe(cb)))
-        self.register_disposable(
-            Disposable(self.cam1_in.subscribe(lambda i: self._on_cam("cam1", i)))
-        )
-        self.register_disposable(
-            Disposable(self.cam2_in.subscribe(lambda i: self._on_cam("cam2", i)))
-        )
-        self._start_telemetry()
+        self._publish_robot_state()
 
     @rpc
     def stop(self) -> None:
-        super().stop()  # stops the control loop (sets _stop_event) + Module teardown
-        self._stop_telemetry()
+        super().stop()  # stops the control loop + Module teardown
         # Graceful broker disconnect so the worker exits promptly instead of
-        # being force-killed and reaped ~30s later. See shutdown_all_providers.
+        # being force-killed and reaped ~30s later.
         shutdown_all_providers()
 
     # ─── Inbound command plane (operator → robot) ─────────────────────
 
     def _on_cmd_raw(self, data: Any) -> None:
         """Fingerprint-dispatch LCM bytes from cmd_unreliable via the decoder
-        table inherited from QuestTeleopModule (PoseStamped, Joy)."""
+        table inherited from QuestTeleopModule (PoseStamped, Joy) plus the
+        TwistStamped decoder registered in __init__."""
         if isinstance(data, str):
             data = data.encode()
         decoder = self._decoders.get(data[:8])
@@ -144,14 +135,12 @@ class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
 
     def _on_pose_bytes(self, data: bytes) -> None:
         """Controller pose → robot frame. Overrides the quest version to drop
-        (not raise on) unexpected frame_ids from the wire, and to feed the
-        command-plane stats pushed to the operator HUD."""
+        (not raise on) unexpected frame_ids from the wire."""
         msg = PoseStamped.lcm_decode(data)
         try:
             hand = self._resolve_hand(msg.frame_id)
         except ValueError:
             return
-        self._cmd_stats.record(msg.ts, nbytes=len(data))
         robot_pose = webxr_to_robot(msg, is_left_controller=(hand == Hand.LEFT))
         with self._lock:
             self._current_poses[hand] = robot_pose
@@ -163,7 +152,6 @@ class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
         if self._estopped:
             return
         msg = TwistStamped.lcm_decode(data)
-        self._cmd_stats.record(msg.ts, nbytes=len(data))
         self.coordinator_ee_twist_command.publish(
             TwistStamped(
                 frame_id=EEF_TWIST_TASK_NAME,
@@ -173,11 +161,36 @@ class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
             )
         )
 
-    def _handle_robot_msg(self, kind: Any, msg: dict[str, Any]) -> None:
-        """Robot-specific state_reliable JSON. gripper: browser keyboard cockpit
-        toggle → the coordinator's eef_twist gripper (Bool on gripper_command)."""
-        if kind == "gripper":
+    def _on_state_json(self, data: Any) -> None:
+        """Dispatch the state kinds this module owns (estop / gripper); ignore
+        the rest — the stats / camera modules own their kinds on this shared
+        channel."""
+        if isinstance(data, str):
+            data = data.encode()
+        if not data.startswith(b"{"):
+            return
+        try:
+            msg = json.loads(data)
+        except ValueError:
+            logger.warning("state_reliable: malformed JSON: %r", data[:80])
+            return
+
+        kind = msg.get("type")
+        if kind == "estop":
+            self._handle_estop(msg.get("nonce"))
+        elif kind == "estop_clear":
+            self._handle_estop_clear(msg.get("nonce"))
+        elif kind == "operator_lost":  # synthetic, injected by the provider
+            self._on_operator_lost()
+        elif kind == "gripper":
             self.gripper_command.publish(Bool(data=bool(msg.get("closed", False))))
+
+    def _send_ack(self, nonce: Any, ok: bool) -> None:
+        """Publish a cmd_ack on the broker-back channel."""
+        try:
+            self.cmd_ack.publish(json.dumps({"type": "cmd_ack", "nonce": nonce, "ok": ok}).encode())
+        except Exception:
+            logger.warning("cmd_ack publish failed", exc_info=True)
 
     # ─── E-STOP gating over the inherited control loop ────────────────
 
@@ -197,7 +210,7 @@ class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
         # (subscriber thread), so gate the publish path too.
         return not self._estopped and super()._should_publish(hand)
 
-    # ─── E-STOP / operator-loss hooks (dispatched by the mixin) ───────
+    # ─── E-STOP / operator-loss hooks ─────────────────────────────────
 
     def _handle_estop(self, nonce: Any) -> None:
         """Latch FIRST (gates the control loop immediately), then disengage."""
@@ -205,6 +218,7 @@ class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
         logger.warning("E-STOP latched by operator")
         with self._lock:
             self._disengage()
+        self._publish_robot_state()  # UI must show estopped:true immediately
         self._send_ack(nonce, True)
 
     def _handle_estop_clear(self, nonce: Any) -> None:
@@ -213,6 +227,7 @@ class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
         recaptures the initial pose, so the delta restarts from zero)."""
         self._estopped = False
         logger.warning("E-STOP cleared by operator")
+        self._publish_robot_state()
         self._send_ack(nonce, True)
 
     def _on_operator_lost(self) -> None:
@@ -221,18 +236,25 @@ class ArmHostedConnection(ArmTeleopModule, HostedConnectionMixin):
         logger.warning("operator link lost — disengaging")
         with self._lock:
             self._disengage()
+        self._publish_robot_state()
 
-    # ─── Telemetry (robot → operator) ─────────────────────────────────
+    # ─── Robot-authoritative state → stats module telemetry ───────────
 
-    def _telemetry_state(self) -> dict[str, Any]:
-        """Per-hand engage state (cams + estopped are merged in by the mixin)."""
+    def _publish_robot_state(self) -> None:
+        """Push per-hand engage state + estopped on robot_state (LCM) so the
+        stats module's telemetry frame reflects reality."""
         with self._lock:
-            return {
+            state = {
+                "estopped": self._estopped,
                 "engaged": {
                     "left": self._is_engaged[Hand.LEFT],
                     "right": self._is_engaged[Hand.RIGHT],
-                }
+                },
             }
+        try:
+            self.robot_state.publish(json.dumps(state).encode())
+        except Exception:
+            logger.debug("robot_state publish failed", exc_info=True)
 
 
-__all__ = ["ArmHostedConnection", "ArmHostedConnectionConfig"]
+__all__ = ["ArmCommandModule", "ArmCommandConfig"]
