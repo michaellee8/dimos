@@ -38,7 +38,7 @@ def generate_api_key(environment: str = "live") -> str:
 
 
 def hash_key(plaintext_key: str) -> str:
-    # SHA-256 is intentional: keys are 160-bit random tokens needing an O(1) hash lookup, not passwords.
+    # SHA-256 intentional: keys are 160-bit random tokens (not passwords) needing O(1) lookup.
     return hashlib.sha256(plaintext_key.encode()).hexdigest()
 
 
