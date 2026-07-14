@@ -1,13 +1,3 @@
-// VR cockpit UI for the xArm — minimal first cut: ONE console panel below the
-// camera showing engage state (per hand), E-STOP / clear, camera select, and a
-// stats line. Parallel to vrui.js (the Go2 cockpit) but deliberately small.
-//
-// It reuses vrui.js's *contract* (buildCockpit → { panels, meshes, onClick,
-// tick, dispose }) that vrarm.js consumes, and a self-contained Panel (the
-// generic canvas→plane→hit-region bits copied from vrui.js) so we don't have to
-// refactor/export vrui.js internals yet. Extract a shared Panel later, once both
-// cockpits are stable.
-
 import * as THREE from 'three';
 
 import { hudDetailRows, healthColor, transportLabel } from './hud.js';
@@ -21,10 +11,9 @@ const C = {
     estopBorder: '#d97777',
 };
 
-// Per-row health tint for the stats grid (mirrors go2's vrui.js HEALTH map).
 const HEALTH = { good: C.cyan, warn: C.warn, bad: C.bad };
 
-// Cockpit UI state — reconciled from robot_telemetry (authoritative on connect).
+// Reconciled from robot_telemetry (authoritative on connect).
 export const aui = {
     engaged: { left: false, right: false },
     estopped: false,
@@ -34,7 +23,6 @@ export const aui = {
 
 function nextNonce() { return ++aui.nonce; }
 
-// ── Panel: canvas → CanvasTexture → plane, with hit regions (from vrui.js) ──
 class Panel {
     constructor({ wM, hM, cw, ch, opacity = 1 }) {
         this.cw = cw; this.ch = ch;
@@ -52,7 +40,6 @@ class Panel {
         this.hoverId = null;
         this.dirty = true;
     }
-    // Desk shelf below the camera: fixed tilt about X, no lookAt.
     placeFlat(pos, rotX) { this.mesh.position.copy(pos); this.mesh.rotation.set(rotX, 0, 0); }
     markDirty() { this.dirty = true; }
     // UV (three, flipY) → canvas px; row = (1-v)*ch.
@@ -78,7 +65,7 @@ class Panel {
         x.font = '600 22px ui-monospace, monospace';
         x.fillText(text.toUpperCase(), 24, 40);
     }
-    // A chip button; st ∈ idle|active|pending|error.
+    // st ∈ idle|active|pending|error.
     chip(id, bx, by, bw, bh, label, st = 'idle') {
         const x = this.ctx, hot = this.hoverId === id;
         let fill = C.bgSolid, border = C.line, txt = C.text;
@@ -95,7 +82,7 @@ class Panel {
         x.textAlign = 'left'; x.textBaseline = 'alphabetic';
         this.regions.push({ id, x: bx, y: by, w: bw, h: bh });
     }
-    // A read-only status pill (engaged L/R) — no hit region.
+    // Read-only status pill (engaged L/R) — no hit region.
     pill(bx, by, bw, bh, label, on) {
         const x = this.ctx;
         x.fillStyle = on ? C.cyan : C.bgSolid;
@@ -120,21 +107,17 @@ function roundRect(x, bx, by, bw, bh, r) {
     x.closePath();
 }
 
-// ── Console render ───────────────────────────────────────────────────
 function renderConsole(p) {
     p.bg();
     p.header('xArm cockpit');
 
-    // Engage status (read-only; the robot decides engage from the held button).
-    // Both cameras are always shown as two screens, so there's no camera toggle.
+    // Engage status is read-only; the robot decides engage from the held button.
     const x = p.ctx;
     x.fillStyle = C.dim; x.font = '600 20px ui-monospace, monospace';
     x.fillText('ENGAGE', 24, 96);
     p.pill(150, 74, 130, 44, `L ${aui.engaged.left ? 'ON' : '—'}`, aui.engaged.left);
     p.pill(292, 74, 130, 44, `R ${aui.engaged.right ? 'ON' : '—'}`, aui.engaged.right);
 
-    // E-STOP / clear — always reachable, big. (Latency/transport live on the
-    // dedicated stats panel now, so the console no longer prints a stats line.)
     if (aui.estopped) {
         p.chip('estop_clear', 24, 168, 540, 130, 'E-STOP LATCHED — CLEAR', 'error');
     } else {
@@ -143,9 +126,6 @@ function renderConsole(p) {
     }
 }
 
-// Stats panel — transport header + the shared hudDetailRows() grid (cmd
-// latency / rate, video codec / fps / jitter, transport). Mirrors go2's
-// renderStats (vrui.js); no SoC/battery row (the arm has no battery telemetry).
 function renderStats(p) {
     p.bg();
     const x = p.ctx;
@@ -187,17 +167,15 @@ function markPending(id) {
     aui.pending.set(aui.nonce + 1, { id, expiry: 0 });  // nonce bumps on send
 }
 
-// cmd_ack handler (wired via state.onCmdAck) — clear the pending chip.
 export function onCmdAck(msg) {
     aui.pending.delete(msg.nonce);
     _dirty();
 }
 
-// robot_telemetry.state handler (wired via state.onRobotState) — authoritative.
+// robot_telemetry.state — authoritative.
 export function onRobotState(s) {
     if (s.engaged) aui.engaged = { left: !!s.engaged.left, right: !!s.engaged.right };
-    // Sticky E-STOP latch: telemetry may raise it, never lower it (a stale
-    // pre-estop frame would release the latch). Only re-arm clears aui.estopped.
+    // Sticky E-STOP latch: telemetry may raise it, never lower it. Only re-arm clears.
     if (s.estopped === true) aui.estopped = true;
     _dirty();
 }
@@ -206,28 +184,23 @@ let _panel = null;
 function _dirty() { if (_panel) _panel.markDirty(); }
 
 export function buildArmCockpit(scene, _headPos) {
-    // One console shelf below the camera panel (CAM in vrarm.js sits at y≈1.52,
-    // z≈-1.6). Tilt up ~34° toward the operator, like the Go2 console.
+    // Console shelf below the camera panel (CAM in vrarm.js sits at y≈1.52, z≈-1.6).
     const console_ = new Panel({ wM: 1.5, hM: 0.52, cw: 1180, ch: 410, opacity: 0.97 });
     console_.placeFlat(new THREE.Vector3(0, 0.86, -1.3), -0.6);
     console_.mesh.renderOrder = 3;
     scene.add(console_.mesh);
     _panel = console_;
 
-    // Stats panel — the third screen in the curved cockpit, to the RIGHT of the
-    // two camera screens and wrapping toward the operator. The camera screens sit
-    // on an arc (x=±0.65, z=-1.62, yaw ∓0.20); this continues that arc one panel
-    // further right, but pulled FORWARD (z less negative) and yawed harder so it
-    // faces the operator and sits in front of — not behind — the right screen.
-    // Same height/row (y=1.52) as the screens. renderOrder above the screens so
-    // it never z-fights into them at the seam.
+    // Stats panel: continues the camera-screen arc one panel further right, pulled
+    // forward and yawed harder to face the operator. renderOrder above the screens
+    // so it never z-fights into them at the seam.
     const stats = new Panel({ wM: 0.5, hM: 0.70, cw: 440, ch: 620, opacity: 0.97 });
     stats.mesh.position.set(1.42, 1.52, -1.28);
-    stats.mesh.rotation.y = -0.7;  // face the operator (harder toe-in than screens)
+    stats.mesh.rotation.y = -0.7;
     stats.mesh.renderOrder = 4;
     scene.add(stats.mesh);
 
-    let lastStatsMs = 0;  // repaint the 1Hz panels (cmd latency etc.), not per frame
+    let lastStatsMs = 0;  // repaint the 1Hz panels, not per frame
 
     return {
         panels: [console_, stats],

@@ -1,7 +1,3 @@
-// Auth view — login / signup / email verification / password reset.
-// All flows talk directly to Cognito (see cognito.js); on success we store
-// the ID + refresh tokens and the broker just verifies them per-request.
-
 import { setSession } from '../api.js';
 import { navigate } from '../router.js';
 import { escHtml, state } from '../state.js';
@@ -18,7 +14,7 @@ import {
 // 'login' | 'register' | 'confirm' | 'forgot' | 'forgot-confirm'
 let mode = 'login';
 let pendingEmail = '';
-let pendingPassword = '';  // kept in-memory only, to auto-login after confirm
+let pendingPassword = '';  // in-memory only, to auto-login after confirm
 
 export function renderAuth(c) {
     if (mode === 'confirm') return renderConfirm(c);
@@ -55,8 +51,6 @@ function showError(msg) {
     el.textContent = msg;
     el.classList.remove('hidden');
 }
-
-// --- Login / Register ---
 
 function renderLoginRegister(c) {
     const isLogin = mode === 'login';
@@ -152,8 +146,6 @@ async function doLogin(email, password) {
     navigate('dashboard');
 }
 
-// --- Email verification ---
-
 function renderConfirm(c) {
     c.innerHTML = shell(`
         <h2 class="term-caps text-sm font-bold text-dim-500 mb-1">// Check your email</h2>
@@ -198,8 +190,6 @@ function renderConfirm(c) {
         }
     };
 }
-
-// --- Password reset ---
 
 function renderForgot(c) {
     const codeSent = mode === 'forgot-confirm';

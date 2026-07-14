@@ -1,9 +1,3 @@
-// Immersive WebXR cockpit (Three.js). The Go2 cockpit ported to VR:
-//   MAP left · CAMERA front-centre · BUTTONS right · STATS far-right column.
-// Passthrough (AR) when the headset offers it. Drive is thumbstick → the same
-// TwistStamped the keyboard sends; buttons are controller-ray clicks (vrui.js).
-// Audio is intentionally out of scope here.
-
 import * as THREE from 'three';
 
 import { geometry_msgs, std_msgs } from 'https://esm.sh/jsr/@dimos/msgs@0.1.4';
@@ -12,13 +6,11 @@ import { sendEstop } from './go2cmd.js';
 import { sampleCmdHz } from './hud.js';
 import { createStallGate, videoMediaTime } from './stall.js';
 import { sendInterval, state } from './state.js';
-import { send } from './webrtc.js';
 import { getVRRenderer } from './vrrenderer.js';
 import { buildCockpit, onCmdAck, onMap, onOdom, onRobotState, vui } from './vrui.js';
 
-const HEAD = new THREE.Vector3(0, 1.55, 0);  // nominal eye point panels face
-// Camera panel — front centre, 16:9. Cluster geometry must agree with
-// buildCockpit's CAM_HALF_W / PANEL_Y / PANEL_Z (map + stats sit flush).
+const HEAD = new THREE.Vector3(0, 1.55, 0);
+// MUST agree with buildCockpit's CAM_HALF_W / PANEL_Y / PANEL_Z (map + stats sit flush).
 const CAM = { w: 1.4, h: 0.7875, x: 0, y: 1.52, z: -1.6 };
 const STICK_DEADZONE = 0.12;
 
@@ -26,9 +18,8 @@ let renderer = null, scene = null, camera = null;
 let cockpit = null, controllers = [];
 let videoMesh = null, videoTex = null;
 let stallGate = null;
-let camEl = null;  // #robot-cam, resolved once per session (not per frame)
+let camEl = null;
 const raycaster = new THREE.Raycaster();
-// Reused scratch for per-frame raycasting — avoid allocating in the XR loop.
 const _rayOrigin = new THREE.Vector3();
 const _rayDir = new THREE.Vector3();
 
@@ -36,14 +27,12 @@ function buildScene() {
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(70, 1, 0.05, 100);
 
-    // Camera panel (robot video). Placeholder colour until frames arrive.
     videoMesh = new THREE.Mesh(
         new THREE.PlaneGeometry(CAM.w, CAM.h),
         new THREE.MeshBasicMaterial({ color: 0x0d0e0e }),
     );
     videoMesh.position.set(CAM.x, CAM.y, CAM.z);
-    // Flat (+Z toward user), NOT lookAt: map/stats sit coplanar flush against
-    // this panel's edges, so any tilt here would split the seams open.
+    // Flat (+Z toward user), NOT lookAt: map/stats sit coplanar flush against this panel's edges.
     videoMesh.renderOrder = 1;
     scene.add(videoMesh);
 
@@ -51,7 +40,6 @@ function buildScene() {
 }
 
 function initControllers() {
-    // Laser + reticle per controller; 'selectstart' = ray-click a panel.
     const lineGeo = new THREE.BufferGeometry().setFromPoints([
         new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -5),
     ]);
@@ -73,7 +61,6 @@ function initControllers() {
     }
 }
 
-// Ray-click: intersect the cockpit panel meshes from this controller.
 function onSelect(ctrl) {
     const hit = raycastPanels(ctrl);
     if (hit) cockpit.onClick(hit.object.userData.panel, hit.uv);
@@ -87,8 +74,6 @@ function raycastPanels(ctrl) {
     return hits.length ? hits[0] : null;
 }
 
-// Bind (or rebind) the robot video to the camera panel; crop the benchmark
-// strip via the texture UV window (same effect as the DOM clip-path).
 function updateVideoTexture() {
     const v = camEl;
     if (!v || v.readyState < 2 || !v.videoWidth) return;
@@ -106,7 +91,6 @@ function updateVideoTexture() {
 }
 
 // Thumbstick → TwistStamped, identical shape/scale to keyboard.js buildTwist.
-// Left stick: forward/back + strafe. Right stick X: turn. Grip = boost/slow.
 let lastDriveSend = 0;
 let twistSeq = 0;
 let wasDriving = false;
@@ -117,8 +101,7 @@ function driveFromSticks(frame) {
     lastDriveSend = now;
 
     // Read sticks FIRST: the stall gate needs the held-state to keep drive
-    // blocked after a freeze clears until the operator releases the stick
-    // (else a held stick lunges the robot the instant video unfreezes).
+    // blocked after a freeze clears until the operator releases the stick.
     let lx = 0, ly = 0, rx = 0, boost = 1;
     for (const src of frame.session.inputSources) {
         const gp = src.gamepad;
@@ -134,7 +117,6 @@ function driveFromSticks(frame) {
     const fwd = -dz(ly), strafe = -dz(lx), turn = -dz(rx);
     const held = fwd !== 0 || strafe !== 0 || turn !== 0;
 
-    // Video-freshness gate — don't drive blind on a frozen frame.
     const gate = stallGate.sample(videoMediaTime(camEl), now, held);
     state.videoStall = gate;
 
@@ -179,7 +161,6 @@ function triggerEstop() {
     cockpit.panels.forEach((p) => p.markDirty());
 }
 
-// Roll cmdSendCount → cmdHz once/sec off the frame loop (VR has no DOM hudTimer).
 let lastCmdSampleMs = 0;
 function tickCmdHz(nowMs) {
     if (!lastCmdSampleMs) { lastCmdSampleMs = nowMs; return; }
@@ -188,9 +169,6 @@ function tickCmdHz(nowMs) {
     lastCmdSampleMs = nowMs;
 }
 
-// Continuous hover: point each controller, highlight the hovered chip, park a
-// reticle at the hit point. Allocation-free (runs every XR frame): clear all
-// panels, then set the one each ray hits.
 function updateHover() {
     for (const p of cockpit.panels) p.setHover(null);
     for (const ctrl of controllers) {
@@ -205,13 +183,11 @@ function updateHover() {
 }
 
 function onFrame(timeMs, frame) {
-    // #robot-cam is created by webrtc.js ontrack (after startVR); resolve it
-    // once it appears, then reuse — no per-frame DOM query for the session.
+    // #robot-cam is created by webrtc.js ontrack (after startVR); resolve once, then reuse.
     if (!camEl) camEl = document.getElementById('robot-cam');
     if (frame) { driveFromSticks(frame); }
     updateHover();
     updateVideoTexture();
-    // Dim the camera panel + tint when the robot's video is stalled/blank.
     if (videoMesh.material.map) {
         const stalled = vui.robotVideoStalled || state.videoStall?.stalled;
         videoMesh.material.color.setHex(stalled ? 0x552222 : 0xffffff);
@@ -226,13 +202,11 @@ export async function startVR() {
     stallGate = createStallGate();
     state.videoStall = { stalled: false, blocked: false, armed: false };
     document.getElementById('canvas').style.display = 'block';
-    renderer = getVRRenderer();  // one shared renderer across all VR cockpits
-    // Fresh scene per session so panels/hover state don't leak across connects.
+    renderer = getVRRenderer();
     buildScene();
     controllers = [];
 
-    // Passthrough (AR) when available; opaque VR otherwise. Must run inside
-    // the Connect click gesture.
+    // Passthrough (AR) when available; opaque VR otherwise. MUST run inside the Connect click gesture.
     let session = null, ar = false;
     try {
         session = await navigator.xr.requestSession('immersive-ar', {
@@ -244,7 +218,6 @@ export async function startVR() {
             requiredFeatures: ['local-floor'], optionalFeatures: ['hand-tracking'],
         });
     }
-    // AR: transparent clear so passthrough shows; VR: dark backdrop.
     scene.background = ar ? null : new THREE.Color(0x0a0b0b);
     renderer.setClearAlpha(ar ? 0 : 1);
 
@@ -253,7 +226,6 @@ export async function startVR() {
     state.xrRefSpace = renderer.xr.getReferenceSpace();
     initControllers();
 
-    // Route acks + robot-state + map onto the VR cockpit (like go2.js does DOM).
     state.onCmdAck = onCmdAck;
     state.onRobotState = onRobotState;
     state.onMap = onMap;
@@ -265,8 +237,6 @@ export async function startVR() {
         renderer.setAnimationLoop(null);
         cockpit?.dispose();
         cockpit = null;
-        // Release the camera panel's GPU resources too (buildScene makes fresh
-        // ones each connect; without this they orphan across reconnect cycles).
         videoTex?.dispose(); videoTex = null;
         videoMesh?.geometry.dispose(); videoMesh?.material.dispose(); videoMesh = null;
         camEl = null;

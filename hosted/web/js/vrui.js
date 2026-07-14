@@ -1,17 +1,9 @@
-// VR cockpit UI — the Go2 cockpit (go2.js) as spatial canvas panels.
-// Each panel is a 2D canvas on a three plane; interaction is controller-ray →
-// panel UV → canvas px → hit-test against registered rects. Commands are the
-// same JSON go2.js sends, so acks/telemetry flow back through the shared
-// state.onCmdAck / state.onRobotState hooks. Layout: MAP left · CAMERA centre ·
-// BUTTONS right · STATS far right.
-
 import * as THREE from 'three';
 
 import { CONFIRM_ACTIONS, POSTURE_STATE, SPEEDS, sendEstop, sendEstopClear } from './go2cmd.js';
 import { hudDetailRows, healthColor, socHealth, statsHealth, transportLabel } from './hud.js';
 import { state } from './state.js';
 
-// Palette (matches index.html cockpit CSS + hud.js).
 const C = {
     bg: 'rgba(18,19,19,0.92)', bgSolid: '#121313', panel: '#0d0e0e',
     line: '#2a2a2a', text: '#d1d5db', dim: '#6b7280', cyan: '#b0e1f0',
@@ -20,8 +12,6 @@ const C = {
 };
 const HEALTH = { good: C.good, warn: C.warn, bad: C.bad };
 
-// Display catalogs — VR uses tighter labels than the DOM cockpit, so these
-// stay local; the shared name/scale/confirm/posture data is in go2cmd.js.
 const POSTURE = [
     { name: 'StandReady', label: 'Stand / Drive' },
     { name: 'StandDown', label: 'Sit' },
@@ -33,14 +23,12 @@ const ACTIONS = [
     { name: 'FrontJump', label: 'Jump Fwd' },
 ];
 const CAMS = [{ id: 'cam1', label: 'Cam 1' }, { id: 'cam2', label: 'Cam 2' }];
-// Discrete light presets — a raycast slider is fiddly; presets read cleanly.
 const LIGHTS = [
     { label: 'Off', v: 0 }, { label: 'Low', v: 0.34 },
     { label: 'Med', v: 0.67 }, { label: 'Full', v: 1.0 },
 ];
 const GO2_LEN_M = 0.70, GO2_WID_M = 0.31;  // footprint, matches cockpit glyph
 
-// ── Shared cockpit UI state (mirror of go2.js `ui`) ──────────────────
 export const vui = {
     posture: 'StandReady', estopped: false, speedMode: 'normal',
     selectedCams: ['cam1'], obstacleAvoid: true, light: 0,
@@ -55,7 +43,6 @@ function chanReady() {
 }
 function sendJSON(obj) { if (chanReady()) state.stateChannel.send(JSON.stringify(obj)); }
 
-// ── Panel: canvas → CanvasTexture → plane, with hit regions ──────────
 class Panel {
     constructor({ wM, hM, cw, ch, opacity = 1 }) {
         this.cw = cw; this.ch = ch;
@@ -69,7 +56,7 @@ class Panel {
             new THREE.MeshBasicMaterial({ map: this.tex, transparent: true, opacity }),
         );
         this.mesh.userData.panel = this;
-        this.regions = [];     // { id, x, y, w, h }
+        this.regions = [];
         this.hoverId = null;
         this.dirty = true;
     }
@@ -77,15 +64,12 @@ class Panel {
         this.mesh.position.copy(pos);
         this.mesh.lookAt(headPos);  // plane front (+Z) faces the user
     }
-    // Console placement: fixed tilt about X (top edge away), no lookAt — a
-    // desk panel angled up toward the operator's eyes.
     placeFlat(pos, rotX) {
         this.mesh.position.copy(pos);
         this.mesh.rotation.set(rotX, 0, 0);
     }
-    // Fold about Y, positioning so this panel's edge (edgeSign +1 right /
-    // -1 left) lands exactly on `hinge` — center = hinge − rotated edge — so
-    // adjacent folded panels' seams coincide at any width/angle.
+    // Fold about Y so this panel's edge (edgeSign +1 right / -1 left) lands exactly
+    // on `hinge` (center = hinge − rotated edge) — adjacent seams coincide at any width/angle.
     placeHinged(hinge, edgeSign, yaw) {
         this.mesh.rotation.set(0, yaw, 0);
         const h = this.mesh.geometry.parameters.width / 2;
@@ -93,8 +77,7 @@ class Panel {
         this.mesh.position.copy(hinge).sub(edge);
     }
     markDirty() { this.dirty = true; }
-    // UV (three) → canvas px. VideoTexture/CanvasTexture are flipY, so v=0 is
-    // the bottom row; canvas y grows down → row = (1-v)*ch.
+    // UV (three) → canvas px. Textures are flipY, so v=0 is bottom row; row = (1-v)*ch.
     hitTest(uv) {
         const px = uv.x * this.cw, py = (1 - uv.y) * this.ch;
         for (const r of this.regions) {
@@ -104,7 +87,6 @@ class Panel {
     }
     setHover(id) { if (id !== this.hoverId) { this.hoverId = id; this.dirty = true; } }
 
-    // ── drawing primitives ──
     bg() {
         const x = this.ctx;
         x.clearRect(0, 0, this.cw, this.ch);
@@ -119,7 +101,7 @@ class Panel {
         x.font = '600 22px ui-monospace, monospace';
         x.fillText(text.toUpperCase(), 24, 40);
     }
-    // A chip button; `st` ∈ idle|active|pending|done|error|confirm.
+    // `st` ∈ idle|active|pending|done|error|confirm.
     chip(id, bx, by, bw, bh, label, st = 'idle') {
         const x = this.ctx, hot = this.hoverId === id;
         let fill = C.bgSolid, border = C.line, txt = C.text;
@@ -155,7 +137,6 @@ function roundRect(x, bx, by, bw, bh, r) {
     x.closePath();
 }
 
-// ── Command senders (mirror go2.js; add ack tracking per region) ─────
 function nonceCmd(panel, region, obj, timeoutMs = 3000) {
     const nonce = ++vui.nonce;
     obj.nonce = nonce;
@@ -222,7 +203,6 @@ function rearm(panel) {
     panel.markDirty();
 }
 
-// ── Ack + robot-state reconcile (registered on state.* by vr.js) ─────
 function setRegionState(panel, region, st) {
     panel._rstate = panel._rstate || {};
     panel._rstate[region] = st;
@@ -241,20 +221,17 @@ export function onCmdAck(msg) { resolveAck(msg.nonce, !!msg.ok); }
 export function onRobotState(s) {
     if (vui.pending.size > 0) return;  // don't fight a command mid-flight
     if (typeof s.posture === 'string' && POSTURE_STATE[s.posture]) vui.posture = s.posture;
-    // Sticky E-STOP latch: telemetry may raise it, never lower it (a stale
-    // pre-estop frame would release the latch and resume drive). Only re-arm clears.
+    // Sticky E-STOP latch: telemetry may raise it, never lower it. Only re-arm clears.
     if (s.estopped === true) vui.estopped = true;
     if (typeof s.obstacle_avoidance === 'boolean') vui.obstacleAvoid = s.obstacle_avoidance;
     if (typeof s.light === 'number') vui.light = s.light;
     if (Array.isArray(s.cams) && s.cams.length) vui.selectedCams = s.cams.filter((c) => CAMS.some((k) => k.id === c));
     if (typeof s.rage === 'boolean') vui.speedMode = s.rage ? 'rage' : (vui.speedMode === 'rage' ? 'normal' : vui.speedMode);
     if (typeof s.video_stalled === 'boolean') vui.robotVideoStalled = s.video_stalled;
-    // Drive gate mirrors the cockpit: only StandReady drives.
     state.driveEnabled = vui.posture === 'StandReady' && !vui.estopped;
     for (const pnl of _allPanels) pnl.markDirty();
 }
 
-// ── Minimap: decode the base64-PNG occupancy grid into a texture ─────
 export function onMap(msg) {
     if (!msg || !msg.png_b64) return;
     const img = new Image();
@@ -264,14 +241,6 @@ export function onMap(msg) {
 }
 export function onOdom(msg) { if (msg) { vui.lastOdom = msg; _mapPanel?.markDirty(); } }
 
-// ─────────────────────────────────────────────────────────────────────
-// Panel renderers
-// ─────────────────────────────────────────────────────────────────────
-
-// Horizontal operator console (tilted shelf under the camera panel).
-// Two bands of grouped chips + a full-height E-STOP block on the right:
-//   band 1: POSTURE ·· SPEED ·· CAMERAS ·· OBSTACLE
-//   band 2: ACTIONS ·········· LIGHT
 function renderConsole(p) {
     p.bg();
     const x = p.ctx;
@@ -280,7 +249,6 @@ function renderConsole(p) {
         return s !== 'idle' ? s : (active ? 'active' : 'idle');
     };
 
-    // Status strip (top-left): drive state + posture, like the cockpit pills.
     const driving = state.driveEnabled && !vui.estopped;
     x.fillStyle = driving ? C.good : C.bad;
     x.beginPath(); x.arc(34, 34, 7, 0, Math.PI * 2); x.fill();
@@ -295,14 +263,12 @@ function renderConsole(p) {
         x.fillStyle = C.dim; x.font = '600 16px ui-monospace,monospace';
         x.fillText(t.toUpperCase(), hx, hy);
     };
-    // Lay a group of chips horizontally; returns x after the group.
     const group = (label, items, gx, gy, bw, bh, render) => {
         header(label, gx, gy - 10);
         items.forEach((it, i) => render(it, gx + i * (bw + 10), gy, bw, bh));
         return gx + items.length * (bw + 10) - 10 + 26;
     };
 
-    // ── band 1 ──
     let gx = 24;
     const B1 = 86, H = 62;
     gx = group('Posture', POSTURE, gx, B1, 128, H, (it, bx, by, bw, bh) => {
@@ -316,7 +282,6 @@ function renderConsole(p) {
     group('Obstacle', [{}], gx, B1, 84, H, (it, bx, by, bw, bh) =>
         p.chip('obstacle', bx, by, bw, bh, vui.obstacleAvoid ? 'ON' : 'OFF', st('obstacle', vui.obstacleAvoid)));
 
-    // ── band 2 ──
     gx = 24;
     const B2 = 216;
     gx = group('Actions', ACTIONS, gx, B2, 115, H, (it, bx, by, bw, bh) => {
@@ -330,11 +295,10 @@ function renderConsole(p) {
         p.chip('light:' + it.v, bx, by, bw, bh, it.label, active ? 'active' : 'idle');
     });
 
-    // Drive hint (bottom edge, small).
     x.fillStyle = C.dim; x.font = '15px ui-monospace,monospace';
     x.fillText('left stick drive · right stick turn · grip boost/slow · B/Y = E-STOP', 24, p.ch - 16);
 
-    // ── E-STOP block: full-height, far right, always in reach ──
+    // E-STOP block: full-height, far right, always in reach.
     const ex = 940, ey = 28, ew = p.cw - ex - 24, eh = p.ch - 56;
     x.fillStyle = vui.estopped ? C.estopBorder : C.estopBg;
     roundRect(x, ex, ey, ew, eh, 14); x.fill();
@@ -359,7 +323,6 @@ function renderConsole(p) {
 function renderStats(p) {
     p.bg();
     const x = p.ctx;
-    // Health dot + transport header.
     x.fillStyle = healthColor();
     x.beginPath(); x.arc(30, 34, 9, 0, Math.PI * 2); x.fill();
     x.fillStyle = C.text; x.font = '600 20px ui-monospace,monospace';
@@ -386,8 +349,6 @@ function renderStats(p) {
     }
 }
 
-// Draw the decoded occupancy grid + robot glyph + nav goal. Mirrors go2.js
-// drawMap (letterbox + y-flip + footprint box) but into the panel canvas.
 function renderMap(p) {
     const x = p.ctx, cw = p.cw, ch = p.ch;
     p.bg();
@@ -433,12 +394,10 @@ function renderMap(p) {
         x.restore();
     }
     x.restore();
-    // Whole map area is a click target → nav goal (store geometry for inverse).
     p._mapGeom = { dx, dy, dw, dh, scale, m };
     p.regions.push({ id: 'map', x: dx, y: top, w: dw, h: area });
 }
 
-// ── click dispatch ───────────────────────────────────────────────────
 function handleButtonsClick(id, panel) {
     if (id === 'estop') return estop(panel);
     if (id === 'rearm') return rearm(panel);
@@ -466,17 +425,12 @@ function handleMapClick(panel, uv) {
     panel.markDirty();
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Public: build the panels, wire click, expose per-frame redraw
-// ─────────────────────────────────────────────────────────────────────
 let _allPanels = [];
 let _mapPanel = null;
-let _lastStatsMs = 0;  // throttle the stats-panel repaint to ~1Hz
+let _lastStatsMs = 0;
 
 export function buildCockpit(scene, headPos) {
-    // Folded triptych: MAP + STATS hinge at the camera panel's left/right edges
-    // and angle ~30° toward the operator; CONSOLE is a tilted shelf below.
-    // CAM_HALF_W/PANEL_Y/PANEL_Z must agree with vr.js CAM.
+    // CAM_HALF_W / PANEL_Y / PANEL_Z MUST agree with vr.js CAM.
     const CAM_HALF_W = 0.7, PANEL_Y = 1.52, PANEL_Z = -1.6;
     const FOLD = THREE.MathUtils.degToRad(30);
 
@@ -485,17 +439,14 @@ export function buildCockpit(scene, headPos) {
     const console_ = new Panel({ wM: 1.5, hM: 0.52, cw: 1180, ch: 410, opacity: 0.97 });
     _mapPanel = map;
 
-    // Map: its RIGHT edge hinges on the camera's LEFT edge, folds in (+yaw
-    // turns its normal toward the user). Stats mirror on the right.
+    // Map RIGHT edge hinges on camera LEFT edge (+yaw folds toward user); stats mirror on the right.
     map.placeHinged(new THREE.Vector3(-CAM_HALF_W, PANEL_Y, PANEL_Z), +1, +FOLD);
     stats.placeHinged(new THREE.Vector3(CAM_HALF_W, PANEL_Y, PANEL_Z), -1, -FOLD);
-    // Console: a desk shelf below the camera — low enough that its top edge
-    // stays under the sight line to the camera's bottom edge, tilted up ~34°.
     console_.placeFlat(new THREE.Vector3(0, 0.86, -1.3), -0.6);
     for (const p of [map, console_, stats]) { scene.add(p.mesh); p.mesh.renderOrder = 3; }
 
     _allPanels = [map, console_, stats];
-    _lastStatsMs = 0;  // paint stats on the first frame of this session
+    _lastStatsMs = 0;
     console_._render = renderConsole;
     stats._render = renderStats;
     map._render = renderMap;
@@ -508,9 +459,7 @@ export function buildCockpit(scene, headPos) {
             const id = panel.hitTest(uv);
             if (id) handleButtonsClick(id, panel);
         },
-        // Stats data changes at 1Hz — refresh it at 1Hz, not per XR frame (a
-        // per-frame canvas repaint + texture upload would risk Quest judder).
-        // Buttons/map still redraw immediately via their own dirty flags.
+        // Repaint stats at 1Hz, not per XR frame — a per-frame canvas repaint + texture upload risks Quest judder.
         tick(nowMs) {
             if (nowMs - _lastStatsMs >= 1000) { stats.markDirty(); _lastStatsMs = nowMs; }
             for (const p of _allPanels) {

@@ -1,11 +1,8 @@
-// Dashboard: API key management + available robots list.
-
 import { api, brokerOrigin, logout } from '../api.js';
 import { connectArmBrowser, connectGo2, connectToRobot, connectXArm } from '../connect.js';
 import { escHtml, state, timeAgo, xrDetection } from '../state.js';
 
-// Manual robot-type toggle (interim — until the broker surfaces robot_type):
-// the operator picks Go2 or Arm before connecting. Persisted across renders.
+// Manual robot-type toggle (interim, until the broker surfaces robot_type). Persisted across renders.
 function robotKind() { return localStorage.getItem('teleop_robot_kind') || 'go2'; }
 function setRobotKind(k) { localStorage.setItem('teleop_robot_kind', k); }
 
@@ -22,7 +19,6 @@ export async function renderDashboard(c) {
             </button>
         </header>
 
-        <!-- API Keys -->
         <section class="bg-bg-950 border border-[#2a2a2a] rounded-xl p-6 mb-6">
             <div class="flex items-center justify-between mb-4">
                 <div>
@@ -60,7 +56,6 @@ export async function renderDashboard(c) {
             </div>
         </section>
 
-        <!-- Connected robots -->
         <section class="bg-bg-950 border border-[#2a2a2a] rounded-xl p-6">
             <div class="flex items-center justify-between mb-4">
                 <div>
@@ -68,7 +63,6 @@ export async function renderDashboard(c) {
                     <p class="text-gray-400 text-sm">Robots online — click Connect to teleoperate</p>
                 </div>
                 <div class="flex items-center gap-3">
-                    <!-- Robot-type toggle: picks which cockpit Connect launches. -->
                     <div id="robot-kind-toggle" class="inline-flex rounded-lg border border-[#2a2a2a] overflow-hidden text-xs">
                         <button data-kind="go2" class="kind-btn px-3 py-2 transition-colors">Go2</button>
                         <button data-kind="xarm" class="kind-btn px-3 py-2 transition-colors">Arm</button>
@@ -99,7 +93,6 @@ export async function renderDashboard(c) {
     await Promise.all([loadKeys(), loadRobots()]);
 }
 
-// Robot-type toggle: highlight the active kind, persist the choice on click.
 function wireRobotKindToggle() {
     const wrap = document.getElementById('robot-kind-toggle');
     if (!wrap) return;
@@ -194,14 +187,13 @@ async function loadRobots() {
     await xrDetection;
     try {
         const robots = await api('GET', '/sessions');
-        // Broker returns a flat list per sessions.py:list_sessions response_model.
         const arr = Array.isArray(robots) ? robots : (robots.sessions || []);
         if (arr.length === 0) {
             listEl.innerHTML = '<p class="text-gray-500 text-sm py-4 text-center">No robots online. Start a robot with a registered API key.</p>';
             return;
         }
         listEl.innerHTML = arr.map(s => {
-            // "Reclaim" when it's our own stale binding (idempotent re-join).
+            // "Reclaim" when it's our own stale binding (idempotent re-join); "Busy" if held by another operator.
             const mine = s.state === 'active' && s.operator_id === state.userEmail;
             const busy = s.state === 'active' && !mine;
             return `
@@ -222,9 +214,7 @@ async function loadRobots() {
             </div>
         `;
         }).join('');
-        // Pick the cockpit from the robot-type toggle + device. Arm: headset →
-        // VR immersive cockpit, desktop → keyboard cockpit (both drive the same
-        // arm, the robot arbitrates). Go2: headset → VR, desktop → Go2 cockpit.
+        // Cockpit = robot-kind toggle + device: Arm → VR (headset) / keyboard (desktop); Go2 → VR / Go2 cockpit.
         listEl.querySelectorAll('.connect-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const arm = robotKind() === 'xarm';

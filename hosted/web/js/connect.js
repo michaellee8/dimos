@@ -1,7 +1,3 @@
-// Connect handlers — called from the Connect button (must run inside a user
-// gesture; that's why VR session creation is started immediately, not after
-// the WebRTC round-trip).
-
 import { setStatus } from './dom.js';
 import { mountHud } from './hud.js';
 import { setupLiveKit } from './livekit.js';
@@ -14,7 +10,6 @@ import { startVR } from './vr.js';
 import { startArmVR } from './vrarm.js';
 import { setupWebRTC } from './webrtc.js';
 
-// Operator transport follows what the robot connected with (broker surfaces it).
 function setupTransport(sessionId, transport) {
     return transport === 'livekit' ? setupLiveKit(sessionId) : setupWebRTC(sessionId);
 }
@@ -42,8 +37,6 @@ export async function connectToRobot(sessionId, robotName, transport) {
     }
 }
 
-// xArm immersive cockpit. Same VR-first gesture ordering as connectToRobot,
-// but the arm cockpit streams controller poses instead of drive twists.
 export async function connectXArm(sessionId, robotName, transport) {
     state.activeRobot = { session_id: sessionId, robot_name: robotName, transport: transport || 'cloudflare' };
     try {
@@ -67,14 +60,12 @@ export async function connectXArm(sessionId, robotName, transport) {
     }
 }
 
-// xArm desktop browser cockpit — keyboard EE-jog (no WebXR). Drives the same
-// hosted arm as connectXArm; the robot arbitrates VR vs keyboard.
 export async function connectArmBrowser(sessionId, robotName, transport) {
     state.activeRobot = { session_id: sessionId, robot_name: robotName, transport: transport || 'cloudflare' };
     try {
-        navigate('arm');           // renderArm draws the cockpit (inline HUD panel)
+        navigate('arm');
         await setupTransport(sessionId, transport);
-        startArmLoop();            // keyboard jog loop + telemetry tick
+        startArmLoop();
         setStatus(`Connected — ${robotName}`);
     } catch (e) {
         console.error(e);
@@ -91,7 +82,7 @@ export async function connectKeyboard(sessionId, robotName, transport) {
         await setupTransport(sessionId, transport);
         setStatus(`Connected — ${robotName}`);
         startKeyboardLoop();
-        mountHud();  // always-on metrics pill (browser view)
+        mountHud();
     } catch (e) {
         console.error(e);
         setStatus(`Connection failed: ${e.message}`);
@@ -99,18 +90,15 @@ export async function connectKeyboard(sessionId, robotName, transport) {
     }
 }
 
-// Go2 cockpit view. Same transport/drive path as connectKeyboard — the go2
-// view starts the keyboard loop itself on render, so we don't start it here.
 export async function connectGo2(sessionId, robotName, transport) {
     state.activeRobot = { session_id: sessionId, robot_name: robotName, transport: transport || 'cloudflare' };
     try {
-        navigate('go2');  // renderGo2() runs startKeyboardLoop() + startTick()
+        navigate('go2');  // renderGo2() starts the drive loop + telemetry tick itself
         await setupTransport(sessionId, transport);
         setStatus(`Connected — ${robotName}`);
     } catch (e) {
         console.error(e);
-        // renderGo2 already started the drive loop + telemetry tick; stop them
-        // or they survive the navigate and stack across retries.
+        // renderGo2 already started the drive loop + tick; stop them or they stack across retries.
         stopKeyboardLoop();
         stopTick();
         setStatus(`Connection failed: ${e.message}`);

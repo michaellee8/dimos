@@ -1,5 +1,3 @@
-// REST helpers + auth lifecycle.
-
 import { state } from './state.js';
 import { navigate } from './router.js';
 import { refreshTokens, tokenExpired } from './cognito.js';
@@ -10,8 +8,7 @@ export function brokerOrigin() {
 
 let refreshInFlight = null;
 
-// Refresh the ID token if it's expired/near expiry. Single-flight so a burst
-// of parallel api() calls doesn't fire N refresh requests.
+// Single-flight token refresh so a burst of parallel api() calls fires one refresh, not N.
 async function ensureFreshToken() {
     if (!state.token || !state.refreshToken) return;
     if (!tokenExpired(state.token)) return;

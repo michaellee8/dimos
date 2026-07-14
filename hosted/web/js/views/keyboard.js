@@ -1,6 +1,3 @@
-// Desktop / phone view: WASD + on-screen touch keys → TwistStamped on
-// cmd_unreliable. Same channel + cadence as VR.
-
 import { geometry_msgs, std_msgs } from 'https://esm.sh/jsr/@dimos/msgs@0.1.4';
 import { disconnect } from '../disconnect.js';
 import { createStallGate, videoMediaTime } from '../stall.js';
@@ -68,11 +65,9 @@ angular.z = 0</pre>
 function trackedKey(e) {
     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return null;
     const k = e.key.toLowerCase();
-    if (k.length === 1 && 'wasdqerf'.includes(k)) return k;  // drive: WASD + Q/E strafe; pose adds R/F height
-    if (e.key === 'Shift') return e.key;  // 2× fast
-    // Space = hold-to-slow. Deliberately NOT Ctrl (Ctrl+W closes the tab and
-    // JS cannot block it) and NOT Alt (Alt+D steals the address bar, bare Alt
-    // focuses the browser menu). Space has no reserved browser chords.
+    if (k.length === 1 && 'wasdqerf'.includes(k)) return k;  // drive WASD + Q/E strafe; pose adds R/F height
+    if (e.key === 'Shift') return e.key;
+    // Space = hold-to-slow. NOT Ctrl (Ctrl+W closes the tab, unblockable) / Alt (steals address bar/menu).
     if (e.key === ' ') return 'Space';
     return null;
 }
@@ -80,19 +75,17 @@ function onKeyDown(e) {
     const k = trackedKey(e);
     if (k === null) return;
     state.kbKeys.add(k);
-    e.preventDefault();  // Space would scroll / activate a focused button
+    e.preventDefault();
 }
 function onKeyUp(e) {
     const k = trackedKey(e);
     if (k === null) return;
     state.kbKeys.delete(k);
-    e.preventDefault();  // buttons fire their click on Space KEYUP — block it
+    e.preventDefault();  // buttons fire their click on Space keyup — block it
 }
 
-// Focus loss (alt-tab, click outside the window, tab hidden) swallows the
-// keyup, so a held W would stay "down" and the robot keeps driving with no way
-// to stop it (and S then cancels W to zero instead of reversing). Clearing all
-// held keys on blur/hide drops the next tick to a zero twist → robot stops.
+// Focus loss swallows the keyup, so a held key stays "down" and the robot keeps driving.
+// Clearing on blur/hide drops the next tick to a zero twist → robot stops.
 function clearHeldKeys() {
     if (state.kbKeys.size) state.kbKeys.clear();
 }
@@ -100,8 +93,6 @@ function onVisibilityChange() {
     if (document.hidden) clearHeldKeys();
 }
 
-// On-screen keys drive the same kbKeys set as the physical keyboard, so
-// buildTwist() is unchanged. Press-and-hold to move; release/leave to stop.
 const TOUCH_KEYS = {
     'key-w': 'w', 'key-a': 'a', 'key-s': 's', 'key-d': 'd',
     'key-q': 'q', 'key-e': 'e',
@@ -123,16 +114,13 @@ function bindTouchKeys() {
 }
 
 function buildTwist() {
-    // W/S forward-back, A/D turn, Q/E strafe. Shift = 2×, Space = 0.5× (slow).
     const kb = state.kbKeys;
     const shift = kb.has('Shift') && !kb.has('Space');
     const slow  = kb.has('Space') && !kb.has('Shift');
 
     if (state.poseMode) {
-        // PoseStand (go2 cockpit): same keys, body-pose axes about the COM —
-        // angular.x/y = roll/pitch, angular.z = yaw, linear.z = height. The
-        // robot feeds these to the firmware's stick posing, which saturates at
-        // 1.0, so amplitude is fixed here (speed bar is a locomotion concept).
+        // Body-pose axes about COM: angular.x/y=roll/pitch, angular.z=yaw, linear.z=height.
+        // Fixed amplitude — firmware stick posing saturates at 1.0.
         const amp = shift ? 0.9 : (slow ? 0.2 : 0.45);
         return {
             linear_x:  0,
@@ -149,9 +137,7 @@ function buildTwist() {
     const strafe = (kb.has('q') ? 1 : 0) - (kb.has('e') ? 1 : 0);
 
     const scale = shift ? 2.0 : (slow ? 0.5 : 1.0);
-    // Speed-bar multiplier: state.js initializes {lin:0.5, ang:0.5} (Normal),
-    // so the standalone keyboard view also drives at the safe Normal scale;
-    // the go2 speed bar overrides it. (The || fallback only covers undefined.)
+    // Default {lin:0.5, ang:0.5} (Normal); the go2 speed bar overrides state.speedScale.
     const sp = state.speedScale || { lin: 0.5, ang: 0.5 };
     return {
         linear_x:  fwd * scale * sp.lin,
@@ -175,22 +161,18 @@ function updateKeyVisuals() {
 const DRIVE_KEYS = ['w', 'a', 's', 'd', 'q', 'e', 'r', 'f'];
 
 export function startKeyboardLoop() {
-    // Idempotent — callers re-render and would otherwise stack listeners.
-    stopKeyboardLoop();
+    stopKeyboardLoop();  // idempotent — callers re-render and would otherwise stack listeners
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
-    // Release everything when focus/visibility is lost — the keyup won't arrive.
     window.addEventListener('blur', clearHeldKeys);
     document.addEventListener('visibilitychange', onVisibilityChange);
-    bindTouchKeys();  // on-screen keys → same kbKeys set (phone/mouse)
+    bindTouchKeys();
     let twistSeq = 0;
-    // Fresh gate per session — stall state must not leak across connects.
-    const stallGate = createStallGate();
+    const stallGate = createStallGate();  // fresh per session — stall state must not leak across connects
     state.videoStall = { stalled: false, blocked: false, armed: false };
 
     const sendTwist = (t) => {
-        // Stamp in the robot's clock frame (clockOffsetMs is 0 until the first
-        // pong lands; falls back gracefully on old brokers).
+        // Stamp in the robot's clock frame (clockOffsetMs is 0 until the first pong lands).
         const nowMs = Date.now() + state.clockOffsetMs;
         const ts = new std_msgs.Time({
             sec: Math.floor(nowMs / 1000),
@@ -205,16 +187,13 @@ export function startKeyboardLoop() {
             }),
         });
         state.cmdChannel.send(twist.encode());
-        state.cmdSendCount++;  // for cmdHz (operator send rate); sampled once/sec
+        state.cmdSendCount++;
     };
 
     state.kbInterval = setInterval(() => {
-        // Always update key visuals; only send/readout when channel is up.
         updateKeyVisuals();
-        // Video-freshness gate: driving blind on a frozen frame is the failure
-        // mode. Auto-resumes when frames return, but only unblocks after all
-        // drive keys are released (neutral gate) so a held W can't lunge the
-        // robot the instant the picture unfreezes.
+        // Video-freshness gate: don't drive blind on a frozen frame. Auto-resumes when frames
+        // return, but only after all drive keys are released so a held W can't lunge on unfreeze.
         const keysHeld = DRIVE_KEYS.some((k) => state.kbKeys.has(k));
         const wasBlocked = state.videoStall.blocked;
         state.videoStall = stallGate.sample(
@@ -224,13 +203,11 @@ export function startKeyboardLoop() {
         );
         if (!state.cmdChannel || state.cmdChannel.readyState !== 'open') return;
         if (state.videoStall.blocked) {
-            // One explicit zero-twist on the transition; after that the robot's
-            // 200ms cmd_vel deadman keeps it stopped while we stay silent.
+            // One zero-twist on the transition; after that the robot's 200ms cmd_vel deadman holds stop.
             if (!wasBlocked) sendTwist({ linear_x: 0, linear_y: 0, linear_z: 0, angular_z: 0 });
             return;
         }
-        // Cockpit gates drive on posture: WASD moves only after Stand/Drive.
-        // Standalone keyboard view leaves driveEnabled=true, so unaffected.
+        // Cockpit gates drive on posture (WASD only after Stand/Drive); standalone view leaves driveEnabled=true.
         if (!state.driveEnabled) return;
         const t = buildTwist();
         sendTwist(t);

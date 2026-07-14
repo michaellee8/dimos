@@ -1,8 +1,5 @@
-// LiveKit transport — operator side. Drop-in alternative to setupWebRTC for
-// sessions whose robot connected with transport="livekit". Produces the same
-// state.* surface (state.cmdChannel / state.stateChannel shims, robot-cam video)
-// the rest of the app already drives, so keyboard.js / vr.js / hud.js / send()
-// and clock-sync work unchanged.
+// LiveKit transport (operator). Drop-in for setupWebRTC when robot's transport="livekit".
+// Produces the same state.* surface (cmdChannel/stateChannel shims, robot-cam video) so keyboard/vr/hud/send/clock-sync work unchanged.
 
 import { api } from './api.js';
 import { ensureRobotCam, setStatus } from './dom.js';
@@ -29,8 +26,7 @@ function toU8(bytes) {
 }
 
 export async function setupLiveKit(sessionId) {
-    // Same re-entry guard as setupWebRTC — a double-click Connect would
-    // otherwise spin up two Rooms that fight over state.*.
+    // Re-entry guard: a double-click Connect would spin up two Rooms fighting over state.*.
     if (state.setupInProgress) {
         throw new Error('Connect already in progress — disconnect first to retry');
     }
@@ -47,20 +43,14 @@ async function _setupLiveKitInner(sessionId) {
     if (!LK) throw new Error('LiveKit client SDK not loaded');
     setStatus('Connecting (LiveKit)...');
 
-    // The broker mints a room-scoped token; LiveKit handles ICE/TURN itself, so
-    // there is no SDP exchange or turn-credentials fetch here (unlike WebRTC).
+    // Broker mints a room-scoped token; LiveKit handles ICE/TURN, so no SDP exchange here.
     const data = await api('POST', `/sessions/${sessionId}/join`, { role: 'operator' });
     if (!data.url || !data.token) throw new Error('Broker did not return LiveKit url/token');
 
-    // adaptiveStream downgrades video whose attached element is hidden/zero-size
-    // — exactly the VR GL-texture <video>. Teleop wants full rate, so keep off.
+    // adaptiveStream would downgrade the hidden VR GL-texture <video>; teleop wants full rate — keep off.
     const room = new LK.Room({ adaptiveStream: false });
     state.room = room;
 
-    // Robot camera track → the shared <video> element (same one the WebRTC path
-    // feeds via pc.ontrack), so keyboard view + VR GL texture pick it up as-is.
-    // The track's RTCRtpReceiver also feeds the video-stats sampler — the SDK
-    // owns the PeerConnection, so state.pc.getStats() doesn't exist here.
     let videoTrack = null;
     const maybeStartStats = () => {
         const receiver = videoTrack?.receiver;
@@ -72,9 +62,7 @@ async function _setupLiveKitInner(sessionId) {
         if (track.kind !== 'video') return;
         const existed = !!document.getElementById('robot-cam');
         const v = ensureRobotCam();
-        // Detach the prior track before rebinding — on a robot republish this
-        // fires again, and the old track + its receiver (still held by the
-        // stats sampler) would otherwise leak.
+        // Detach prior track before rebinding — on a robot republish the old track + its receiver (held by stats sampler) would leak.
         if (videoTrack && videoTrack !== track) {
             try { videoTrack.detach(v); } catch (_) {}
         }
@@ -82,31 +70,28 @@ async function _setupLiveKitInner(sessionId) {
         if (existed) v.style.display = 'block';
         v.play?.().catch(() => {});
         videoTrack = track;
-        maybeStartStats();  // restarts the sampler against the new receiver
+        maybeStartStats();
     });
 
-    // Robot replies on the back channel by protocol; LiveKit never echoes our
-    // own published data, so the forward topic carries nothing inbound.
+    // Robot replies on the back channel by protocol; LiveKit never echoes our own published data.
     room.on(LK.RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
         if (topic === STATE_BACK_TOPIC) {
             handleStateMessage(DEC.decode(payload));
         }
     });
 
-    // Drop refs on terminal disconnect so send() doesn't fire into a dead
-    // Room and a fresh setupLiveKit doesn't skip teardown.
+    // Drop refs on terminal disconnect so send() doesn't fire into a dead Room and a fresh setup doesn't skip teardown.
     room.on(LK.RoomEvent.Disconnected, () => {
         console.info('[livekit] room disconnected');
         if (state.room === room) {
-            stopVideoStats();  // sampler holds this room's track receiver
+            stopVideoStats();
             state.room = null;
             state.cmdChannel = null;
             state.stateChannel = null;
         }
     });
 
-    // On connect failure/timeout, tear down the half-open Room — otherwise it
-    // keeps reconnecting in the background and a retry spins up a second Room.
+    // On failure/timeout tear down the half-open Room — else it keeps reconnecting and a retry spins up a second Room.
     try {
         await Promise.race([
             room.connect(data.url, data.token),
@@ -118,10 +103,7 @@ async function _setupLiveKitInner(sessionId) {
         throw err;
     }
 
-    // Shim the outbound DataChannels onto LiveKit topics: send()/startClockSync
-    // only touch .readyState + .send(). readyState tracks room.state so callers
-    // stop sending mid-reconnect; .close() is a no-op (disconnect tears down);
-    // publishData rejections are swallowed (fire-and-forget).
+    // DataChannel shims onto LiveKit topics: readyState tracks room.state so callers stop sending mid-reconnect; close() is a no-op; publishData rejections swallowed.
     const lp = room.localParticipant;
     const publish = (bytes, opts) => lp.publishData(bytes, opts).catch(() => {});
     const isOpen = () => (room.state === 'connected' ? 'open' : 'closed');
@@ -138,8 +120,6 @@ async function _setupLiveKitInner(sessionId) {
 
     startClockSync(state.stateChannel);
     startOpHeartbeat(sessionId);
-    // Video stats: sampled off the subscribed track's RTCRtpReceiver (the SDK
-    // owns the PC). TrackSubscribed may fire before or after this point —
-    // whichever side runs second actually starts the sampler.
+    // maybeStartStats also runs from TrackSubscribed; whichever side runs second actually starts the sampler.
     maybeStartStats();
 }

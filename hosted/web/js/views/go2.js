@@ -1,33 +1,13 @@
-// Go2 teleop cockpit — swappable camera/map stage, control column right.
-//
-// Posture/action commands go over state_reliable (acked on state_reliable_back);
-// telemetry + battery + occupancy map come back the same way; video is the
-// WebRTC track; drive (WASD/QE) reuses the keyboard loop / cmdChannel exactly
-// as views/keyboard.js does.
-//
-// Preview with no broker:  window._teleopDev.previewGo2()
-
 import { disconnect } from '../disconnect.js';
 import { CONFIRM_ACTIONS, POSTURE_STATE, SPEEDS, sendEstop, sendEstopClear } from '../go2cmd.js';
 import { applyStampCrop, hudDetailRows, hudSummaryLine, sampleCmdHz, socHealth, statsHealth, transportLabel } from '../hud.js';
 import { escHtml, state } from '../state.js';
 import { startKeyboardLoop } from './keyboard.js';
 
-// Command catalog — labels only; SPORT_CMD ids live robot-side.
-// StandReady = standup + balance_stand (drive-ready); they always go together,
-// so there's no separate Stand Up / Balance. No Recovery button either:
-// Stand/Drive already ends in RecoveryStand robot-side, so it doubles as the
-// recovery action — one less thing on the panel.
-// PoseStand = firmware Pose mode: WASD poses the body about the COM
-// (pitch/roll/yaw/height) with the feet planted instead of driving.
-// Button shelved until the axis mapping is verified on hardware — re-add
-// { name: 'PoseStand', label: 'Pose' } here; the full pipeline stays wired.
 const POSTURE = [
     { name: 'StandReady', label: 'Stand / Drive' },
     { name: 'StandDown', label: 'Sit' },
 ];
-// Robot actions. Hello/Stretch verified working; Pounce/Jump are acrobatic and
-// UNVERIFIED on this firmware (may no-op) — and the robot leaps, so clear space.
 const ACTIONS = [
     { name: 'Hello', label: 'Shake Hand' },
     { name: 'Stretch', label: 'Stretch' },
@@ -35,39 +15,33 @@ const ACTIONS = [
     { name: 'FrontJump', label: 'Jump Forward' },
 ];
 
-// Camera tabs → robot composites the selected cameras into the one video track.
-// cam1 = Go2, cam2 = RealSense. Toggle on/off; both = side-by-side. (B-ready:
-// the same {camera_select, cams:[...]} protocol works for per-camera tracks.)
-// SPEEDS / CONFIRM_ACTIONS / POSTURE_STATE live in go2cmd.js (shared with VR).
 const CAMS = [
     { id: 'cam1', label: 'Cam 1' },
     { id: 'cam2', label: 'Cam 2' },
 ];
 
-// Local UI state; battery/posture/estop reconcile from real telemetry.
 const ui = {
-    posture: 'StandReady',  // robot auto-stands+balances on blueprint start
+    posture: 'StandReady',
     estopped: false,
-    speedMode: 'normal',      // speed bar selection
-    selectedCams: ['cam1'],   // active camera tabs (default Go2)
-    obstacleAvoid: true,      // onboard obstacle avoidance on/off (robot boots ON)
-    light: 0,                 // head-LED brightness 0..1 (robot boots off; telemetry reconciles)
-    lightDragging: false,     // don't let reconcile fight an in-progress drag
-    robotVideoStalled: false, // robot-confirmed no-frames watchdog (telemetry)
-    nonce: 0,                 // monotonic command id for ack matching
-    pending: new Map(),       // nonce -> {el, timer}
-    mainView: 'camera',       // 'camera' | 'map' — which is the big stage; other → PiP
-    lastMap: null,            // latest decoded {type:map,...} for redraw between frames
-    lastOdom: null,           // latest {x,y,yaw,ts} for the robot marker
-    navGoal: null,            // last clicked nav goal {x,y} world coords
-    mapZoom: 1,               // pan/zoom view transform on the minimap
-    mapPanX: 0, mapPanY: 0,   // canvas-px pan offset (applied before letterbox/flip)
-    pipW: 192, pipH: 120,     // floating PiP size in px (user-resizable, free ratio)
+    speedMode: 'normal',
+    selectedCams: ['cam1'],
+    obstacleAvoid: true,
+    light: 0,
+    lightDragging: false,
+    robotVideoStalled: false,
+    nonce: 0,
+    pending: new Map(),
+    mainView: 'camera',
+    lastMap: null,
+    lastOdom: null,
+    navGoal: null,
+    mapZoom: 1,
+    mapPanX: 0, mapPanY: 0,
+    pipW: 192, pipH: 120,
 };
 
 let tickTimer = null;
 
-// Is the operator → robot command channel up? (state_reliable)
 function cmdReady() {
     return state.stateChannel && state.stateChannel.readyState === 'open' && !ui.estopped;
 }
@@ -91,39 +65,21 @@ export function renderGo2(c) {
         </header>
 
         <div class="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-4">
-            <!-- LEFT: main stage — camera OR map, swappable. The non-main one
-                 shows in the floating PiP (bottom-right). state.mainView toggles. -->
             <section class="bg-bg-950 border border-[#2a2a2a] rounded-xl overflow-hidden flex flex-col min-h-0">
-                <!-- Slim control strip: swap + camera tabs. Kept compact (px-2
-                     py-1, text-[11px]) so it's a thin bar, not a tall column. -->
                 <div class="flex items-center gap-1.5 px-2 py-1 border-b border-[#2a2a2a] shrink-0">
-                    <!-- Swap button — LEFT of the camera tabs (per spec). Flips
-                         which of {camera, map} is the main stage vs the PiP. -->
                     <button id="view-swap" class="strip-btn term-caps tracking-normal" title="Swap camera / map">
                         <span id="view-swap-label">MAP VIEW</span>
                     </button>
-                    <!-- Operator mic → robot. Track is captured muted at connect;
-                         this flips track.enabled. Greyed when no mic was granted. -->
                     <button id="mic-toggle" class="strip-btn term-caps tracking-normal" title="Operator mic → robot">
                         <span id="mic-toggle-label">AUDIO OFF</span>
                     </button>
-                    <!-- Camera tabs: toggle which cameras the robot composites into
-                         the single video. At least one stays selected. -->
                     <div class="flex items-center gap-1.5 ml-auto" id="cam-tabs"></div>
                 </div>
                 <div class="relative flex-1 bg-black flex items-center justify-center min-h-0" id="stage">
-                    <!-- Camera + map are BOTH always in the DOM; setMainView()
-                         toggles a .is-main / .is-pip class on each so one fills
-                         the stage and the other floats in the corner. The live
-                         <video> is never reparented (that can drop the track). -->
                     <video id="robot-cam" autoplay muted playsinline
                         class="object-contain is-main" style="display:none;"></video>
-                    <!-- Map canvas — occupancy grid + robot marker drawn on top. -->
                     <canvas id="map-canvas" class="is-pip"></canvas>
-                    <!-- PiP resize handle (shown only over the floating window). -->
                     <div id="pip-resize" title="Drag to resize"></div>
-                    <!-- Centered status (Negotiating WebRTC…) + placeholder, both
-                         hidden once the video track is actually playing. -->
                     <div id="video-placeholder" class="absolute inset-0 flex flex-col items-center justify-center text-center text-gray-500">
                         <div class="text-6xl mb-3">🐕</div>
                         <div id="teleop-status" class="text-lg text-gray-300 px-4 py-2 bg-bg-950/80 border border-[#2a2a2a] rounded-lg">
@@ -149,24 +105,20 @@ export function renderGo2(c) {
                 </div>
             </section>
 
-            <!-- RIGHT: control column -->
             <aside class="flex flex-col gap-2 min-h-0 overflow-y-auto pr-1">
                 <div id="blocked" class="hidden blocked-banner rounded-md px-3 py-2 text-xs term-caps shrink-0"></div>
 
-                <!-- Battery: symbol+label left, % right. No bar. -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0 flex items-center justify-between">
                     <span class="text-sm text-gray-400">🔋 Battery</span>
                     <span id="batt-pct" class="text-sm font-semibold text-dim-400">—%</span>
                 </section>
 
-                <!-- Obstacle avoidance toggle -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0 flex items-center justify-between">
                     <span class="text-sm text-gray-400">Obstacle avoidance</span>
                     <button id="obstacle-toggle" class="px-3 py-1 text-xs term-caps rounded border border-dim-700 text-dim-400">ON</button>
                 </section>
 
 
-                <!-- Head light brightness (0..1 → firmware levels 0-10) -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0 flex items-center gap-3">
                     <span class="text-sm text-gray-400 shrink-0">💡 Light</span>
                     <input id="light-slider" type="range" min="0" max="1" step="0.1" value="0"
@@ -174,7 +126,6 @@ export function renderGo2(c) {
                     <span id="light-val" class="text-xs font-mono text-dim-400 w-10 text-right">0%</span>
                 </section>
 
-                <!-- Telemetry: summary always; click to expand full detail. -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0">
                     <button id="hud-toggle" class="w-full flex items-center justify-between mb-2">
                         <span class="term-caps text-xs text-gray-500">Telemetry <span id="hud-caret" class="text-gray-600">▸</span></span>
@@ -184,26 +135,21 @@ export function renderGo2(c) {
                     <div id="hud-detail" class="hidden mt-2 pt-2 border-t border-[#2a2a2a] space-y-2.5"></div>
                 </section>
 
-                <!-- Posture -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0">
                     <div class="term-caps text-xs text-gray-500 mb-2">Posture</div>
                     <div class="grid grid-cols-2 gap-2">${POSTURE.map(btn).join('')}</div>
                 </section>
 
-                <!-- Actions -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0">
                     <div class="term-caps text-xs text-gray-500 mb-2">Actions</div>
                     <div class="grid grid-cols-2 gap-2">${ACTIONS.map(btn).join('')}</div>
                 </section>
 
-                <!-- Speed bar: Normal / High / Rage -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0">
                     <div class="term-caps text-xs text-gray-500 mb-2">Speed</div>
                     <div class="grid grid-cols-3 gap-2" id="speed-bar"></div>
                 </section>
 
-                <!-- WASD drive indicator: lights up keys as they're pressed
-                     (updateKeyVisuals() in keyboard.js toggles .pressed by id). -->
                 <section class="bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0">
                     <div class="term-caps text-xs text-gray-500 mb-2" id="drive-title">Drive</div>
                     <div class="flex flex-col items-center gap-2">
@@ -225,9 +171,6 @@ export function renderGo2(c) {
                     </div>
                 </section>
 
-                <!-- E-STOP: sticks to bottom of the aside as it scrolls.
-                     Original horizontal shape (full column width) preserved;
-                     background content scrolls behind it. -->
                 <section id="estop-dock" class="sticky bottom-0 z-10 mt-auto bg-bg-950 border border-[#2a2a2a] rounded-md p-3 shrink-0 shadow-lg">
                     <button id="estop" class="estop">■ EMERGENCY STOP</button>
                     <button id="rearm" class="hidden mt-2 w-full py-2 text-xs term-caps text-gray-300 border border-[#2a2a2a] rounded hover:border-dim-700">
@@ -241,25 +184,19 @@ export function renderGo2(c) {
     wireGo2();
     refreshControls();
     startTick();
-    // Drive: reuse the proven keyboard loop verbatim — WASD → TwistStamped on
-    // state.cmdChannel (same as views/keyboard.js). The loop's updateKeyVisuals()
-    // lights up the #key-w/a/s/d Drive panel as keys are pressed.
     startKeyboardLoop();
 }
 
-// ── interaction ──────────────────────────────────────────────────────
 function wireGo2() {
     document.getElementById('disconnectBtn').onclick = disconnect;
 
-    // Telemetry expand/collapse — summary always, full detail grid on click.
     document.getElementById('hud-toggle').addEventListener('click', () => {
         const detail = document.getElementById('hud-detail');
         const collapsed = detail.classList.toggle('hidden');
         document.getElementById('hud-caret').textContent = collapsed ? '▸' : '▾';
-        if (!collapsed) renderTelemetryGrid();  // populate immediately on expand
+        if (!collapsed) renderTelemetryGrid();
     });
 
-    // Camera tabs: render toggles, wire selection.
     const tabs = document.getElementById('cam-tabs');
     tabs.innerHTML = CAMS.map((c) =>
         `<button data-cam="${c.id}" class="px-4 py-0.5 rounded text-[11px] leading-none border border-[#2a2a2a] text-gray-400">${c.label}</button>`
@@ -268,7 +205,6 @@ function wireGo2() {
         b.addEventListener('click', () => toggleCam(b.dataset.cam)));
     renderCamTabs();
 
-    // Speed bar: render 3 segments, select current, wire selection.
     const bar = document.getElementById('speed-bar');
     bar.innerHTML = SPEEDS.map((s) =>
         `<button class="cmd-btn" data-speed="${s.mode}" data-status="idle"><span>${s.label}</span></button>`
@@ -280,9 +216,6 @@ function wireGo2() {
     renderObstacleToggle();
     wireLightSlider();
 
-    // Video: webrtc.js sets srcObject + display:block on ontrack, but doesn't
-    // know about our placeholder. Hide the dog+status overlay once frames flow
-    // ('playing'); show it again if the stream drops.
     const cam = document.getElementById('robot-cam');
     const placeholder = document.getElementById('video-placeholder');
     const showPlaceholder = (on) => placeholder && placeholder.classList.toggle('hidden', !on);
@@ -290,10 +223,7 @@ function wireGo2() {
         cam.style.display = 'block';
         showPlaceholder(false);
     });
-    cam.addEventListener('emptied', () => showPlaceholder(true)); // stream cleared on disconnect
-    // The frame dimensions change when the robot switches cameras (e.g. dual-cam
-    // is wider). Re-crop the benchmark strip the instant that happens, so it
-    // never flashes into view between the switch and the next 1Hz stats tick.
+    cam.addEventListener('emptied', () => showPlaceholder(true));
     cam.addEventListener('resize', applyStampCrop);
 
     document.querySelectorAll('.cmd-btn[data-cmd]').forEach((b) =>
@@ -312,19 +242,12 @@ function wireGo2() {
         refreshControls();
     });
 
-    // Resolve command acks coming back on state_reliable_back (via webrtc.js).
     state.onCmdAck = onCmdAck;
-    // Reconcile controls from robot-authoritative telemetry state (3Hz).
     state.onRobotState = onRobotState;
-    // Minimap: occupancy grid (slow) + robot pose (fast), both on the
-    // map_unreliable channel; handlers below.
     state.onMap = onMap;
     state.onOdom = onOdom;
     document.getElementById('view-swap').addEventListener('click', () => setMainView());
     wireMicToggle();
-    // Click the floating PiP to swap too. Both media elements are always in the
-    // DOM; only the one with .is-pip is visually the PiP, so a click on either
-    // (guarded to the PiP one) flips the view.
     for (const id of ['robot-cam', 'map-canvas']) {
         document.getElementById(id).addEventListener('click', (e) => {
             if (e.currentTarget.classList.contains('is-pip')) setMainView();
@@ -332,15 +255,13 @@ function wireGo2() {
     }
     bindMapPanZoom();
     bindPipResize();
-    setMainView('camera');  // default: camera main, map floating (per spec)
+    setMainView('camera');
     window.addEventListener('resize', positionPipHandle);
 
-    selectSpeed(ui.speedMode, /*sendToRobot=*/ false);  // reflect default selection
+    selectSpeed(ui.speedMode, /*sendToRobot=*/ false);
 }
 
-// Drag the bottom-left handle to resize the floating PiP. Aspect ratio is
-// LOCKED — dragging scales the window uniformly (only the scale changes, the
-// video/map shape doesn't). Size lives in ui.pipW/pipH, applied by setMainView.
+// Aspect ratio is LOCKED — dragging scales the PiP uniformly.
 function bindPipResize() {
     const handle = document.getElementById('pip-resize');
     const stage = document.getElementById('stage');
@@ -356,23 +277,20 @@ function bindPipResize() {
         startX = e.clientX; startY = e.clientY;
         const r = pip.getBoundingClientRect();
         startW = r.width;
-        ratio = r.height / r.width;  // lock the current aspect
+        ratio = r.height / r.width;
         handle.setPointerCapture(e.pointerId);
     });
     handle.addEventListener('pointermove', (e) => {
         if (!resizing) return;
         const pip = pipEl();
         if (!pip) return;
-        // Handle is bottom-left (PiP anchored top-right): dragging left OR down
-        // grows it. Drive width off the larger of the two deltas, derive height
-        // from the locked ratio so the shape never changes.
         const grow = Math.max(startX - e.clientX, e.clientY - startY);
         ui.pipW = Math.max(MIN_W, Math.min(MAX_W, startW + grow));
         ui.pipH = Math.round(ui.pipW * ratio);
         pip.style.width = ui.pipW + 'px';
         pip.style.height = ui.pipH + 'px';
         positionPipHandle();
-        if (pip.id === 'map-canvas') drawMap();  // canvas backing store follows size
+        if (pip.id === 'map-canvas') drawMap();
     });
     const end = (e) => {
         if (!resizing) return;
@@ -383,9 +301,7 @@ function bindPipResize() {
     handle.addEventListener('pointercancel', end);
 }
 
-// Operator mic → robot. The track is captured MUTED at connect (webrtc.js);
-// this just flips track.enabled. No track (mic denied / robot side without
-// audio_in) → the button reads N/A and stays inert.
+// Track is captured MUTED at connect (webrtc.js); this flips track.enabled.
 function wireMicToggle() {
     const btn = document.getElementById('mic-toggle');
     const label = document.getElementById('mic-toggle-label');
@@ -402,15 +318,11 @@ function wireMicToggle() {
         if (t) t.enabled = !t.enabled;
         sync();
     });
-    // The view renders before webrtc.js captures the mic — re-sync when it lands.
     state.onMicReady = sync;
     sync();
 }
 
-// Click-to-navigate: canvas px → world metres (exact inverse of drawMap's
-// pan/zoom → letterbox → y-flip chain) → {type:'nav_goal'} on state_reliable.
-// The robot publishes it as a goal_request for the planner; live WASD input
-// always overrides the planner's twists robot-side.
+// canvas px → world metres: exact inverse of drawMap's pan/zoom → letterbox → y-flip chain.
 function sendNavGoal(e) {
     const m = ui.lastMap;
     const canvas = document.getElementById('map-canvas');
@@ -419,16 +331,14 @@ function sendNavGoal(e) {
     const rect = canvas.getBoundingClientRect();
     const cw = rect.width, ch = rect.height;
     const cx = e.clientX - rect.left, cy = e.clientY - rect.top;
-    // undo pan + zoom-about-centre
     const ux = (cx - ui.mapPanX - cw / 2) / ui.mapZoom + cw / 2;
     const uy = (cy - ui.mapPanY - ch / 2) / ui.mapZoom + ch / 2;
-    // undo letterbox + y-flip (world y-up)
     const scale = Math.min(cw / m.w, ch / m.h);
     const dw = m.w * scale, dh = m.h * scale;
     const dx = (cw - dw) / 2, dy = (ch - dh) / 2;
     const col = (ux - dx) / scale;
     const row = ((dy + dh) - uy) / scale;
-    if (col < 0 || col > m.w || row < 0 || row > m.h) return;  // letterbox click
+    if (col < 0 || col > m.w || row < 0 || row > m.h) return;
     const wx = m.origin[0] + col * m.res;
     const wy = m.origin[1] + row * m.res;
     ui.navGoal = { x: wx, y: wy };
@@ -438,9 +348,6 @@ function sendNavGoal(e) {
     drawMap();
 }
 
-// Scroll-to-zoom (about the cursor) + drag-to-pan on the minimap, active only
-// while the map is the MAIN view (the PiP keeps its click-to-swap). Double-click
-// resets. All in canvas px; drawMap applies ui.mapZoom / mapPan{X,Y}.
 function bindMapPanZoom() {
     const canvas = document.getElementById('map-canvas');
     if (!canvas) return;
@@ -455,13 +362,11 @@ function bindMapPanZoom() {
         const prev = ui.mapZoom;
         const next = Math.min(MAX_Z, Math.max(MIN_Z, prev * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
         if (next === prev) return;
-        // Keep the point under the cursor fixed: solve pan so (mx,my) maps to
-        // the same map location before and after the zoom change.
         const cx = rect.width / 2, cy = rect.height / 2;
         ui.mapPanX = mx - (mx - ui.mapPanX - cx) * (next / prev) - cx;
         ui.mapPanY = my - (my - ui.mapPanY - cy) * (next / prev) - cy;
         ui.mapZoom = next;
-        if (next === MIN_Z) { ui.mapPanX = 0; ui.mapPanY = 0; }  // snap home at 1×
+        if (next === MIN_Z) { ui.mapPanX = 0; ui.mapPanY = 0; }
         drawMap();
     }, { passive: false });
 
@@ -483,7 +388,6 @@ function bindMapPanZoom() {
         if (!dragging) return;
         dragging = false; canvas.style.cursor = '';
         try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
-        // A tap (no real drag) on the main map = click-to-navigate.
         if (moved < 5) sendNavGoal(e);
     };
     canvas.addEventListener('pointerup', endDrag);
@@ -496,13 +400,7 @@ function bindMapPanZoom() {
     });
 }
 
-// ── minimap: map + robot marker ──────────────────────────────────────
-// Camera stays the WebRTC <video>; the map is a <canvas> we draw ourselves.
-// The two swap between the big stage and the floating PiP.
-
-// Swap which of {camera, map} is the big stage vs the floating PiP. With no
-// arg, flips the current view. Never reparents the <video> (would drop the
-// track) — just toggles .is-main / .is-pip so CSS repositions each element.
+// Never reparents the <video> (would drop the track) — toggles .is-main / .is-pip.
 function setMainView(view) {
     ui.mainView = view || (ui.mainView === 'camera' ? 'map' : 'camera');
     const cam = document.getElementById('robot-cam');
@@ -512,8 +410,6 @@ function setMainView(view) {
     cam.classList.toggle('is-pip', !camMain);
     map.classList.toggle('is-main', !camMain);
     map.classList.toggle('is-pip', camMain);
-    // Apply the user-resized PiP size to whichever element is now the PiP;
-    // clear it from the one that's now main (so it fills the stage).
     for (const el of [cam, map]) {
         if (el.classList.contains('is-pip')) {
             el.style.width = ui.pipW + 'px';
@@ -522,22 +418,14 @@ function setMainView(view) {
             el.style.width = ''; el.style.height = '';
         }
     }
-    // Button/label name what a click switches TO (the other view).
     const label = document.getElementById('view-swap-label');
     if (label) label.textContent = camMain ? 'MAP VIEW' : 'CAM VIEW';
-    // Reset pan/zoom whenever the map isn't the main view — a zoomed PiP is
-    // never what you want, and it starts fresh next time it's promoted.
     if (camMain) { ui.mapZoom = 1; ui.mapPanX = 0; ui.mapPanY = 0; }
-    // Re-crop the benchmark strip NOW, not on the next 1Hz tick — the video's
-    // box just changed size, and a stale clip-path would flash the strip.
     applyStampCrop();
     positionPipHandle();
-    // Canvas backing-store size changed (stage <-> PiP) → redraw at new size.
     drawMap();
 }
 
-// The resize handle sits at the PiP's bottom-left corner (PiP is top-right).
-// Only shown while a PiP exists; hidden isn't meaningful when nothing floats.
 function pipEl() { return document.querySelector('#stage .is-pip'); }
 function positionPipHandle() {
     const handle = document.getElementById('pip-resize');
@@ -550,9 +438,6 @@ function positionPipHandle() {
     handle.style.top = (pr.bottom - sr.top - 11) + 'px';
 }
 
-// Occupancy grid (~2Hz). Decode the PNG once here (off the fast odom path),
-// cache it, then redraw. The robot bakes the color palette into the PNG
-// (transparent unknown), so there's no colormap here — drawMap just blits it.
 function onMap(msg) {
     if (!msg || !msg.png_b64) return;
     const img = new Image();
@@ -560,28 +445,21 @@ function onMap(msg) {
         ui.lastMap = { ...msg, img };
         drawMap();
     };
-    img.onerror = () => {};  // ignore a corrupt frame; the next one redraws
+    img.onerror = () => {};
     img.src = 'data:image/png;base64,' + msg.png_b64;
 }
 
-// Robot pose (~15Hz). Cache + redraw so the marker moves smoothly between the
-// slower map frames. No PNG work here.
 function onOdom(msg) {
     if (!msg) return;
     ui.lastOdom = msg;
     drawMap();
 }
 
-// Draw the cached map (scaled to fill the canvas, nearest-neighbour so cells
-// stay crisp) then the robot glyph, placed via the grid origin + resolution:
-//   col = (odom.x - origin[0]) / res ;  row = (odom.y - origin[1]) / res
-// The grid is row-major from origin; y grows up in world but down in canvas,
-// so the row is flipped. Yaw rotates the glyph (0 = +x world = canvas right).
+// Grid is row-major from origin; world y grows up, canvas down, so the row is flipped.
 function drawMap() {
     const canvas = document.getElementById('map-canvas');
     if (!canvas) return;
     const m = ui.lastMap;
-    // Size the backing store to the element's box (avoids blur on resize/swap).
     const rect = canvas.getBoundingClientRect();
     const cw = Math.max(1, Math.round(rect.width));
     const ch = Math.max(1, Math.round(rect.height));
@@ -597,62 +475,45 @@ function drawMap() {
         ctx.fillText('awaiting map…', 10, 20);
         return;
     }
-    // Fit the grid image into the canvas preserving aspect; letterbox the rest.
     const scale = Math.min(cw / m.w, ch / m.h);
     const dw = m.w * scale, dh = m.h * scale;
     const dx = (cw - dw) / 2, dy = (ch - dh) / 2;
     ctx.imageSmoothingEnabled = false;
 
-    // Pan/zoom view transform, applied around EVERYTHING below so the map and
-    // the robot marker move together. Zoom is about the canvas centre; pan is a
-    // plain canvas-px offset. Wraps the letterbox+flip that follow.
     ctx.save();
     ctx.translate(ui.mapPanX, ui.mapPanY);
     ctx.translate(cw / 2, ch / 2);
     ctx.scale(ui.mapZoom, ui.mapZoom);
     ctx.translate(-cw / 2, -ch / 2);
 
-    // The grid is row-major from the bottom-left origin: row 0 = min world y
-    // (south), col 0 = min world x (west). Canvas y grows DOWN, so we flip the
-    // image vertically to put world-north at the top — matching DimOS's own
-    // renderer (OccupancyGrid.to_rerun does grid[::-1] for the same reason).
-    // Everything below is drawn in this flipped frame so the marker agrees.
     ctx.save();
     ctx.translate(dx, dy + dh);
-    ctx.scale(1, -1);                 // y-up within [0..dh] → world-north = top
+    ctx.scale(1, -1);
     ctx.drawImage(m.img, 0, 0, dw, dh);
 
-    // Robot footprint, in the same flipped frame. Drawn as a to-scale box:
-    // the Go2 body is 0.70 m long (+x / heading) × 0.31 m wide (+y). Convert
-    // metres → cells → px via the map scale; a min-size floor keeps it visible
-    // on wide/zoomed-out maps where true scale would be a few px.
     const o = ui.lastOdom;
     if (o && m.res > 0) {
-        const col = (o.x - m.origin[0]) / m.res;   // cells east of origin
-        const row = (o.y - m.origin[1]) / m.res;    // cells north of origin
+        const col = (o.x - m.origin[0]) / m.res;
+        const row = (o.y - m.origin[1]) / m.res;
         const px = col * scale;
-        const py = row * scale;                     // y-up here (frame flipped)
+        const py = row * scale;
         if (px >= 0 && px <= dw && py >= 0 && py <= dh) {
-            const pxPerM = scale / m.res;           // map px per world metre
-            const MIN_LEN_PX = 14;                  // visibility floor (long side)
-            let lenPx = GO2_LEN_M * pxPerM;         // along heading (+x)
-            let widPx = GO2_WID_M * pxPerM;         // across (+y)
-            if (lenPx < MIN_LEN_PX) {               // scale up together, keep ratio
+            const pxPerM = scale / m.res;
+            const MIN_LEN_PX = 14;
+            let lenPx = GO2_LEN_M * pxPerM;
+            let widPx = GO2_WID_M * pxPerM;
+            if (lenPx < MIN_LEN_PX) {
                 widPx *= MIN_LEN_PX / lenPx;
                 lenPx = MIN_LEN_PX;
             }
             ctx.save();
             ctx.translate(px, py);
-            // y-up frame: CCW world yaw = CCW canvas rotation (no sign flip).
-            // Box local x = heading, local y = left. Center it on the robot.
             ctx.rotate(o.yaw || 0);
             ctx.fillStyle = 'rgba(176,225,240,0.35)';
             ctx.strokeStyle = '#b0e1f0';
             ctx.lineWidth = 1.5;
             ctx.fillRect(-lenPx / 2, -widPx / 2, lenPx, widPx);
             ctx.strokeRect(-lenPx / 2, -widPx / 2, lenPx, widPx);
-            // Heading tick: short line from centre to the front (+x) edge so the
-            // facing direction is unambiguous on the rectangle.
             ctx.beginPath();
             ctx.moveTo(0, 0);
             ctx.lineTo(lenPx / 2, 0);
@@ -662,7 +523,6 @@ function drawMap() {
             ctx.restore();
         }
     }
-    // Nav goal marker (same flipped frame): ring + dot at the clicked point.
     const g = ui.navGoal;
     if (g && m.res > 0) {
         const gx = ((g.x - m.origin[0]) / m.res) * scale;
@@ -682,15 +542,13 @@ function drawMap() {
             ctx.restore();
         }
     }
-    ctx.restore();  // flip frame
-    ctx.restore();  // pan/zoom frame
+    ctx.restore();
+    ctx.restore();
 }
 
-// Go2 body footprint (URDF base_link box): 0.70 m long × 0.31 m wide.
 const GO2_LEN_M = 0.70;
 const GO2_WID_M = 0.31;
 
-// ── camera tabs ──────────────────────────────────────────────────────
 function toggleCam(id) {
     const sel = new Set(ui.selectedCams);
     if (sel.has(id)) {
@@ -719,19 +577,13 @@ function sendCameraSelect() {
     }
 }
 
-// ── speed bar ────────────────────────────────────────────────────────
 function selectSpeed(mode, sendToRobot = true) {
     const spec = SPEEDS.find((s) => s.mode === mode);
     if (!spec) return;
     ui.speedMode = mode;
-    // Apply the velocity scale locally NOW (buildTwist reads state.speedScale).
     state.speedScale = spec.scale;
-    // Highlight the active segment.
     document.querySelectorAll('#speed-bar [data-speed]').forEach((b) =>
         b.classList.toggle('is-active', b.dataset.speed === mode));
-    // Only rage crossing changes the robot FSM; the robot ignores normal<->high
-    // (browser scale handles those). Send set_mode regardless — robot no-ops if
-    // already in the right FSM, and acks.
     if (sendToRobot && state.stateChannel && state.stateChannel.readyState === 'open') {
         state.stateChannel.send(JSON.stringify({ type: 'set_mode', mode, nonce: ++ui.nonce }));
     }
@@ -756,9 +608,6 @@ function renderObstacleToggle() {
     b.classList.toggle('text-gray-500', !on);
 }
 
-// ── head light (brightness slider, 0..1) ─────────────────────────────
-// Live label while dragging; send on release only ({type:'light',
-// brightness}). Ack feedback uses the cmd-sending/ok/err range classes.
 function wireLightSlider() {
     const s = document.getElementById('light-slider');
     if (!s) return;
@@ -794,17 +643,11 @@ function renderLightSlider() {
     renderLightValue(ui.light);
 }
 
-// ── command ack (state_reliable_back) — shared by all nonce'd commands ──
 function onCmdAck(msg) {
     resolveAck(msg.nonce, !!msg.ok);
 }
 
-// ── robot-state reconcile (robot_telemetry.state, 3Hz) ──────────────
-// The robot is authoritative: on (re)connect the cockpit's optimistic
-// defaults (StandReady, OA on, cams [cam1], no rage) get corrected to
-// reality. Skipped while a command is pending — the robot still reports
-// the old state until the ack lands, and flip-flopping the UI mid-click
-// reads as a glitch.
+// Skipped while a command is pending — robot reports the old state until the ack lands.
 function onRobotState(s) {
     if (ui.pending.size > 0) return;
     let dirty = false;
@@ -812,18 +655,12 @@ function onRobotState(s) {
         ui.posture = s.posture;
         dirty = true;
     }
-    // E-STOP latch is sticky: telemetry may RAISE it (a robot-side stop the
-    // operator didn't trigger — hardware button, safety supervisor) but must
-    // NEVER lower it. A robot_telemetry frame generated before the robot
-    // processed the operator's estop carries estopped:false; clearing the local
-    // latch from it would release E-STOP and resume a held-key twist. Only the
-    // re-arm button clears ui.estopped.
+    // E-STOP latch is sticky: telemetry may RAISE it but must NEVER lower it
+    // (a pre-estop frame carries estopped:false; clearing it would resume a held-key twist).
     if (s.estopped === true && !ui.estopped) {
         ui.estopped = true;
         dirty = true;
     }
-    // Robot-confirmed camera stall — dormant (guarded no-op) until the dimos
-    // no-frames watchdog emits state.video_stalled; 8s "no video" hint covers it.
     if (typeof s.video_stalled === 'boolean') {
         ui.robotVideoStalled = s.video_stalled;
     }
@@ -840,9 +677,7 @@ function onRobotState(s) {
         if (!ui.selectedCams.length) ui.selectedCams = ['cam1'];
         renderCamTabs();
     }
-    // Rage is firmware truth; normal-vs-high is browser-only, so only the
-    // rage boundary is reconcilable. Don't send set_mode back — this IS the
-    // robot's state.
+    // Rage is firmware truth; normal-vs-high is browser-only. Don't send set_mode back.
     if (typeof s.rage === 'boolean') {
         const uiRage = ui.speedMode === 'rage';
         if (s.rage !== uiRage) selectSpeed(s.rage ? 'rage' : 'normal', /*sendToRobot=*/ false);
@@ -856,11 +691,7 @@ function resolveAck(nonce, ok) {
     clearTimeout(p.timer);
     ui.pending.delete(nonce);
     const btn = p.el;
-    // Track posture optimistically on a confirmed posture command. StandReady
-    // is an action (stand+balance), not a latched state — map it to standing.
     if (ok && POSTURE_STATE[p.name]) ui.posture = POSTURE_STATE[p.name];
-    // Range inputs (light slider) flash via the cmd-* classes; buttons via
-    // data-status. 700ms flash → idle; bail if the cockpit unmounted.
     const isRange = btn && btn.tagName === 'INPUT';
     if (isRange) {
         btn.classList.remove('cmd-sending');
@@ -877,9 +708,6 @@ function resolveAck(nonce, ok) {
     refreshControls();
 }
 
-// Posture/gesture button → {type:sport_cmd, name, nonce} on state_reliable.
-// Robot allow-lists + dispatches, then acks on state_reliable_back (→ resolveAck).
-
 function sendCommand(name, btn) {
     if (!cmdReady()) return;
     if (CONFIRM_ACTIONS.has(name) &&
@@ -889,9 +717,7 @@ function sendCommand(name, btn) {
     const nonce = ++ui.nonce;
     btn.dataset.status = 'pending';
     state.stateChannel.send(JSON.stringify({ type: 'sport_cmd', name, nonce }));
-    // Ack watchdog. StandReady is a robot-side combo (standup → recovery →
-    // balance → joystick) with ~3.6s of settling sleeps — 3s would mark it
-    // failed while the robot is mid-stand.
+    // StandReady is a robot-side combo with ~3.6s of settling sleeps — 3s would mark it failed mid-stand.
     const timeoutMs = name === 'StandReady' ? 9000 : 3000;
     const timer = setTimeout(() => resolveAck(nonce, false), timeoutMs);
     ui.pending.set(nonce, { el: btn, name, timer });
@@ -907,8 +733,7 @@ function refreshControls() {
     document.querySelectorAll('.cmd-btn').forEach((b) => {
         const active = b.dataset.cmd === ui.posture;
         b.classList.toggle('is-active', active);
-        // Disable the active posture so you can't re-fire it — EXCEPT StandReady,
-        // which you may want to re-press to re-arm drive after sitting.
+        // Don't lock StandReady — may want to re-press it to re-arm drive after sitting.
         const lockActive = active && b.dataset.cmd !== 'StandReady';
         b.disabled = !!reason || (lockActive && b.dataset.status === 'idle');
     });
@@ -916,10 +741,7 @@ function refreshControls() {
     document.getElementById('estop').classList.toggle('latched', ui.estopped);
     document.getElementById('rearm').classList.toggle('hidden', !ui.estopped);
 
-    // Drive is live in Stand/Drive (WASD walks) and Pose (WASD poses the body)
-    // and not e-stopped. Other postures (Recovery/Sit/StandDown) change pose
-    // but don't accept WASD. Gates the keyboard loop's send; poseMode flips
-    // buildTwist's key mapping to the body-pose axes.
+    // Gates the keyboard loop's send; poseMode flips buildTwist's key mapping to body-pose axes.
     state.poseMode = ui.posture === 'PoseStand' && !ui.estopped;
     state.driveEnabled = (ui.posture === 'StandReady' || state.poseMode) && !ui.estopped;
 
@@ -939,13 +761,12 @@ function refreshControls() {
     renderBattery();
 }
 
-// Drive panel doubles as the pose panel: same keys, different axes.
 function renderDriveHints() {
     const title = document.getElementById('drive-title');
     const hints = document.getElementById('drive-hints');
     if (!title || !hints) return;
     const mode = state.poseMode ? 'pose' : 'drive';
-    if (hints.dataset.mode === mode) return;  // refreshControls runs per telemetry tick
+    if (hints.dataset.mode === mode) return;
     hints.dataset.mode = mode;
     title.textContent = state.poseMode ? 'Pose' : 'Drive';
     hints.innerHTML = state.poseMode
@@ -960,7 +781,6 @@ function renderDriveHints() {
 function renderBattery() {
     const pct = document.getElementById('batt-pct');
     if (!pct) return;
-    // Real SOC from robot_telemetry (state_reliable_back); null until first push.
     const soc = state.liveStats?.soc;
     if (soc == null) {
         pct.textContent = '—%';
@@ -972,12 +792,11 @@ function renderBattery() {
     pct.style.color = { good: '#c4e7f3', warn: '#eab308', bad: '#f3b4b4' }[socHealth(p)];
 }
 
-// Telemetry value tint by per-metric health (matches the .pill palette).
 const HEALTH_TINT = { good: 'text-[#b0e1f0]', warn: 'text-[#eab308]', bad: 'text-[#f3b4b4]' };
 
 function renderTelemetryGrid() {
     const el = document.getElementById('hud-detail');
-    if (!el || el.classList.contains('hidden')) return;  // skip work when collapsed
+    if (!el || el.classList.contains('hidden')) return;
     el.innerHTML = hudDetailRows().map((g) => `
         <div>
             <div class="term-caps text-[10px] text-gray-600 mb-1">${g.group}</div>
@@ -990,33 +809,23 @@ function renderTelemetryGrid() {
         </div>`).join('');
 }
 
-// Telemetry tick (1Hz): sample the operator's own send rate (cmdHz), render
-// summary + detail via the shared hud.js formatters, drive the health pills,
-// update battery. Reuses hud.js so cockpit + keyboard HUD stay in sync.
 let _lastHudSample = 0;
-let _noVideoSinceMs = 0;  // connected-but-never-saw-a-frame escalation timer
+let _noVideoSinceMs = 0;
 function startTick() {
     stopTick();
     _lastHudSample = performance.now();
     _noVideoSinceMs = 0;
     tickTimer = setInterval(() => {
         const now = performance.now();
-        sampleCmdHz((now - _lastHudSample) / 1000);  // cmdSendCount from the drive loop
+        sampleCmdHz((now - _lastHudSample) / 1000);
         _lastHudSample = now;
 
-        // Bail if the cockpit DOM is gone (failed connect / view teardown) —
-        // the interval can outlive the elements for a tick.
         const summary = document.getElementById('hud-summary');
         if (!summary) return;
 
-        // Hide the benchmark timestamp strip from the video (display-only).
         applyStampCrop();
 
-        // Never-got-video escalation: connected but no first frame → after 8s
-        // stop saying "Negotiating…" and name the likely culprit. The robot's
-        // no-frames watchdog flag (telemetry) upgrades it to a confirmed
-        // diagnosis. Both clear naturally once frames arrive (placeholder
-        // hides on 'playing').
+        // Never-got-video escalation: connected but no first frame → after 8s name the likely culprit.
         const chOpen = state.cmdChannel && state.cmdChannel.readyState === 'open';
         const statusEl = document.getElementById('teleop-status');
         if (statusEl && chOpen && !state.videoStall.armed) {
@@ -1032,16 +841,13 @@ function startTick() {
             _noVideoSinceMs = 0;
         }
 
-        // Video-freshness lockout (keyboard loop drives state.videoStall):
-        // stalled → overlay + drive pill off; the loop already blocks sends.
+        // Video-freshness lockout: stalled → overlay + drive pill off (loop already blocks sends).
         const lost = document.getElementById('video-lost');
         const stalled = state.videoStall.stalled;
         if (lost && lost.classList.contains('hidden') !== !stalled) {
             lost.classList.toggle('hidden', !stalled);
-            refreshControls();  // re-render the DRIVE pill on stall transitions
+            refreshControls();
         }
-        // Mid-stream stall: enrich the overlay when the robot CONFIRMS its
-        // camera died (vs a plain network freeze).
         if (lost && stalled) {
             const label = lost.querySelector('.term-caps');
             if (label) label.textContent = ui.robotVideoStalled
@@ -1049,12 +855,9 @@ function startTick() {
                 : 'video stalled — drive disabled';
         }
 
-        // Summary always; detail grid rendered (hidden until expanded).
         summary.textContent = hudSummaryLine();
         renderTelemetryGrid();
 
-        // Health pills (good/warn/bad) + transport label. Both the telemetry
-        // header pill and the video-overlay LINK pill track signal health.
         const health = statsHealth();
         const pill = document.getElementById('hud-health');
         if (pill) pill.className = 'pill pill-' + health;
@@ -1076,7 +879,6 @@ export function stopTick() {
         clearInterval(tickTimer);
         tickTimer = null;
     }
-    // Drop the ack/state hooks + pending watchdogs so they don't leak to the next view.
     if (state.onCmdAck === onCmdAck) state.onCmdAck = null;
     if (state.onRobotState === onRobotState) state.onRobotState = null;
     ui.pending.forEach((p) => clearTimeout(p.timer));

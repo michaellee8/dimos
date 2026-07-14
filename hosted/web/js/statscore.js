@@ -1,12 +1,8 @@
-// Pure video-stats math shared by the Cloudflare path (webrtc.js, pc.getStats)
-// and the LiveKit path (livekit.js, receiver.getStats) — HARDENING_PLAN E2.
-// No DOM, no timers: node:test drives it with fake stats objects.
+// Pure video-stats math shared by the Cloudflare (webrtc.js) and LiveKit
+// (livekit.js) getStats paths. No DOM, no timers.
 
-// Resolve the in-use ICE path from a getStats() report (Map-like): find the
-// active candidate-pair, look up its local candidate, map candidateType.
-//   host        → 'direct'
-//   srflx/prflx → 'stun'
-//   relay       → 'turn'
+// Active ICE path from a getStats() report: host→'direct', srflx/prflx→'stun',
+// relay→'turn'. null when no active pair.
 export function selectedIceType(report) {
     let pair = null;
     report.forEach((r) => {
@@ -19,10 +15,9 @@ export function selectedIceType(report) {
     if (!local) return null;
     return local.candidateType === 'relay' ? 'turn'
         : local.candidateType === 'srflx' || local.candidateType === 'prflx' ? 'stun'
-        : 'direct';  // host
+        : 'direct';
 }
 
-// Find the video inbound-rtp entry in a stats report; null when absent.
 export function findVideoInbound(report) {
     let inbound = null;
     report.forEach((r) => {
@@ -31,20 +26,16 @@ export function findVideoInbound(report) {
     return inbound;
 }
 
-// Negotiated video codec short name ('H264' / 'VP8' / ...) from the inbound
-// entry's linked codec stats, or '' when unavailable. Lets the operator confirm
-// the robot's H.264-first offer actually won the negotiation (VP8 falls back to
-// software decode on most browsers and adds latency).
+// Negotiated codec short name ('H264'/'VP8'/...) or '' when unavailable.
 export function videoCodec(report, inbound) {
     if (!inbound?.codecId) return '';
     const codec = report.get?.(inbound.codecId);
-    const mime = codec?.mimeType || '';  // e.g. 'video/H264'
+    const mime = codec?.mimeType || '';
     return mime.includes('/') ? mime.split('/')[1] : mime;
 }
 
-// Delta two consecutive inbound-rtp samples into the video_stats payload the
-// robot logs and the HUD renders. Returns null when a delta isn't computable
-// yet (first sample, or non-advancing stats clock — callers just skip a tick).
+// Delta two inbound-rtp samples into the video_stats payload. null when a delta
+// isn't computable yet (first sample or non-advancing stats clock).
 export function computeVideoStats(prev, inbound, e2eLatencyMs = 0, codec = '') {
     if (!prev || !inbound) return null;
     const dt = (inbound.timestamp - prev.timestamp) / 1000;
@@ -55,7 +46,6 @@ export function computeVideoStats(prev, inbound, e2eLatencyMs = 0, codec = '') {
     const dLost = (inbound.packetsLost ?? 0) - (prev.packetsLost ?? 0);
     const dRecv = (inbound.packetsReceived ?? 0) - (prev.packetsReceived ?? 0);
     const lossDen = dLost + dRecv;
-    // Avg decode time per frame over the window — latency component.
     const dDecode = (inbound.totalDecodeTime ?? 0) - (prev.totalDecodeTime ?? 0);
     const decodeMs = dFrames > 0 ? +((dDecode / dFrames) * 1000).toFixed(1) : 0;
 
@@ -69,15 +59,13 @@ export function computeVideoStats(prev, inbound, e2eLatencyMs = 0, codec = '') {
         jitter_ms: +((inbound.jitter ?? 0) * 1000).toFixed(1),
         frames_dropped: inbound.framesDropped ?? 0,
         freezes: inbound.freezeCount ?? 0,
-        // Receive-side latency (network RTT lives in clock-sync, not here).
         jitter_buffer_ms:
             inbound.jitterBufferEmittedCount
                 ? +((inbound.jitterBufferDelay / inbound.jitterBufferEmittedCount) * 1000).toFixed(1)
                 : 0,
         decode_ms: decodeMs,
         e2e_latency_ms: e2eLatencyMs,  // glass-to-glass, 0 if not stamping
-        codec,  // 'H264' / 'VP8' — confirms which codec the session negotiated
-        // 'ExternalDecoder'/HW name vs 'libvpx' (software) — the latency tell.
-        decoder: inbound.decoderImplementation ?? '',
+        codec,
+        decoder: inbound.decoderImplementation ?? '',  // HW name vs 'libvpx' = latency tell
     };
 }

@@ -1,6 +1,4 @@
-// Cognito client — talks directly to the cognito-idp public API (no SDK).
-// The broker only verifies tokens; all sign-in/sign-up flows live here.
-// Pool/client IDs come from the broker's public /auth/config endpoint.
+// Talks directly to cognito-idp public API (no SDK); broker only verifies tokens. Pool/client IDs from broker's /auth/config.
 
 import { brokerOrigin } from './api.js';
 
@@ -101,8 +99,7 @@ export async function confirmForgotPassword(email, code, password) {
     });
 }
 
-// Decode a JWT payload without verifying (the broker verifies; this is just
-// for reading exp/email client-side).
+// Decode JWT payload WITHOUT verifying — client-side read of exp/email only; broker verifies.
 export function tokenPayload(token) {
     try {
         return JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));

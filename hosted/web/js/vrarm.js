@@ -1,14 +1,8 @@
-// Immersive WebXR cockpit for the xArm (manipulation). Parallel to vr.js (the
-// Go2 drive cockpit): same generic shell — XR session, renderer, camera video
-// panel, controller rays, hover, stats — but the input plane streams 6-DoF
-// controller poses + gripper instead of thumbstick drive twists.
-//
+// Engage = hold the primary button (X left / A right); robot recaptures baseline on
+// engage and streams deltas, so we send ABSOLUTE poses. Robot's webxr_to_robot owns
+// the frame conversion — we send raw WebXR poses.
 //   controller gripSpace pose ──cmd_unreliable──▶ PoseStamped (frame_id=hand)
 //   trigger/buttons           ──cmd_unreliable──▶ Joy  (axes[2]=gripper, btn4=engage)
-//
-// Engage = hold the primary button (X left / A right); the robot recaptures the
-// baseline pose on engage and streams deltas, so we send ABSOLUTE poses. The
-// robot's webxr_to_robot owns the frame conversion — we send raw WebXR poses.
 
 import * as THREE from 'three';
 
@@ -21,10 +15,8 @@ import { getVRRenderer } from './vrrenderer.js';
 import { buildJoy, buildPoseStamped, sendCameraSelect, sendEstop } from './xarmcmd.js';
 
 const HEAD = new THREE.Vector3(0, 1.55, 0);
-// Two side-by-side camera screens (cam1 left, cam2 right), each ~16:9. The robot
-// muxes both cams into ONE hstacked 1696×480 video track; we split that texture
-// down the middle so each panel shows one full-aspect feed — a dual-monitor
-// cockpit rather than a single switched view.
+// Robot muxes both cams into ONE hstacked 1696×480 track; we split the texture down
+// the middle so each panel shows one full-aspect feed (dual-monitor cockpit).
 const SCREEN = { w: 1.24, h: 0.70, y: 1.52, z: -1.62 };
 const SCREEN_GAP = 0.06;     // seam between the two panels (metres)
 const SCREEN_YAW = 0.20;     // toe-in so both face the operator (~11°)
@@ -45,8 +37,6 @@ function buildScene() {
     scene = new THREE.Scene();
     camera = new THREE.PerspectiveCamera(70, 1, 0.05, 100);
 
-    // Two panels, toed-in toward the operator. Left edge of the right panel and
-    // right edge of the left panel meet near centre with a small gap.
     const halfW = SCREEN.w / 2;
     const centreX = halfW + SCREEN_GAP / 2;
     videoMeshes = [];
@@ -105,8 +95,7 @@ function updateVideoTexture() {
     const v = camEl;
     if (!v || v.readyState < 2 || !v.videoWidth) return;
 
-    // (Re)bind a texture per panel off the same video element. Each panel samples
-    // one horizontal half of the muxed frame: left→cam1, right→cam2.
+    // Each panel samples one horizontal half of the muxed frame: left→cam1, right→cam2.
     if (videoTexes.length !== 2 || videoTexes[0].image !== v) {
         for (const t of videoTexes) t.dispose();
         videoTexes = videoMeshes.map((mesh) => {
@@ -122,9 +111,7 @@ function updateVideoTexture() {
     const strip = state.liveStats.stampStripPx || 0;
     const yFrac = strip && v.videoHeight ? strip / v.videoHeight : 0;
 
-    // Horizontal split. Two cams → wide frame (aspect ≥ ~2.4): each panel takes
-    // its half. One cam → square-ish frame: both panels show the whole frame
-    // (graceful fallback until the robot sends both).
+    // Two cams → wide frame: each panel takes its half. One cam → both show whole frame.
     const dual = v.videoWidth >= v.videoHeight * 2;
     for (let i = 0; i < videoTexes.length; i++) {
         const tex = videoTexes[i];
@@ -133,7 +120,6 @@ function updateVideoTexture() {
     }
 }
 
-// ── Arm command plane: stream controller pose + Joy per hand ─────────
 let lastSend = 0;
 
 function streamArmPose(frame) {
@@ -144,9 +130,7 @@ function streamArmPose(frame) {
     const chan = state.cmdChannel;
     if (!chan || chan.readyState !== 'open') return;
 
-    // Video-freshness gate: don't stream poses onto a frozen frame — the
-    // operator would be commanding blind. (No held-state to track: any pose is
-    // only acted on while a hand is engaged, and engage needs a live view.)
+    // Video-freshness gate: don't stream poses onto a frozen frame.
     const gate = stallGate.sample(videoMediaTime(camEl), now, false);
     state.videoStall = gate;
     if (gate.blocked) return;
@@ -165,8 +149,7 @@ function streamArmPose(frame) {
 
         if (src.gamepad) {
             chan.send(buildJoy(hand, src.gamepad, nowMs).encode());
-            // Menu button (index 6) → E-STOP, debounced.
-            if (src.gamepad.buttons[6]?.pressed) triggerEstop();
+            if (src.gamepad.buttons[6]?.pressed) triggerEstop();  // Menu button → E-STOP
         }
     }
 }
@@ -201,8 +184,7 @@ function updateHover() {
     }
 }
 
-// Ask the robot for BOTH cameras once the state channel opens (the mux defaults
-// to cam1 only). One-shot: the dual-screen cockpit always wants both muxed.
+// Ask the robot for BOTH cameras once the state channel opens (mux defaults to cam1 only).
 let _requestedBothCams = false;
 function requestBothCams() {
     if (_requestedBothCams) return;
@@ -217,7 +199,6 @@ function onFrame(timeMs, frame) {
     if (frame) streamArmPose(frame);
     updateHover();
     updateVideoTexture();
-    // Tint both screens red when the robot video is stalled/frozen.
     const stalled = state.videoStall?.stalled;
     for (const mesh of videoMeshes) {
         if (mesh.material.map) mesh.material.color.setHex(stalled ? 0x552222 : 0xffffff);
@@ -232,12 +213,11 @@ export async function startArmVR() {
     stallGate = createStallGate();
     state.videoStall = { stalled: false, blocked: false, armed: false };
     document.getElementById('canvas').style.display = 'block';
-    renderer = getVRRenderer();  // one shared renderer across all VR cockpits
+    renderer = getVRRenderer();
     buildScene();
     controllers = [];
 
-    // Passthrough (AR) when available; opaque VR otherwise. Must run inside the
-    // Connect click gesture.
+    // Passthrough (AR) when available; opaque VR otherwise. MUST run inside the Connect click gesture.
     let session = null, ar = false;
     try {
         session = await navigator.xr.requestSession('immersive-ar', {
@@ -254,13 +234,11 @@ export async function startArmVR() {
 
     state.xrSession = session;
     await renderer.xr.setSession(session);
-    // Sample controller poses against a reference space we own (matches the
-    // working quest reference client). three.js's getReferenceSpace() can lag a
-    // recenter/reset, which would freeze getPose and stall the arm.
+    // Own the reference space: three's getReferenceSpace() can lag a recenter/reset,
+    // which would freeze getPose and stall the arm.
     state.xrRefSpace = await session.requestReferenceSpace('local-floor');
     initControllers();
 
-    // Route acks + robot-state onto the arm cockpit.
     state.onCmdAck = onCmdAck;
     state.onRobotState = onRobotState;
 

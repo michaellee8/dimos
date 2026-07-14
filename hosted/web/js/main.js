@@ -1,6 +1,3 @@
-// Entry point: register views with the router, pick the initial route, and
-// wire the DevTools preview hook.
-
 import { installPagehideLeave } from './disconnect.js';
 import { navigate, register } from './router.js';
 import { state } from './state.js';
@@ -22,13 +19,10 @@ register('vrpreview', renderVRPreview);
 
 installPagehideLeave();
 
-// #vrpreview: headset UI check with faked data — no auth, no broker, no robot.
 if (location.hash === '#vrpreview') navigate('vrpreview');
 else if (state.token) navigate('dashboard');
 else navigate('auth');
 
-// DevTools-only preview hooks — no broker required. (VR preview lives at the
-// #vrpreview route, which fakes channels + map + video; see vrpreview.js.)
 window._teleopDev = {
     previewKeyboard() {
         state.cmdChannel = { readyState: 'open', send: () => {} };
@@ -40,8 +34,7 @@ window._teleopDev = {
         navigate('go2');
     },
     async previewXArm() {
-        // Immersive arm cockpit against fake channels — no broker/robot. Must be
-        // called from a click (WebXR requestSession needs a user gesture).
+        // WebXR requestSession needs a user gesture — call from a click.
         const { startArmVR } = await import('./vrarm.js');
         state.activeRobot = { session_id: 'preview', robot_name: 'xarm-preview', transport: 'cloudflare' };
         state.cmdChannel = { readyState: 'open', send: () => {} };

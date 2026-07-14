@@ -1,5 +1,3 @@
-// WebRTC dial-out + clock sync + video-stats reporter + state-channel dispatch.
-
 import { api } from './api.js';
 import { ensureRobotCam, setStatus } from './dom.js';
 import {
@@ -14,18 +12,13 @@ import { computeVideoStats, findVideoInbound, selectedIceType, videoCodec } from
 
 const STUN_ONLY = [{ urls: 'stun:stun.cloudflare.com:3478' }];
 
-// Connection waits hang forever on networks that silently drop UDP (ICE sits
-// in 'checking'); cap them so the operator gets an error instead.
+// Cap connection waits so silently-dropped-UDP networks (ICE stuck 'checking') error instead of hanging.
 const CONNECT_TIMEOUT_MS = 20000;
 const CHANNEL_OPEN_TIMEOUT_MS = 10000;
 const GATHER_TIMEOUT_MS = 10000;
-// Overall ceiling so a hung api() call (fetch has no default timeout) or any
-// missed per-await guard can't wedge setupInProgress forever. Generous: sum
-// of per-step caps is ~60s; this gives headroom without being mistaken for
-// progress.
+// Overall ceiling so a hung api() call (fetch has no default timeout) can't wedge setupInProgress forever.
 const SETUP_TIMEOUT_MS = 90000;
-// After the first usable (srflx/relay) candidate, wait this long to scoop up
-// sibling candidates (the relay leg lands ~80ms after srflx) before proceeding.
+// After first usable (srflx/relay) candidate, wait this for siblings (relay leg lands ~80ms after srflx).
 const GATHER_SETTLE_MS = 400;
 
 export function timeout(ms, label) {
@@ -34,8 +27,7 @@ export function timeout(ms, label) {
 }
 
 export async function setupWebRTC(sessionId) {
-    // Re-entry would overwrite state.pc and leak the prior PC; the second
-    // caller is rejected, the first finishes (or its finally clears the flag).
+    // Re-entry would overwrite state.pc and leak the prior PC.
     if (state.setupInProgress) {
         throw new Error('Connect already in progress — disconnect first to retry');
     }
@@ -47,8 +39,6 @@ export async function setupWebRTC(sessionId) {
     try {
         return await Promise.race([_setupWebRTCInner(sessionId), timer]);
     } catch (err) {
-        // Close partial PC so a failure (timeout or otherwise) doesn't leak
-        // it past the next setupWebRTC entry.
         if (state.pc) { try { state.pc.close(); } catch (_) {} state.pc = null; }
         throw err;
     } finally {
@@ -59,9 +49,7 @@ export async function setupWebRTC(sessionId) {
 
 async function _setupWebRTCInner(sessionId) {
     setStatus('Negotiating WebRTC...');
-    // TURN must be in the PC's config at construction for relay candidates
-    // to gather with the offer. Best-effort: a broker without TURN
-    // configured returns STUN-only, and a failed fetch degrades to it.
+    // TURN must be in the PC config at construction for relay candidates to gather with the offer.
     let iceServers = STUN_ONLY;
     const tFetch = performance.now();
     try {
@@ -87,10 +75,7 @@ async function _setupWebRTCInner(sessionId) {
     // recvonly transceiver gives the offer a video m-section to bind to.
     pc.addTransceiver('video', { direction: 'recvonly' });
 
-    // Operator mic → robot: a sendonly m=audio in the offer, which the broker
-    // records and bridges onto the robot's session. Captured MUTED — the
-    // cockpit's mic toggle unmutes; never hot-mic on connect. No mic /
-    // permission denied degrades to a silent link (video + commands unaffected).
+    // Operator mic → robot: sendonly m=audio. Captured MUTED — never hot-mic on connect.
     state.micTrack = null;
     try {
         const mic = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -99,23 +84,20 @@ async function _setupWebRTCInner(sessionId) {
             state.micTrack.enabled = false;
             pc.addTransceiver(state.micTrack, { direction: 'sendonly', streams: [mic] });
             console.info('[mic] captured (muted) — toggle in the cockpit to talk');
-            state.onMicReady?.();  // view rendered before capture — refresh its toggle
+            state.onMicReady?.();
         }
     } catch (err) {
         console.info('[mic] unavailable — audio uplink disabled:', err.name || err);
     }
     pc.ontrack = (e) => {
         if (e.track.kind !== 'video') return;
-        // Minimise the receiver jitter buffer — teleop wants the freshest frame,
-        // not smooth playback. Both hints are non-standard and browser-clamped,
-        // so guard the assignment.
+        // Minimise receiver jitter buffer (freshest frame). Both hints are non-standard/clamped — guard.
         try {
             if ('playoutDelayHint' in e.receiver) e.receiver.playoutDelayHint = 0;
             if ('jitterBufferTarget' in e.receiver) e.receiver.jitterBufferTarget = 0;
         } catch (err) {
             console.debug('[video] playout-delay hint unsupported:', err?.name || err);
         }
-        // Keyboard has a static <video>; VR uses a hidden one as a GL source.
         const existed = !!document.getElementById('robot-cam');
         const v = ensureRobotCam();
         // Stop the prior stream so renegotiation track-swaps don't leak.
@@ -128,13 +110,10 @@ async function _setupWebRTCInner(sessionId) {
         v.play?.().catch(() => {});  // immersive has no user-gesture; nudge autoplay
     };
 
-    // Resolve gather as soon as we have a routable (srflx/relay) candidate plus
-    // a short settle window — don't wait for iceGatheringState='complete'. With
-    // TURN configured, CF/Chrome keep the gatherer open probing extra relay
-    // permutations long after every usable candidate exists, so 'complete' lags
-    // ~10s behind a connection that was ready in <400ms.
-    let onUsableCandidate = null;  // set by the gather phase below
-    const candTypes = {};  // type → count, for a one-line gather summary
+    // Resolve gather on first routable (srflx/relay) candidate + settle window; don't wait for 'complete'
+    // (with TURN, 'complete' lags ~10s behind a connection ready in <400ms).
+    let onUsableCandidate = null;
+    const candTypes = {};
     pc.onicecandidate = (e) => {
         if (!e.candidate) return;
         const c = e.candidate;
@@ -142,17 +121,14 @@ async function _setupWebRTCInner(sessionId) {
         if ((c.type === 'srflx' || c.type === 'relay') && onUsableCandidate) onUsableCandidate();
     };
     pc.onicecandidateerror = (e) => {
-        // 701 = ONE (local addr × TURN url) allocation failed — routine noise on
-        // dual-stack networks (rotated IPv6 privacy addrs × tcp/tls variants);
-        // the gather summary reports whether relays were actually obtained, and
-        // warns if none were. 401 = bad creds; 300/600 = misc — those stay loud.
+        // 701 = per (local addr × TURN url) allocation failed — routine dual-stack noise, log at debug.
+        // 401 bad creds / 300 / 600 stay loud.
         const log = e.errorCode === 701 ? console.debug : console.warn;
         log(`[ice] cand ERROR code=${e.errorCode} ${e.errorText || ''} ` +
             `url=${e.url || ''} host=${e.address || ''}:${e.port || ''}`);
     };
 
-    // 'disconnected' is transient (network blips recover in ~1s); only
-    // 'failed' is terminal.
+    // 'disconnected' is transient (recovers ~1s); only 'failed' is terminal.
     const iceFailed = new Promise((_, reject) => {
         pc.oniceconnectionstatechange = () => {
             if (pc.iceConnectionState === 'failed') {
@@ -164,17 +140,12 @@ async function _setupWebRTCInner(sessionId) {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
-    // Non-trickle ICE: proceed once we have a usable (srflx/relay) candidate,
-    // after a brief settle to scoop up siblings (e.g. the relay leg ~80ms after
-    // srflx). Falls back to iceGatheringState='complete' or the hard cap so a
-    // truly stalled gather still can't hang forever.
     const tGather = performance.now();
     let how = 'cap';
     await new Promise(resolve => {
         let settleTimer = null;
         const done = (reason) => { how = reason; clearTimeout(settleTimer); resolve(); };
         if (pc.iceGatheringState === 'complete') return done('complete');
-        // First usable candidate → wait GATHER_SETTLE_MS for siblings, then go.
         onUsableCandidate = () => {
             if (settleTimer) return;
             settleTimer = setTimeout(() => done('usable+settle'), GATHER_SETTLE_MS);
@@ -184,10 +155,9 @@ async function _setupWebRTCInner(sessionId) {
         };
         setTimeout(() => done('cap'), GATHER_TIMEOUT_MS);
     });
-    onUsableCandidate = null;  // stop settling on late candidates
+    onUsableCandidate = null;
     const candSummary = Object.entries(candTypes).map(([t, n]) => `${t}×${n}`).join(' ') || 'none';
     console.info(`[ice] gather ${(performance.now() - tGather).toFixed(0)}ms (${how}) — ${candSummary}`);
-    // Individual 701s log at debug; this is the signal that actually matters.
     if (relayCount > 0 && !candTypes.relay) {
         console.warn('[ice] TURN configured but NO relay candidates gathered — CGNAT/strict-NAT fallback unavailable');
     }
@@ -242,8 +212,7 @@ async function _setupWebRTCInner(sessionId) {
         timeout(CHANNEL_OPEN_TIMEOUT_MS, 'Command channel never opened'),
     ]);
 
-    // state_reliable — best-effort. Older brokers omit state_channel_id and
-    // clock sync just doesn't run; cmdChannel is unaffected.
+    // state_reliable — best-effort. Older brokers omit state_channel_id; cmdChannel is unaffected.
     if (bridge.state_channel_id != null) {
         state.stateChannel = pc.createDataChannel('state_reliable', {
             negotiated: true,
@@ -254,7 +223,6 @@ async function _setupWebRTCInner(sessionId) {
             startClockSync(state.stateChannel);
             startVideoStats(state.stateChannel);
         };
-        // Fallback for old brokers w/o state_back_channel_id (no-op on new ones).
         state.stateChannel.onmessage = (e) => handleStateMessage(e.data);
         state.stateChannel.onerror = (e) => console.warn('[state-channel] error', e);
         state.stateChannel.onclose = () => console.info('[state-channel] closed');
@@ -274,9 +242,7 @@ async function _setupWebRTCInner(sessionId) {
         console.warn('[state-back] no state_back_channel_id from broker — cmd latency/SOC unavailable');
     }
 
-    // Map (occupancy grid + odom), robot → operator, its own unreliable channel
-    // so bursty/large map frames don't block clock-sync on the reliable plane.
-    // Routes through the same handleStateMessage (map/odom types).
+    // Map (occupancy grid + odom) on its own unreliable channel so bursty frames don't block clock-sync.
     if (bridge.map_channel_id != null) {
         state.mapChannel = pc.createDataChannel('map_unreliable', {
             negotiated: true,
@@ -292,8 +258,7 @@ async function _setupWebRTCInner(sessionId) {
         console.warn('[map] no map_channel_id from broker — minimap unavailable');
     }
 
-    // Apply the broker's video-pull renegotiation offer so ontrack fires.
-    // Best-effort: failure leaves commands + clock intact.
+    // Apply the broker's video-pull renegotiation offer so ontrack fires. Best-effort.
     if (bridge.video_offer) {
         try {
             await pc.setRemoteDescription({ type: 'offer', sdp: bridge.video_offer });
@@ -311,10 +276,9 @@ async function _setupWebRTCInner(sessionId) {
     }
 }
 
-// ─── Clock sync ──────────────────────────────────────────────────────────
 // Burst of N pings to converge fast, then one every 30s to track drift.
 export function startClockSync(channel) {
-    _lastBestUpdateMs = 0;  // reset decay state for the new session
+    _lastBestUpdateMs = 0;
     let sent = 0;
     const sendPing = () => {
         if (!channel || channel.readyState !== 'open') return;
@@ -338,24 +302,17 @@ export function stopClockSync() {
     if (state.clockSyncDriftTimer) { clearInterval(state.clockSyncDriftTimer); state.clockSyncDriftTimer = null; }
 }
 
-// ─── Video stats ─────────────────────────────────────────────────────────
-// Delta math + ICE-path resolution live in statscore.js (shared with the
-// LiveKit path, unit-tested under web/js/tests/).
-
-// Glass-to-glass latency: read the robot's capture stamp from a strip APPENDED
-// below the video (robot draws it as extra rows, not over content). Constants
-// MUST match _stamp() in hosted_connection.py.
+// Glass-to-glass latency: read the robot's capture stamp from a strip appended below the video.
+// Constants MUST match _stamp() in hosted_connection.py.
 const STAMP_CELL_PX = 16;
-const STAMP_STRIP_PX = 16;  // height of the appended strip, in rows
+const STAMP_STRIP_PX = 16;
 const STAMP_SYNC = [1, 0, 1, 0];
 const STAMP_TIME_BITS = 44;
 const STAMP_CELLS = STAMP_SYNC.length + STAMP_TIME_BITS;
 const _stampCanvas = document.createElement('canvas');
 
-// Latency in ms, or 0 when the stamp is missing/unreadable (robot not stamping).
-// Side effect: records strip presence in state.liveStats.stampStripPx so the
-// HUD can crop the strip out of the display (clip-path reads nothing — this
-// decoder samples source pixels via drawImage, so cropping doesn't break it).
+// Latency in ms, or 0 when the stamp is missing/unreadable. Side effect: records strip presence in
+// state.liveStats.stampStripPx so the HUD can crop the strip out of the display.
 function readLatencyStamp() {
     const v = document.getElementById('robot-cam');
     if (!v || !v.videoWidth) return 0;
@@ -383,14 +340,11 @@ function readLatencyStamp() {
     };
     for (let i = 0; i < STAMP_SYNC.length; i++) {
         if (bitAt(i) !== STAMP_SYNC[i]) {
-            // Sync missed. DON'T clear stampStripPx here — a camera switch briefly
-            // changes frame dimensions and the read transiently fails, which would
-            // un-crop and flash the strip. Once we've seen a stamp this session the
-            // robot is stamping every frame, so keep cropping; disconnect resets it.
+            // Sync missed. DON'T clear stampStripPx — a camera switch transiently fails the read;
+            // clearing would un-crop and flash the strip. Disconnect resets it.
             return 0;
         }
     }
-    // Sync matched: the strip exists even if the decoded time fails sanity.
     state.liveStats.stampStripPx = STAMP_STRIP_PX;
     let ms = 0;
     for (let i = 0; i < STAMP_TIME_BITS; i++) {
@@ -402,18 +356,14 @@ function readLatencyStamp() {
     return +e2e.toFixed(1);
 }
 
-// getStats() lives only in the browser, so the operator samples the inbound
-// track and reports health to the robot (rate/bitrate/loss = deltas between
-// consecutive 1s samples). Robot folds it into report.json.
-//
-// getReport supplies the RTCStatsReport: defaults to the Cloudflare path's
+// getStats() is browser-only, so the operator samples the inbound track and reports health to the robot
+// (rate/bitrate/loss = deltas between consecutive 1s samples). getReport defaults to the CF path's
 // state.pc.getStats(); the LiveKit path passes its track receiver's getStats.
 export function startVideoStats(channel, getReport = null) {
     state.videoStatsPrev = null;
-    // Skip overlapping ticks — if getStats() blocks >1s, two concurrent
-    // bodies race on videoStatsPrev and emit nonsense deltas.
+    // Skip overlapping ticks — if getStats() blocks >1s, concurrent bodies race on videoStatsPrev.
     let inFlight = false;
-    let loggedSummary = false;  // one-shot per session (reset on each start)
+    let loggedSummary = false;
     state.videoStatsTimer = setInterval(async () => {
         if (inFlight) return;
         if (!channel || channel.readyState !== 'open') return;
@@ -426,22 +376,18 @@ export function startVideoStats(channel, getReport = null) {
             inFlight = false;
             return;
         }
-        state.liveStats.iceType = selectedIceType(report);  // direct/stun/turn
+        state.liveStats.iceType = selectedIceType(report);
         const inbound = findVideoInbound(report);
         if (!inbound) { inFlight = false; return; }
 
         const prev = state.videoStatsPrev;
         state.videoStatsPrev = inbound;
-        // Stamp decode draws the video to a canvas — skip it on ticks that
-        // can't produce a payload anyway (first sample).
         const payload = prev
             ? computeVideoStats(prev, inbound, readLatencyStamp(), videoCodec(report, inbound))
             : null;
         if (payload) {
             try { channel.send(JSON.stringify(payload)); } catch (_) {}
-            state.liveStats.video = payload;  // latest sample for the HUD/VR quad
-            // One-shot latency summary once video flows: codec, jitter buffer,
-            // and ICE path — the three knobs that decide glass-to-glass latency.
+            state.liveStats.video = payload;
             if (!loggedSummary && payload.codec) {
                 loggedSummary = true;
                 console.info(
@@ -461,14 +407,11 @@ export function stopVideoStats() {
     state.videoStatsPrev = null;
 }
 
-// ─── Operator liveness heartbeat ─────────────────────────────────────────
-// Keeps broker's last_operator_heartbeat fresh so the reaper doesn't evict
-// us. Covers silent drops (browser crash, iOS backgrounding) that pagehide
-// misses. Stops on terminal auth/not-found — nothing to be gained by spam.
+// Keeps broker's last_operator_heartbeat fresh so the reaper doesn't evict us; covers silent drops
+// (browser crash, iOS backgrounding) that pagehide misses.
 export function startOpHeartbeat(sessionId) {
     stopOpHeartbeat();
-    // In-flight guard: fetch has no timeout, so a hung request would stack a
-    // new POST every interval behind it.
+    // In-flight guard: fetch has no timeout, so a hung request would stack a POST every interval.
     let inFlight = false;
     state.opHeartbeatTimer = setInterval(async () => {
         if (inFlight) return;
@@ -495,10 +438,8 @@ export function stopOpHeartbeat() {
 }
 
 export function handleStateMessage(data) {
-    // Messages arrive as a string (pong, sent as str) OR an ArrayBuffer
-    // (robot_telemetry/cmd_ack, published as bytes → CF delivers binary).
-    // Decode binary to text before parsing, else JSON.parse throws and the
-    // message is silently dropped — which is why battery never showed.
+    // Binary (robot_telemetry/cmd_ack, sent as bytes) MUST be decoded to text before JSON.parse,
+    // else it throws and the message is silently dropped.
     if (data instanceof ArrayBuffer) {
         data = new TextDecoder().decode(data);
     } else if (ArrayBuffer.isView(data)) {
@@ -507,32 +448,17 @@ export function handleStateMessage(data) {
     let msg;
     try { msg = JSON.parse(data); } catch (_) { return; }
     if (msg.type === 'pong') applyPong(msg);
-    // Robot-measured command-plane health (latency/jitter/loss) — what
-    // actually arrived, which the operator can't see from its send side.
     else if (msg.type === 'robot_telemetry') {
         state.liveStats.cmd = msg.cmd;
-        // Battery SOC rides robot_telemetry (state_reliable_back). null until
-        // the robot's first lowstate; views read state.liveStats.soc.
         if (msg.soc != null) state.liveStats.soc = msg.soc;
-        // Robot-authoritative UI state (posture/rage/OA/cams/estop) — the
-        // active view registers state.onRobotState to reconcile its controls.
-        // Absent on older robots; the hook is a no-op then.
         if (msg.state) state.onRobotState?.(msg.state);
     }
-    // Command ack for a nonce'd command (body_height, sport_cmd, ...). The
-    // active view registers state.onCmdAck to resolve its pending button/slider.
     else if (msg.type === 'cmd_ack') state.onCmdAck?.(msg);
-    // Occupancy grid for the minimap (Phase 1: rides state_reliable_back as an
-    // extra type; a dedicated channel comes later). Slow (~2Hz), few KB PNG.
-    // The active view registers state.onMap to decode + draw. See go2.js.
     else if (msg.type === 'map') state.onMap?.(msg);
-    // Robot pose for the minimap marker. Fast (~15Hz), tiny (x/y/yaw). Kept a
-    // separate type from map so the marker moves smoothly between map frames.
     else if (msg.type === 'odom') state.onOdom?.(msg);
 }
 
-// NTP-style min-RTT. Decay the floor ~1ms/s so a stale outlier doesn't pin
-// clockOffsetMs forever — let the offset track link drift over minutes.
+// NTP-style min-RTT. Decay the floor ~1ms/s so a stale outlier doesn't pin clockOffsetMs forever.
 const BEST_RTT_DECAY_MS_PER_SEC = 1;
 let _lastBestUpdateMs = 0;
 
@@ -554,7 +480,6 @@ function applyPong(pong) {
     state.liveStats.rttMs = rttMs;
     state.liveStats.offsetMs = state.clockOffsetMs;
     console.debug(`[clock-sync] rtt=${rttMs.toFixed(1)}ms offset=${state.clockOffsetMs.toFixed(1)}ms`);
-    // Report back so the robot can log it (can't derive from one-way pings).
     if (state.stateChannel && state.stateChannel.readyState === 'open') {
         state.stateChannel.send(JSON.stringify({
             type: 'clock_report',

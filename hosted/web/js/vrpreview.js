@@ -1,11 +1,4 @@
-// VR cockpit preview — no broker, no robot. Open #vrpreview on a headset,
-// press the button (requestSession needs the gesture), and the full VR
-// cockpit renders against faked data:
-//   - fake state/cmd channels that echo cmd_acks like an obedient robot
-//   - synthesized occupancy-grid map + robot marker driving a lap
-//   - canvas test-pattern piped into #robot-cam via captureStream()
-//   - telemetry (fps/rtt/cmd/battery) wiggling at plausible values
-// Everything is local: nothing touches the broker or a real robot.
+// VR cockpit preview — no broker, no robot. requestSession needs the click gesture.
 
 import { ensureRobotCam } from './dom.js';
 import { state } from './state.js';
@@ -13,7 +6,6 @@ import { startVR } from './vr.js';
 
 const timers = [];
 
-// ── fake robot: echo acks + track state like the real firmware would ──
 const robot = {
     posture: 'StandReady', estopped: false, obstacle: true,
     light: 0, cams: ['cam1'], rage: false,
@@ -25,7 +17,6 @@ function fakeChannels() {
         readyState: 'open',
         send: (txt) => {
             let m; try { m = JSON.parse(txt); } catch (_) { return; }
-            // Update the fake robot the way the real one would.
             if (m.type === 'sport_cmd') {
                 if (['StandReady', 'StandDown', 'Sit', 'RecoveryStand', 'Damp'].includes(m.name)) robot.posture = m.name;
             } else if (m.type === 'estop') { robot.estopped = true; robot.posture = 'Damp'; }
@@ -34,7 +25,6 @@ function fakeChannels() {
             else if (m.type === 'light') robot.light = m.brightness ?? 0;
             else if (m.type === 'camera_select') robot.cams = m.cams || ['cam1'];
             else if (m.type === 'set_mode') robot.rage = m.mode === 'rage';
-            // Ack anything nonce'd, like the robot's command executor.
             if (m.nonce != null) {
                 const delay = m.name === 'StandReady' ? 1200 : 250;
                 timers.push(setTimeout(() => state.onCmdAck?.({ type: 'cmd_ack', nonce: m.nonce, ok: true }), delay));
@@ -43,7 +33,6 @@ function fakeChannels() {
     };
 }
 
-// ── fake occupancy grid: rooms + corridor, robot lapping the space ────
 function fakeMap() {
     const W = 160, H = 120, RES = 0.05;              // 8m × 6m at 5cm cells
     const c = document.createElement('canvas');
@@ -61,7 +50,6 @@ function fakeMap() {
     const png_b64 = c.toDataURL('image/png').split(',')[1];
     state.onMap?.({ type: 'map', png_b64, w: W, h: H, res: RES, origin: [-4.0, -3.0] });
 
-    // Robot lapping a rounded rectangle inside the free space.
     let t = 0;
     timers.push(setInterval(() => {
         t += 0.02;
@@ -70,7 +58,6 @@ function fakeMap() {
     }, 100));
 }
 
-// ── fake camera: animated test pattern → #robot-cam ──────────────────
 function fakeVideo() {
     const c = document.createElement('canvas');
     c.width = 640; c.height = 360;
@@ -96,7 +83,6 @@ function fakeVideo() {
     v.play?.().catch(() => {});
 }
 
-// ── fake telemetry: stats panel food ─────────────────────────────────
 function fakeTelemetry() {
     let soc = 87;
     timers.push(setInterval(() => {
@@ -150,5 +136,4 @@ export function renderVRPreview(c) {
     });
 }
 
-// Best-effort cleanup if the page navigates away mid-preview.
 window.addEventListener('pagehide', () => timers.forEach((t) => { clearTimeout(t); clearInterval(t); }));

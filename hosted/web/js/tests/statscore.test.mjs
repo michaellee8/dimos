@@ -1,6 +1,3 @@
-// node --test web/js/tests/
-// Video-stats delta math + ICE-path resolution (HARDENING_PLAN E2).
-
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
@@ -116,7 +113,6 @@ test('videoCodec resolves the linked codec short name', () => {
     const inbound = { id: 'v', type: 'inbound-rtp', kind: 'video', codecId: 'cod' };
     const r = fakeReport([inbound, { id: 'cod', type: 'codec', mimeType: 'video/H264' }]);
     assert.equal(videoCodec(r, inbound), 'H264');
-    // Missing codec entry, no codecId, or no inbound → '' (never throws).
     assert.equal(videoCodec(fakeReport([inbound]), inbound), '');
     assert.equal(videoCodec(r, { type: 'inbound-rtp' }), '');
     assert.equal(videoCodec(r, null), '');
@@ -128,7 +124,6 @@ test('computeVideoStats carries codec and decoder implementation', () => {
     const s = computeVideoStats(prev, cur, 0, 'H264');
     assert.equal(s.codec, 'H264');
     assert.equal(s.decoder, 'ExternalDecoder');
-    // Defaults stay backward-compatible when omitted.
     assert.equal(computeVideoStats(prev, sample({ timestamp: 1000 })).codec, '');
     assert.equal(computeVideoStats(prev, sample({ timestamp: 1000 })).decoder, '');
 });

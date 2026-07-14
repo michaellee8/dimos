@@ -1,5 +1,4 @@
-// VR landing view — the actual scene renders into <canvas> via WebXR; this
-// is just the loading screen + Disconnect button.
+// Loading screen only — the VR scene renders into <canvas> via WebXR elsewhere.
 
 import { disconnect } from '../disconnect.js';
 import { escHtml, state } from '../state.js';

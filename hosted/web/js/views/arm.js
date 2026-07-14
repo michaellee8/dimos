@@ -1,16 +1,3 @@
-// Desktop browser cockpit for the hosted xArm — keyboard EE-jog, in parallel
-// with the Quest VR cockpit (both drive the same ControlCoordinator; the robot
-// arbitrates, VR overriding keyboard when engaged). Mirrors views/go2.js.
-//
-//   WASD/QE            → EE linear X/Y/Z    (m/s)
-//   Shift + WASD/QE    → EE angular R/P/Y   (rad/s)
-//   Space              → gripper toggle open/close
-//   E-STOP button      → latch/clear
-//
-// Twist → cmd_unreliable (state.cmdChannel) as TwistStamped frame_id
-// "eef_twist_arm"; gripper + estop → state_reliable JSON. Shares transport with
-// vrarm.js/xarmcmd.js against the same ArmHostedConnection.
-
 import { disconnect } from '../disconnect.js';
 import { applyStampCrop, hudDetailRows, hudSummaryLine, sampleCmdHz, statsHealth, transportLabel } from '../hud.js';
 import { createStallGate, videoMediaTime } from '../stall.js';
@@ -19,27 +6,23 @@ import {
     buildEEFTwist, sendCameraSelect, sendEstop, sendEstopClear, sendGripper,
 } from '../xarmcmd.js';
 
-// Jog speeds. Modest so the arm is controllable near singularities.
 const LINEAR_SPEED = 0.12;   // m/s
 const ANGULAR_SPEED = 0.8;   // rad/s
 
-// key → (axis, sign) for LINEAR jog (no Shift).
+// key → [axis, sign] for LINEAR jog (no Shift)
 const AXIS_KEYS = {
-    w: ['x', +1], s: ['x', -1],   // forward / back
-    a: ['y', +1], d: ['y', -1],   // left / right
-    q: ['z', +1], e: ['z', -1],   // up / down
+    w: ['x', +1], s: ['x', -1],
+    a: ['y', +1], d: ['y', -1],
+    q: ['z', +1], e: ['z', -1],
 };
 
-// key → (axis, sign) for ANGULAR jog (Shift held). W/S and A/D swap axes vs
-// linear so W/S drive pitch (Y) and A/D drive roll (X); Q/E stays yaw (Z).
+// key → [axis, sign] for ANGULAR jog (Shift): W/S pitch(Y), A/D roll(X), Q/E yaw(Z)
 const ROT_AXIS_KEYS = {
-    w: ['y', +1], s: ['y', -1],   // pitch
-    a: ['x', +1], d: ['x', -1],   // roll
-    q: ['z', +1], e: ['z', -1],   // yaw
+    w: ['y', +1], s: ['y', -1],
+    a: ['x', +1], d: ['x', -1],
+    q: ['z', +1], e: ['z', -1],
 };
 
-// Camera tabs — mirror the go2 view: toggle which cams the robot composites into
-// the one video track. At least one stays on; both = side-by-side.
 const CAMS = [
     { id: 'cam1', label: 'Cam 1' },
     { id: 'cam2', label: 'Cam 2' },
@@ -49,12 +32,10 @@ const _held = new Set();
 let _estopped = false;
 let _gripperClosed = false;
 let _estopNonce = 0;
-// Default to a single camera: selecting both makes the robot hstack them into a
-// 1696×480 side-by-side frame that letterboxes into an unreadable strip. The
-// Cam 1 / Cam 2 tabs still switch (and enable both) on demand.
+// Single cam by default: selecting both makes the robot hstack into an unreadable side-by-side strip.
 let _cams = ['cam1'];
 let _camsRequested = false;
-let _wasSending = false;  // true while actively jogging (for one-shot stop on release)
+let _wasSending = false;
 
 function trackedKey(e) {
     const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
@@ -123,8 +104,6 @@ function paintStatus() {
     renderCamTabs();
 }
 
-// Light up the on-screen key grid as keys are held (go2's updateKeyVisuals
-// equivalent). Also swaps the grid label to signal linear vs rotation mode.
 function paintKeys() {
     for (const key of ['w', 'a', 's', 'd', 'q', 'e']) {
         const el = document.getElementById(`arm-key-${key}`);
@@ -136,7 +115,6 @@ function paintKeys() {
     if (title) title.textContent = _held.has('Shift') ? 'Rotate (Shift)' : 'Translate';
 }
 
-// go2-style camera tabs: click toggles; keep ≥1 on; preserve CAMS order.
 function renderCamTabs() {
     document.querySelectorAll('#arm-cam-tabs [data-cam]').forEach((b) => {
         const on = _cams.includes(b.dataset.cam);
@@ -159,48 +137,34 @@ function toggleCam(id) {
 }
 
 export function renderArm(c) {
-    // A prior VR/preview session may have left a hidden #robot-cam appended to
-    // <body> (ensureRobotCam creates one when a view has no <video>). navigate()
-    // only replaces #app, so that stale element survives — and since it's earlier
-    // in document order, getElementById('robot-cam') would return IT, so the
-    // WebRTC track attaches to the invisible element and our video stays black.
-    // Drop it before we render ours.
+    // Drop any stale #robot-cam left on <body> by a prior session: it precedes #app in
+    // document order, so getElementById would return it and the WebRTC track would attach off-screen.
     document.querySelectorAll('#robot-cam').forEach((el) => {
         if (!el.closest('#app')) el.remove();
     });
     c.innerHTML = `
     <div class="min-h-screen flex flex-col md:flex-row gap-4 p-4 fade-in">
-        <!-- Video -->
         <div class="flex-1 flex flex-col">
             <div class="flex items-center justify-between mb-2">
                 <h1 class="text-2xl font-bold text-white">${escHtml(state.activeRobot?.robot_name || 'xArm teleop')}</h1>
                 <button id="disconnectBtn" class="term-caps px-3 py-1.5 text-xs text-gray-400 hover:text-white border border-[#2a2a2a] rounded">[ disconnect ]</button>
             </div>
-            <!-- setStatus() targets #teleop-status -->
             <div id="teleop-status" class="text-sm text-gray-300 px-3 py-2 bg-bg-950 border border-[#2a2a2a] rounded-lg mb-3">Negotiating…</div>
-            <!-- Camera strip (go2-style): thin bar of camera tabs above the stage. -->
             <div class="flex items-center gap-1.5 px-2 py-1 bg-bg-950 border border-[#2a2a2a] border-b-0 rounded-t-lg">
                 <span class="term-caps text-[10px] text-gray-600 mr-1">Camera</span>
                 <div class="flex items-center gap-1.5" id="arm-cam-tabs"></div>
             </div>
-            <!-- Fixed-size stage (like the go2 view's #stage): the box keeps a
-                 constant 16:9 area and the video letterboxes inside it via
-                 object-contain, so the frame never resizes the layout. Starts
-                 display:none; webrtc.js reveals it on track arrival. -->
             <div class="relative w-full bg-black border-x border-[#2a2a2a] overflow-hidden" style="aspect-ratio:16/9;">
                 <video id="robot-cam" autoplay muted playsinline
                     class="absolute inset-0 w-full h-full object-contain"
                     style="display:none;"></video>
-                <!-- Bottom-left live command overlay (go2's #twist-readout). -->
                 <div id="arm-twist-readout" class="absolute bottom-3 left-3 text-xs font-mono bg-black/40 rounded px-2 py-1 text-dim-400">
                     idle
                 </div>
-                <!-- Bottom-right gripper chip. -->
                 <div class="absolute bottom-3 right-3">
                     <span class="pill pill-good"><span class="dot"></span><span id="arm-grip-chip">OPEN</span></span>
                 </div>
             </div>
-            <!-- Bottom bar (mirrors go2): live-input pill + key hint under the stage. -->
             <div class="border border-[#2a2a2a] rounded-b-lg p-3 flex items-center justify-between shrink-0 bg-bg-950">
                 <div class="flex items-center gap-3 text-xs text-gray-500">
                     <span id="arm-live" class="pill pill-good"><span class="dot"></span>KEYBOARD LIVE</span>
@@ -211,9 +175,7 @@ export function renderArm(c) {
                 </div>
             </div>
         </div>
-        <!-- Right control panel -->
         <div class="w-full md:w-72 flex flex-col gap-3">
-            <!-- Telemetry: summary always; click to expand full detail. -->
             <section class="bg-bg-950 border border-[#2a2a2a] rounded-lg p-3">
                 <button id="hud-toggle" class="w-full flex items-center justify-between mb-2">
                     <span class="term-caps text-xs text-gray-500">Telemetry <span id="hud-caret" class="text-gray-600">▸</span></span>
@@ -222,7 +184,6 @@ export function renderArm(c) {
                 <pre id="hud-summary" class="text-xs text-dim-400 leading-relaxed">—</pre>
                 <div id="hud-detail" class="hidden mt-2 pt-2 border-t border-[#2a2a2a] space-y-2.5"></div>
             </section>
-            <!-- Gripper -->
             <div class="bg-bg-950 border border-[#2a2a2a] rounded-lg p-3 flex items-center justify-between">
                 <span class="text-gray-400 text-xs term-caps">Gripper</span>
                 <div class="flex items-center gap-2">
@@ -231,8 +192,6 @@ export function renderArm(c) {
                 </div>
             </div>
 
-            <!-- EE-jog key grid (mirrors go2's Drive panel): lights up keys as
-                 they're held (paintKeys). Title flips Translate ↔ Rotate on Shift. -->
             <section class="bg-bg-950 border border-[#2a2a2a] rounded-lg p-3">
                 <div class="term-caps text-xs text-gray-500 mb-2" id="arm-key-title">Translate</div>
                 <div class="flex flex-col items-center gap-2">
@@ -264,16 +223,13 @@ export function renderArm(c) {
 
     document.getElementById('disconnectBtn').onclick = disconnect;
     document.getElementById('arm-estop-btn').onclick = triggerEstop;
-    // Recompute the latency-strip crop when the video box/frame size changes.
     document.getElementById('robot-cam').addEventListener('resize', applyStampCrop);
-    // Camera tabs (go2-style): render + wire toggles.
     const tabs = document.getElementById('arm-cam-tabs');
     tabs.innerHTML = CAMS.map((c) =>
         `<button data-cam="${c.id}" class="px-4 py-0.5 rounded text-[11px] leading-none border border-[#2a2a2a] text-gray-400">${c.label}</button>`
     ).join('');
     tabs.querySelectorAll('[data-cam]').forEach((b) =>
         b.addEventListener('click', () => toggleCam(b.dataset.cam)));
-    // Telemetry expand/collapse — summary always, full detail grid on expand.
     document.getElementById('hud-toggle').addEventListener('click', () => {
         const detail = document.getElementById('hud-detail');
         const collapsed = detail.classList.toggle('hidden');
@@ -300,9 +256,6 @@ function renderTelemetryGrid() {
         </div>`).join('');
 }
 
-// 1Hz telemetry tick: sample the operator send rate, refresh the always-on
-// summary + health pill (+ detail grid when expanded) via the shared hud.js
-// formatters, so this cockpit's HUD matches Go2's.
 function startHudTick() {
     stopHudTick();
     let last = performance.now();
@@ -319,7 +272,7 @@ function startHudTick() {
         const tl = document.getElementById('hud-transport');
         if (tl) tl.textContent = transportLabel();
         renderTelemetryGrid();
-        applyStampCrop();  // hide the benchmark latency strip (display-only)
+        applyStampCrop();
     }, 1000);
 }
 
@@ -332,26 +285,25 @@ export function startArmLoop() {
     _held.clear();
     _estopped = false;
     _gripperClosed = false;
-    _cams = ['cam1'];  // single cam by default (see _cams declaration)
+    _cams = ['cam1'];
     _camsRequested = false;
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', clearHeld);
-    startHudTick();  // inline telemetry panel (summary + expand)
+    startHudTick();
 
     const stallGate = createStallGate();
     state.videoStall = { stalled: false, blocked: false, armed: false };
 
     state.kbInterval = setInterval(() => {
-        // Once the reliable channel opens, sync the robot to our default cam
-        // selection (_cams). One-shot.
+        // One-shot: sync robot to default cam selection once the reliable channel opens.
         if (!_camsRequested && state.stateChannel && state.stateChannel.readyState === 'open') {
             sendCameraSelect(state.stateChannel, _cams);
             _camsRequested = true;
             paintStatus();
         }
 
-        paintKeys();  // light up the on-screen key grid
+        paintKeys();
 
         const chan = state.cmdChannel;
         const chanOk = !!chan && chan.readyState === 'open';
@@ -362,8 +314,6 @@ export function startArmLoop() {
         );
         state.videoStall = gate;
 
-        // Bottom-bar live pill (mirrors go2's kb-live): green when the command
-        // channel is open and not stalled/estopped; red with a reason otherwise.
         const live = document.getElementById('arm-live');
         if (live) {
             const ok = chanOk && !gate.blocked && !_estopped;
@@ -377,9 +327,8 @@ export function startArmLoop() {
 
         if (!chanOk) return;
 
-        // Send only while jogging (or one zero-twist on release / block / estop),
-        // NOT every tick — flooding the datachannel with idle zero-twists competes
-        // with the video and adds latency. The robot's eef_twist holds when idle.
+        // Send only while jogging (plus one zero-twist on release/block/estop): idle zero-twists
+        // flood the datachannel and add latency. The robot's eef_twist holds when idle.
         const readout = document.getElementById('arm-twist-readout');
         const shouldStop = gate.blocked || _estopped || !held;
         if (shouldStop) {
@@ -398,7 +347,6 @@ export function startArmLoop() {
         state.cmdSendCount++;
         _wasSending = true;
 
-        // Bottom-left overlay: show whichever plane is active (like go2's readout).
         if (readout) {
             readout.textContent = _held.has('Shift')
                 ? `ω  r ${angular.x.toFixed(2)} · p ${angular.y.toFixed(2)} · y ${angular.z.toFixed(2)}`

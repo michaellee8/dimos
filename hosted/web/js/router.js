@@ -1,6 +1,4 @@
-// Tiny view dispatcher. Views register themselves at import time (in main.js)
-// so router.js doesn't have to import from views/* — that import direction is
-// what caused the cycles in the single-file split.
+// Views register themselves at import time (main.js) so router.js need not import views/* — avoids import cycles.
 
 const routes = {};
 

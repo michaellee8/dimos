@@ -1,5 +1,3 @@
-// Single teardown path — wraps every connect-time side effect.
-
 import { api, brokerOrigin } from './api.js';
 import { unmountHud } from './hud.js';
 import { navigate } from './router.js';
@@ -10,9 +8,7 @@ import { stopKeyboardLoop } from './views/keyboard.js';
 import { stopClockSync, stopOpHeartbeat, stopVideoStats } from './webrtc.js';
 
 export async function disconnect() {
-    // Await leave so the broker clears operator_id before any re-connect —
-    // fire-and-forget raced the next join into a 409 "already has operator".
-    // Best-effort: still tear down locally if it fails.
+    // MUST await leave so broker clears operator_id before any re-connect (else next join 409s).
     if (state.activeRobot && state.token) {
         try {
             await api('POST', `/sessions/${state.activeRobot.session_id}/leave`,
@@ -21,8 +17,8 @@ export async function disconnect() {
     }
 
     stopKeyboardLoop();
-    stopArmLoop();  // arm cockpit: remove its key/blur listeners
-    stopTick();  // go2 cockpit: clear telemetry tick + cmd-ack hook
+    stopArmLoop();
+    stopTick();
     stopClockSync();
     stopVideoStats();
     stopOpHeartbeat();
@@ -38,8 +34,7 @@ export async function disconnect() {
     const v = document.getElementById('robot-cam');
     if (v) {
         v.srcObject = null;
-        // Remove the dynamically-created (VR) element; leave the keyboard
-        // view's static one in place (it's re-rendered anyway).
+        // Remove the dynamically-created (VR) element; leave the keyboard view's static one.
         if (!v.parentElement || v.parentElement === document.body) v.remove();
         else v.style.display = 'none';
     }
@@ -52,10 +47,10 @@ export async function disconnect() {
     state.liveStats.offsetMs = 0;
     state.liveStats.cmdHz = 0;
     state.liveStats.cmd = null;
-    state.liveStats.soc = null;      // else next robot briefly shows this one's battery
-    state.liveStats.iceType = null;  // ditto for the ICE path label
-    state.liveStats.stampStripPx = 0;  // next robot may not be stamping
-    state.speedScale = { lin: 0.5, ang: 0.5 };  // don't leak cockpit Rage scale into next session
+    state.liveStats.soc = null;
+    state.liveStats.iceType = null;
+    state.liveStats.stampStripPx = 0;
+    state.speedScale = { lin: 0.5, ang: 0.5 };
     state.videoStall = { stalled: false, blocked: false, armed: false };
     state.cmdSendCount = 0;
 
@@ -65,8 +60,7 @@ export async function disconnect() {
     navigate('dashboard');
 }
 
-// Best-effort /leave on tab close/reload. fetch+keepalive lets the request
-// finish after the page unloads; sendBeacon can't set Authorization.
+// Best-effort /leave on tab close/reload. fetch+keepalive survives unload; sendBeacon can't set Authorization.
 let _pagehideInstalled = false;
 
 export function installPagehideLeave() {
