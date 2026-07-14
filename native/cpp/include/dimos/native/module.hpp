@@ -272,6 +272,7 @@ public:
     Builder(std::unordered_map<std::string, std::string> topics, Notifier* notifier)
         : topics_(std::move(topics)), notifier_(notifier) {}
 
+    // Explicit decoder + handler form. Use for a lambda or a non-lcm decoder.
     template <class T>
     void input(const std::string& port, DecodeFn<T> decode, HandlerFn<T> handler) {
         std::string topic = topic_for(port);
@@ -282,8 +283,9 @@ public:
         owned_inputs_.push_back(std::move(channel));
     }
 
-    // Register a member function as the handler, with the decoder defaulting to
-    // the generic lcm codec.
+    // Route each `T` on `port` to a method on `self`, decoded by the lcm codec:
+    // `builder.input<Twist>("data", &Pong::on_data, this)`. Handlers run
+    // serialized on the dispatch thread, so they touch module state without locks.
     template <class T, class Self>
     void input(const std::string& port, void (Self::*handler)(const T&), Self* self,
                DecodeFn<T> decode = lcm_decode<T>) {
@@ -291,7 +293,9 @@ public:
                  [self, handler](T msg) { (self->*handler)(msg); });
     }
 
-    // Encoder defaults to the generic lcm codec, so LCM message types need none.
+    // Declare an output and return its publish handle, encoded by the lcm codec:
+    // `out_ = builder.output<Twist>("confirm")` then `out_.publish(msg)`. publish()
+    // hands off to a per-channel worker, so it never blocks the caller.
     template <class T>
     Output<T> output(const std::string& port, EncodeFn<T> encode = lcm_encode<T>) {
         std::string topic = topic_for(port);

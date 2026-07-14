@@ -21,7 +21,10 @@ using geometry_msgs::Twist;
 class Ping : public Module {
 public:
     void build(Builder& builder, Config& /*config*/) override {
+        // publish data topic
         data_ = builder.output<Twist>("data");
+
+        // input confirm topic
         builder.input<Twist>("confirm", &Ping::on_confirm, this);
     }
 

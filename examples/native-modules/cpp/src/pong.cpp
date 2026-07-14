@@ -31,8 +31,13 @@ DIMOS_NATIVE_CONFIG(PongConfig, sample_config);
 class Pong : public Module {
 public:
     void build(Builder& builder, Config& config) override {
+        // read the config from stdin
         config_ = config.parse<PongConfig>();
+
+        // publish confirm topic
         confirm_ = builder.output<Twist>("confirm");
+
+        // input data topic
         builder.input<Twist>("data", &Pong::on_data, this);
     }
 
