@@ -416,7 +416,23 @@ class Benchmarker(Module):
     def _on_gate_event(self, msg: Int8) -> None:
         self._gate_queue.put(int(msg.data))
 
+    def _drain_gate(self) -> int:
+        """Discard queued gate events; return how many were dropped.
+
+        Gate presses DURING a run (e.g. the operator hitting ENTER while a stuck
+        run waits out its timeout) must not auto-start the runs that follow."""
+        dropped = 0
+        while True:
+            try:
+                self._gate_queue.get_nowait()
+                dropped += 1
+            except queue.Empty:
+                return dropped
+
     def _wait_gate(self) -> int:
+        stale = self._drain_gate()
+        if stale:
+            logger.info(f"discarded {stale} stale gate event(s) from the previous run")
         return self._gate_queue.get()
 
     # -- the session loop ----------------------------------------------------

@@ -76,7 +76,11 @@ DEFAULT_ARTIFACT_PATH = str(
     _FsPath(__file__).parent.parent / "rpp_path_follower_task" / "artifacts" / "go2_posedomain.json"
 )
 
-HolonomicPoseFollowerState = Literal["idle", "tracking", "settling", "arrived", "aborted"]
+# "stopping" = at the goal, streaming zero commands until the base has actually
+# come to rest (one zero command does not stop a legged base mid-glide).
+HolonomicPoseFollowerState = Literal[
+    "idle", "tracking", "settling", "stopping", "arrived", "aborted"
+]
 
 # P gain for a critically-damped outer loop on a first-order-lag plant
 # (tau*s^2 + s + kp = 0 -> kp = 1/(4 zeta^2 tau)); same derivation the
@@ -116,6 +120,17 @@ class HolonomicPoseFollowerTaskConfig:
     # the regulated path speed. Off falls back to carrot-only pursuit of the
     # previewed pose (slow; mainly for isolation tests).
     feedforward: bool = True
+    # Comfortable braking rate (m/s^2) for the ramp INTO the goal. Deliberately
+    # far below the artifact's max decel (~5.5): braking at the measured maximum
+    # starts centimeters before the goal, so the robot crosses the arrival ring
+    # at cruise and glides past (hardware 2026-07-13: 0.29 m past at v=0.7). At
+    # 1.0 the ramp opens ~0.3-0.5 m out and lands near floor speed.
+    approach_decel: float = 1.0
+    # After the goal tolerances are met, stream zero commands for this long, then
+    # re-check the REST pose and only then declare arrival. Covers the plant's
+    # dead time + lag glide, and catches an overshoot past the tolerance circle
+    # (which sends the follower back to settling).
+    stop_hold_s: float = 1.0
     # Calibration artifact (plant K per axis, envelope, accel limits). Loaded
     # lazily on the first start_path so a missing file never blocks startup.
     artifact_path: str = DEFAULT_ARTIFACT_PATH
@@ -155,6 +170,7 @@ class HolonomicPoseFollowerTask(BaseControlTask):
         self._last_t: float | None = None
         self._last_pose: tuple[float, float, float] | None = None
         self._last_pose_t: float | None = None
+        self._stop_started_t: float | None = None  # when the zero-command hold began
 
     # ControlTask protocol
 
@@ -170,7 +186,8 @@ class HolonomicPoseFollowerTask(BaseControlTask):
         )
 
     def is_active(self) -> bool:
-        return self._state in ("tracking", "settling")
+        # "stopping" still commands the base (zeros), so it counts as active.
+        return self._state in ("tracking", "settling", "stopping")
 
     def compute(self, state: CoordinatorState) -> JointCommandOutput | None:
         if not self.is_active() or self._reference is None:
@@ -192,7 +209,9 @@ class HolonomicPoseFollowerTask(BaseControlTask):
         dt = state.t_now - self._last_t if self._last_t is not None else 0.0
         self._last_t = state.t_now
 
-        if self._state == "tracking":
+        if self._state == "stopping":
+            vx, vy, wz = self._stopping_command(pose, state.t_now)
+        elif self._state == "tracking":
             vx, vy, wz = self._tracking_command(pose, dt)
         else:
             vx, vy, wz = self._settling_command(pose)
@@ -294,28 +313,75 @@ class HolonomicPoseFollowerTask(BaseControlTask):
         if kappa_max > 1e-6:
             v = min(v, math.sqrt(self._a_lat / kappa_max))
         # Yaw/curvature regulation never drags v below the plant's floor speed;
-        # only the goal decel ramp may (it must reach 0).
+        # only the goal approach ramp may (it must reach 0).
         v = max(v, min(self._min_speed, v_cruise))
-        v = min(v, math.sqrt(2.0 * self._a_dec * max(remaining, 0.0)))
+        # Approach ramp: land at the settle boundary near floor speed, braking at
+        # the COMFORTABLE approach_decel (v^2 = v_land^2 + 2*a*d). Braking at the
+        # artifact's max decel would postpone braking to the last centimeters and
+        # the robot would cross the arrival ring at cruise and glide past it.
+        a_app = min(self._a_dec, self._config.approach_decel)
+        d_to_land = max(0.0, remaining - self._config.goal_tolerance)
+        v_land = min(self._min_speed, v_cruise)
+        v = min(v, math.sqrt(v_land * v_land + 2.0 * a_app * d_to_land))
 
         if dt > 0.0:
             dv_up = self._a_acc * dt
             dv_down = self._a_dec * dt
             v = min(max(v, self._v_path - dv_down), self._v_path + dv_up)
+        else:
+            # First tick (dt unknown): hold the previous path speed rather than
+            # jumping straight to cruise; the ramp starts on the next tick.
+            v = min(v, self._v_path)
         self._v_path = max(0.0, v)
         return self._v_path
 
-    def _settling_command(self, pose: tuple[float, float, float]) -> tuple[float, float, float]:
+    def _goal_errors(self, pose: tuple[float, float, float]) -> tuple[float, float]:
         assert self._reference is not None
         end = self._reference.end_pose()
-        pos_err = math.hypot(end[0] - pose[0], end[1] - pose[1])
-        yaw_err = abs(angle_diff(end[2], pose[2]))
+        return (
+            math.hypot(end[0] - pose[0], end[1] - pose[1]),
+            abs(angle_diff(end[2], pose[2])),
+        )
+
+    def _settling_command(self, pose: tuple[float, float, float]) -> tuple[float, float, float]:
+        assert self._reference is not None
+        pos_err, yaw_err = self._goal_errors(pose)
+        # Inside both tolerances -> hand over to the zero-command hold. Arrival is
+        # only declared once the hold confirms the base came to REST in tolerance;
+        # a robot merely passing through the zone does not count.
         if pos_err < self._config.goal_tolerance and yaw_err < self._config.orientation_tolerance:
-            self._state = "arrived"
-            logger.info(f"HolonomicPoseFollowerTask '{self._name}' arrived")
+            self._state = "stopping"
+            self._stop_started_t = None  # stamped on the next compute()
             return 0.0, 0.0, 0.0
         self._v_path = 0.0
-        return self._feedback(end, pose)
+        return self._feedback(self._reference.end_pose(), pose)
+
+    def _stopping_command(
+        self, pose: tuple[float, float, float], t_now: float
+    ) -> tuple[float, float, float]:
+        # Stream zeros while the plant's dead time + lag play out, then check
+        # where the robot actually came to rest.
+        if self._stop_started_t is None:
+            self._stop_started_t = t_now
+        if t_now - self._stop_started_t < self._config.stop_hold_s:
+            return 0.0, 0.0, 0.0
+        pos_err, yaw_err = self._goal_errors(pose)
+        if pos_err < self._config.goal_tolerance and yaw_err < self._config.orientation_tolerance:
+            self._state = "arrived"
+            logger.info(
+                f"HolonomicPoseFollowerTask '{self._name}' arrived "
+                f"(rest pos_err={pos_err:.3f} m, yaw_err={yaw_err:.3f} rad)"
+            )
+            return 0.0, 0.0, 0.0
+        # The glide carried the robot back outside tolerance (e.g. the plant's
+        # true gain exceeds the artifact's K): pull onto the goal again.
+        logger.info(
+            f"HolonomicPoseFollowerTask '{self._name}': rest pose outside tolerance "
+            f"(pos_err={pos_err:.3f} m, yaw_err={yaw_err:.3f} rad); re-settling"
+        )
+        self._state = "settling"
+        self._stop_started_t = None
+        return self._settling_command(pose)
 
     def _command(self, vx: float, vy: float, wz: float, *, calibrate: bool) -> JointCommandOutput:
         if calibrate:
@@ -399,6 +465,7 @@ class HolonomicPoseFollowerTask(BaseControlTask):
         self._last_t = None
         self._last_pose = None
         self._last_pose_t = None
+        self._stop_started_t = None
         self._state = "tracking"
         logger.info(
             f"HolonomicPoseFollowerTask '{self._name}' started: {len(path.poses)} poses, "
@@ -436,6 +503,8 @@ class HolonomicPoseFollowerTask(BaseControlTask):
         goal_tolerance: float | None = None,
         orientation_tolerance: float | None = None,
         feedforward: bool | None = None,
+        approach_decel: float | None = None,
+        stop_hold_s: float | None = None,
         **ignored: Any,
     ) -> bool:
         """Override per-run knobs before start_path. Unknown kwargs are
@@ -458,6 +527,10 @@ class HolonomicPoseFollowerTask(BaseControlTask):
             self._config.orientation_tolerance = orientation_tolerance
         if feedforward is not None:
             self._config.feedforward = feedforward
+        if approach_decel is not None:
+            self._config.approach_decel = approach_decel
+        if stop_hold_s is not None:
+            self._config.stop_hold_s = stop_hold_s
         if ignored:
             logger.info(
                 f"HolonomicPoseFollowerTask '{self._name}': ignoring unknown configure "
@@ -480,6 +553,7 @@ class HolonomicPoseFollowerTask(BaseControlTask):
         self._last_t = None
         self._last_pose = None
         self._last_pose_t = None
+        self._stop_started_t = None
         return True
 
     def get_state(self) -> HolonomicPoseFollowerState:
@@ -494,6 +568,8 @@ class HolonomicPoseFollowerTaskParams(BaseConfig):
     goal_tolerance: float = 0.20
     orientation_tolerance: float = 0.25
     feedforward: bool = True
+    approach_decel: float = 1.0
+    stop_hold_s: float = 1.0
     stale_pose_timeout: float = 0.3
 
 
@@ -510,6 +586,8 @@ def create_task(cfg: Any, hardware: Any) -> HolonomicPoseFollowerTask:
             goal_tolerance=params.goal_tolerance,
             orientation_tolerance=params.orientation_tolerance,
             feedforward=params.feedforward,
+            approach_decel=params.approach_decel,
+            stop_hold_s=params.stop_hold_s,
             artifact_path=params.artifact_path,
             stale_pose_timeout=params.stale_pose_timeout,
         ),

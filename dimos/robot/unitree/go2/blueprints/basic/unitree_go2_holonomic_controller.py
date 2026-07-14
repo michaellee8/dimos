@@ -63,7 +63,13 @@ _go2_joints = make_twist_base_joints("go2")
 
 unitree_go2_holonomic_controller = (
     autoconnect(
-        GO2Connection.blueprint(),
+        # velocity_api=True routes cmd_vel through the SPORT_MOD ``Move`` API
+        # (real m/s and rad/s) instead of the default WIRELESS_CONTROLLER
+        # joystick emulation (normalized stick deflections). The follower's
+        # calibration artifact was characterized against the velocity API, so
+        # under the default the commanded and achieved speeds disagree — the
+        # robot runs hot and glides past the goal.
+        GO2Connection.blueprint(velocity_api=True),
         ControlCoordinator.blueprint(
             publish_joint_state=True,
             hardware=[

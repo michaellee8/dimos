@@ -230,6 +230,39 @@ def test_holds_fixed_tangent_offset_around_circle():
 # Progress indexing: no clock, no re-ramp
 
 
+def test_stops_inside_the_goal_when_the_plant_runs_hot():
+    """Arrival must mean AT REST inside tolerance, not merely passing through.
+
+    Hardware 2026-07-13: the real base ran ~25% faster than the artifact's K,
+    so the follower crossed the ring at cruise, sent one zero, and glided
+    0.29 m past the goal — outside the benchmark's arrival circle. Model that
+    mismatch (plant K=1.0 vs artifact ~0.8) and require a rest inside tolerance.
+    """
+    task = _task(speed=0.9)
+    hot = TwistBasePlantSim(
+        TwistBasePlantParams(
+            vx=FopdtChannelParams(1.0, 0.3, 0.15),
+            vy=FopdtChannelParams(1.0, 0.3, 0.15),
+            wz=FopdtChannelParams(1.0, 0.3, 0.15),
+        )
+    )
+    hot.reset(0.0, 0.0, 0.0, _DT)
+    path = straight_rotate(length=5.0, yaw_end=0.0)
+    assert task.start_path(path, _pose())
+    for k in range(1200):
+        out = task.compute(_state(hot.x, hot.y, hot.yaw, t=k * _DT))
+        vx, vy, wz = out.velocities if out is not None else (0.0, 0.0, 0.0)
+        if task.get_state() == "arrived":
+            break
+        hot.step(vx, vy, wz, _DT)
+    assert task.get_state() == "arrived"
+    goal = path.poses[-1].position
+    rest_err = math.hypot(hot.x - goal.x, hot.y - goal.y)
+    assert rest_err < task._config.goal_tolerance, f"rested {rest_err:.3f} m from goal"
+    # Came to rest, not still coasting through.
+    assert math.hypot(hot.vx, hot.vy) < 0.05
+
+
 def test_replan_reprojects_without_reramp():
     """Swapping the path mid-run must keep the follower moving (re-project,
     not restart a speed ramp from zero)."""
