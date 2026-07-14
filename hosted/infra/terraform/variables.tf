@@ -25,9 +25,8 @@ variable "app_port" {
 }
 
 variable "ssh_ingress_cidrs" {
-  description = "CIDRs allowed to SSH (port 22). Default keeps the historic open behavior; NARROW THIS to your admin IPs (e.g. [\"203.0.113.7/32\"])."
+  description = "CIDRs allowed to SSH (port 22). Required — set your admin IP(s), e.g. [\"203.0.113.7/32\"]. Never 0.0.0.0/0."
   type        = list(string)
-  default     = ["0.0.0.0/0"]
 }
 
 variable "cf_teleop_app_id" {
