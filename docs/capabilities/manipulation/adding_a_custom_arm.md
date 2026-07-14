@@ -1,100 +1,168 @@
 ---
 title: "How to Integrate a New Manipulator Arm"
 ---
-An **adapter** is the driver DimOS uses to talk to your arm. You write one class. The `ControlCoordinator` calls it in a loop, and everything else — planning, teleop, pick-and-place — works without knowing what arm you have.
+DimOS talks to every arm through one small class: an **adapter**. It wraps your vendor's SDK and answers a fixed set of questions — where are the joints right now, go to these angles, open the gripper.
 
-Start here, because the rest of the guide follows from it.
+Write that one class and the rest of the stack comes free. Motion planning, keyboard and VR teleop, pick-and-place, the LLM agent: none of them know or care what arm you have. They all talk to the coordinator, and the coordinator talks to your adapter.
 
-## How your adapter gets used
+It is usually about 200 lines.
 
-The coordinator owns a 100Hz loop. Your adapter never runs a thread, never owns a socket, never publishes anything. It just answers calls.
-
-On startup:
+## Where the adapter sits
 
 ```
-adapter.connect()            # return False and the coordinator gives up
-adapter.write_enable(True)   # if auto_enable is set
+ControlCoordinator      100Hz loop. Runs tasks, decides which task
+                        commands which joint, produces one command set.
+        │
+        │  calls your methods
+        ▼
+Your adapter            Turns those calls into vendor SDK calls,
+                        and vendor units into SI.
+        │
+        ▼
+The arm
 ```
 
-Then, every tick, forever:
+Your adapter owns no threads, no sockets, and no message ports. It is entirely passive: the coordinator calls it, it answers. That is the whole design, and it is why an adapter stays small.
+
+## What the coordinator asks for
+
+On startup it calls `connect()`, then `write_enable(True)`. Then, every tick, forever:
 
 ```
-positions  = adapter.read_joint_positions()    # list[float], radians
-velocities = adapter.read_joint_velocities()   # list[float], rad/s
-efforts    = adapter.read_joint_efforts()      # list[float], Nm
+positions  = adapter.read_joint_positions()     # radians
+velocities = adapter.read_joint_velocities()    # rad/s
+efforts    = adapter.read_joint_efforts()       # Nm
 
-        ... the coordinator runs tasks, resolves conflicts, produces commands ...
+     ... the coordinator runs its tasks and resolves conflicts ...
 
-adapter.set_control_mode(mode)                 # only when the mode changes
-adapter.write_joint_positions([...])           # POSITION / SERVO_POSITION
-adapter.write_joint_velocities([...])          # VELOCITY
+adapter.set_control_mode(mode)                  # only when it changes
+adapter.write_joint_positions([...])            # or write_joint_velocities
 ```
 
-And on shutdown, `adapter.disconnect()`.
+On shutdown, `disconnect()`.
 
-That is the whole live path: eleven methods, counting the gripper. The Protocol declares 26. The other fifteen are diagnostics and optional features, and every one of them may return `None` or `False` forever without anything breaking.
+That is the entire live path. The Protocol declares 26 methods, but only eleven are ever called in normal operation. The other fifteen are diagnostics and optional features that can return `None` or `False` forever without anything noticing.
 
-## What the loop implies
+So the job is smaller than the Protocol makes it look.
 
-Three rules fall straight out of the code above, and they are the only ones you need to hold in your head.
+## Building the adapter
 
-**Return lists in your joint order, always the same length.** The coordinator does `positions[i]` against the joint list you declared. If your SDK has no velocity or torque feedback, return `[0.0] * dof` — not `[]`, not `None`. An empty list is an `IndexError` on the next tick.
+Copy `dimos/hardware/manipulators/mock/adapter.py`. It implements all 26 methods against in-memory fake state, which makes it a complete, working adapter with the vendor calls missing. Your job is to replace the fakes.
 
-**Everything is SI.** Radians, meters, rad/s, Nm. These values go straight into the planner and the IK solver, which assume radians. If your SDK speaks degrees, convert in the adapter. That is what the adapter is *for*.
+There is no base class and nothing to inherit from. The Protocol is duck-typed: match the method names and DimOS accepts it.
 
-**Never raise.** If your arm has no force-torque sensor, `read_force_torque()` returns `None`. If it cannot do velocity control, `write_joint_velocities()` returns `False`. The coordinator handles both. An exception on the tick thread is not handled.
+### Connecting
 
-## Joint names, and why they have a slash
+Return `True` on success, `False` on failure. Do not raise, or you take the coordinator down with you.
 
-`read_state` hands the coordinator a dict keyed by joint name, and the coordinator merges **every** piece of hardware into one namespace. Two arms both have a `joint1`, so the hardware id is the prefix that keeps them apart:
-
-```python
-make_joints("left_arm", 6)   # ['left_arm/joint1', ... 'left_arm/joint6']
-make_joints("right_arm", 6)  # ['right_arm/joint1', ...]
+```python skip
+def connect(self) -> bool:
+    try:
+        from yourarm_sdk import YourArmSDK
+        self._sdk = YourArmSDK(self._address)
+        self._sdk.connect()
+        return bool(self._sdk.is_alive())
+    except Exception as e:
+        logger.error(f"could not reach arm at {self._address}: {e}")
+        return False
 ```
 
-That is all the slash is. Call `make_joints` and it is handled; you never type a joint name yourself.
+Import the SDK **inside** `connect()`, not at the top of the file. Vendor SDKs are optional dependencies, and a module-scope import means `import dimos` explodes on every machine that does not have your arm plugged in.
 
-## Writing the adapter
+### Reading state
 
-Copy `dimos/hardware/manipulators/mock/adapter.py`. It implements all 26 methods against fake state, so it is a working adapter with the vendor calls missing. Replace those with your SDK, method by method.
-
-The ones that matter look like this. Here is `read_joint_positions` for an SDK that speaks degrees:
+This is where unit conversion lives. Most vendor SDKs speak degrees. DimOS speaks radians, and those numbers flow straight into the IK solver.
 
 ```python skip
 def read_joint_positions(self) -> list[float]:
-    if not self._sdk:
-        raise RuntimeError("not connected")
-    raw = self._sdk.get_joint_positions()          # SDK gives degrees
-    return [math.radians(p) for p in raw[:self._dof]]   # DimOS wants radians
+    raw = self._sdk.get_joint_positions()               # degrees, from the SDK
+    return [math.radians(p) for p in raw[:self._dof]]   # radians, for DimOS
 ```
 
-Two constructor details, both of which the coordinator depends on:
+The coordinator reads these lists **positionally** — `positions[i]` against the joint list you declared. They must be `dof` long, in your joint order, every tick.
+
+That matters most for the feedback your arm probably does not have:
 
 ```python skip
-class YourArmAdapter:
-    def __init__(
-        self,
-        address: str = "192.168.1.100",
-        dof: int = 6,
-        initial_positions: list[float] | None = None,
-        **_: object,       # the coordinator also passes hardware_id and adapter_kwargs
-    ) -> None:
-        ...
-
-    def connect(self) -> bool:
-        try:
-            from yourarm_sdk import YourArmSDK     # import here, not at module scope
-            ...
+def read_joint_velocities(self) -> list[float]:
+    return [0.0] * self._dof     # no velocity feedback? zeros. Not [], not None.
 ```
 
-The `**_: object` is because the coordinator constructs every adapter the same way and passes keys yours may not care about. The lazy SDK import is so `import dimos` still works on a machine that has never seen your arm.
+Return an empty list and you get an `IndexError` on the next tick. Zeros are correct, and the coordinator handles them fine.
 
-For a real adapter with a vendor SDK, read `dimos/hardware/manipulators/a750/adapter.py`. If your arm has no Python SDK and you are talking to a raw bus, `openarm/` drives SocketCAN directly.
+### Writing commands
+
+The coordinator hands you a full, ordered list of targets. Convert and forward.
+
+```python skip
+def write_joint_positions(self, positions: list[float], velocity: float = 1.0) -> bool:
+    degrees = [math.degrees(p) for p in positions]
+    return self._sdk.set_joint_positions(degrees)
+```
+
+`set_control_mode` is called only when the mode actually changes. Map DimOS's modes onto your SDK's, and return `False` for any you do not support:
+
+```python skip
+def set_control_mode(self, mode: ControlMode) -> bool:
+    sdk_mode = {
+        ControlMode.POSITION: 0,
+        ControlMode.SERVO_POSITION: 1,   # high-frequency streaming
+        ControlMode.VELOCITY: 4,
+    }.get(mode)
+    if sdk_mode is None:
+        return False                     # unsupported. The coordinator copes.
+    return self._sdk.set_mode(sdk_mode)
+```
+
+### The gripper
+
+Grippers are not joints. They get their own two methods, in **meters** of opening:
+
+```python skip
+def read_gripper_position(self) -> float | None:
+    return self._sdk.get_gripper_mm() / 1000.0
+
+def write_gripper_position(self, position: float) -> bool:
+    return self._sdk.set_gripper_mm(position * 1000.0)
+```
+
+No gripper? Return `None` and `False`, and you are done.
+
+### What you can skip
+
+Roughly half the Protocol. No force-torque sensor, no Cartesian mode, no error codes — say so and move on:
+
+```python skip
+def read_force_torque(self) -> list[float] | None:
+    return None                  # no sensor
+
+def write_cartesian_position(self, pose, velocity: float = 1.0) -> bool:
+    return False                 # not supported
+```
+
+The rule throughout: **unsupported reads return `None`, unsupported writes return `False`, and nothing ever raises.** An exception on the tick thread is not caught.
+
+### The constructor
+
+One detail that is easy to miss and will bite you on startup:
+
+```python skip
+def __init__(
+    self,
+    address: str = "192.168.1.100",
+    dof: int = 6,
+    initial_positions: list[float] | None = None,
+    **_: object,          # <- this
+) -> None:
+```
+
+The coordinator builds every adapter identically, passing `address`, `dof`, `hardware_id`, and whatever else the blueprint specifies. The `**_: object` swallows the keys yours does not use. Without it, `TypeError`.
+
+For a finished adapter with a real vendor SDK, read `dimos/hardware/manipulators/a750/adapter.py`. If your arm has no Python SDK at all and you are down at the bus level, `openarm/` drives raw SocketCAN.
 
 ## Registering it
 
-Two places. A manifest next to your adapter:
+Drop a manifest beside your adapter so DimOS can find it:
 
 ```python skip
 # dimos/hardware/manipulators/yourarm/_registry.py
@@ -103,29 +171,27 @@ ADAPTER_FACTORIES = {
 }
 ```
 
-Keep it to stdlib imports. It gets loaded on machines that do not have your vendor SDK, which is what makes a missing SDK fail with a clear error at `create()` instead of your arm silently vanishing from the list.
+Stdlib imports only in that file. It loads even on machines without your vendor SDK, which is what makes a missing SDK fail with a clear message instead of your arm quietly vanishing from the list.
 
-Then add your name to `EXPECTED_NAMES` in `dimos/hardware/test_adapter_registries.py`. CI pins the exact set of registered adapters on purpose, so adding one is a deliberate act rather than an accident.
+Then add `"yourarm"` to `EXPECTED_NAMES` in `dimos/hardware/test_adapter_registries.py`. CI pins the exact set of adapters on purpose, so adding one is deliberate rather than accidental.
 
-## Wiring it up
+## Running it
 
-Two more files, both small. First, describe the arm — `dimos/robot/manipulators/yourarm/config.py`:
+Two small files under `dimos/robot/manipulators/yourarm/`. One describes the arm, one makes it runnable.
 
 ```python skip
+# config.py
 def yourarm_hardware(hw_id: str = "arm") -> HardwareComponent:
     return HardwareComponent(
         hardware_id=hw_id,
         hardware_type=HardwareType.MANIPULATOR,
-        joints=make_joints(hw_id, 6),
-        adapter_type="yourarm",                 # matches the ADAPTER_FACTORIES key
+        joints=make_joints(hw_id, 6),           # ['arm/joint1', ... 'arm/joint6']
+        adapter_type="yourarm",                 # matches your ADAPTER_FACTORIES key
         address="192.168.1.100",                # handed to your __init__
-        gripper_joints=[f"{hw_id}/gripper"],    # driven via write_gripper_position
+        gripper_joints=[f"{hw_id}/gripper"],
     )
-```
 
-Then make it runnable — `dimos/robot/manipulators/yourarm/blueprints/basic.py`:
-
-```python skip
+# blueprints/basic.py
 _hw = yourarm_hardware("arm")
 
 coordinator_yourarm = autoconnect(
@@ -133,21 +199,17 @@ coordinator_yourarm = autoconnect(
 )
 ```
 
-`autoconnect` wires modules together by matching their ports. It also has a second job: `dimos/robot/all_blueprints.py` is generated by scanning for assignments from `autoconnect(...)` or `.blueprint(...)`, so it is what gives your blueprint a name on the CLI. A blueprint built any other way works fine in Python but `dimos run` will not find it.
-
-Copy the shape from `dimos/robot/manipulators/a750/blueprints/teleop.py` and you inherit all of this.
-
-## Running it
+`autoconnect` connects modules by matching their ports, and it is also what lands your blueprint in `dimos/robot/all_blueprints.py`, which is generated by scanning for exactly that call. Build a blueprint another way and it will work fine in Python, but `dimos run` will never find it.
 
 ```bash
-pytest dimos/robot/test_all_blueprints_generation.py   # regenerates all_blueprints.py; commit the result
+pytest dimos/robot/test_all_blueprints_generation.py   # regenerates the registry; commit the result
 dimos run coordinator-yourarm
 ```
 
-You do not need the hardware to do this. Set `adapter_type="mock"` and the entire coordinator, planner, and teleop stack runs against the mock adapter. Get that working first — it is how the shipped arms are tested, and it means the only thing left to debug on the real robot is your SDK calls.
+**You do not need the arm for any of this.** Set `adapter_type="mock"` and the whole stack — coordinator, planner, teleop — runs against the mock adapter. Build against that first. It is how the shipped arms are tested, and it means the only thing left to debug on real hardware is your SDK calls.
 
 ## Going further
 
-Motion planning needs a URDF and a `RobotModelConfig`. Cartesian control, keyboard teleop, and VR teleop each add a different task to the coordinator. All of it, with templates and a verification loop, is in [Adding a New Arm](/docs/coding-agents/adding_a_new_arm.md).
+Motion planning needs a URDF and a `RobotModelConfig`. Cartesian control, keyboard teleop, and VR teleop each add a task to the coordinator. All of that is in [Adding a New Arm](/docs/coding-agents/adding_a_new_arm.md), the full reference, and the page to hand an AI agent.
 
-`dimos/hardware/manipulators/README.md` is the quick reference for the adapter tree. For a full integration written up end to end, including the CAN debugging, see [OpenArm Integration](/docs/capabilities/manipulation/openarm_integration.md).
+For an integration written up end to end, including the CAN debugging, see [OpenArm Integration](/docs/capabilities/manipulation/openarm_integration.md).
