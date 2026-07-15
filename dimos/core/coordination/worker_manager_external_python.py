@@ -27,7 +27,7 @@ class WorkerManagerExternalPython(WorkerManager):
     def __init__(self, g: GlobalConfig) -> None:
         super().__init__(g)
         self._workers: dict[ModuleProxyProtocol, ExternalPythonWorker] = {}
-        self._module_kwargs: dict[ModuleProxyProtocol, dict[str, Any]] = {}
+        self._module_constructor_kwargs: dict[ModuleProxyProtocol, dict[str, Any]] = {}
         self._closed = False
 
     def start(self) -> None:
@@ -41,13 +41,22 @@ class WorkerManagerExternalPython(WorkerManager):
     ) -> ModuleProxyProtocol:
         if self._closed:
             raise RuntimeError("WorkerManager is closed")
-        runtime_kwargs = dict(kwargs)
-        runtime_kwargs["g"] = global_config
-        worker = ExternalPythonWorker(module_class, global_config, runtime_kwargs)
-        worker.start()
+        constructor_kwargs = dict(kwargs)
+        constructor_kwargs["g"] = global_config
+        worker = ExternalPythonWorker(module_class, constructor_kwargs)
+        try:
+            worker.start()
+        except BaseException:
+            # A worker is not registered until startup succeeds, so clean up
+            # any process resources it may have created before re-raising.
+            try:
+                worker.stop()
+            except Exception:
+                logger.exception("Failed to clean up external Python worker startup")
+            raise
         proxy = cast("ModuleProxyProtocol", RPCClient.remote(module_class))
         self._workers[proxy] = worker
-        self._module_kwargs[proxy] = dict(kwargs)
+        self._module_constructor_kwargs[proxy] = dict(kwargs)
         return proxy
 
     def deploy_parallel(
@@ -75,7 +84,7 @@ class WorkerManagerExternalPython(WorkerManager):
         if worker is None:
             raise ValueError("Proxy is not managed by external Python workers")
         worker.stop()
-        self._module_kwargs.pop(proxy, None)
+        self._module_constructor_kwargs.pop(proxy, None)
 
     def stop(self) -> None:
         if self._closed:
@@ -84,7 +93,7 @@ class WorkerManagerExternalPython(WorkerManager):
         for worker in self._workers.values():
             worker.stop()
         self._workers.clear()
-        self._module_kwargs.clear()
+        self._module_constructor_kwargs.clear()
 
     def health_check(self) -> bool:
         healthy = True

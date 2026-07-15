@@ -7,15 +7,23 @@ from typing import Protocol
 from dimos.agents.annotation import skill
 from dimos.core.core import rpc
 from dimos.core.external_python_module import ExternalPythonModule
+from dimos.core.module import ModuleConfig
 from dimos.core.stream import In, Out
 from dimos.msgs.std_msgs.Int32 import Int32
 from dimos.spec.utils import Spec
+
+
+class Config(ModuleConfig):
+    """Configuration declared and owned by the external module contract."""
+
+    initial_multiplier: int = 2
 
 
 class ExampleExternal(ExternalPythonModule):
     """Declaration implemented by the isolated sibling runtime project."""
 
     implementation = "example_external.runtime:ExampleExternalRuntime"
+    config: Config
 
     value: In[Int32]
     doubled: Out[Int32]

@@ -21,7 +21,9 @@ from examples.external_python_module.contract import ExampleExternal
 class ExampleExternalRuntime(ExampleExternal):
     """Implementation loaded by the local external-Python worker."""
 
-    _multiplier = 2
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self._multiplier = self.config.initial_multiplier
 
     @rpc
     def start(self) -> None:

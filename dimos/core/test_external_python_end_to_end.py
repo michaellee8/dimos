@@ -6,6 +6,7 @@ from collections.abc import Generator
 from importlib import resources
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 from typing import cast
@@ -29,6 +30,9 @@ def running_external_example() -> Generator[
     None,
     None,
 ]:
+    if shutil.which("pixi") is None:
+        pytest.skip("Pixi is required for the external Python runtime E2E")
+
     coordinator = ModuleCoordinator()
     manager = cast("WorkerManagerExternalPython", coordinator._managers["external-python"])
     workers: list[ExternalPythonWorker] = []
@@ -37,7 +41,9 @@ def running_external_example() -> Generator[
     try:
         coordinator.start()
         coordinator.load_blueprint(
-            autoconnect(ExampleExternal.blueprint(), ExampleConsumer.blueprint())
+            autoconnect(
+                ExampleExternal.blueprint(initial_multiplier=3), ExampleConsumer.blueprint()
+            )
         )
         workers.extend(manager._workers.values())
         child_pids.extend(pid for worker in workers if (pid := worker.pid) is not None)
@@ -51,11 +57,15 @@ def running_external_example() -> Generator[
             for proxy in coordinator._deployed_modules.values()
             if proxy not in proxies
         )
-        coordinator.stop()
-        for proxy in proxies:
-            proxy.stop_rpc_client()
-        for transport in coordinator._transport_registry.values():
-            transport.stop()
+        try:
+            coordinator.stop()
+        finally:
+            try:
+                for proxy in proxies:
+                    proxy.stop_rpc_client()
+            finally:
+                for transport in coordinator._transport_registry.values():
+                    transport.stop()
         for worker in workers:
             assert worker.pid is None
         for pid in child_pids:
@@ -72,7 +82,9 @@ def test_external_example_runs_through_real_coordinator_and_restarts(
     external_proxy = coordinator.get_instance(ExampleExternal)
     consumer_proxy = coordinator.get_instance(ExampleConsumer)
 
-    assert external_proxy.get_multiplier() == 2
+    assert external_proxy.get_multiplier() == 3
+    assert external_proxy.set_multiplier(5) == "External multiplier set to 5"
+    assert external_proxy.get_multiplier() == 5
     assert consumer_proxy is not None
     first_worker = next(iter(manager._workers.values()))
     first_pid = first_worker.pid
@@ -88,7 +100,7 @@ def test_external_example_runs_through_real_coordinator_and_restarts(
     proxies.append(replacement_proxy)
     assert replacement_worker.pid is not None
     assert replacement_worker.pid != first_pid
-    assert replacement_proxy.get_multiplier() == 2
+    assert replacement_proxy.get_multiplier() == 3
 
 
 def test_external_example_runtime_assets_are_packaged() -> None:
@@ -99,6 +111,9 @@ def test_external_example_runtime_assets_are_packaged() -> None:
 
 
 def test_external_example_entrypoint_exits_after_clean_restart() -> None:
+    if shutil.which("pixi") is None:
+        pytest.skip("Pixi is required for the external Python runtime E2E")
+
     root = Path(__file__).resolve().parents[2]
     process = subprocess.Popen(
         [sys.executable, "examples/external_python_module/run.py"],
@@ -119,7 +134,7 @@ def test_external_example_entrypoint_exits_after_clean_restart() -> None:
             process.wait(timeout=5)
 
     assert process.returncode == 0, stderr
-    assert "external multiplier: 2" in stdout
-    assert "restarted external multiplier: 2" in stdout
+    assert "external multiplier: 3" in stdout
+    assert "restarted external multiplier: 3" in stdout
     with pytest.raises(ProcessLookupError):
         os.killpg(process.pid, 0)

@@ -21,7 +21,7 @@ def make_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ExternalPyt
     project = source.parent / "python"
     project.mkdir()
     (project / "pyproject.toml").write_text("[project]\nname = 'external-package'\n")
-    return ExternalPythonRuntime(Declaration, object(), {"answer": 42})
+    return ExternalPythonRuntime(Declaration, {"answer": 42})
 
 
 def test_missing_runtime_project_is_reported(
@@ -32,7 +32,7 @@ def test_missing_runtime_project_is_reported(
     monkeypatch.setattr(runtime_module.inspect, "getfile", lambda _: str(source))
 
     with pytest.raises(FileNotFoundError, match="sibling 'python/' directory"):
-        ExternalPythonRuntime(Declaration, object(), {})
+        ExternalPythonRuntime(Declaration, {})
 
 
 def test_missing_runtime_manifest_is_reported(
@@ -44,7 +44,7 @@ def test_missing_runtime_manifest_is_reported(
     monkeypatch.setattr(runtime_module.inspect, "getfile", lambda _: str(source))
 
     with pytest.raises(FileNotFoundError, match="pyproject.toml"):
-        ExternalPythonRuntime(Declaration, object(), {})
+        ExternalPythonRuntime(Declaration, {})
 
 
 def test_uv_commands_use_uv_lock_and_pixi_when_present(

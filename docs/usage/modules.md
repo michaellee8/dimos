@@ -222,6 +222,26 @@ class MyFeature(ExternalPythonModule):
     implementation = "my_feature_runtime.runtime:MyFeatureRuntime"
 ```
 
+Configuration belongs to the declaration contract and is inherited by the
+runtime implementation. Declare a module-specific `Config(ModuleConfig)`,
+annotate the declaration's `config` with it, and read it from the runtime:
+
+```python
+from dimos.core.module import ModuleConfig
+
+class Config(ModuleConfig):
+    initial_multiplier: int = 2
+
+class MyFeature(ExternalPythonModule):
+    config: Config
+```
+
+Blueprint callers override declaration configuration in the usual way:
+`MyFeature.blueprint(initial_multiplier=3)`. The runtime reads the resolved
+value from `self.config.initial_multiplier` and may copy it into private
+mutable state during initialization. Restarting the module creates a fresh
+runtime, so that private state starts from the configured value again.
+
 Use the fixed sibling-project layout. The declaration source can have any
 filename; this example uses `run.py`:
 
@@ -262,7 +282,9 @@ runs this project with uv. If `python/pixi.toml` is present, Pixi supplies the
 outer tool environment and runs uv; it does not replace the uv Python project
 or its dependency declarations.
 
-Preparation happens before the module starts. A missing `python/` directory or
+If the sibling `python/pixi.toml` is present, local preparation requires Pixi
+to be installed; Pixi is not supplied by DimOS. Preparation happens before the
+module starts. A missing `python/` directory or
 `pyproject.toml`, a failed uv/Pixi preparation, an unavailable dependency, or
 an invalid implementation import reference aborts deployment with diagnostics
 from the failed step. A runtime that does not fulfill the declaration contract

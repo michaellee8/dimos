@@ -23,17 +23,16 @@ class ExternalPythonRuntime:
 
     startup_timeout = 30.0
     shutdown_timeout = 5.0
+    # Keep the most recent 64 KiB for each child output stream.
     output_limit = 64 * 1024
 
     def __init__(
         self,
         declaration: type[ExternalPythonModule],
-        global_config: object,
-        kwargs: dict[str, object],
+        constructor_kwargs: dict[str, object],
     ) -> None:
         self.declaration = declaration
-        self.global_config = global_config
-        self.kwargs = kwargs
+        self.constructor_kwargs = constructor_kwargs
         source = Path(inspect.getfile(declaration)).resolve()
         self.project = source.parent / "python"
         self.pyproject = self.project / "pyproject.toml"
@@ -83,7 +82,7 @@ class ExternalPythonRuntime:
             "--handshake-fd",
             str(handshake_fd),
             "--kwargs",
-            base64.b64encode(pickle.dumps(self.kwargs)).decode("ascii"),
+            base64.b64encode(pickle.dumps(self.constructor_kwargs)).decode("ascii"),
         ]
         if self.locked:
             args.insert(1, "--locked")
@@ -213,8 +212,8 @@ class ExternalPythonRuntime:
 class ExternalPythonWorker:
     """Private one-process worker for one external declaration."""
 
-    def __init__(self, declaration: type, global_config: object, kwargs: dict[str, object]) -> None:
-        self.runtime = ExternalPythonRuntime(declaration, global_config, kwargs)
+    def __init__(self, declaration: type, constructor_kwargs: dict[str, object]) -> None:
+        self.runtime = ExternalPythonRuntime(declaration, constructor_kwargs)
         self.declaration = declaration
 
     def start(self) -> None:

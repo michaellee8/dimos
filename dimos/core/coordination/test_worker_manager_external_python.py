@@ -55,6 +55,37 @@ def test_external_manager_dispatches_and_undeploys(monkeypatch) -> None:
     assert manager.health_check()
 
 
+def test_external_manager_passes_configuration_to_child_constructor(monkeypatch) -> None:
+    worker = Mock(pid=123)
+    proxy = Mock()
+    worker_factory = Mock(return_value=worker)
+    monkeypatch.setattr(external_manager, "ExternalPythonWorker", worker_factory)
+    monkeypatch.setattr(external_manager.RPCClient, "remote", Mock(return_value=proxy))
+
+    manager = external_manager.WorkerManagerExternalPython(global_config)
+    manager.deploy(_ExternalDeclaration, global_config, {"setting": object()})
+
+    constructor_kwargs = worker_factory.call_args.args[1]
+    assert constructor_kwargs["setting"] is not None
+    assert constructor_kwargs["g"] is global_config
+
+
+def test_external_manager_cleans_up_worker_when_start_fails(monkeypatch) -> None:
+    worker = Mock()
+    worker.start.side_effect = RuntimeError("startup failed")
+    monkeypatch.setattr(external_manager, "ExternalPythonWorker", Mock(return_value=worker))
+
+    manager = external_manager.WorkerManagerExternalPython(global_config)
+    try:
+        manager.deploy(_ExternalDeclaration, global_config, {})
+    except RuntimeError as error:
+        assert str(error) == "startup failed"
+    else:
+        raise AssertionError("deploy should propagate startup failure")
+
+    worker.stop.assert_called_once()
+
+
 def test_external_manager_deploy_fresh_uses_a_new_worker(monkeypatch) -> None:
     workers = [Mock(pid=1), Mock(pid=2)]
     proxies = [Mock(), Mock()]

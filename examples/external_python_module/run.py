@@ -37,18 +37,22 @@ def run_example() -> None:
     """Run the example's build, RPC, restart, and deterministic shutdown path."""
     coordinator = ModuleCoordinator.build(
         autoconnect(
-            ExampleExternal.blueprint(),
+            ExampleExternal.blueprint(initial_multiplier=3),
             ExampleConsumer.blueprint(),
         )
     )
     proxies = [cast("RPCClient", proxy) for proxy in coordinator._deployed_modules.values()]
     try:
         external = coordinator.get_instance(ExampleExternal)
+        assert external.get_multiplier() == 3
         print("external multiplier:", external.get_multiplier())
+        assert external.set_multiplier(5) == "External multiplier set to 5"
+        assert external.get_multiplier() == 5
 
         coordinator.restart_module(ExampleExternal, reload_source=False)
         restarted = coordinator.get_instance(ExampleExternal)
         proxies.append(restarted)
+        assert restarted.get_multiplier() == 3
         print("restarted external multiplier:", restarted.get_multiplier())
     finally:
         coordinator.stop()
