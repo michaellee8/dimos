@@ -453,7 +453,11 @@ class PathFollowerTask(BaseControlTask):
             self._config.forward_only = forward_only
         if ff_config is not _UNSET:
             self._config.ff_config = ff_config  # type: ignore[assignment]
-            self._ff = FeedforwardGainCompensator(ff_config) if ff_config is not None else None
+            self._ff = (
+                FeedforwardGainCompensator(ff_config)  # type: ignore[arg-type]
+                if ff_config is not None
+                else None
+            )
         # external_profile_cap takes precedence over velocity_profile_config.
         if external_profile_cap is not _UNSET:
             self._profile_cap = external_profile_cap  # type: ignore[assignment]
@@ -463,7 +467,7 @@ class PathFollowerTask(BaseControlTask):
         elif velocity_profile_config is not _UNSET:
             self._config.velocity_profile_config = velocity_profile_config  # type: ignore[assignment]
             self._profile_cap = (
-                PathSpeedCap(velocity_profile_config)
+                PathSpeedCap(velocity_profile_config)  # type: ignore[arg-type]
                 if velocity_profile_config is not None
                 else None
             )
