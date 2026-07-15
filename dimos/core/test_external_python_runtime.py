@@ -6,8 +6,8 @@ import sys
 
 import pytest
 
-import dimos.core.external_python_runtime as runtime_module
-from dimos.core.external_python_runtime import ExternalPythonRuntime
+import dimos.core.coordination.external_python_worker as runtime_module
+from dimos.core.coordination.external_python_worker import ExternalPythonRuntime
 
 
 class Declaration:
