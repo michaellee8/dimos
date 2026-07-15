@@ -18,7 +18,7 @@ from dimos.core.coordination.module_coordinator import ModuleCoordinator
 from dimos.core.coordination.worker_manager_external_python import WorkerManagerExternalPython
 from dimos.core.rpc_client import RPCClient
 from examples.external_python_module.contract import ExampleExternal
-from examples.external_python_module.deployment import ExampleConsumer
+from examples.external_python_module.run import ExampleConsumer
 
 
 @pytest.fixture
@@ -101,7 +101,7 @@ def test_external_example_runtime_assets_are_packaged() -> None:
 def test_external_example_entrypoint_exits_after_clean_restart() -> None:
     root = Path(__file__).resolve().parents[2]
     process = subprocess.Popen(
-        [sys.executable, "examples/external_python_module/deployment.py"],
+        [sys.executable, "examples/external_python_module/run.py"],
         cwd=root,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

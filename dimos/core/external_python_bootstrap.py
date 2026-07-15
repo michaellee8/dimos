@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import argparse
 import base64
 import os
 import pickle
 import signal
 import threading
 import time
+
+import typer
 
 from dimos.core.external_python_module import ExternalPythonModule
 from dimos.core.module import Module
@@ -32,36 +33,35 @@ def _load(ref: str) -> type:
     return value
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--declaration", required=True)
-    parser.add_argument("--implementation", required=True)
-    parser.add_argument("--handshake-fd", required=True, type=int)
-    parser.add_argument("--kwargs", required=True)
-    args = parser.parse_args()
+def main(
+    declaration: str = typer.Option(..., "--declaration"),
+    implementation: str = typer.Option(..., "--implementation"),
+    handshake_fd: int = typer.Option(..., "--handshake-fd"),
+    kwargs: str = typer.Option(..., "--kwargs"),
+) -> None:
     handshake_open = True
     try:
-        declaration = _load(args.declaration)
-        implementation = _load(args.implementation)
-        if not issubclass(declaration, ExternalPythonModule):
-            raise TypeError(f"Declaration {args.declaration!r} is not an ExternalPythonModule")
-        if not issubclass(implementation, Module):
-            raise TypeError(f"Implementation {args.implementation!r} is not a Module subclass")
-        if not issubclass(implementation, declaration):
+        declaration_class = _load(declaration)
+        implementation_class = _load(implementation)
+        if not issubclass(declaration_class, ExternalPythonModule):
+            raise TypeError(f"Declaration {declaration!r} is not an ExternalPythonModule")
+        if not issubclass(implementation_class, Module):
+            raise TypeError(f"Implementation {implementation!r} is not a Module subclass")
+        if not issubclass(implementation_class, declaration_class):
             raise TypeError(
-                f"Implementation {args.implementation!r} does not implement {args.declaration!r}"
+                f"Implementation {implementation!r} does not implement {declaration!r}"
             )
-        kwargs = pickle.loads(base64.b64decode(args.kwargs))
-        module = implementation(**kwargs)
+        module_kwargs = pickle.loads(base64.b64decode(kwargs))
+        module = implementation_class(**module_kwargs)
         if module.rpc is None:
-            raise RuntimeError(f"Implementation {args.implementation!r} has no RPC server")
-        module.rpc.serve_module_rpc(module, name=declaration.__name__)
-        os.write(args.handshake_fd, b"READY\n")
+            raise RuntimeError(f"Implementation {implementation!r} has no RPC server")
+        module.rpc.serve_module_rpc(module, name=declaration_class.__name__)
+        os.write(handshake_fd, b"READY\n")
     except Exception as error:
         handshake_open = False
         try:
             os.write(
-                args.handshake_fd,
+                handshake_fd,
                 f"ERROR {type(error).__name__}: {error}\n".encode(),
             )
         except OSError:
@@ -70,7 +70,7 @@ def main() -> None:
     finally:
         if handshake_open:
             try:
-                os.close(args.handshake_fd)
+                os.close(handshake_fd)
             except OSError:
                 pass
 
@@ -86,4 +86,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    typer.run(main)

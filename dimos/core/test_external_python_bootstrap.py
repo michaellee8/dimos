@@ -7,6 +7,8 @@ import subprocess
 import sys
 
 import pytest
+import typer
+from typer.testing import CliRunner
 
 import dimos.core.external_python_bootstrap as bootstrap
 
@@ -43,23 +45,43 @@ def test_main_rejects_contract_mismatch_before_starting_module(
 
     values = {"decl:Declaration": Declaration, "impl:Implementation": NotImplementation}
     monkeypatch.setattr(bootstrap, "_load", values.__getitem__)
-    monkeypatch.setattr(
-        bootstrap.argparse.ArgumentParser,
-        "parse_args",
-        lambda _: type(
-            "Args",
-            (),
-            {
-                "declaration": "decl:Declaration",
-                "implementation": "impl:Implementation",
-                "handshake_fd": 9,
-                "kwargs": base64.b64encode(pickle.dumps({})).decode("ascii"),
-            },
-        )(),
-    )
 
     with pytest.raises(TypeError, match="does not resolve to a class|Module subclass"):
-        bootstrap.main()
+        bootstrap.main(
+            "decl:Declaration",
+            "impl:Implementation",
+            9,
+            base64.b64encode(pickle.dumps({})).decode("ascii"),
+        )
+
+
+def test_typer_cli_parses_bootstrap_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    class NotImplementation:
+        pass
+
+    monkeypatch.setattr(
+        bootstrap,
+        "_load",
+        {"decl:Declaration": Declaration, "impl:Implementation": NotImplementation}.__getitem__,
+    )
+    app = typer.Typer()
+    app.command()(bootstrap.main)
+    result = CliRunner().invoke(
+        app,
+        [
+            "--declaration",
+            "decl:Declaration",
+            "--implementation",
+            "impl:Implementation",
+            "--handshake-fd",
+            "9",
+            "--kwargs",
+            base64.b64encode(pickle.dumps({})).decode("ascii"),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "Missing option" not in result.output
 
 
 def test_main_valid_reference_serves_and_signals_ready(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -92,20 +114,6 @@ def test_main_valid_reference_serves_and_signals_ready(monkeypatch: pytest.Monke
             "impl:Implementation": FakeImplementation,
         }.__getitem__,
     )
-    monkeypatch.setattr(
-        bootstrap.argparse.ArgumentParser,
-        "parse_args",
-        lambda _: type(
-            "Args",
-            (),
-            {
-                "declaration": "decl:Declaration",
-                "implementation": "impl:Implementation",
-                "handshake_fd": 9,
-                "kwargs": base64.b64encode(pickle.dumps({"value": 7})).decode("ascii"),
-            },
-        )(),
-    )
     writes: list[tuple[int, bytes]] = []
     monkeypatch.setattr(
         bootstrap.os, "write", lambda fd, data: writes.append((fd, data)) or len(data)
@@ -114,7 +122,12 @@ def test_main_valid_reference_serves_and_signals_ready(monkeypatch: pytest.Monke
     monkeypatch.setattr(bootstrap.time, "sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt))
 
     with pytest.raises(KeyboardInterrupt):
-        bootstrap.main()
+        bootstrap.main(
+            "decl:Declaration",
+            "impl:Implementation",
+            9,
+            base64.b64encode(pickle.dumps({"value": 7})).decode("ascii"),
+        )
 
     assert writes == [(9, b"READY\n")]
     assert FakeImplementation.rpc.served[1] == "FakeDeclaration"

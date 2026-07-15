@@ -223,11 +223,11 @@ class MyFeature(ExternalPythonModule):
 ```
 
 Use the fixed sibling-project layout. The declaration source can have any
-filename; this example uses `deployment.py`:
+filename; this example uses `run.py`:
 
 ```text
 external_python_module/
-├── deployment.py
+├── run.py
 └── python/
     ├── pyproject.toml       # required
     ├── pixi.toml            # optional outer environment for uv
@@ -247,7 +247,7 @@ special external-module API:
 
 ```python
 from examples.external_python_module.contract import ExampleExternal
-from examples.external_python_module.deployment import ExampleConsumer
+from examples.external_python_module.run import ExampleConsumer
 from dimos.core.coordination.blueprints import autoconnect
 
 stack = autoconnect(ExampleExternal.blueprint(), ExampleConsumer.blueprint())
