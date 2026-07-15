@@ -75,8 +75,7 @@ broker-bound modules run in one worker so they share a single broker session;
 the `GO2Connection` driver runs in a second worker (`n_workers=2`).
 
 Enable the glass-to-glass latency benchmark with
-`-o cameramuxmodule.latency_stamp=true` (adds a timestamp strip the operator
-reads then crops).
+`-o cameramuxmodule.latency_stamp=true`.
 
 ## Operating the robot
 
