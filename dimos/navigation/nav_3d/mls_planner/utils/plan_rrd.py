@@ -101,7 +101,7 @@ def _log_edges(edges: NDArray[np.float32], entity: str) -> None:
         [(float(r[0]), float(r[1]), float(r[2])), (float(r[3]), float(r[4]), float(r[5]))]
         for r in edges
     ]
-    rr.log(entity, rr.LineStrips3D(segments))
+    rr.log(entity, rr.LineStrips3D(segments, colors=[[255, 255, 255]], radii=0.02))
 
 
 def _log_path_wp(waypoints: NDArray[np.float32] | None, entity: str, color: list[int]) -> None:
@@ -127,17 +127,16 @@ def _log_odometry(
         rr.log("world/odom_path", rr.LineStrips3D([trail], colors=[[255, 255, 255]], radii=0.015))
 
 
-def _clearance_colors(
-    clearance: NDArray[np.float32], clamp_m: float, hard_clearance: float
+def _clearance_class_ids(
+    clearance: NDArray[np.float32], hard_clearance: float, clamp_m: float
 ) -> NDArray[np.uint8]:
-    """Color surface cells by wall clearance, red inside the hard clearance."""
-    norm = np.clip(np.nan_to_num(clearance / clamp_m, nan=1.0, posinf=1.0), 0.0, 1.0)
-    blocked = np.array([4.0, 8.0, 48.0], dtype=np.float64)
-    clear = np.array([150.0, 200.0, 255.0], dtype=np.float64)
-    rgb: NDArray[np.float64] = blocked + norm[:, None] * (clear - blocked)
-    out = rgb.astype(np.uint8)
-    out[clearance < hard_clearance] = (255, 0, 0)
-    return out
+    """Turbo class ids across the passable band: red where tight, blue out in the open."""
+    span = max(clamp_m - hard_clearance, 1e-6)
+    norm = np.clip(
+        np.nan_to_num((clearance - hard_clearance) / span, nan=1.0, posinf=1.0), 0.0, 1.0
+    )
+    ids: NDArray[np.float64] = (1.0 - norm) * 255
+    return ids.astype(np.uint8)
 
 
 def _log_shared(
@@ -163,12 +162,15 @@ def _log_shared(
         )
 
     surface = planner.surface_clearance_map()
-    if surface.size:
+    # Walls are already drawn by the voxel map; the surface layer only answers
+    # "how much room is there", which is only a question where the robot fits.
+    passable = surface[surface[:, 3] >= hard_clearance] if surface.size else surface
+    if passable.size:
         rr.log(
             "world/surface_map",
             rr.Points3D(
-                surface[:, :3],
-                colors=_clearance_colors(surface[:, 3], clearance_clamp, hard_clearance),
+                passable[:, :3],
+                class_ids=_clearance_class_ids(passable[:, 3], hard_clearance, clearance_clamp),
                 radii=render_voxel / 2,
             ),
         )
