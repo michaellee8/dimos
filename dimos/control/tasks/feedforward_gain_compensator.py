@@ -69,6 +69,15 @@ class FeedforwardGainCompensator:
 
     def __init__(self, config: FeedforwardGainConfig | None = None) -> None:
         self.cfg = config or FeedforwardGainConfig()
+        # Fail at construction, not on the control tick: a near-zero plant gain
+        # would divide-by-zero (or explode) in compute(). A K of 0 means the
+        # calibration artifact says the axis does not move — an invalid artifact.
+        for axis, k in (("vx", self.cfg.K_vx), ("vy", self.cfg.K_vy), ("wz", self.cfg.K_wz)):
+            if abs(k) < 1e-6:
+                raise ValueError(
+                    f"FeedforwardGainConfig.K_{axis}={k} is ~0; a zero plant gain "
+                    f"is an invalid calibration artifact (axis does not move)."
+                )
 
     def compute(
         self,
