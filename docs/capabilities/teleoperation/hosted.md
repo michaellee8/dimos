@@ -4,8 +4,8 @@ title: "Remote Teleop"
 
 Operate a DimOS robot remotely from any browser or Quest headset over WebRTC.
 The robot dials out to a hosted broker
-([teleop.dimensionalos.com](https://teleop.dimensionalos.com)) — a Cloudflare
-Realtime SFU — so you don't need to open any inbound ports on the
+([teleop.dimensionalos.com](https://teleop.dimensionalos.com)), so you don't
+need to open any inbound ports on the
 robot's network. It works behind a home router, on Wi-Fi, wired LAN, or
 cellular.
 
