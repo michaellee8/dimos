@@ -233,6 +233,7 @@ web = [
     "jinja2>=3.1.6",
     "ffmpeg-python",
     "soundfile",
+    "aioquic>=1.2.0",  # WebTransport client for the cockpit relay bridge
 ]
 
 perception = [
@@ -361,6 +362,19 @@ all = [
 [dependency-groups]
 # For autofix.yml
 autofix = ["ruff==0.14.3"]
+
+# Minimal env for the CI `web` job's pytest leg (pytest -m web_e2e): the
+# relay bridge + every pytest plugin the baked-in addopts reference, without
+# the torch/transformers stack. Versions track the `tests` group.
+web-e2e = [
+    "pytest==8.3.5",
+    "pytest-asyncio==0.26.0",
+    "pytest-env==1.1.5",
+    "pytest-timeout==2.4.0",
+    "pytest-xdist>=3.5.0",
+    "pytest-cov>=5.0",
+    "dimos[web]",
+]
 
 # Project deps shared by `tests` and `lint`.
 project-deps = [
@@ -631,7 +645,7 @@ env = [
   "GOOGLE_MAPS_API_KEY=AIzafake_google_key",
   "PYTHONWARNINGS=ignore:cupyx.jit.rawkernel is experimental:FutureWarning",
 ]
-addopts = "--dist=loadfile --durations=10 --timeout=600 --timeout-method=thread -v -ra --showlocals --cov-report=xml -p no:launch_testing -p no:launch_ros --import-mode=importlib --color=yes -m 'not (self_hosted or mujoco or self_hosted_large)'"
+addopts = "--dist=loadfile --durations=10 --timeout=600 --timeout-method=thread -v -ra --showlocals --cov-report=xml -p no:launch_testing -p no:launch_ros --import-mode=importlib --color=yes -m 'not (self_hosted or mujoco or self_hosted_large or web_e2e)'"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 

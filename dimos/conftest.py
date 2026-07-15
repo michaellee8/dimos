@@ -110,6 +110,9 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "skipif_aarch64: skip tests not intended to run on aarch64 (Linux ARM)"
     )
+    config.addinivalue_line(
+        "markers", "web_e2e: WebTransport relay e2e (spawns the Deno relay; runs in the CI web job)"
+    )
 
     if config.pluginmanager.hasplugin("_cov"):
         os.environ["COVERAGE_PROCESS_START"] = str(config.rootpath / "pyproject.toml")

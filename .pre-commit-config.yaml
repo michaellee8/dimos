@@ -54,6 +54,9 @@ repos:
       - id: pretty-format-json
         name: format json
         args: [ --autofix, --no-sort-keys ]
+        # web/ JSON is owned by `deno fmt` (inline short arrays, no \u escapes);
+        # the two styles conflict. check-json still validates these files.
+        exclude: ^web/
 
   - repo: https://github.com/editorconfig-checker/editorconfig-checker.python
     rev: 3.4.1

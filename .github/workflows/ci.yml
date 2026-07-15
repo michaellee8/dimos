@@ -230,6 +230,39 @@ jobs:
       #   working-directory: docs
       #   run: npm run validate
 
+  web:
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # For checkout
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.6.10  # keep in sync with dimos/utils/deno.py DENO_VERSION
+          cache: true
+
+      - name: Deno fmt, lint, check, test
+        working-directory: web
+        run: |
+          deno fmt --check
+          deno lint
+          deno task check
+          deno task test
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          enable-cache: true
+
+      - name: Install e2e dependencies
+        run: uv sync --only-group web-e2e --frozen
+
+      - name: Python <-> relay e2e
+        run: uv run pytest -m web_e2e dimos/web/relay_bridge --no-cov
+
   tests:
     timeout-minutes: 20
     strategy:
@@ -282,13 +315,13 @@ jobs:
       - name: Install dependencies
         run: uv sync --group tests --frozen
       - name: Run tests
-        run: uv run pytest --numprocesses=3 --cov=dimos/ --junitxml=junit.xml -m 'not (self_hosted or mujoco or self_hosted_large)'
+        run: uv run pytest --numprocesses=3 --cov=dimos/ --junitxml=junit.xml -m 'not (self_hosted or mujoco or self_hosted_large or web_e2e)'
       - name: Re-run the failing tests with maximum verbosity
         if: failure()
         env:
           COLOR: yes
         run: >-  # `exit 1` makes sure that the job remains red with flaky runs
-          uv run pytest --no-cov -vvvvv --lf  -m 'not (self_hosted or mujoco or self_hosted_large)' && exit 1
+          uv run pytest --no-cov -vvvvv --lf  -m 'not (self_hosted or mujoco or self_hosted_large or web_e2e)' && exit 1
         shell: bash
       - name: Turn coverage into xml
         run: uv run python -m coverage xml
@@ -718,6 +751,7 @@ jobs:
     - rust
     - md-babel
     - docs-validate
+    - web
     - tests
     - cmu-nav-natives
     - self-hosted-tests
