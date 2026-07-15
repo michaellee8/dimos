@@ -23,17 +23,19 @@ use global joint names so multiple robots can safely share local names such as
 
 ## Discovering planning groups
 
-Planning-group config helpers can discover groups in this order:
+Robot configs can provide planning groups explicitly with
+`RobotModelConfig.planning_groups`. Direct `RobotModelConfig(...)` construction
+does not run discovery or synthesize groups in `model_post_init`; callers must
+pass explicit `planning_groups` there.
 
-1. Explicit `planning_groups` on the robot model config.
-2. Explicit `srdf_path` on the robot model config.
-3. Conservative SRDF auto-discovery near the model path, with a warning.
-4. Fallback generation of one `{robot_name}/manipulator` group when the
+When code uses the discovery helper instead of explicit config, DimOS discovers
+groups in this order:
+
+1. Explicit `srdf_path` provided to the helper.
+2. Conservative SRDF auto-discovery near the model path, with a warning.
+3. Fallback generation of one `{robot_name}/manipulator` group when the
    configured controllable joints form exactly one unambiguous serial chain.
-5. Error if no SRDF or fallback chain can provide a single valid group.
-
-Direct `RobotModelConfig(...)` construction does not run discovery or synthesize
-groups in `model_post_init`; callers must pass explicit `planning_groups` there.
+4. Error if no SRDF or fallback chain can provide a single valid group.
 
 Supported SRDF group forms:
 
@@ -59,8 +61,8 @@ unique serial target frame.
 
 ## Fallback behavior
 
-When no SRDF or explicit group config is available,
-fallback uses `RobotModelConfig.joint_names` as the candidate controllable set.
+When discovery runs without an SRDF, fallback uses
+`RobotModelConfig.joint_names` as the candidate controllable set.
 This field is the robot's ordered local model joint set, not an implicit
 planning group.
 
@@ -80,8 +82,10 @@ pose_groups = [group for group in groups if group.has_pose_target]
 group_id = pose_groups[0].id
 ```
 
-Joint-space planning targets group IDs and uses local joint names inside each
-target `JointState`:
+Joint-space planning targets group IDs. Each target `JointState` may be
+unnamed in the group's joint order, named with all local model joint names, or
+named with all global joint names. Do not mix local and global names in one
+target.
 
 ```python skip
 ok = manip.plan_to_joint_targets(
@@ -95,7 +99,8 @@ ok = manip.plan_to_joint_targets(
 ```
 
 Pose planning targets pose-capable group IDs. Add auxiliary groups when another
-chain should participate as free DOFs but does not have its own pose target:
+chain should participate as free DOFs but does not have its own pose target.
+Pose targets are `Pose` values keyed by planning group ID:
 
 ```python skip
 ok = manip.plan_to_pose_targets(
@@ -120,9 +125,9 @@ manip.execute_plan(plan)
 ```
 
 For robot-scoped compatibility APIs, unnamed joint vectors are interpreted in
-the robot model's configured joint order. If names are provided, they must be
-local model joint names: no global names, missing joints, extra joints, or
-partial joint sets.
+the selected default planning group's joint order. If names are provided, they
+may be all local model joint names or all global joint names. Missing joints,
+extra joints, partial joint sets, and mixed local/global namespaces are rejected.
 
 ## Generated plans and execution
 
