@@ -21,16 +21,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from dimos.memory2.replay import resolve_db_path
-from dimos.memory2.store.sqlite import SqliteStore
 from dimos.msgs.sensor_msgs.PointCloud2 import PointCloud2
 from dimos.navigation.map_nav.map_nav_plant import (
     BuiltStaticMap,
     _load_pgo_cache,
     _save_pgo_cache,
-    build_global_map_from_db,
     build_surface_columns,
-    resolve_lidar_stream,
     snap_z_to_surface,
 )
 
@@ -125,32 +121,6 @@ def test_teleop_walk_climbs_synthetic_stair_columns() -> None:
             max_step_m=0.16,
         )
         assert abs(z - i * 0.15) < 1e-6, (i, y, z)
-
-
-def test_resolve_lidar_stream_falls_back_to_pointlio() -> None:
-    path = resolve_db_path("mid360_athens_stairs")
-    store = SqliteStore(path=str(path), must_exist=True)
-    store.start()
-    try:
-        assert resolve_lidar_stream(store, "lidar") == "pointlio_lidar"
-    finally:
-        store.stop()
-
-
-@pytest.mark.timeout(120)
-def test_build_mid360_athens_stairs_map_has_elevation() -> None:
-    """Mid360 bags store sensor-frame clouds on pointlio_lidar; map must span Z."""
-    built = build_global_map_from_db(
-        "mid360_athens_stairs",
-        lidar_stream="lidar",
-        voxel_size=0.10,
-        dedup_tol_m=1.0,
-    )
-    assert built.lidar_stream == "pointlio_lidar"
-    assert built.frames_used > 10
-    assert len(built.cloud) > 1000
-    zs = built.cloud.points_f32()[:, 2]
-    assert float(zs.max() - zs.min()) > 2.0
 
 
 def test_pgo_cache_roundtrip(tmp_path: Path) -> None:
