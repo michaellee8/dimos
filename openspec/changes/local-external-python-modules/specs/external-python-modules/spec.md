@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Declare a local external Python implementation
-DimOS SHALL allow a module author to declare a local external Python implementation with a single implementation import reference while retaining the declaration's normal module configuration, streams, RPC methods, skills, and module references.
+DimOS SHALL allow a module author to declare a local external Python implementation with a single `module:Class` implementation import reference while retaining the declaration's normal module configuration, streams, RPC methods, skills, and module references. The declaration contract SHALL be directly importable from the existing DimOS distribution without a separate contract package or `PYTHONPATH` setup.
 
 #### Scenario: Compose an external declaration with ordinary modules
 - **GIVEN** an external module declaration and a normal DimOS module with compatible typed streams or a compatible module reference

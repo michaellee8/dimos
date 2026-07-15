@@ -205,6 +205,69 @@ class Counter(Module):
 
 The callback runs on whatever thread emits the message, so guard mutable state with a lock if multiple inputs share it.
 
+## External Python Modules
+
+An external Python module keeps its declaration in the host DimOS project and
+runs its implementation in a separately prepared local Python environment.
+The declaration is still an ordinary Blueprint participant: its typed streams,
+RPC methods, skills, configuration, and `Spec` module references are declared
+the same way as for any other `Module`. The only external-runtime setting is
+the implementation import reference:
+
+```python
+from dimos.core.external_python_module import ExternalPythonModule
+
+
+class MyFeature(ExternalPythonModule):
+    implementation = "my_feature_runtime.runtime:MyFeatureRuntime"
+```
+
+Use the fixed sibling-project layout. The declaration source can have any
+filename; this example uses `deployment.py`:
+
+```text
+external_python_module/
+├── deployment.py
+└── python/
+    ├── pyproject.toml       # required
+    ├── pixi.toml            # optional
+    └── my_feature_runtime/
+        └── runtime.py
+```
+
+The shipped example includes its runtime project's `pyproject.toml` and
+`uv.lock` as package data, so the same sibling layout remains available when
+DimOS is installed from a wheel.
+
+The runtime class subclasses the declaration. Compose the declaration with
+regular modules using `autoconnect`; do not add a deployment plan, target, or
+special external-module API:
+
+```python
+from examples.external_python_module.contract import ExampleExternal
+from examples.external_python_module.deployment import ExampleConsumer
+from dimos.core.coordination.blueprints import autoconnect
+
+stack = autoconnect(ExampleExternal.blueprint(), ExampleConsumer.blueprint())
+```
+
+`python/pyproject.toml` is mandatory and must declare every Python dependency
+needed by the runtime, including its compatible DimOS package. The contract is
+imported directly (for example, `from examples.external_python_module.contract
+import ExampleExternal`) because the `examples` package is part of the DimOS
+distribution; no `PYTHONPATH` setting is required or used. DimOS prepares and
+runs this project with uv. If `python/pixi.toml` is present, Pixi supplies the
+outer tool environment and runs uv; it does not replace the uv Python project
+or its dependency declarations.
+
+Preparation happens before the module starts. A missing `python/` directory or
+`pyproject.toml`, a failed uv/Pixi preparation, an unavailable dependency, or
+an invalid implementation import reference aborts deployment with diagnostics
+from the failed step. A runtime that does not fulfill the declaration contract
+is rejected and cleaned up before the rest of the Blueprint starts. There is
+no remote deployment, package transfer, SSH, or deployment-specific CLI in
+this API; use the normal local Blueprint and coordinator lifecycle.
+
 ## Triggering side effects via Specs
 
 A common pattern is "subscribe to a stream, react by calling another module". Declare the other module's protocol as a `Spec` field (single-underscore, private). The coordinator binds the proxy at deploy time, so handlers can call it directly with no extra wiring:
